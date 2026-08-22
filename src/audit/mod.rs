@@ -198,6 +198,9 @@ pub(crate) struct Audit {
     /// Files in the folder that claim to be images and will not decode, by name. A
     /// count alone says a folder has a problem and gives you nowhere to look.
     unreadable: Vec<PathBuf>,
+    /// Directories the scan could not enter, by path. Every number in the header is
+    /// short while one of these exists, so they are named like `unreadable`.
+    walk_errors: Vec<PathBuf>,
     /// Files already sitting in the output folder when this one was scanned.
     existing_output: usize,
     /// A drag is hovering over the window.
@@ -952,6 +955,7 @@ impl Audit {
             .scroll_to_item_strict(0, ScrollStrategy::Top);
         self.skipped_raw = scanned.skipped_raw;
         self.unreadable = scanned.unreadable;
+        self.walk_errors = scanned.walk_errors;
         self.existing_output = scanned.existing_output;
         self.thumbs.clear();
         self.thumb_order.clear();
@@ -1014,6 +1018,7 @@ impl Audit {
                                 entries: vec![entry],
                                 skipped_raw: 0,
                                 unreadable: Vec::new(),
+                                walk_errors: Vec::new(),
                                 existing_output: 0,
                             },
                             root,
@@ -1885,6 +1890,7 @@ pub(crate) fn build_audit(
         entries,
         skipped_raw,
         unreadable,
+        walk_errors,
         existing_output,
         open_single,
         format,
@@ -1985,6 +1991,7 @@ pub(crate) fn build_audit(
             active_target_count: None,
             failures: Vec::new(),
             unreadable,
+            walk_errors,
             existing_output,
             drag_over: false,
             sirv_pairing: None,

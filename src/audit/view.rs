@@ -1543,6 +1543,15 @@ impl Audit {
                 }))
             ));
         }
+        if !self.walk_errors.is_empty() {
+            parts.push(format!(
+                "could not enter: {}",
+                named(self.walk_errors.iter().filter_map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                }))
+            ));
+        }
         if self.existing_output > 0 {
             parts.push(match self.existing_output {
                 1 => format!("{}/ already holds 1 file", scan::OUTPUT_DIR),
