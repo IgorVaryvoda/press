@@ -180,7 +180,8 @@ fn push_plan_lists_only_files_sirv_lacks() {
             "same.jpg".into(),
             sirv::Node {
                 filename: "/d/same.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 20,
             },
         ),
@@ -188,7 +189,8 @@ fn push_plan_lists_only_files_sirv_lacks() {
             "changed.jpg".into(),
             sirv::Node {
                 filename: "/d/changed.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 31,
             },
         ),
@@ -216,7 +218,8 @@ fn the_forced_push_plan_takes_changed_files_and_leaves_synced_ones() {
             "same.jpg".into(),
             sirv::Node {
                 filename: "/d/same.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 20,
             },
         ),
@@ -224,7 +227,8 @@ fn the_forced_push_plan_takes_changed_files_and_leaves_synced_ones() {
             "changed.jpg".into(),
             sirv::Node {
                 filename: "/d/changed.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 31,
             },
         ),
