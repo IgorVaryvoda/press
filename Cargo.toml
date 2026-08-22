@@ -67,7 +67,9 @@ category = "Graphics and Design"
 icons = ["assets/app-icon.png"]
 
 [package.metadata.packager.macos]
-signing-identity = "-"
+# The env var override did not take, so the real identity lives here. Ad-hoc
+# local packaging can still pass `--signing-identity -` on the command line.
+signing-identity = "Developer ID Application: Igor Varyvoda (2Z5ZVRKA23)"
 
 [profile.release]
 opt-level = 2
