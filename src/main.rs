@@ -195,6 +195,7 @@ fn main() {
             entries: Vec::new(),
             skipped_raw: 0,
             unreadable: Vec::new(),
+            walk_errors: Vec::new(),
             existing_output: 0,
             open_single: false,
             format: args.format,
@@ -222,6 +223,7 @@ fn main() {
                 entries: vec![entry],
                 skipped_raw: 0,
                 unreadable: Vec::new(),
+                walk_errors: Vec::new(),
                 existing_output: 0,
             },
             parent,
@@ -236,6 +238,9 @@ fn main() {
         format_bytes(entries.iter().map(|entry| entry.bytes).sum()),
         scanned.skipped_raw
     );
+    for path in &scanned.walk_errors {
+        eprintln!("imageguide: could not enter {}", path.display());
+    }
 
     if args.convert {
         convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
@@ -247,6 +252,7 @@ fn main() {
         entries,
         skipped_raw: scanned.skipped_raw,
         unreadable: scanned.unreadable,
+        walk_errors: scanned.walk_errors,
         existing_output: scanned.existing_output,
         open_single,
         format: args.format,
@@ -332,6 +338,7 @@ struct Launch {
     entries: Vec<Entry>,
     skipped_raw: usize,
     unreadable: Vec<PathBuf>,
+    walk_errors: Vec<PathBuf>,
     existing_output: usize,
     open_single: bool,
     format: Format,

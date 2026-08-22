@@ -37,6 +37,10 @@ pub struct Scan {
     /// counted: "3 would not decode" tells you a folder has a problem and gives you
     /// nowhere to look for it.
     pub unreadable: Vec<PathBuf>,
+    /// Directories the walk could not enter, named like `unreadable`: "permission
+    /// denied" somewhere in the tree means every number above is short, and a count
+    /// alone would leave the user no place to look.
+    pub walk_errors: Vec<PathBuf>,
     /// Files already sitting in this root's own `OUTPUT_DIR`. The walk steps over them
     /// anyway, so counting them is free, and a second run is otherwise silent about
     /// what it is about to write over.
@@ -133,14 +137,23 @@ pub fn scan(root: &Path) -> Scan {
     let mut candidates = Vec::new();
     let mut skipped_raw = 0;
     let mut existing_output = 0;
+    let mut walk_errors = Vec::new();
     let output_root = root.join(OUTPUT_DIR);
 
-    for file in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-    {
+    for entry in WalkDir::new(root).follow_links(false) {
+        // A directory whose readdir fails yields an Err here. Dropping it would
+        // report a folder that was never fully looked at as fully audited, so the
+        // path is kept and named in the same way decode failures are.
+        let Ok(entry) = entry else {
+            if let Some(path) = entry.unwrap_err().path() {
+                walk_errors.push(path.to_path_buf());
+            }
+            continue;
+        };
+        let file = entry;
+        if !file.file_type().is_file() {
+            continue;
+        }
         if file
             .path()
             .components()
@@ -201,6 +214,7 @@ pub fn scan(root: &Path) -> Scan {
         entries,
         skipped_raw,
         unreadable,
+        walk_errors,
         existing_output,
     }
 }
@@ -244,6 +258,7 @@ pub fn format_name(format: ImageFormat) -> &'static str {
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
+    use std::os::unix::fs::PermissionsExt;
 
     fn write_sample(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
         let path = dir.join(name);
@@ -455,6 +470,32 @@ mod tests {
         assert!(
             scanned.unreadable[0].ends_with("truncated.png"),
             "the report says which file, not how many"
+        );
+    }
+
+    #[test]
+    fn a_folder_it_cannot_enter_is_named_not_swallowed() {
+        let dir = temp_dir("walk-error");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        write_sample(&dir, "keep.png", 8, 8);
+        // No read or execute permission: readdir on it fails.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let scanned = scan(&dir);
+
+        // Restore before asserting so cleanup cannot fail on the locked folder.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if scanned.entries.len() == 2 {
+            // Root read the locked folder anyway; there is nothing to assert.
+            return;
+        }
+        assert_eq!(scanned.entries.len(), 1);
+        assert_eq!(
+            scanned.walk_errors,
+            vec![locked],
+            "the place the walk stopped is named, not swallowed"
         );
     }
 

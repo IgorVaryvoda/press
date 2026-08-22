@@ -39,16 +39,30 @@ const WALK_LIMIT: usize = 20_000;
 pub struct Node {
     #[serde(default)]
     pub filename: String,
-    /// `"file"`, `"folder"` or `"symlink"`.
-    #[serde(default)]
-    pub r#type: String,
+    /// Byte size; folders report 0.
     #[serde(default)]
     pub size: u64,
+    /// True for folders. The docs' field is `isDirectory`; older drafts said
+    /// `type`, so both are accepted.
+    #[serde(default, rename = "isDirectory")]
+    pub is_directory: bool,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
+/// One readdir page. `contents` holds up to 100 entries;
+/// `continuation` is the token for the next page when there is one.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Listing {
+    #[serde(default)]
+    pub contents: Vec<Node>,
+    #[serde(default)]
+    pub continuation: Option<String>,
 }
 
 impl Node {
     pub fn is_folder(&self) -> bool {
-        self.r#type == "folder"
+        self.is_directory || self.kind.as_deref() == Some("folder")
     }
 }
 
@@ -301,29 +315,45 @@ impl Client {
         Ok(format!("Bearer {}", self.token()?))
     }
 
-    /// One directory listing. Folder names come back absolute
-    /// (`/photos/sub`); files carry their byte size.
+    /// One directory listing, following `continuation` pages. The API returns
+    /// up to 100 entries per page; stopping early would make the sync diff lie.
     pub fn readdir(&mut self, dirname: &str) -> Result<Vec<Node>, Error> {
-        let url = format!("{API}/v2/files/readdir?dirname={}", encode_path(dirname));
-        self.authenticated(|client| {
-            let authorization = client.bearer()?;
-            let response = client
-                .agent
-                .get(&url)
-                .set("Authorization", &authorization)
-                .call()
-                .map_err(|error| match error {
-                    ureq::Error::Status(status, _) => Error {
-                        status,
-                        message: "readdir rejected".into(),
-                    },
-                    other => sirv_error("readdir")(other),
-                })?;
-            response.into_json().map_err(|error| Error {
-                status: 0,
-                message: format!("readdir body: {error}"),
-            })
-        })
+        let mut nodes = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut url = format!("{API}/v2/files/readdir?dirname={}", encode_path(dirname));
+            if let Some(token) = &continuation {
+                url.push_str(&format!("&continuation={}", encode_path(token)));
+            }
+            let listing: Listing = self.authenticated(|client| {
+                let authorization = client.bearer()?;
+                let response = client
+                    .agent
+                    .get(&url)
+                    .set("Authorization", &authorization)
+                    .call()
+                    .map_err(|error| match error {
+                        ureq::Error::Status(status, _) => Error {
+                            status,
+                            message: "readdir rejected".into(),
+                        },
+                        other => sirv_error("readdir")(other),
+                    })?;
+                response.into_json().map_err(|error| Error {
+                    status: 0,
+                    message: format!("readdir body: {error}"),
+                })
+            })?;
+            let Listing {
+                contents,
+                continuation: next,
+            } = listing;
+            nodes.extend(contents);
+            match next {
+                Some(token) => continuation = Some(token),
+                None => return Ok(nodes),
+            }
+        }
     }
 
     /// Every file below `dir`, flattened, folders walked depth-first. Bounded:
@@ -583,7 +613,8 @@ mod tests {
     fn classification_covers_the_three_states() {
         let node = Node {
             filename: "/d/a.png".into(),
-            r#type: "file".into(),
+            is_directory: false,
+            kind: None,
             size: 100,
         };
         assert_eq!(classify(100, Some(&node)), SyncState::Same);
@@ -615,19 +646,36 @@ mod tests {
     }
 
     #[test]
-    fn readdir_parses_files_and_folders_leniently() {
-        let nodes: Vec<Node> = serde_json::from_str(
-            r#"[
-                {"type":"folder","filename":"/photos/sub","mtime":"2026-01-01T00:00:00Z"},
-                {"type":"file","filename":"/photos/a.jpg","size":1234,"width":80,"height":60},
-                {"type":"file","filename":"/photos/b.png","size":0}
-            ]"#,
+    fn readdir_parses_the_documented_contents_envelope() {
+        // Shape taken from the Sirv API docs (GET /v2/files/readdir): a top-level
+        // object whose `contents` array holds the entries. Folders carry
+        // `"isDirectory": true`, not a `type` field.
+        let listing: Listing = serde_json::from_str(
+            r#"{
+                "contents": [
+                    {"filename": "video", "mtime": "2020-07-17T15:36:52.477Z",
+                     "size": 0, "isDirectory": true, "meta": {}},
+                    {"filename": "aurora.jpg", "mtime": "2026-02-23T10:22:34.659Z",
+                     "contentType": "image/jpeg", "size": 260864,
+                     "isDirectory": false,
+                     "meta": {"width": 2500, "height": 1667, "duration": 0}}
+                ]
+            }"#,
         )
         .unwrap();
-        assert_eq!(nodes.len(), 3);
-        assert!(nodes[0].is_folder());
-        assert_eq!(nodes[1].size, 1234);
-        assert_eq!(nodes[2].filename, "/photos/b.png");
+        assert_eq!(listing.contents.len(), 2);
+        assert!(listing.contents[0].is_folder());
+        assert_eq!(listing.contents[1].size, 260864);
+        assert_eq!(listing.contents[1].filename, "aurora.jpg");
+    }
+
+    #[test]
+    fn a_readdir_page_keeps_its_continuation_token() {
+        let listing: Listing = serde_json::from_str(
+            r#"{"contents": [{"filename": "a.jpg", "size": 1}], "continuation": "next-page-token"}"#,
+        )
+        .unwrap();
+        assert_eq!(listing.continuation.as_deref(), Some("next-page-token"));
     }
 
     #[test]
@@ -731,12 +779,14 @@ mod tests {
         let remote = vec![
             Node {
                 filename: "/d/ok.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 1,
             },
             Node {
                 filename: "/d/../../.bashrc".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 1,
             },
         ];
@@ -752,17 +802,20 @@ mod tests {
         let remote = vec![
             Node {
                 filename: "/d/a.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 1,
             },
             Node {
                 filename: "/d/b.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 2,
             },
             Node {
                 filename: "/d/sub/c.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 3,
             },
         ];
@@ -778,17 +831,20 @@ mod tests {
         let remote = vec![
             Node {
                 filename: "/d/missing.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 1,
             },
             Node {
                 filename: "/d/same.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 2,
             },
             Node {
                 filename: "/d/changed.jpg".into(),
-                r#type: "file".into(),
+                is_directory: false,
+                kind: None,
                 size: 3,
             },
         ];
