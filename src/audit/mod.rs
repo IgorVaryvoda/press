@@ -1,12 +1,18 @@
 //! Audit window state, background jobs, rendering, and tests.
 
+mod compare_view;
 mod convert_job;
+mod gallery;
+mod header;
 mod media;
 mod sirv_actions;
+mod sirv_view;
 mod state;
+mod statusbar;
 mod table;
 #[cfg(test)]
 mod tests;
+mod toolbar;
 mod view;
 
 use table::AuditTable;
@@ -443,10 +449,6 @@ fn write_settings(settings: &settings::Settings) {
 }
 
 impl Audit {
-    /// Remember the window state without putting a disk write inside a frame.
-    /// Dragging a window edge changes the size on every frame, and the old code
-    /// answered each one with `create_dir_all` plus `write` on the UI thread. One
-
     /// Install a completed scan. This is the one state transition that replaces the
     /// dataset and invalidates every detached job derived from the old rows.
     fn install_dataset(
