@@ -1561,6 +1561,12 @@ impl Audit {
         if !self.failures.is_empty() {
             parts.push(format!("failed: {}", named(self.failures.iter().cloned())));
         }
+        // Behind the `updater` feature, this is what tells a windowed user their
+        // next launch will be different. Nothing renders while the updater is idle.
+        #[cfg(feature = "updater")]
+        if let Some(line) = crate::update::notice() {
+            parts.push(line);
+        }
         if let Some(pairing) = &self.sirv_pairing
             && let Listing::Failed(reason) = &pairing.files
         {
