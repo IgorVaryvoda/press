@@ -139,10 +139,21 @@ pub fn relative_key(root: &Path, path: &Path) -> Option<String> {
 /// Strip the paired folder off a remote filename so both sides of the diff
 /// speak the same key language. `/photos/a.jpg` paired at `/photos` is
 /// `a.jpg`; anything outside the pair is skipped by the caller via `None`.
+///
+/// readdir's filenames come back relative to the listed folder on some
+/// account shapes (`a.jpg` for `dirname=/photos`), absolute on others. A
+/// relative name under its own listing folder *is* inside the pair, so it is
+/// joined before the prefix check instead of being discarded.
 pub fn unpair_remote(dir: &str, filename: &str) -> Option<String> {
     let dir = dir.trim_end_matches('/');
-    let prefix = format!("{dir}/");
-    filename.strip_prefix(&prefix).map(str::to_string)
+    if let Some(stripped) = filename.strip_prefix(&format!("{dir}/")) {
+        return Some(stripped.to_string());
+    }
+    if filename.starts_with('/') {
+        None
+    } else {
+        Some(filename.to_string())
+    }
 }
 
 /// True when a remote key is safe to join onto a local folder.
@@ -358,13 +369,35 @@ impl Client {
 
     /// Every file below `dir`, flattened, folders walked depth-first. Bounded:
     /// a tree that exceeds `WALK_LIMIT` files is an error, not an endless walk.
+    ///
+    /// readdir's `filename` fields are relative to the listed folder (the API
+    /// docs' own example lists `/REST%20API%20Examples` and gets back
+    /// `"aurora.jpg"`, not the absolute path). Joining each folder entry onto
+    /// the folder being listed is what keeps the recursion on absolute paths;
+    /// pushing the bare name made the next call ask Sirv for
+    /// `dirname=subfolder` and every nested listing died with a 400.
     pub fn walk(&mut self, dir: &str) -> Result<Vec<Node>, Error> {
+        let root = format!("/{}", dir.trim().trim_start_matches('/'));
+        let root = root.trim_end_matches('/').to_string();
+        if root.is_empty() {
+            return Err(Error {
+                status: 0,
+                message: "pairing folder is empty".into(),
+            });
+        }
         let mut all = Vec::new();
-        let mut stack = vec![dir.to_string()];
+        let mut stack = vec![root];
         while let Some(current) = stack.pop() {
             for node in self.readdir(&current)? {
                 if node.is_folder() {
-                    stack.push(node.filename.clone());
+                    let name = node.filename.trim_end_matches('/');
+                    // Absolute entries pass through; relative ones join the parent.
+                    let child = if name.starts_with('/') {
+                        name.to_string()
+                    } else {
+                        format!("{current}/{name}")
+                    };
+                    stack.push(child);
                 } else {
                     all.push(node);
                 }
@@ -634,6 +667,10 @@ mod tests {
 
     #[test]
     fn remote_names_unpair_against_the_folder() {
+        // Relative entries (some account shapes) belong to their listing folder.
+        assert_eq!(unpair_remote("/ER", "a.jpg"), Some("a.jpg".into()));
+        assert_eq!(unpair_remote("/ER", "sub/b.jpg"), Some("sub/b.jpg".into()));
+        // Absolute ones keep the prefix rule.
         assert_eq!(
             unpair_remote("/photos", "/photos/sub/a.jpg"),
             Some("sub/a.jpg".into())
@@ -642,6 +679,7 @@ mod tests {
             unpair_remote("/photos/", "/photos/a.jpg"),
             Some("a.jpg".into())
         );
+        // Absolute and outside the pair is skipped.
         assert_eq!(unpair_remote("/photos", "/other/a.jpg"), None);
     }
 
