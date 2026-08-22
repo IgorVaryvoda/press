@@ -1,3 +1,10 @@
+> **STATUS: DONE** — executed 2026-08-22 on `improve/batch-4`, commits
+> `8a0ef96`…`bb5f1ac`. Final sizes: largest file `sirv.rs` 881; audit modules:
+> mod 865, view 772, sirv_actions 548, table 500, state 388, header ~230,
+> statusbar ~330, compare_view ~360, sirv_view ~350, media 143,
+> convert_job 120, gallery 15. 85 tests pass, clippy/fmt clean. Visual
+> surface check pending (screen locked at execution time).
+
 # Plan 033: Finish the module split — Sirv out of the audit, view by feature
 
 > **Executor instructions**: Follow this plan step by step. This is a

@@ -8,8 +8,9 @@ that 029 and 030 are now genuinely DONE in source.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 031 | Name the folders the scan could not read | P1 | M | — | TODO |
-| 032 | Show the updater's outcome in the window | P2 | S | — | TODO |
+| 031 | Name the folders the scan could not read | P1 | M | — | DONE |
+| 032 | Show the updater's outcome in the window | P2 | S | — | DONE |
+| 033 | Finish the module split (Sirv out of the audit, view by feature) | P1 | M | — | DONE |
 
 ### Findings considered and deferred to decision memos
 
