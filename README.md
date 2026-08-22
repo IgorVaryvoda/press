@@ -55,14 +55,14 @@ found — heaviest first, because that is where the work is.
 | Thumb | Decoded off the main thread, only for rows the viewport asked for |
 | Format | The real format, read from the file's magic bytes, not its extension |
 | Size | Pixel dimensions |
-| bpp | Bytes on disk per output pixel |
+| B/px | Bytes on disk per output pixel |
 | Weight | Bytes on disk |
 
 **Format is read from the content.** That column disagreeing with the file extension
 is a finding, not a display bug. The first folder this was pointed at —
 `imageguide/public` — held 169 files named `.webp`, and 59 of them were PNG.
 
-`bpp` is the quick read on whether a file is carrying weight it does not need. A
+`B/px` is the quick read on whether a file is carrying weight it does not need. A
 photographic JPEG sits near 0.2. A screenshot saved as PNG can be ten times that.
 
 **Camera raw is counted, not listed.** `.nef`, `.cr2`, `.arw` and friends are TIFF
@@ -187,16 +187,15 @@ regression there would silently flatten every cut-out.
 
 ## Comparing
 
-Click any row, or pass a single file, to open the original against the WebP the
-current quality setting would produce. The encode happens in memory — nothing is
-written, because the point is to decide whether the trade is acceptable *before*
-committing to it.
+Double-click any row, press **Enter**, or pass a single file to open the original
+against the WebP the current quality setting would produce. The encode happens in
+memory — nothing is written, because the point is to decide whether the trade is
+acceptable *before* committing to it.
 
-![Original against WebP, at 1:1](docs/comparison.webp)
+![Original against WebP, fitted](docs/comparison.webp)
 
-**The view is 1:1.** Fitting a 5568px photo into a 900px window hides exactly the
-artefacts the view exists to show, so both sides are drawn at native size, centred,
-and cropped by the window.
+**The view opens fitted.** Press **100%** to inspect native pixels, or scroll to pick
+another zoom level. The original and result stay registered at every scale.
 
 Move the pointer to sweep the divider across. **Hold the left button and drag to
 pan** — both sides move together, so they never fall out of register.
@@ -207,8 +206,6 @@ rather than tells you.
 
 ## Planned
 
-- Zoom in the comparison. It is 1:1 and pannable, but there is no way to back out to
-  a whole-image view.
 - Spec profiles — "1400×1400, white background, under 250 KB" — for marketplace
   pre-flight.
 

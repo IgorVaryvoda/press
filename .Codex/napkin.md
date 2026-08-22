@@ -5,6 +5,9 @@
 |------|--------|----------------|-------------------|
 | 2026-08-22 | self | Treated `webp::WebPConfig::new()` as `Option` in an `Option`-returning encoder | It returns `Result`; use `.ok()?` at this deliberately lossy error boundary |
 | 2026-08-22 | self | Timed a long conversion through an `exec` wrapper that hid the yielded `exec_command` session id, then accidentally started a second conversion beside it | Print the full `exec_command` result as JSON and resume its `session_id` with `write_stdin`; never trust timing while another benchmark process exists |
+| 2026-08-22 | self | Tried to execute the skill-creator Python helper directly, but it is not executable on this host | Invoke skill-creator helpers with `python`, even when the usage examples show the script path directly |
+| 2026-08-22 | self | Assumed a newly dirty app icon came from `cargo build` and restored it before checking `build.rs`; the exact 19,611-byte file was a concurrent 8-bit conversion | Before restoring a late dirty file, inspect the producer and copy the dirty artifact aside; a clean start snapshot can race with concurrent user edits |
+| 2026-08-22 | self | Trusted a plans-index DONE row without checking `src/`; 029 and 030 were marked DONE twice with no execution behind them | Verify a status against the source before building on it; a row is a claim about `src/`, not about work done |
 | 2026-08-20 | user | Treated the broken GPUI headless renderer as a reason to defer screenshot-backed UI proof | Launch the real pre-alpha app, control it through Hyprland/ydotool, capture with `grim`, and visually inspect every changed state and size |
 
 ## User Preferences
@@ -12,6 +15,7 @@
 - For pre-alpha UI work, reshape the design freely and make real app screenshots yourself; do not wait for an in-repo headless capture test.
 
 ## Patterns That Work
+- In the audit toolbar, group filtering separately from conversion settings and stack those groups at the default/minimum widths; this keeps Resize, Format, and Quality together instead of letting one long flex row orphan Quality.
 - The in-process system libavif 1.4.2 + libaom 3.14.1 + libyuv path took 9.070s versus rav1e speed 8's 21.503s on the same 64-file / 134.1MB sample (57.8% faster); output fell 8.7%, and PSNR was higher on four of five spot checks. A tiny C bridge avoids stale Rust wrappers and subprocess overhead.
 - On the 5,739-image corpus, bundled libwebp 1.6.0 with zero-copy RGB/RGBA input took 28.512s versus 29.569s for the 1.3.1 wrapper (3.6% faster) and encoded five formats the wrapper rejected; converting every image to a fresh RGB buffer first regressed to 33.119s.
 - Rav1e speed 8 took 20.628s versus 23.373s at speed 6 on a 64-file size-stratified real sample (11.7% faster), while output grew only 0.6%.
