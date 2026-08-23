@@ -433,6 +433,20 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
     (audit, cx)
 }
 
+#[gpui::test]
+fn flushing_settings_clears_the_pending_debounce(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        let mut settings = audit.settings.clone();
+        settings.width = Some(1280.);
+        audit.remember_settings(settings, cx);
+        assert!(audit.settings_save_pending);
+
+        audit.flush_settings();
+        assert!(!audit.settings_save_pending);
+    });
+}
+
 fn pointer_checkbox_audit(
     grid: bool,
     cx: &mut TestAppContext,

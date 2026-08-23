@@ -30,6 +30,14 @@ impl Audit {
         .detach();
     }
 
+    /// Write the settings now, cancelling the debounce. Every quit path
+    /// runs through this; without it, quitting inside the 500 ms window
+    /// silently forgets the last resize or folder change.
+    pub(crate) fn flush_settings(&mut self) {
+        self.settings_save_pending = false;
+        write_settings(&self.settings);
+    }
+
     /// The rows a conversion would touch. An empty selection means the whole folder,
     /// so the common case needs no ticking.
     pub(super) fn targets(&self) -> Vec<usize> {

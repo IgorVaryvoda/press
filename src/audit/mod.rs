@@ -587,7 +587,7 @@ impl Audit {
 
     /// Ask the desktop for a folder or a file. The dialog runs off the main thread so
     /// the window keeps drawing while it is open.
-    fn pick(&mut self, folders: bool, cx: &mut Context<Self>) {
+    pub(crate) fn pick(&mut self, folders: bool, cx: &mut Context<Self>) {
         if self.converting {
             return;
         }
@@ -862,4 +862,14 @@ pub(crate) fn build_audit(
     audit.update(cx, |audit, _| audit.table = Some(table));
 
     audit
+}
+
+/// Flush the debounced settings write when the app quits, whatever path
+/// the quit took — menu, Cmd+W on the last window, or the close button.
+pub(crate) fn register_quit_flush(audit: gpui::Entity<Audit>, cx: &mut gpui::App) {
+    cx.on_app_quit(move |cx| {
+        audit.update(cx, |audit, _| audit.flush_settings());
+        async {}
+    })
+    .detach();
 }
