@@ -1,6 +1,6 @@
 [package]
 name = "imageguide-desktop"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Audit and optimise a folder of images without uploading them anywhere"
 
