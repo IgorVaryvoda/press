@@ -79,7 +79,20 @@ impl Audit {
                         .min(view_h / pair.height as f32)
                         .min(1.);
                     let before = comparison.zoom.unwrap_or(fit);
-                    let after = (before * 1.2f32.powf(ticks)).clamp(0.02, 16.);
+                    // Fit is the floor: below it the image is a stamp adrift in
+                    // a black stage, and there is nothing smaller-than-everything
+                    // could ever show about compression.
+                    let after = (before * 1.2f32.powf(ticks)).clamp(fit, 16.);
+
+                    if after <= fit {
+                        // Landing back at fit snaps to the centred fitted state,
+                        // so zooming out is always a way home — `None` keeps
+                        // tracking the window if it resizes.
+                        comparison.zoom = None;
+                        comparison.pan = (0., 0.);
+                        cx.notify();
+                        return;
+                    }
 
                     // Keep whatever is under the pointer under the pointer. Without this
                     // zooming walks the image off screen.
@@ -210,6 +223,36 @@ impl Audit {
             );
         }
 
+        // The pair decodes and encodes in the background; until it lands the
+        // stage used to be a black void with six grey letters in the footer.
+        // A build in progress should look like one.
+        if comparison.pair.is_none() && !comparison.failed {
+            stage = stage.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        gpui_component::spinner::Spinner::new()
+                            .large()
+                            .color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "Building preview — encoding to {} {}…",
+                                self.format.label().to_uppercase(),
+                                self.quality.label()
+                            )),
+                    ),
+            );
+        }
+
         // Chrome as two full-width bars. These were black boxes pinned at
         // hand-computed offsets, the right-hand one at `view_w - 240` — a number
         // that stopped being the right edge the moment the text or window changed.
@@ -267,6 +310,32 @@ impl Audit {
                             ))
                             .child(compare_chip(saving_text, saving_colour, cx))
                     }))
+                    .child({
+                        // The preview exists to answer "is this good enough?" —
+                        // yes should not require finding your way back to a
+                        // button on another screen.
+                        let target_count = self.target_count();
+                        Button::new("compare-convert")
+                            .primary()
+                            .small()
+                            .label(if self.converting {
+                                "Converting…".to_string()
+                            } else if self.selected.is_empty() {
+                                format!("Convert all to {}", self.format.label().to_uppercase())
+                            } else {
+                                format!(
+                                    "Convert {} to {}",
+                                    target_count,
+                                    self.format.label().to_uppercase()
+                                )
+                            })
+                            .disabled(self.converting || target_count == 0)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                // Back to the list, where the run's progress lives.
+                                audit.compare = None;
+                                audit.start_conversion(cx);
+                            }))
+                    })
                     .child(
                         Button::new("compare-close")
                             .small()
