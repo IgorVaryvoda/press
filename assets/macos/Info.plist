@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>ImageGuide audits and converts images in folders you choose, including folders on your Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>ImageGuide audits and converts images in folders you choose, including folders in your Documents.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>ImageGuide audits and converts images in folders you choose, including folders in your Downloads.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>ImageGuide audits and converts images in folders you choose, including folders on external drives.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>ImageGuide audits and converts images in folders you choose, including folders on network drives.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>© Igor Varyvoda</string>
+</dict>
+</plist>
