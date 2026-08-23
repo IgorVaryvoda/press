@@ -470,6 +470,7 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
             stopping: false,
             generation: audit.sirv_generation,
         });
+        let generation_before = audit.sirv_pairing_generation;
 
         audit.adopt_new_credentials(
             sirv::Credentials {
@@ -485,6 +486,8 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
         assert!(audit.sirv_counts.is_none());
         assert!(!Arc::ptr_eq(&pairing.client, &old_client));
         assert!(audit.sirv_job.as_ref().unwrap().stopping);
+        // This rejects stale walks through walk_landing_applies.
+        assert_ne!(audit.sirv_pairing_generation, generation_before);
     });
 }
 

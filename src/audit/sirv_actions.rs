@@ -332,9 +332,9 @@ impl Audit {
     }
 
     /// New credentials mean a possibly different account: the old client,
-    /// its cached token, any listing built under it, and any transfer in
-    /// flight all describe a world that may no longer exist. Retire all of
-    /// them and re-list.
+    /// its cached token, any listing built under it, any transfer, and any
+    /// walk in flight all describe a world that may no longer exist. Retire
+    /// all of them and re-list.
     pub(super) fn adopt_new_credentials(
         &mut self,
         credentials: sirv::Credentials,
@@ -346,6 +346,10 @@ impl Audit {
         } else {
             return;
         }
+        // A walk started under the old credentials must land nowhere: it
+        // carries the old account's listing. Same invalidation pair_sirv
+        // and unpair_sirv already use.
+        self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.cancel_sirv_transfer();
         self.sirv_local_presence.clear();
         self.sirv_counts = None;
