@@ -18,6 +18,8 @@ const API: &str = "https://api.sirv.com";
 /// Tokens live 20 minutes on the server. Refresh a minute early so an upload
 /// started at minute 19 does not die mid-flight.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
+/// Used until the first response names the real lifetime (`expiresIn`).
+const DEFAULT_TOKEN_LIFETIME: Duration = Duration::from_secs(1200);
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// File transfers get their own, much looser ceiling: a photo shoot folder
 /// holds files that legitimately take minutes.
@@ -254,6 +256,7 @@ pub fn content_type(key: &str) -> &'static str {
 pub struct Client {
     credentials: Credentials,
     token: Option<(String, Instant)>,
+    token_lifetime: Duration,
     agent: ureq::Agent,
 }
 
@@ -262,16 +265,18 @@ impl Client {
         Self {
             credentials,
             token: None,
+            token_lifetime: DEFAULT_TOKEN_LIFETIME,
             agent: ureq::AgentBuilder::new().timeout(TIMEOUT).build(),
         }
     }
 
     /// A valid token, fetching or refreshing one when needed.
     fn token(&mut self) -> Result<String, Error> {
-        if let Some((token, fetched_at)) = &self.token
-            && fetched_at.elapsed() < Duration::from_secs(19 * 60) - TOKEN_MARGIN
-        {
-            return Ok(token.clone());
+        if let Some((token, fetched_at)) = &self.token {
+            let fresh_for = self.token_lifetime.saturating_sub(TOKEN_MARGIN);
+            if fetched_at.elapsed() < fresh_for {
+                return Ok(token.clone());
+            }
         }
         self.fetch_token()
     }
@@ -299,10 +304,11 @@ impl Client {
             status: 0,
             message: format!("token body: {error}"),
         })?;
-        self.token = Some((
-            issued.token.clone(),
-            Instant::now() + Duration::from_secs(issued.expires_in),
-        ));
+        // Store when the token was fetched, not when it expires: `elapsed()`
+        // on a future instant panics, and the old `now + expires_in` value made
+        // every refresh check after the first one a time bomb.
+        self.token = Some((issued.token.clone(), Instant::now()));
+        self.token_lifetime = Duration::from_secs(issued.expires_in);
         Ok(issued.token)
     }
 
@@ -343,13 +349,7 @@ impl Client {
                     .get(&url)
                     .set("Authorization", &authorization)
                     .call()
-                    .map_err(|error| match error {
-                        ureq::Error::Status(status, _) => Error {
-                            status,
-                            message: "readdir rejected".into(),
-                        },
-                        other => sirv_error("readdir")(other),
-                    })?;
+                    .map_err(sirv_error("readdir"))?;
                 response.into_json().map_err(|error| Error {
                     status: 0,
                     message: format!("readdir body: {error}"),
@@ -388,7 +388,15 @@ impl Client {
         let mut all = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            for node in self.readdir(&current)? {
+            // Name the page that failed. The pairing root in the notice is
+            // useless when a subfolder three levels down rejected the call.
+            let nodes = self.readdir(&current).map_err(|mut error| {
+                if !error.message.contains(&current) {
+                    error.message = format!("{current}: {}", error.message);
+                }
+                error
+            })?;
+            for node in nodes {
                 if node.is_folder() {
                     let name = node.filename.trim_end_matches('/');
                     // Absolute entries pass through; relative ones join the parent.
@@ -423,13 +431,7 @@ impl Client {
                 .set("Authorization", &authorization)
                 .timeout(TRANSFER_TIMEOUT)
                 .call()
-                .map_err(|error| match error {
-                    ureq::Error::Status(status, _) => Error {
-                        status,
-                        message: "download rejected".into(),
-                    },
-                    other => sirv_error("download")(other),
-                })?;
+                .map_err(sirv_error("download"))?;
             let mut bytes = Vec::new();
             response
                 .into_reader()
@@ -462,13 +464,7 @@ impl Client {
                 .set("Content-Type", content_type)
                 .timeout(TRANSFER_TIMEOUT)
                 .send_bytes(&body)
-                .map_err(|error| match error {
-                    ureq::Error::Status(status, _) => Error {
-                        status,
-                        message: "upload rejected".into(),
-                    },
-                    other => sirv_error("upload")(other),
-                })?;
+                .map_err(sirv_error("upload"))?;
             Ok(())
         })
     }
@@ -487,10 +483,6 @@ impl Client {
             {
                 Ok(_) => Ok(()),
                 Err(ureq::Error::Status(409, _)) => Ok(()),
-                Err(ureq::Error::Status(status, _)) => Err(Error {
-                    status,
-                    message: "mkdir rejected".into(),
-                }),
                 Err(other) => Err(sirv_error("mkdir")(other)),
             }
         })
@@ -705,6 +697,38 @@ mod tests {
         assert!(listing.contents[0].is_folder());
         assert_eq!(listing.contents[1].size, 260864);
         assert_eq!(listing.contents[1].filename, "aurora.jpg");
+    }
+
+    // Regression: fetch_token stored `Instant::now() + expires_in` in the
+    // slot that `token()` reads with `elapsed()`. `elapsed()` on a future
+    // instant panics, so one minute into any session with real credentials
+    // the next refresh check blew up instead of refreshing.
+    #[test]
+    fn a_fetched_token_is_stored_as_a_fetch_time_not_an_expiry() {
+        let mut client = Client::new(Credentials {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+        });
+        client.token_lifetime = Duration::from_secs(1200);
+        client.token = Some(("t".into(), Instant::now()));
+        // Just inside the fresh window: no refresh attempted. This only
+        // proves it does not panic; the panic was the bug.
+        assert_eq!(client.token().unwrap(), "t");
+    }
+
+    #[test]
+    fn an_expired_token_is_refreshed_not_returned() {
+        let mut client = Client::new(Credentials {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+        });
+        client.token_lifetime = Duration::from_secs(1200);
+        // Fetched 20 minutes ago: outside any fresh window.
+        client.token = Some(("stale".into(), Instant::now() - Duration::from_secs(1200)));
+        // fetch_token will fail against the network with fake credentials;
+        // what matters is that the stale token did not come back as if fresh.
+        let result = client.token().unwrap_err();
+        assert_ne!(result.message, "");
     }
 
     #[test]

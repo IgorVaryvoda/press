@@ -348,18 +348,25 @@ impl Audit {
                         async move { client.lock().download(&remote_path) }
                     })
                     .await;
-                let written = match outcome {
+                // Keep the reason. "1 failed: a.jpg" sends the user hunting;
+                // "a.jpg: 403 forbidden" or "a.jpg: No space left on device"
+                // says what to do about it.
+                let failure = match outcome {
                     Ok(bytes) => {
                         let target = root.join(key);
-                        let dirs_ok = target
-                            .parent()
-                            .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok());
-                        dirs_ok && std::fs::write(&target, bytes).is_ok()
+                        match target.parent().map(std::fs::create_dir_all) {
+                            Some(Err(error)) => {
+                                Some(format!("{key}: could not create folder: {error}"))
+                            }
+                            None | Some(Ok(())) => std::fs::write(&target, bytes)
+                                .err()
+                                .map(|error| format!("{key}: {error}")),
+                        }
                     }
-                    Err(_) => false,
+                    Err(error) => Some(format!("{key}: {error}")),
                 };
-                if !written {
-                    failures.push(key.clone());
+                if let Some(message) = failure {
+                    failures.push(message);
                 }
                 this.update(cx, |audit, cx| {
                     // Only onto this loop's own job. A slow last file can land after
@@ -448,8 +455,8 @@ impl Audit {
                         for folder in &folders {
                             // mkdir on an existing folder is success upstream, so this
                             // is "ensure", not "create".
-                            if client.mkdir(&format!("{dir}/{folder}")).is_err() {
-                                return Err(format!("could not create folder {folder}"));
+                            if let Err(error) = client.mkdir(&format!("{dir}/{folder}")) {
+                                return Err(format!("could not create folder {folder}: {error}"));
                             }
                         }
                         Ok(())
