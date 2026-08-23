@@ -363,7 +363,9 @@ impl Render for Audit {
         }
 
         if let Some(table) = self.table.clone() {
-            let width = f32::from(viewport.width);
+            // The table lives left of the output panel; handing it the full
+            // viewport would make every column calculation 264px too wide.
+            let width = f32::from(viewport.width) - panel::OUTPUT_PANEL_WIDTH;
             let show_result = !self.results.is_empty();
             let signature = (width.round().max(0.) as u32, show_result);
             if self.table_signature != Some(signature) {
@@ -731,101 +733,126 @@ impl Render for Audit {
                 }
             }))
             .child(self.header(count, cx))
-            .child(self.controls(window, cx))
-            .children(self.notices(cx))
+            // Audit on the left, the output panel on the right: the working
+            // area and the settings column split below one shared header.
             .child(
-                // The list runs to the window edge; hairlines above it, not a
-                // card floating in padding.
                 div()
                     .flex()
-                    .flex_col()
                     .flex_1()
                     .overflow_hidden()
-                    .bg(cx.theme().table)
-                    // Columns take a width, not a share, so the remainder after the
-                    // fixed ones has to be handed to the name column by hand.
-                    .child(if self.grid {
-                        // One virtualised band is one row of fixed-size tiles.
-                        let (root_left, root_right) = root_horizontal_chrome(window);
-                        let layout = gallery_layout(
-                            f32::from(window.viewport_size().width),
-                            root_left,
-                            root_right,
-                            count,
-                        );
-                        if let Some(previous) = self.gallery_columns
-                            && previous != layout.columns
-                        {
-                            self.gallery_scroll
-                                .scroll_to_item_strict(0, ScrollStrategy::Top);
-                        }
-                        self.gallery_columns = Some(layout.columns);
-                        let gallery = uniform_list(
-                            "gallery",
-                            layout.rows,
-                            cx.processor(|audit, range: std::ops::Range<usize>, _window, cx| {
-                                range
-                                    .map(|band| {
-                                        // A plain loop: the closure form borrows `audit`
-                                        // mutably for `request_thumb` and immutably for
-                                        // `tile`, which nested closures cannot express.
-                                        let mut tiles = Vec::new();
-                                        let (root_left, root_right) =
-                                            root_horizontal_chrome(_window);
-                                        let layout = gallery_layout(
-                                            f32::from(_window.viewport_size().width),
-                                            root_left,
-                                            root_right,
-                                            audit.visible.len(),
-                                        );
-                                        for row in layout.band_range(band) {
-                                            let Some(entry) = audit.entry_at(row) else {
-                                                continue;
-                                            };
-                                            audit.request_thumb(entry, cx);
-                                            tiles.push(audit.tile(row, entry, layout.tile, cx));
-                                        }
-                                        div().flex().gap_2().children(tiles)
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .track_scroll(&self.gallery_scroll)
-                        .size_full()
-                        .p_2();
+                    .child(
                         div()
-                            .relative()
+                            .flex()
+                            .flex_col()
                             .flex_1()
+                            .min_w_0()
                             .overflow_hidden()
-                            .child(gallery)
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .bottom_0()
-                                    .w(Scrollbar::width())
-                                    .debug_selector(|| "gallery-scrollbar".into())
-                                    .child(
-                                        Scrollbar::vertical(&self.gallery_scroll)
-                                            .id("gallery-scrollbar")
-                                            .mode(ScrollbarMode::Always)
-                                            .viewport_from_layout(),
-                                    ),
-                            )
-                            .into_any_element()
-                    } else if let Some(table) = self.table.as_ref() {
-                        DataTable::new(table)
-                            .stripe(false)
-                            .bordered(false)
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    }),
+                            .child(self.controls(cx))
+                            .children(self.notices(cx))
+                            .child(self.audit_content(count, window, cx)),
+                    )
+                    .child(self.output_panel(cx)),
             )
-            // The status bar sits at the very bottom, so nothing above it ever
-            // changes height and the list never jumps.
-            .child(self.summary(cx))
+            .into_any_element()
+    }
+}
+
+impl Audit {
+    /// The list or the gallery, filling the space left of the panel.
+    fn audit_content(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // The list runs to the window edge; hairlines above it, not a
+        // card floating in padding.
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_hidden()
+            .bg(cx.theme().table)
+            // Columns take a width, not a share, so the remainder after the
+            // fixed ones has to be handed to the name column by hand.
+            .child(if self.grid {
+                // One virtualised band is one row of fixed-size tiles.
+                let (root_left, root_right) = root_horizontal_chrome(window);
+                let layout = gallery_layout(
+                    f32::from(window.viewport_size().width) - panel::OUTPUT_PANEL_WIDTH,
+                    root_left,
+                    root_right,
+                    count,
+                );
+                if let Some(previous) = self.gallery_columns
+                    && previous != layout.columns
+                {
+                    self.gallery_scroll
+                        .scroll_to_item_strict(0, ScrollStrategy::Top);
+                }
+                self.gallery_columns = Some(layout.columns);
+                let gallery = uniform_list(
+                    "gallery",
+                    layout.rows,
+                    cx.processor(|audit, range: std::ops::Range<usize>, _window, cx| {
+                        range
+                            .map(|band| {
+                                // A plain loop: the closure form borrows `audit`
+                                // mutably for `request_thumb` and immutably for
+                                // `tile`, which nested closures cannot express.
+                                let mut tiles = Vec::new();
+                                let (root_left, root_right) = root_horizontal_chrome(_window);
+                                let layout = gallery_layout(
+                                    f32::from(_window.viewport_size().width)
+                                        - panel::OUTPUT_PANEL_WIDTH,
+                                    root_left,
+                                    root_right,
+                                    audit.visible.len(),
+                                );
+                                for row in layout.band_range(band) {
+                                    let Some(entry) = audit.entry_at(row) else {
+                                        continue;
+                                    };
+                                    audit.request_thumb(entry, cx);
+                                    tiles.push(audit.tile(row, entry, layout.tile, cx));
+                                }
+                                div().flex().gap_2().children(tiles)
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&self.gallery_scroll)
+                .size_full()
+                .p_2();
+                div()
+                    .relative()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(gallery)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(Scrollbar::width())
+                            .debug_selector(|| "gallery-scrollbar".into())
+                            .child(
+                                Scrollbar::vertical(&self.gallery_scroll)
+                                    .id("gallery-scrollbar")
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout(),
+                            ),
+                    )
+                    .into_any_element()
+            } else if let Some(table) = self.table.as_ref() {
+                DataTable::new(table)
+                    .stripe(false)
+                    .bordered(false)
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .into_any_element()
     }
 }

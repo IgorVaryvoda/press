@@ -29,6 +29,15 @@ impl Audit {
                 many => format!(" · {many} macOS packages skipped"),
             });
         }
+        // Information, not a warning: a previous run's output sitting in
+        // optimized/ is normal life, and a yellow banner made it look like
+        // something had gone wrong.
+        if self.existing_output > 0 {
+            stats.push_str(&match self.existing_output {
+                1 => format!(" · 1 file in {}/", scan::OUTPUT_DIR),
+                many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
+            });
+        }
         // Three states, three sentences. A pairing whose walk is still running used to
         // read exactly like one whose walk failed: no Sirv text at all.
         match (&self.sirv_pairing, self.sirv_counts) {
@@ -79,12 +88,15 @@ impl Audit {
                                     .text_ellipsis()
                                     .child(folder),
                             )
+                            // Icon-only: three ellipsised text buttons crowding the
+                            // title read as clutter, and the tooltips say the same
+                            // words on demand.
                             .child(
                                 Button::new("open-folder")
                                     .small()
                                     .ghost()
                                     .icon(IconName::Folder)
-                                    .label("Open folder…")
+                                    .tooltip("Open a folder")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| audit.pick(true, cx))),
                             )
@@ -93,25 +105,30 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .icon(IconName::File)
-                                    .label("Open image…")
+                                    .tooltip("Open a single image")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| audit.pick(false, cx))),
                             )
                             .child(
                                 // The sync entry point: opens the remote-folder
                                 // browser, which is also where a pairing is undone.
-                                Button::new("sirv-browser")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Globe)
-                                    .label(match &self.sirv_pairing {
-                                        Some(pairing) => pairing.dir.clone(),
-                                        None => "Sirv…".into(),
-                                    })
-                                    .disabled(self.converting)
-                                    .on_click(
-                                        cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
-                                    ),
+                                // A live pairing keeps its name on the button; the
+                                // name IS the state.
+                                {
+                                    let button = Button::new("sirv-browser")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::Globe)
+                                        .tooltip("Sync with a Sirv folder")
+                                        .disabled(self.converting)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            audit.open_sirv_browser(cx)
+                                        }));
+                                    match &self.sirv_pairing {
+                                        Some(pairing) => button.label(pairing.dir.clone()),
+                                        None => button,
+                                    }
+                                },
                             ),
                     )
                     .child(
@@ -175,133 +192,57 @@ impl Audit {
             )
     }
 
-    /// The three knobs that decide what a conversion produces, each under its own
-    /// name and drawn as one control rather than a run of loose buttons.
-    pub(super) fn controls(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lossless = self.quality == Quality::LOSSLESS;
+    /// The audit's working row: the filter and the findings you can act on.
+    /// Conversion settings live in the output panel on the right, next to the
+    /// estimate and the button they drive.
+    pub(super) fn controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let heavy = self
             .entries
             .iter()
             .filter(|entry| Finding::Heavy.holds(entry))
             .count();
-        // Below this width the audit controls and conversion settings are two
-        // intentional bands. Letting one long flex row break wherever it ran out of
-        // room left Quality orphaned on a line of its own at the default window size.
-        let stacked = f32::from(window.viewport_size().width) < 1060.;
 
         div()
             .flex()
             .flex_wrap()
-            .when(stacked, |strip| strip.flex_col().items_start())
-            .when(!stacked, |strip| strip.items_center())
+            .items_center()
             .gap_2()
             .px_3()
             .py_2()
             .border_b_1()
             .border_color(cx.theme().border)
-            // What the list shows, then what a conversion would do: the reading
-            // order of the strip follows the order you use it.
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_shrink_0()
-                    .child(
-                        div().w(px(150.)).flex_shrink_0().child(
-                            Input::new(&self.filter_input)
-                                .small()
-                                .cleanable(true)
-                                .disabled(self.converting)
-                                .prefix(IconName::Search),
-                        ),
-                    )
-                    // The audit colours every row by weight per pixel and then asks
-                    // you to find the heavy ones yourself.
-                    .children((heavy > 0).then(|| {
-                        self.finding_button(
-                            Finding::Heavy,
-                            IconName::TriangleAlert,
-                            format!("{heavy} heavy"),
-                            cx,
-                        )
-                    })),
+                div().w(px(220.)).flex_shrink_0().child(
+                    Input::new(&self.filter_input)
+                        .small()
+                        .cleanable(true)
+                        .disabled(self.converting)
+                        .prefix(IconName::Search),
+                ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_3()
-                    .child(self.control_group("Resize", self.resize_group(cx), cx))
-                    .child(self.control_group("Format", self.format_group(cx), cx))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_nowrap()
-                                    .child("Quality"),
-                            )
-                            .child(
-                                div()
-                                    .w(px(110.))
-                                    .debug_selector(|| "quality-control".to_string())
-                                    .when(self.converting, |rail| {
-                                        rail.child(
-                                            Progress::new("quality-locked")
-                                                .value(self.quality.0.unwrap_or(100.))
-                                                .color(cx.theme().primary)
-                                                .h(px(6.)),
-                                        )
-                                    })
-                                    .when(!self.converting, |slider| {
-                                        slider.child(Slider::new(&self.quality_slider).horizontal())
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .w(px(26.))
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_size(px(12.))
-                                    .whitespace_nowrap()
-                                    .text_color(if lossless {
-                                        cx.theme().muted_foreground
-                                    } else {
-                                        cx.theme().foreground
-                                    })
-                                    .child(match self.quality.0 {
-                                        Some(value) => format!("{}", value.round() as u32),
-                                        None => "—".to_string(),
-                                    }),
-                            )
-                            .child(
-                                Switch::new("lossless")
-                                    .checked(lossless)
-                                    .label("Lossless")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        if audit.converting {
-                                            return;
-                                        }
-                                        // A second click on a lit toggle has to turn it off,
-                                        // or lossless is a one-way door.
-                                        audit.quality = if audit.quality == Quality::LOSSLESS {
-                                            Quality::lossy(audit.slider_quality)
-                                        } else {
-                                            Quality::LOSSLESS
-                                        };
-                                        audit.results.clear();
-                                        audit.schedule_estimate(cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
+            // The audit colours every row by weight per pixel and then asks
+            // you to find the heavy ones yourself.
+            .children((heavy > 0).then(|| {
+                self.finding_button(
+                    Finding::Heavy,
+                    IconName::TriangleAlert,
+                    format!("{heavy} heavy"),
+                    "Files carrying more bytes per pixel than a photograph \
+                     needs. Click to show only them.",
+                    cx,
+                )
+            }))
+            // Same chip family as heavy: a finding you can act on, not a
+            // banner shouting a sentence across the window.
+            .children((self.mislabelled > 0).then(|| {
+                self.finding_button(
+                    Finding::Mislabelled,
+                    IconName::TriangleAlert,
+                    format!("{} mislabelled", self.mislabelled),
+                    "Files whose bytes are not the format their extension \
+                     claims. Click to show only them.",
+                    cx,
+                )
+            }))
     }
 }

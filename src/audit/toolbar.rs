@@ -14,41 +14,22 @@ pub(super) fn segment(
 }
 
 impl Audit {
-    /// Several exclusive options as one control, under the word for what they choose.
-    /// The old toolbar was thirteen identical ghost buttons in a row with a 12px gap
-    /// standing in for grouping, and nothing said which was which.
-    pub(super) fn control_group(
-        &self,
-        label: &'static str,
-        group: ButtonGroup,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // The word sits left of its control, in the same muted voice as the
-        // rest of the strip's metadata.
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .flex_shrink_0()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .child(label),
-            )
-            .child(group.small().compact())
-    }
-
     /// The resize presets, as one segmented control. `ButtonGroup` reports the index
     /// that was clicked, so the options are listed once and read back by position.
     pub(super) fn resize_group(&self, cx: &mut Context<Self>) -> ButtonGroup {
         let options = MaxEdge::PRESETS;
         ButtonGroup::new("resize")
             .children(options.iter().map(|edge| {
+                // "full" is the CLI's word and stays there; next to pixel
+                // sizes under a "Max size" heading, the window's word for
+                // no-limit is the source itself.
+                let display = match edge.0 {
+                    None => "Original".to_string(),
+                    Some(_) => edge.label(),
+                };
                 segment(
                     gpui::SharedString::from(edge.label()),
-                    edge.label(),
+                    display,
                     self.max_edge == *edge,
                 )
                 .disabled(self.converting)
@@ -86,6 +67,12 @@ impl Audit {
                     return;
                 };
                 audit.format = *format;
+                // There is no lossless AVIF here: the encoder maps LOSSLESS to a
+                // lossy quality (aom_quality). Carrying the flag across would
+                // convert lossy while every label says lossless.
+                if *format == Format::Avif && audit.quality == Quality::LOSSLESS {
+                    audit.quality = Quality::lossy(audit.slider_quality);
+                }
                 // Results describe the old format; keeping them would mislabel them.
                 audit.results.clear();
                 audit.schedule_estimate(cx);

@@ -5,6 +5,7 @@ mod convert_job;
 mod gallery;
 mod header;
 mod media;
+mod panel;
 mod sirv_actions;
 mod sirv_view;
 mod state;
