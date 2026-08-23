@@ -52,46 +52,69 @@ struct Args {
     quality: Quality,
     max_edge: MaxEdge,
     grid: bool,
+    unknown: Vec<String>,
 }
 
 fn parse_args() -> Args {
+    match parse_args_from(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("imageguide: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut root = None;
     let mut convert = false;
     let mut format = Format::WebP;
     let mut quality = Quality::lossy(80.);
     let mut max_edge = MaxEdge::FULL;
     let mut grid = false;
-    let mut rest = std::env::args().skip(1);
+    let mut unknown = Vec::new();
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
             "--convert" => convert = true,
             "--avif" => format = Format::Avif,
             "--max-edge" => {
-                if let Some(value) = rest.next().and_then(|value| value.parse().ok()) {
-                    max_edge = MaxEdge(Some(value));
-                }
+                let value = rest.next().unwrap_or_else(|| "nothing".to_string());
+                let edge = value
+                    .parse()
+                    .map_err(|_| format!("--max-edge needs a number, got {value:?}"))?;
+                max_edge = MaxEdge(Some(edge));
             }
             "--webp" => format = Format::WebP,
             "--grid" => grid = true,
             "--lossless" => quality = Quality::LOSSLESS,
             "--quality" => {
-                if let Some(value) = rest.next().and_then(|value| value.parse().ok()) {
-                    quality = Quality::lossy(value);
-                }
+                let value = rest.next().unwrap_or_else(|| "nothing".to_string());
+                let quality_value = value
+                    .parse()
+                    .map_err(|_| format!("--quality needs a number, got {value:?}"))?;
+                quality = Quality::lossy(quality_value);
             }
+            "--" => {
+                for argument in rest {
+                    root = Some(PathBuf::from(argument));
+                }
+                break;
+            }
+            _ if argument.starts_with('-') => unknown.push(argument),
             _ => root = Some(PathBuf::from(argument)),
         }
     }
 
-    Args {
+    Ok(Args {
         root,
         convert,
         format,
         quality,
         max_edge,
         grid,
-    }
+        unknown,
+    })
 }
 
 /// Convert without opening a window, so the same work is scriptable and testable.
@@ -101,7 +124,7 @@ fn convert_headless(
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
-) {
+) -> usize {
     let out_dir = root.join(scan::OUTPUT_DIR);
     let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
     let by_path: HashMap<&Path, &Entry> = entries
@@ -170,11 +193,25 @@ fn convert_headless(
             format!(", {failed} failed")
         }
     );
-    println!("written to {}", out_dir.display());
+    if entries.len() - failed > 0 {
+        println!("written to {}", out_dir.display());
+    }
+    failed
 }
 
 fn main() {
     let args = parse_args();
+
+    if args.convert {
+        if let Some(first) = args.unknown.first() {
+            eprintln!("imageguide: unknown option {first}");
+            std::process::exit(2);
+        }
+    } else {
+        for argument in &args.unknown {
+            eprintln!("imageguide: ignoring unknown option {argument}");
+        }
+    }
 
     let remembered = settings::load();
     let target = args.root.clone().or_else(|| {
@@ -231,6 +268,8 @@ fn main() {
     } else {
         (scan::scan(&target), target.clone())
     };
+    let scanned_unreadable_count = scanned.unreadable.len();
+    let walk_error_count = scanned.walk_errors.len();
     let entries = scanned.entries;
     println!(
         "{} images, {} on disk, {} camera raw skipped",
@@ -243,8 +282,12 @@ fn main() {
     }
 
     if args.convert {
-        convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
-        return;
+        let failed = convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
+        let unread = scanned_unreadable_count + walk_error_count;
+        if unread > 0 {
+            eprintln!("imageguide: {unread} files or folders could not be read");
+        }
+        std::process::exit(if failed + unread == 0 { 0 } else { 1 });
     }
 
     run_window(Launch {
@@ -384,4 +427,84 @@ fn run_window(launch: Launch) {
             .unwrap();
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(arguments: &[&str]) -> Result<Args, String> {
+        parse_args_from(arguments.iter().map(|argument| (*argument).to_string()))
+    }
+
+    #[test]
+    fn flags_parse_into_their_fields() {
+        let cases = [
+            (
+                vec!["--convert", "--avif", "--quality", "40", "x"],
+                true,
+                Format::Avif,
+                Quality::lossy(40.),
+                MaxEdge::FULL,
+                false,
+                "x",
+            ),
+            (
+                vec!["--max-edge", "1600", "--lossless", "--grid", "x"],
+                false,
+                Format::WebP,
+                Quality::LOSSLESS,
+                MaxEdge(Some(1600)),
+                true,
+                "x",
+            ),
+        ];
+
+        for (arguments, convert, format, quality, max_edge, grid, root) in cases {
+            let args = parse(&arguments).unwrap();
+            assert_eq!(args.convert, convert);
+            assert_eq!(args.format, format);
+            assert_eq!(args.quality, quality);
+            assert_eq!(args.max_edge, max_edge);
+            assert_eq!(args.grid, grid);
+            assert_eq!(args.root, Some(PathBuf::from(root)));
+        }
+    }
+
+    #[test]
+    fn a_bad_quality_value_is_an_error_not_a_default() {
+        match parse(&["--quality", "abc"]) {
+            Err(error) => assert!(error.contains("--quality")),
+            Ok(_) => panic!("a bad quality value must be an error"),
+        }
+    }
+
+    #[test]
+    fn a_bad_max_edge_value_is_an_error_not_a_default() {
+        match parse(&["--max-edge", "abc"]) {
+            Err(error) => assert!(error.contains("--max-edge")),
+            Ok(_) => panic!("a bad max edge value must be an error"),
+        }
+    }
+
+    #[test]
+    fn a_missing_value_is_an_error() {
+        for arguments in [["--quality"].as_slice(), ["--max-edge"].as_slice()] {
+            assert!(parse(arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn an_unknown_option_is_collected_not_a_path() {
+        let args = parse(&["--nope", "/tmp"]).unwrap();
+        assert_eq!(args.root, Some(PathBuf::from("/tmp")));
+        assert_eq!(args.unknown, ["--nope"]);
+    }
+
+    #[test]
+    fn a_double_dash_ends_option_parsing() {
+        let args = parse(&["--", "-photos"]).unwrap();
+        assert_eq!(args.root, Some(PathBuf::from("-photos")));
+        assert!(args.unknown.is_empty());
+    }
 }

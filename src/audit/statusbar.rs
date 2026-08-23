@@ -31,10 +31,7 @@ impl Audit {
                     self.format.label().to_uppercase(),
                     self.quality.label()
                 ),
-                Some((
-                    1. - done as f32 / total.max(1) as f32,
-                    cx.theme().primary,
-                )),
+                Some((1. - done as f32 / total.max(1) as f32, cx.theme().primary)),
                 None,
             )
         } else if !self.results.is_empty() {
