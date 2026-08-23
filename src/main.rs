@@ -83,6 +83,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 let edge = value
                     .parse()
                     .map_err(|_| format!("--max-edge needs a number, got {value:?}"))?;
+                if edge == 0 {
+                    return Err(format!("--max-edge needs a positive number, got {value:?}"));
+                }
                 max_edge = MaxEdge(Some(edge));
             }
             "--webp" => format = Format::WebP,
@@ -484,6 +487,14 @@ mod tests {
         match parse(&["--max-edge", "abc"]) {
             Err(error) => assert!(error.contains("--max-edge")),
             Ok(_) => panic!("a bad max edge value must be an error"),
+        }
+    }
+
+    #[test]
+    fn a_zero_max_edge_is_an_error() {
+        match parse(&["--max-edge", "0"]) {
+            Err(error) => assert!(error.contains("--max-edge")),
+            Ok(_) => panic!("a zero max edge must be an error"),
         }
     }
 
