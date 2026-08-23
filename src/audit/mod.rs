@@ -228,6 +228,9 @@ pub(crate) struct Audit {
     sirv_job: Option<SirvJob>,
     /// Bumped whenever a running transfer stops being wanted.
     sirv_generation: u64,
+    /// Bumped whenever a pairing changes, so an old recursive listing cannot
+    /// land under a newly selected remote folder.
+    sirv_pairing_generation: u64,
     /// The open remote-folder browser.
     sirv_browser: Option<SirvBrowser>,
     /// The open settings overlay.
@@ -840,6 +843,7 @@ pub(crate) fn build_audit(
             sirv_counts: None,
             sirv_job: None,
             sirv_generation: 0,
+            sirv_pairing_generation: 0,
             sirv_browser: None,
             settings_panel: None,
             compare: None,

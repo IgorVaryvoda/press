@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// True when a finished walk still describes the current world: same
+/// dataset, same pairing as when it started. A walk that outlives either
+/// must land nowhere — installing folder A's listing under folder B's
+/// pairing arms a full-folder push at the wrong remote directory.
+pub(super) fn walk_landing_applies(
+    dataset_then: u64,
+    dataset_now: u64,
+    pairing_then: u64,
+    pairing_now: u64,
+) -> bool {
+    dataset_then == dataset_now && pairing_then == pairing_now
+}
+
 impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
     /// missing store opens the browser on an error that names the file to fix.
@@ -135,6 +148,14 @@ impl Audit {
                 browser.path.trim_end_matches('/').to_string(),
             )
         };
+        // The account root pairs to "", which `walk` rejects; a pairing
+        // whose header reads "Unpair " with no name is worse than no
+        // pairing. The browser's button says why; this guard holds even
+        // if a future caller forgets to.
+        if dir.is_empty() {
+            return;
+        }
+        self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = Some(SirvPairing {
             dir: dir.clone(),
             files: Listing::Walking,
@@ -154,16 +175,21 @@ impl Audit {
         };
         let client = pairing.client.clone();
         let dir = pairing.dir.clone();
+        let walked_dir = dir.clone();
         let generation = self.dataset_generation;
+        let pairing_generation = self.sirv_pairing_generation;
         cx.spawn(async move |this, cx| {
             let walked = cx
                 .background_executor()
                 .spawn(async move { client.lock().walk(&dir).map_err(|error| error.to_string()) })
                 .await;
             this.update(cx, |audit, cx| {
-                // A folder swap mid-walk retires this listing with the rest of
-                // the detached work the old dataset owned.
-                if audit.dataset_generation != generation {
+                if !walk_landing_applies(
+                    generation,
+                    audit.dataset_generation,
+                    pairing_generation,
+                    audit.sirv_pairing_generation,
+                ) {
                     return;
                 }
                 let Some(pairing) = audit.sirv_pairing.as_mut() else {
@@ -171,12 +197,12 @@ impl Audit {
                 };
                 match walked {
                     Ok(nodes) => {
-                        let dir = pairing.dir.clone();
                         pairing.files = Listing::Ready(
                             nodes
                                 .into_iter()
                                 .filter_map(|node| {
-                                    sirv::unpair_remote(&dir, &node.filename).map(|key| (key, node))
+                                    sirv::unpair_remote(&walked_dir, &node.filename)
+                                        .map(|key| (key, node))
                                 })
                                 .collect(),
                         );
@@ -195,6 +221,7 @@ impl Audit {
     }
 
     pub(super) fn unpair_sirv(&mut self, cx: &mut Context<Self>) {
+        self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
         self.sirv_counts = None;
         self.sirv_browser = None;

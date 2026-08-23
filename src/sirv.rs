@@ -35,6 +35,10 @@ const MAX_TRANSFER: u64 = 512 * 1024 * 1024;
 /// A walk that finds more files than this is treated as an error rather than
 /// listed forever.
 const WALK_LIMIT: usize = 20_000;
+/// A broken server can mint unique continuation tokens forever without adding
+/// entries. This stays comfortably above any listing that could fit below the
+/// file limit.
+const READDIR_PAGE_LIMIT: usize = 512;
 /// One entry as Sirv reports it from readdir. Unknown fields are ignored, so a
 /// server-side addition never breaks the parse.
 #[derive(Clone, Debug, Deserialize)]
@@ -155,6 +159,32 @@ pub fn unpair_remote(dir: &str, filename: &str) -> Option<String> {
         None
     } else {
         Some(filename.to_string())
+    }
+}
+
+/// Join a readdir entry name onto the folder that was listed. Some account
+/// shapes return absolute names, others names relative to the listed folder;
+/// recursion and diff keys both need the absolute form.
+pub fn join_listing_name(current: &str, name: &str) -> String {
+    let name = name.trim_end_matches('/');
+    if name.starts_with('/') {
+        name.to_string()
+    } else {
+        format!("{}/{name}", current.trim_end_matches('/'))
+    }
+}
+
+/// True when this continuation token has not been seen before in this
+/// listing. A repeated token — adjacent or in a cycle — means the server is
+/// looping, and following it would list forever.
+pub fn continuation_advances(seen: &mut HashSet<String>, token: &str) -> bool {
+    seen.insert(token.to_string())
+}
+
+fn walk_limit_error() -> Error {
+    Error {
+        status: 0,
+        message: format!("folder holds more than {WALK_LIMIT} files; sync it in parts"),
     }
 }
 
@@ -337,7 +367,18 @@ impl Client {
     pub fn readdir(&mut self, dirname: &str) -> Result<Vec<Node>, Error> {
         let mut nodes = Vec::new();
         let mut continuation: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut pages = 0;
         loop {
+            pages += 1;
+            if pages > READDIR_PAGE_LIMIT {
+                return Err(Error {
+                    status: 0,
+                    message: format!(
+                        "{dirname}: listing did not finish after {READDIR_PAGE_LIMIT} pages"
+                    ),
+                });
+            }
             let mut url = format!("{API}/v2/files/readdir?dirname={}", encode_path(dirname));
             if let Some(token) = &continuation {
                 url.push_str(&format!("&continuation={}", encode_path(token)));
@@ -360,8 +401,19 @@ impl Client {
                 continuation: next,
             } = listing;
             nodes.extend(contents);
+            if nodes.len() > WALK_LIMIT {
+                return Err(walk_limit_error());
+            }
             match next {
-                Some(token) => continuation = Some(token),
+                Some(token) => {
+                    if !continuation_advances(&mut seen, &token) {
+                        return Err(Error {
+                            status: 0,
+                            message: format!("{dirname}: readdir repeated a continuation token"),
+                        });
+                    }
+                    continuation = Some(token);
+                }
                 None => return Ok(nodes),
             }
         }
@@ -386,6 +438,7 @@ impl Client {
             });
         }
         let mut all = Vec::new();
+        let mut visited = HashSet::from([root.clone()]);
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
             // Name the page that failed. The pairing root in the notice is
@@ -396,25 +449,26 @@ impl Client {
                 }
                 error
             })?;
-            for node in nodes {
+            for mut node in nodes {
+                let name = node.filename.trim_end_matches('/');
+                if matches!(name, "" | "." | "..") {
+                    continue;
+                }
                 if node.is_folder() {
-                    let name = node.filename.trim_end_matches('/');
-                    // Absolute entries pass through; relative ones join the parent.
-                    let child = if name.starts_with('/') {
-                        name.to_string()
-                    } else {
-                        format!("{current}/{name}")
-                    };
-                    stack.push(child);
+                    let child = join_listing_name(&current, name);
+                    if visited.insert(child.clone()) {
+                        if visited.len() > WALK_LIMIT {
+                            return Err(walk_limit_error());
+                        }
+                        stack.push(child);
+                    }
                 } else {
+                    node.filename = join_listing_name(&current, name);
                     all.push(node);
                 }
             }
             if all.len() > WALK_LIMIT {
-                return Err(Error {
-                    status: 0,
-                    message: format!("folder holds more than {WALK_LIMIT} files; sync it in parts"),
-                });
+                return Err(walk_limit_error());
             }
         }
         Ok(all)
@@ -673,6 +727,43 @@ mod tests {
         );
         // Absolute and outside the pair is skipped.
         assert_eq!(unpair_remote("/photos", "/other/a.jpg"), None);
+    }
+
+    #[test]
+    fn a_relative_file_name_joins_the_folder_being_listed() {
+        let filename = join_listing_name("/photos/sub", "c.jpg");
+        assert_eq!(filename, "/photos/sub/c.jpg");
+        assert_eq!(
+            unpair_remote("/photos", &filename),
+            Some("sub/c.jpg".into())
+        );
+    }
+
+    #[test]
+    fn an_absolute_file_name_passes_through() {
+        assert_eq!(
+            join_listing_name("/photos/sub", "/photos/sub/c.jpg"),
+            "/photos/sub/c.jpg"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_folder_does_not_double() {
+        assert_eq!(join_listing_name("/photos/", "sub"), "/photos/sub");
+    }
+
+    #[test]
+    fn a_fresh_token_advances_the_listing() {
+        let mut seen = HashSet::new();
+        assert!(continuation_advances(&mut seen, "next"));
+    }
+
+    #[test]
+    fn a_token_cycle_is_refused_even_when_not_adjacent() {
+        let mut seen = HashSet::new();
+        assert!(continuation_advances(&mut seen, "a"));
+        assert!(continuation_advances(&mut seen, "b"));
+        assert!(!continuation_advances(&mut seen, "a"));
     }
 
     #[test]

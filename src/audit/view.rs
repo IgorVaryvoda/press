@@ -30,6 +30,7 @@ impl Audit {
             .sirv_pairing
             .as_ref()
             .map(|pairing| pairing.dir.clone());
+        let at_root = browser.path.trim_end_matches('/').is_empty();
 
         let body: gpui::AnyElement = match browser.nodes.as_ref() {
             None => div()
@@ -260,8 +261,12 @@ impl Audit {
                         Button::new("sirv-pair")
                             .primary()
                             .small()
-                            .label("Pair this folder")
-                            .disabled(!matches!(browser.nodes, Some(Ok(_))))
+                            .label(if at_root {
+                                "Open a folder to pair it"
+                            } else {
+                                "Pair this folder"
+                            })
+                            .disabled(at_root || !matches!(browser.nodes, Some(Ok(_))))
                             .on_click(cx.listener(|audit, _, _, cx| audit.pair_sirv(cx))),
                     ),
             )

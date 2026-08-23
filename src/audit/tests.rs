@@ -1,3 +1,4 @@
+use super::sirv_actions::walk_landing_applies;
 use super::*;
 use crate::{
     Launch, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
@@ -373,6 +374,19 @@ fn unpairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             "the reason is named, not implied"
         );
     });
+}
+
+#[test]
+fn a_walk_from_a_previous_pairing_lands_nowhere() {
+    assert!(!walk_landing_applies(1, 2, 3, 3));
+    assert!(!walk_landing_applies(2, 1, 3, 3));
+    assert!(!walk_landing_applies(1, 1, 3, 4));
+    assert!(!walk_landing_applies(1, 1, 4, 3));
+}
+
+#[test]
+fn a_current_walk_lands() {
+    assert!(walk_landing_applies(1, 1, 2, 2));
 }
 
 /// A finding belongs to the folder it was found in.
