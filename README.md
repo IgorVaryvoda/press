@@ -7,7 +7,7 @@ to a worker to do the work. That is fine for one screenshot and wrong for a clie
 shoot. This does the same job locally: nothing leaves the machine, and the folder size
 is bounded by the disk rather than by a browser tab.
 
-![The audit](docs/audit.webp)
+![ImageGuide auditing a mixed folder of PNG and JPEG images](docs/audit.webp)
 
 It is the desktop companion to the site and the
 [Chrome extension](https://chromewebstore.google.com/detail/hinifcidioledficgenmdncpkifnngap).
@@ -192,7 +192,7 @@ against the WebP the current quality setting would produce. The encode happens i
 memory — nothing is written, because the point is to decide whether the trade is
 acceptable *before* committing to it.
 
-![Original against WebP, fitted](docs/comparison.webp)
+![A fitted original-versus-WebP comparison with a draggable divider](docs/comparison.webp)
 
 **The view opens fitted.** Press **100%** to inspect native pixels, or scroll to pick
 another zoom level. The original and result stay registered at every scale.
@@ -244,5 +244,5 @@ actual commits; CI builds `--locked`.
 
 MIT. See [LICENSE](LICENSE).
 
-The two screenshots in this README were compressed by this tool — 354 KB of PNG to
-71 KB of WebP at q82.
+The two screenshots in this README were resized to 1100px and compressed by this
+tool — 3.7 MB of PNG to 159 KB of WebP at q88.
