@@ -180,6 +180,9 @@ pub(crate) struct Audit {
     root: PathBuf,
     entries: Vec<Entry>,
     skipped_raw: usize,
+    /// macOS packages the scan skipped whole, counted like raw: excluded by
+    /// design, so the total says so.
+    skipped_packages: usize,
     /// Decoded thumbnails, keyed by their row. Only rows that have been on screen are
     /// in here; a folder of 5,000 images never decodes 5,000 files.
     thumbs: HashMap<usize, Arc<RenderImage>>,
@@ -477,6 +480,7 @@ impl Audit {
         self.gallery_scroll
             .scroll_to_item_strict(0, ScrollStrategy::Top);
         self.skipped_raw = scanned.skipped_raw;
+        self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
         self.walk_errors = scanned.walk_errors;
         self.existing_output = scanned.existing_output;
@@ -540,6 +544,7 @@ impl Audit {
                             scan::Scan {
                                 entries: vec![entry],
                                 skipped_raw: 0,
+                                skipped_packages: 0,
                                 unreadable: Vec::new(),
                                 walk_errors: Vec::new(),
                                 existing_output: 0,
@@ -731,6 +736,7 @@ pub(crate) fn build_audit(
         root,
         entries,
         skipped_raw,
+        skipped_packages,
         unreadable,
         walk_errors,
         existing_output,
@@ -793,6 +799,7 @@ pub(crate) fn build_audit(
             root,
             entries,
             skipped_raw,
+            skipped_packages,
             heaviest: 0,
             visible_bytes: 0,
             mislabelled,

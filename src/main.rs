@@ -194,6 +194,7 @@ fn main() {
             root: PathBuf::new(),
             entries: Vec::new(),
             skipped_raw: 0,
+            skipped_packages: 0,
             unreadable: Vec::new(),
             walk_errors: Vec::new(),
             existing_output: 0,
@@ -222,6 +223,7 @@ fn main() {
             scan::Scan {
                 entries: vec![entry],
                 skipped_raw: 0,
+                skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
                 existing_output: 0,
@@ -241,6 +243,11 @@ fn main() {
     for path in &scanned.walk_errors {
         eprintln!("imageguide: could not enter {}", path.display());
     }
+    match scanned.skipped_packages {
+        0 => {}
+        1 => println!("1 macOS package skipped"),
+        many => println!("{many} macOS packages skipped"),
+    }
 
     if args.convert {
         convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
@@ -251,6 +258,7 @@ fn main() {
         root,
         entries,
         skipped_raw: scanned.skipped_raw,
+        skipped_packages: scanned.skipped_packages,
         unreadable: scanned.unreadable,
         walk_errors: scanned.walk_errors,
         existing_output: scanned.existing_output,
@@ -337,6 +345,7 @@ struct Launch {
     root: PathBuf,
     entries: Vec<Entry>,
     skipped_raw: usize,
+    skipped_packages: usize,
     unreadable: Vec<PathBuf>,
     walk_errors: Vec<PathBuf>,
     existing_output: usize,

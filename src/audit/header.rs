@@ -23,6 +23,12 @@ impl Audit {
         if self.skipped_raw > 0 {
             stats.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
         }
+        if self.skipped_packages > 0 {
+            stats.push_str(&match self.skipped_packages {
+                1 => " · 1 macOS package skipped".to_string(),
+                many => format!(" · {many} macOS packages skipped"),
+            });
+        }
         // Three states, three sentences. A pairing whose walk is still running used to
         // read exactly like one whose walk failed: no Sirv text at all.
         match (&self.sirv_pairing, self.sirv_counts) {

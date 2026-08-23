@@ -26,6 +26,39 @@ pub fn is_raw(path: &Path) -> bool {
 /// otherwise list its own output and offer to convert it again.
 pub const OUTPUT_DIR: &str = "optimized";
 
+/// Extensions macOS keeps as opaque packages. Some are permission-walled, and the
+/// rest are directory trees whose internal images are not web-delivery candidates.
+/// Skipped by design like camera raw, counted for the same reason.
+const PACKAGE_EXTENSIONS: [&str; 13] = [
+    "photoslibrary",
+    "photolibrary",
+    "aplibrary",
+    "lrdata",
+    "app",
+    "bundle",
+    "framework",
+    "plugin",
+    "kext",
+    "xpc",
+    "appex",
+    "wdgt",
+    "docset",
+];
+
+/// True when this directory is one macOS keeps opaque. Packages are a macOS
+/// concept — on other systems these names are just folders, so they keep being
+/// walked there.
+fn is_opaque_package(path: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            PACKAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
 /// What a folder holds.
 pub struct Scan {
     pub entries: Vec<Entry>,
@@ -33,6 +66,9 @@ pub struct Scan {
     /// A count, not names: raw is excluded by design and a photographer knows they
     /// have it. Nothing in the window would act on the list.
     pub skipped_raw: usize,
+    /// macOS packages the walk never entered, counted like raw for the same
+    /// reason: they are excluded by design and the total says so.
+    pub skipped_packages: usize,
     /// Files that look like images by extension but would not decode. Named, not
     /// counted: "3 would not decode" tells you a folder has a problem and gives you
     /// nowhere to look for it.
@@ -138,9 +174,37 @@ pub fn scan(root: &Path) -> Scan {
     let mut skipped_raw = 0;
     let mut existing_output = 0;
     let mut walk_errors = Vec::new();
+    let mut skipped_packages = 0;
+    let counted_packages = &mut skipped_packages;
     let output_root = root.join(OUTPUT_DIR);
 
-    for entry in WalkDir::new(root).follow_links(false) {
+    // `filter_entry` prunes: a package directory is never descended into, so its
+    // unreadable interior is never even attempted. Walk errors pass the predicate
+    // untouched — a folder that is locked and not a package still names itself.
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            // The folder the user asked for is entered whatever it is called.
+            if entry.depth() == 0 {
+                return true;
+            }
+            // Output is already excluded below, but it still has to be walked so the
+            // root output count remains truthful. A package there is not skipped input.
+            if entry
+                .path()
+                .components()
+                .any(|part| part.as_os_str() == OUTPUT_DIR)
+            {
+                return true;
+            }
+            if entry.file_type().is_dir() && is_opaque_package(entry.path()) {
+                *counted_packages += 1;
+                return false;
+            }
+            true
+        })
+    {
         // A directory whose readdir fails yields an Err here. Dropping it would
         // report a folder that was never fully looked at as fully audited, so the
         // path is kept and named in the same way decode failures are.
@@ -213,6 +277,7 @@ pub fn scan(root: &Path) -> Scan {
     Scan {
         entries,
         skipped_raw,
+        skipped_packages,
         unreadable,
         walk_errors,
         existing_output,
@@ -497,6 +562,80 @@ mod tests {
             vec![locked],
             "the place the walk stopped is named, not swallowed"
         );
+    }
+
+    /// A Photos library inside the audited folder is skipped whole and counted,
+    /// not reported as a place the walk failed. Its interior is permission-walled
+    /// by macOS and never held web-delivery images anyway.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_macos_package_is_skipped_by_design_and_counted() {
+        let dir = temp_dir("package");
+        let library = dir.join("Photos Library.photoslibrary");
+        std::fs::create_dir_all(&library).unwrap();
+        write_sample(&library, "master.png", 8, 8);
+        write_sample(&dir, "keep.png", 8, 8);
+
+        let scanned = scan(&dir);
+        assert_eq!(
+            scanned.entries.len(),
+            1,
+            "the sibling file is still audited"
+        );
+        assert_eq!(scanned.entries[0].name(), "keep.png");
+        assert_eq!(
+            scanned.skipped_packages, 1,
+            "the package is counted like camera raw"
+        );
+        assert!(scanned.walk_errors.is_empty());
+        assert!(scanned.unreadable.is_empty());
+    }
+
+    /// A folder explicitly handed to the app is entered even when its name says
+    /// package: the user asked for it, and nothing else would be shown at all.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_folder_the_app_was_pointed_at_is_entered_even_when_it_is_a_package() {
+        let dir = temp_dir("package-root");
+        write_sample(&dir, "inside.png", 8, 8);
+
+        let scanned = scan(&dir);
+        assert_eq!(scanned.entries.len(), 1);
+        assert_eq!(scanned.skipped_packages, 0);
+    }
+
+    /// The extension says nothing about a regular file's contents. Package pruning
+    /// is for directories only, or a mislabelled but valid image disappears before
+    /// the content-based probe can identify it.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_regular_file_with_a_package_suffix_is_still_probed() {
+        let dir = temp_dir("package-file");
+        let png = write_sample(&dir, "image.png", 8, 8);
+        let disguised = dir.join("image.app");
+        std::fs::rename(png, &disguised).unwrap();
+
+        let scanned = scan(&dir);
+        assert_eq!(scanned.entries.len(), 1);
+        assert_eq!(scanned.entries[0].path, disguised);
+        assert_eq!(scanned.entries[0].format, ImageFormat::Png);
+        assert_eq!(scanned.skipped_packages, 0);
+    }
+
+    /// Existing output is not input, so a package-shaped folder there must neither
+    /// count as skipped input nor stop the existing-output count at its boundary.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_package_inside_output_is_counted_only_as_existing_output() {
+        let dir = temp_dir("output-package");
+        let package = dir.join(OUTPUT_DIR).join("Archive.app");
+        std::fs::create_dir_all(&package).unwrap();
+        write_sample(&package, "inside.png", 8, 8);
+
+        let scanned = scan(&dir);
+        assert!(scanned.entries.is_empty());
+        assert_eq!(scanned.existing_output, 1);
+        assert_eq!(scanned.skipped_packages, 0);
     }
 
     #[test]

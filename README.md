@@ -71,6 +71,10 @@ as a 160x120 TIFF and every derived number becomes a lie. They are also not web
 delivery candidates. The header says how many were skipped rather than quietly
 shortening the total.
 
+On macOS, nested packages such as Photos libraries and application bundles are
+counted and skipped for the same reason: their internal assets are not web-delivery
+images. Pointing ImageGuide directly at a package still scans it.
+
 The list is virtualised, and a row's thumbnail is decoded only once it has been on
 screen. A folder of 6,000 images does not decode 6,000 files.
 
