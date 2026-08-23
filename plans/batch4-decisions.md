@@ -61,3 +61,13 @@ the outcome visible but deliberately keeps auto-install.
 settings page exists (the natural place for an "updates: automatic / ask"
 control). If a release ever ships data-format changes that older versions
 cannot read back, switch to ask-first before then.
+
+**New evidence (2026-08-23)**: on macOS, when replacing the `.app` hits
+`PermissionDenied` (admin-owned /Applications, managed Macs),
+cargo-packager-updater 0.2.3 escalates via
+`osascript … with administrator privileges` — an unexplained admin-password
+dialog during startup (the check runs on a detached thread, racing window
+creation, so it can appear before, beside, or after the first frame). That
+is a materially worse failure mode than the memo weighed. Raise the
+priority of "ask-first" when revisiting; plan 035 only stops non-bundle
+installs.

@@ -30,7 +30,69 @@ pub fn notice() -> Option<String> {
     }
 }
 
+/// True when the executable path has the shape of an installed macOS app
+/// bundle. The bar is `.app/Contents/MacOS/`, not just `Contents/MacOS/`:
+/// cargo-packager-updater resolves the "installed app" from this path, and
+/// outside a real bundle that resolution is the executable's parent
+/// directory, which an update then `remove_dir_all`s — for a
+/// `target/release/imageguide` that deletes the build tree.
+///
+/// Known accepted-but-imperfect cases, on purpose: an app run straight off
+/// a read-only DMG and a Gatekeeper-translocated app both still match this
+/// shape (translocated paths keep the `.app/Contents/MacOS/` form, and
+/// Apple provides no supported translocation detector). For those, the
+/// update fails or escalates exactly as it does today — that behavior is
+/// decision memo B's territory, not this guard's.
+///
+/// Component-wise, not substring: the updater resolves the bundle by
+/// walking up two parents from the executable, so
+/// `Foo.app/Contents/MacOS/helpers/exe` would resolve to `Foo.app/Contents`
+/// and delete that. Only the immediate layout counts.
+fn mac_bundle_path(exe: &std::path::Path) -> bool {
+    let parent_is = |path: Option<&std::path::Path>, name: &str| {
+        path.and_then(|p| p.file_name()).is_some_and(|n| n == name)
+    };
+    let parent = exe.parent();
+    let contents = parent.and_then(|p| p.parent());
+    let bundle = contents.and_then(|p| p.parent());
+    parent_is(parent, "MacOS")
+        && parent_is(contents, "Contents")
+        && bundle
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".app"))
+}
+
+/// True when this process is actually the mounted AppImage payload. The
+/// updater replaces the file APPIMAGE names, so an inherited variable from
+/// some other application's environment must not be trusted on its own: a
+/// loose binary with a stale APPIMAGE would overwrite that other app. The
+/// AppImage runtime mounts its payload under `/tmp/.mount_*`, so require
+/// the executable to live in such a mount as well.
+fn appimage_run(exe: &std::path::Path, appimage_set: bool) -> bool {
+    appimage_set && exe.to_string_lossy().contains("/.mount_")
+}
+
+fn updatable_install(exe: &std::path::Path) -> bool {
+    if cfg!(target_os = "macos") {
+        mac_bundle_path(exe)
+    } else if cfg!(target_os = "linux") {
+        appimage_run(exe, std::env::var_os("APPIMAGE").is_some())
+    } else {
+        // Windows installs via NSIS, which the updater handles through the
+        // installer rather than by moving directories.
+        true
+    }
+}
+
 pub fn install_if_available() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if !updatable_install(&exe) {
+        return;
+    }
+
     std::thread::spawn(|| {
         let config = Config {
             endpoints: vec![ENDPOINT.parse().expect("the update URL is valid")],
@@ -71,6 +133,50 @@ mod tests {
     #[test]
     fn release_endpoint_is_https() {
         assert!(ENDPOINT.starts_with("https://"));
+    }
+
+    #[test]
+    fn a_bundled_mac_path_is_updatable() {
+        assert!(mac_bundle_path(std::path::Path::new(
+            "/Applications/ImageGuide.app/Contents/MacOS/imageguide"
+        )));
+    }
+
+    #[test]
+    fn a_target_release_binary_is_not_a_mac_bundle() {
+        assert!(!mac_bundle_path(std::path::Path::new(
+            "/home/user/repo/target/release/imageguide"
+        )));
+    }
+
+    #[test]
+    fn a_bare_contents_macos_layout_without_an_app_is_refused() {
+        assert!(!mac_bundle_path(std::path::Path::new(
+            "/tmp/build/Contents/MacOS/imageguide"
+        )));
+    }
+
+    #[test]
+    fn a_helper_nested_below_macos_is_refused() {
+        assert!(!mac_bundle_path(std::path::Path::new(
+            "/tmp/Foo.app/Contents/MacOS/helpers/imageguide"
+        )));
+    }
+
+    #[test]
+    fn an_inherited_appimage_variable_alone_is_not_an_appimage_run() {
+        assert!(!appimage_run(
+            std::path::Path::new("/home/user/repo/target/release/imageguide"),
+            true
+        ));
+        assert!(appimage_run(
+            std::path::Path::new("/tmp/.mount_ImageGkQjHd/usr/bin/imageguide"),
+            true
+        ));
+        assert!(!appimage_run(
+            std::path::Path::new("/tmp/.mount_ImageGkQjHd/usr/bin/imageguide"),
+            false
+        ));
     }
 }
 

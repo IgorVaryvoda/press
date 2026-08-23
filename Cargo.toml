@@ -70,6 +70,7 @@ icons = ["assets/app-icon.png"]
 # The env var override did not take, so the real identity lives here. Ad-hoc
 # local packaging can still pass `--signing-identity -` on the command line.
 signing-identity = "Developer ID Application: Igor Varyvoda (2Z5ZVRKA23)"
+info-plist-path = "assets/macos/Info.plist"
 
 [profile.release]
 opt-level = 2
