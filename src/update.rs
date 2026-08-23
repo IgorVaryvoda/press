@@ -63,21 +63,30 @@ fn mac_bundle_path(exe: &std::path::Path) -> bool {
             .is_some_and(|n| n.ends_with(".app"))
 }
 
-/// True when this process is actually the mounted AppImage payload. The
-/// updater replaces the file APPIMAGE names, so an inherited variable from
-/// some other application's environment must not be trusted on its own: a
-/// loose binary with a stale APPIMAGE would overwrite that other app. The
-/// AppImage runtime mounts its payload under `/tmp/.mount_*`, so require
-/// the executable to live in such a mount as well.
-fn appimage_run(exe: &std::path::Path, appimage_set: bool) -> bool {
-    appimage_set && exe.to_string_lossy().contains("/.mount_")
+/// True when this process is actually an AppImage payload run: the runtime
+/// exports APPIMAGE (the image the updater will replace) and APPDIR (where
+/// the payload is mounted or extracted), and the running executable must
+/// live under that APPDIR. An inherited APPIMAGE from another program's
+/// environment fails this containment, and both the FUSE-mount and the
+/// --appimage-extract-and-run execution modes pass it.
+fn appimage_run(
+    exe: &std::path::Path,
+    appimage_set: bool,
+    appdir: Option<&std::path::Path>,
+) -> bool {
+    appimage_set && appdir.is_some_and(|dir| exe.starts_with(dir))
 }
 
 fn updatable_install(exe: &std::path::Path) -> bool {
     if cfg!(target_os = "macos") {
         mac_bundle_path(exe)
     } else if cfg!(target_os = "linux") {
-        appimage_run(exe, std::env::var_os("APPIMAGE").is_some())
+        let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
+        appimage_run(
+            exe,
+            std::env::var_os("APPIMAGE").is_some(),
+            appdir.as_deref(),
+        )
     } else {
         // Windows installs via NSIS, which the updater handles through the
         // installer rather than by moving directories.
@@ -164,18 +173,34 @@ mod tests {
     }
 
     #[test]
-    fn an_inherited_appimage_variable_alone_is_not_an_appimage_run() {
-        assert!(!appimage_run(
-            std::path::Path::new("/home/user/repo/target/release/imageguide"),
-            true
-        ));
+    fn an_appimage_payload_under_its_appdir_is_updatable() {
         assert!(appimage_run(
             std::path::Path::new("/tmp/.mount_ImageGkQjHd/usr/bin/imageguide"),
-            true
+            true,
+            Some(std::path::Path::new("/tmp/.mount_ImageGkQjHd")),
+        ));
+    }
+
+    #[test]
+    fn an_inherited_appimage_variable_does_not_match_a_loose_binary() {
+        assert!(!appimage_run(
+            std::path::Path::new("/home/user/repo/target/release/imageguide"),
+            true,
+            Some(std::path::Path::new("/tmp/.mount_Other")),
         ));
         assert!(!appimage_run(
-            std::path::Path::new("/tmp/.mount_ImageGkQjHd/usr/bin/imageguide"),
-            false
+            std::path::Path::new("/home/user/repo/target/release/imageguide"),
+            true,
+            None,
+        ));
+    }
+
+    #[test]
+    fn an_extracted_appimage_run_is_still_updatable() {
+        assert!(appimage_run(
+            std::path::Path::new("/tmp/appimage_extracted_1234/usr/bin/imageguide"),
+            true,
+            Some(std::path::Path::new("/tmp/appimage_extracted_1234")),
         ));
     }
 }
