@@ -8,6 +8,7 @@ mod audit;
 mod avif;
 mod compare;
 mod convert;
+mod menus;
 mod scan;
 mod settings;
 mod sirv;
@@ -366,6 +367,10 @@ fn run_window(launch: Launch) {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             init_theme(cx);
+            // GPUI's macOS default keeps the process alive after the last window
+            // closes, which suits a document-based app with a menu bar to come back
+            // through. This is a single-window tool: the red light means quit.
+            cx.set_quit_mode(gpui::QuitMode::LastWindowClosed);
 
             // The thumbnail cache grows with every folder ever opened. Bound it once,
             // here, where a whole-directory pass costs a thread nobody waits for.
@@ -376,6 +381,7 @@ fn run_window(launch: Launch) {
             let remembered = settings::load();
             let (width, height) = restored_window_size(remembered.width, remembered.height);
             let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+            let mut audit_slot = None;
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -385,12 +391,21 @@ fn run_window(launch: Launch) {
                 },
                 |window, cx| {
                     let audit = audit::build_audit(launch, window, cx);
+                    audit_slot = Some(audit.clone());
                     // Dialogs, notifications and tooltips are drawn by the Root, so
                     // the window's first level has to be one.
                     cx.new(|cx| Root::new(audit, window, cx).bg(cx.theme().background))
                 },
             )
             .unwrap();
+            if let Some(audit) = audit_slot {
+                // cfg! keeps the call compiled (and the module alive) on every
+                // platform while running it only where a menu bar exists.
+                if cfg!(target_os = "macos") {
+                    menus::init(audit.clone(), cx);
+                }
+                audit::register_quit_flush(audit, cx);
+            }
             cx.activate(true);
         });
 }
