@@ -178,12 +178,28 @@ impl Audit {
         let client = pairing.client.clone();
         let dir = pairing.dir.clone();
         let walked_dir = dir.clone();
+        let root = self.root.clone();
         let generation = self.dataset_generation;
         let pairing_generation = self.sirv_pairing_generation;
         cx.spawn(async move |this, cx| {
             let walked = cx
                 .background_executor()
-                .spawn(async move { client.lock().walk(&dir).map_err(|error| error.to_string()) })
+                .spawn(async move {
+                    let nodes = client
+                        .lock()
+                        .walk(&dir)
+                        .map_err(|error| error.to_string())?;
+                    let files: HashMap<String, sirv::Node> = nodes
+                        .into_iter()
+                        .filter_map(|node| {
+                            sirv::unpair_remote(&walked_dir, &node.filename).map(|key| (key, node))
+                        })
+                        .collect();
+                    let presence = sirv::local_sizes_for(&root, files.keys().map(String::as_str))
+                        .into_keys()
+                        .collect();
+                    Ok((files, presence))
+                })
                 .await;
             this.update(cx, |audit, cx| {
                 if !walk_landing_applies(
@@ -198,16 +214,9 @@ impl Audit {
                     return;
                 };
                 match walked {
-                    Ok(nodes) => {
-                        pairing.files = Listing::Ready(
-                            nodes
-                                .into_iter()
-                                .filter_map(|node| {
-                                    sirv::unpair_remote(&walked_dir, &node.filename)
-                                        .map(|key| (key, node))
-                                })
-                                .collect(),
-                        );
+                    Ok((files, presence)) => {
+                        pairing.files = Listing::Ready(files);
+                        audit.sirv_local_presence = presence;
                         audit.refresh_sirv_counts();
                     }
                     // A listing that failed is not a transfer that failed. It used to
@@ -226,6 +235,7 @@ impl Audit {
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
         self.sirv_counts = None;
+        self.sirv_local_presence.clear();
         self.sirv_browser = None;
         self.cancel_sirv_transfer();
         cx.notify();
@@ -310,7 +320,8 @@ impl Audit {
 
     /// Download every remote file the local folder lacks. Existing files are
     /// never overwritten — pull is additive by design, so it can never destroy
-    /// local work.
+    /// local work. Installation enforces that promise with an atomic no-replace
+    /// link, not an inference from the image scan.
     pub(super) fn start_pull(&mut self, cx: &mut Context<Self>) {
         self.run_pull(false, cx);
     }
@@ -333,37 +344,63 @@ impl Audit {
         let files = files.clone();
         let dir = pairing.dir.clone();
         let client = pairing.client.clone();
-        let remote: Vec<sirv::Node> = files.values().cloned().collect();
-        let local_sizes: HashMap<String, u64> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                sirv::relative_key(&self.root, &entry.path).map(|key| (key, entry.bytes))
-            })
-            .collect();
-        let plan = sirv::pull_plan(&remote, &dir, &local_sizes, differing);
-        if plan.is_empty() {
-            return;
-        }
-        let total = plan.len();
+        let entry_sizes = if differing {
+            self.entries
+                .iter()
+                .filter_map(|entry| {
+                    sirv::relative_key(&self.root, &entry.path).map(|key| (key, entry.bytes))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         let generation = self.sirv_generation;
-        self.sirv_job = Some(SirvJob {
-            kind: if differing {
-                SirvJobKind::PullChanged
-            } else {
-                SirvJobKind::Pull
-            },
-            done: 0,
-            total,
-            failures: Vec::new(),
-            finished: false,
-            generation,
-        });
-        cx.notify();
-
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_executor()
+                .spawn({
+                    let root = root.clone();
+                    let files = files.clone();
+                    let dir = dir.clone();
+                    async move {
+                        let remote: Vec<sirv::Node> = files.values().cloned().collect();
+                        let local_sizes = if differing {
+                            entry_sizes
+                        } else {
+                            sirv::local_sizes_for(&root, files.keys().map(String::as_str))
+                        };
+                        sirv::pull_plan(&remote, &dir, &local_sizes, differing)
+                    }
+                })
+                .await;
+            let Some(_) = this
+                .update(cx, |audit, cx| {
+                    if audit.sirv_generation != generation || audit.sirv_busy() || plan.is_empty() {
+                        return None;
+                    }
+                    let total = plan.len();
+                    audit.sirv_job = Some(SirvJob {
+                        kind: if differing {
+                            SirvJobKind::PullChanged
+                        } else {
+                            SirvJobKind::Pull
+                        },
+                        done: 0,
+                        total,
+                        failures: Vec::new(),
+                        finished: false,
+                        generation,
+                    });
+                    cx.notify();
+                    Some(total)
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
             let mut failures = Vec::new();
             for (ix, key) in plan.iter().enumerate() {
                 if Self::sirv_superseded(&this, cx, generation) {
@@ -374,26 +411,22 @@ impl Audit {
                     .spawn({
                         let client = client.clone();
                         let remote_path = format!("{dir}/{key}");
-                        async move { client.lock().download(&remote_path) }
+                        let root = root.clone();
+                        let key = key.clone();
+                        async move {
+                            let bytes = client
+                                .lock()
+                                .download(&remote_path)
+                                .map_err(|error| error.to_string())?;
+                            sirv::write_pulled(&root, &key, &bytes, differing)
+                        }
                     })
                     .await;
                 // Keep the reason. "1 failed: a.jpg" sends the user hunting;
                 // "a.jpg: 403 forbidden" or "a.jpg: No space left on device"
                 // says what to do about it.
-                let failure = match outcome {
-                    Ok(bytes) => {
-                        let target = root.join(key);
-                        match target.parent().map(std::fs::create_dir_all) {
-                            Some(Err(error)) => {
-                                Some(format!("{key}: could not create folder: {error}"))
-                            }
-                            None | Some(Ok(())) => std::fs::write(&target, bytes)
-                                .err()
-                                .map(|error| format!("{key}: {error}")),
-                        }
-                    }
-                    Err(error) => Some(format!("{key}: {error}")),
-                };
+                let failure = outcome.err().map(|error| format!("{key}: {error}"));
+                let succeeded = failure.is_none();
                 if let Some(message) = failure {
                     failures.push(message);
                 }
@@ -405,6 +438,9 @@ impl Audit {
                     {
                         job.done = ix + 1;
                         job.failures = failures.clone();
+                        if succeeded {
+                            audit.sirv_local_presence.insert(key.clone());
+                        }
                         cx.notify();
                     }
                 })
@@ -561,12 +597,10 @@ impl Audit {
             Some(Listing::Ready(files)) => {
                 let mut to_push = 0;
                 let mut changed = 0;
-                let mut local_keys = HashSet::new();
                 for entry in &self.entries {
                     let Some(key) = sirv::relative_key(&self.root, &entry.path) else {
                         continue;
                     };
-                    local_keys.insert(key.clone());
                     match sirv::classify(entry.bytes, files.get(&key)) {
                         sirv::SyncState::OnlyLocal => to_push += 1,
                         sirv::SyncState::Changed => changed += 1,
@@ -575,7 +609,7 @@ impl Audit {
                 }
                 let to_pull = files
                     .keys()
-                    .filter(|key| !local_keys.contains(*key))
+                    .filter(|key| !self.sirv_local_presence.contains(*key))
                     .count();
                 Some((to_push, changed, to_pull))
             }

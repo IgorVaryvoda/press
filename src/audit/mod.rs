@@ -224,6 +224,9 @@ pub(crate) struct Audit {
     /// differ, files to pull. Recomputed when the dataset or the listing
     /// changes, never per frame.
     sirv_counts: Option<(usize, usize, usize)>,
+    /// A snapshot from the last walk, patched by completed pulls. A file made
+    /// by hand between walks stays stale until the next walk, like the listing.
+    sirv_local_presence: HashSet<String>,
     /// A running or finished Sirv transfer, shown in the notices line.
     sirv_job: Option<SirvJob>,
     /// Bumped whenever a running transfer stops being wanted.
@@ -504,7 +507,14 @@ impl Audit {
         // A new folder is a new diff: the pairing survives, the numbers do not, and a
         // transfer aimed at the old folder must not keep running against the new one.
         self.cancel_sirv_transfer();
-        self.refresh_sirv_counts();
+        if let Some(pairing) = self.sirv_pairing.as_mut() {
+            self.sirv_local_presence.clear();
+            pairing.files = Listing::Walking;
+            self.sirv_counts = None;
+            self.walk_sirv_pairing(cx);
+        } else {
+            self.refresh_sirv_counts();
+        }
         self.schedule_estimate(cx);
         cx.notify();
 
@@ -841,6 +851,7 @@ pub(crate) fn build_audit(
             drag_over: false,
             sirv_pairing: None,
             sirv_counts: None,
+            sirv_local_presence: HashSet::new(),
             sirv_job: None,
             sirv_generation: 0,
             sirv_pairing_generation: 0,

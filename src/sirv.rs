@@ -227,6 +227,118 @@ pub fn pull_plan(
         .collect()
 }
 
+/// The on-disk size of every remote key's local twin. The image scan is the
+/// wrong source for this: it drops RAW files, non-images and `optimized/`
+/// output, and a pull that trusts it will overwrite exactly those. The disk
+/// is the only honest witness for "exists locally". `symlink_metadata`, not
+/// `metadata`: a symlink counts as "something is here".
+pub fn local_sizes_for<'a>(
+    root: &Path,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, u64> {
+    keys.into_iter()
+        .filter(|key| safe_key(key))
+        .filter_map(|key| {
+            let meta = root.join(key).symlink_metadata().ok()?;
+            Some((key.to_string(), meta.len()))
+        })
+        .collect()
+}
+
+/// Read at most `cap` bytes and refuse a body that reaches past it. The old
+/// `.take(cap)` alone returned a silently truncated buffer as success, and a
+/// truncated image written to disk is corruption with a success message.
+pub fn read_capped(reader: impl Read, cap: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > cap {
+        return Err(format!("larger than the {cap}-byte transfer cap"));
+    }
+    Ok(bytes)
+}
+
+/// Write pulled bytes for `key` under `root`.
+///
+/// Three properties, each load-bearing:
+/// - **Confinement.** `safe_key` is lexical; a local symlink ancestor
+///   (`root/sub -> /outside`) still redirects the write. Every existing
+///   ancestor between `root` and the target is checked with
+///   `symlink_metadata` and refused if it is a symlink.
+/// - **No silent replace.** Without `overwrite`, the final installation is
+///   `hard_link(part, target)`, which fails atomically if the target
+///   exists — there is no check-then-rename window for another writer.
+/// - **No partial files.** Bytes land in an exclusively created `.part`
+///   sibling first (`create_new` refuses to follow a symlink or truncate a
+///   leftover), then move into place.
+///
+/// Filesystems without hard-link support fail with their OS error rather than
+/// silently falling back to replacement.
+pub fn write_pulled(root: &Path, key: &str, bytes: &[u8], overwrite: bool) -> Result<(), String> {
+    if !safe_key(key) {
+        return Err("unsafe remote name".into());
+    }
+    let target = root.join(key);
+
+    // Refuse symlinked ancestors before creating anything through them.
+    let mut ancestor = root.to_path_buf();
+    let parts: Vec<&str> = key.split('/').collect();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        ancestor = ancestor.join(part);
+        match ancestor.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "{} is a symlink; refusing to write through it",
+                    ancestor.display()
+                ));
+            }
+            _ => {}
+        }
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create folder: {error}"))?;
+    }
+
+    let mut part_name = target.as_os_str().to_owned();
+    part_name.push(".part");
+    let part = PathBuf::from(part_name);
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+            .map_err(|error| format!("could not create {}: {error}", part.display()))?;
+        file.write_all(bytes).map_err(|error| {
+            let _ = std::fs::remove_file(&part);
+            error.to_string()
+        })?;
+    }
+
+    let installed = if overwrite {
+        std::fs::rename(&part, &target).map_err(|error| error.to_string())
+    } else {
+        // hard_link is the atomic "create only if absent" install; a target
+        // that appeared since planning fails here instead of being replaced.
+        std::fs::hard_link(&part, &target)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "exists locally; use overwrite to replace it".to_string()
+                } else {
+                    error.to_string()
+                }
+            })
+            .and_then(|()| std::fs::remove_file(&part).map_err(|error| error.to_string()))
+    };
+    if installed.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    installed
+}
+
 /// The ancestor folders a relative key needs, in creation order:
 /// `sub/deep/a.jpg` gives `["sub", "sub/deep"]`.
 pub fn ancestor_dirs(key: &str) -> Vec<String> {
@@ -486,14 +598,10 @@ impl Client {
                 .timeout(TRANSFER_TIMEOUT)
                 .call()
                 .map_err(sirv_error("download"))?;
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .take(MAX_TRANSFER)
-                .read_to_end(&mut bytes)
-                .map_err(|error| Error {
+            let bytes =
+                read_capped(response.into_reader(), MAX_TRANSFER).map_err(|message| Error {
                     status: 0,
-                    message: format!("download body: {error}"),
+                    message: format!("download body: {message}"),
                 })?;
             Ok(bytes)
         })
@@ -680,6 +788,153 @@ fn owner_only(_path: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pull_test_dir(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("imageguide-pull-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the pull test directory is created");
+        root
+    }
+
+    #[test]
+    fn a_plain_pull_refuses_an_existing_file() {
+        let root = pull_test_dir("existing");
+        let target = root.join("a.jpg");
+        std::fs::write(&target, b"old").unwrap();
+
+        let error = write_pulled(&root, "a.jpg", b"new", false).unwrap_err();
+        assert!(error.contains("exists locally"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_overwrite_pull_replaces_atomically() {
+        let root = pull_test_dir("overwrite");
+        let target = root.join("a.jpg");
+        std::fs::write(&target, b"old").unwrap();
+
+        write_pulled(&root, "a.jpg", b"new", true).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!root.join("a.jpg.part").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_parent_is_created() {
+        let root = pull_test_dir("parents");
+
+        write_pulled(&root, "one/two/a.jpg", b"new", false).unwrap();
+        assert_eq!(std::fs::read(root.join("one/two/a.jpg")).unwrap(), b"new");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_leftover_part_file_is_never_truncated() {
+        let root = pull_test_dir("part");
+        let part = root.join("a.jpg.part");
+        std::fs::write(&part, b"unfinished").unwrap();
+
+        assert!(write_pulled(&root, "a.jpg", b"new", false).is_err());
+        assert_eq!(std::fs::read(&part).unwrap(), b"unfinished");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ancestor_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let root = pull_test_dir("ancestor-symlink");
+        let outside =
+            root.with_file_name(format!("imageguide-pull-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("sub")).unwrap();
+
+        let error = write_pulled(&root, "sub/a.jpg", b"new", false).unwrap_err();
+        assert!(error.contains("is a symlink"));
+        assert!(!outside.join("a.jpg").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_target_counts_as_existing() {
+        use std::os::unix::fs::symlink;
+
+        let root = pull_test_dir("target-symlink");
+        let outside = root.join("outside.jpg");
+        std::fs::write(&outside, b"old").unwrap();
+        symlink(&outside, root.join("a.jpg")).unwrap();
+
+        let error = write_pulled(&root, "a.jpg", b"new", false).unwrap_err();
+        assert!(error.contains("exists locally"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"old");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_sizes_sees_every_file_kind() {
+        let root = pull_test_dir("sizes");
+        std::fs::write(root.join("a.jpg"), b"one").unwrap();
+        std::fs::write(root.join("notes.txt"), b"twos").unwrap();
+        std::fs::create_dir_all(root.join("optimized")).unwrap();
+        std::fs::write(root.join("optimized/out.webp"), b"three").unwrap();
+
+        assert_eq!(
+            local_sizes_for(&root, ["a.jpg", "notes.txt", "optimized/out.webp"],),
+            HashMap::from([
+                ("a.jpg".to_string(), 3),
+                ("notes.txt".to_string(), 4),
+                ("optimized/out.webp".to_string(), 5),
+            ])
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_body_at_the_cap_passes_and_one_past_it_fails() {
+        assert_eq!(
+            read_capped(std::io::Cursor::new(b"1234"), 4).unwrap(),
+            b"1234"
+        );
+        assert!(
+            read_capped(std::io::Cursor::new(b"12345"), 4)
+                .unwrap_err()
+                .contains("transfer cap")
+        );
+    }
+
+    #[test]
+    fn a_differing_pull_never_selects_files_the_audit_does_not_show() {
+        let remote = vec![
+            Node {
+                filename: "/d/notes.txt".into(),
+                is_directory: false,
+                kind: None,
+                size: 5,
+            },
+            Node {
+                filename: "/d/a.jpg".into(),
+                is_directory: false,
+                kind: None,
+                size: 5,
+            },
+        ];
+        let local = HashMap::from([("a.jpg".into(), 9)]);
+
+        assert_eq!(pull_plan(&remote, "/d", &local, true), ["a.jpg"]);
+    }
 
     #[test]
     fn paths_escape_for_query_strings() {

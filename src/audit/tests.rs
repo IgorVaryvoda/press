@@ -454,6 +454,50 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn opening_another_folder_rewalks_the_pairing(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.sirv_pairing = Some(SirvPairing {
+            dir: "/photos".into(),
+            files: Listing::Ready(HashMap::new()),
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+        });
+        audit.sirv_local_presence.insert("a.jpg".into());
+    });
+
+    cx.update(|window, cx| {
+        audit.update(cx, |audit, cx| {
+            audit.install_dataset(
+                scan::Scan {
+                    entries: vec![entry("new.png", 10, 10, 100, ImageFormat::Png)],
+                    skipped_raw: 0,
+                    unreadable: Vec::new(),
+                    walk_errors: Vec::new(),
+                    existing_output: 0,
+                },
+                PathBuf::from("/elsewhere"),
+                false,
+                window,
+                cx,
+            );
+        });
+    });
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sirv_local_presence.is_empty());
+        assert!(matches!(
+            audit.sirv_pairing.as_ref().map(|pairing| &pairing.files),
+            Some(Listing::Walking)
+        ));
+    });
+}
+
 fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
     cx.update(init_theme);
     // A PNG named `.webp` is the mislabelled one. The screenshot is 30 bytes per
