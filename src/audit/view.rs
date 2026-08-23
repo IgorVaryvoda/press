@@ -170,10 +170,21 @@ impl Audit {
                                 let failures = if job.failures.is_empty() {
                                     String::new()
                                 } else {
+                                    let rest = job.failures.len().saturating_sub(3);
                                     format!(
-                                        ", {} failed: {}",
+                                        ", {} failed: {}{}",
                                         job.failures.len(),
-                                        job.failures.join(", ")
+                                        job.failures
+                                            .iter()
+                                            .take(3)
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                        if rest == 0 {
+                                            String::new()
+                                        } else {
+                                            format!(" and {rest} more")
+                                        },
                                     )
                                 };
                                 format!("{verb} {} of {}{failures}", job.done, job.total)
@@ -189,8 +200,26 @@ impl Audit {
                         .gap_2()
                         .when_some(paired, |row, dir| {
                             let busy = self.sirv_busy();
+                            let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
+                            let push_changed_confirmed =
+                                self.sirv_confirm == Some(SirvJobKind::PushChanged);
+                            let pull_changed_confirmed =
+                                self.sirv_confirm == Some(SirvJobKind::PullChanged);
                             let (to_push, changed, to_pull) = self.sirv_counts.unwrap_or((0, 0, 0));
-                            row.child(
+                            row.when(busy, |row| {
+                                row.child(
+                                    Button::new("sirv-stop")
+                                        .outline()
+                                        .small()
+                                        .label(if stopping { "Stopping…" } else { "Stop" })
+                                        .disabled(stopping)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            audit.cancel_sirv_transfer();
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
                                 Button::new("sirv-pull")
                                     .outline()
                                     .small()
@@ -211,22 +240,46 @@ impl Audit {
                             .when(changed > 0, |row| {
                                 row.child(
                                     Button::new("sirv-push-changed")
-                                        .ghost()
+                                        .when(push_changed_confirmed, |button| button.primary())
+                                        .when(!push_changed_confirmed, |button| button.ghost())
                                         .small()
-                                        .label(format!("Overwrite {changed} on Sirv"))
+                                        .label(if push_changed_confirmed {
+                                            format!("Really overwrite {changed} on Sirv?")
+                                        } else {
+                                            format!("Overwrite {changed} on Sirv")
+                                        })
                                         .disabled(busy)
                                         .on_click(cx.listener(|audit, _, _, cx| {
-                                            audit.start_push_changed(cx);
+                                            if audit.sirv_confirm == Some(SirvJobKind::PushChanged)
+                                            {
+                                                audit.sirv_confirm = None;
+                                                audit.start_push_changed(cx);
+                                            } else {
+                                                audit.sirv_confirm = Some(SirvJobKind::PushChanged);
+                                                cx.notify();
+                                            }
                                         })),
                                 )
                                 .child(
                                     Button::new("sirv-pull-changed")
-                                        .ghost()
+                                        .when(pull_changed_confirmed, |button| button.primary())
+                                        .when(!pull_changed_confirmed, |button| button.ghost())
                                         .small()
-                                        .label(format!("Take {changed} from Sirv"))
+                                        .label(if pull_changed_confirmed {
+                                            format!("Really replace {changed} local files?")
+                                        } else {
+                                            format!("Take {changed} from Sirv")
+                                        })
                                         .disabled(busy)
                                         .on_click(cx.listener(|audit, _, _, cx| {
-                                            audit.start_pull_changed(cx);
+                                            if audit.sirv_confirm == Some(SirvJobKind::PullChanged)
+                                            {
+                                                audit.sirv_confirm = None;
+                                                audit.start_pull_changed(cx);
+                                            } else {
+                                                audit.sirv_confirm = Some(SirvJobKind::PullChanged);
+                                                cx.notify();
+                                            }
                                         })),
                                 )
                             })
@@ -254,6 +307,7 @@ impl Audit {
                             .label("Close")
                             .on_click(cx.listener(|audit, _, _, cx| {
                                 audit.sirv_browser = None;
+                                audit.sirv_confirm = None;
                                 cx.notify();
                             })),
                     )

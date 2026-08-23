@@ -19,6 +19,7 @@ impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
     /// missing store opens the browser on an error that names the file to fix.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
+        self.sirv_confirm = None;
         // A live pairing already holds a warm client; reuse it so the browser
         // and later pushes share one token cache.
         let client = self
@@ -238,6 +239,9 @@ impl Audit {
         self.sirv_local_presence.clear();
         self.sirv_browser = None;
         self.cancel_sirv_transfer();
+        // The detached loop may finish one file, but has no pairing to update.
+        self.sirv_job = None;
+        self.sirv_confirm = None;
         cx.notify();
     }
 
@@ -252,15 +256,16 @@ impl Audit {
             .unwrap_or(true)
     }
 
-    /// Retire any running transfer. The loop checks the generation before each file,
-    /// so the file in flight finishes and nothing after it starts.
+    /// Ask the running transfer to stop. The loop checks before each file,
+    /// so the file in flight finishes and nothing after it starts. The job
+    /// stays busy until the loop acknowledges, preventing another transfer
+    /// from racing that last file.
     pub(super) fn cancel_sirv_transfer(&mut self) {
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         if let Some(job) = self.sirv_job.as_mut()
             && !job.finished
         {
-            job.finished = true;
-            job.failures.push("stopped".into());
+            job.stopping = true;
         }
     }
 
@@ -288,27 +293,50 @@ impl Audit {
 
     /// Store the CDN credentials.
     pub(super) fn save_sirv_settings(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.settings_panel.as_mut() else {
-            return;
+        let (client_id, client_secret) = {
+            let Some(panel) = self.settings_panel.as_mut() else {
+                return;
+            };
+            (
+                panel.client_id.read(cx).value().trim().to_string(),
+                panel.client_secret.read(cx).value().trim().to_string(),
+            )
         };
-        let client_id = panel.client_id.read(cx).value().trim().to_string();
-        let client_secret = panel.client_secret.read(cx).value().trim().to_string();
         if client_id.is_empty() || client_secret.is_empty() {
+            let panel = self.settings_panel.as_mut().unwrap();
             panel.cdn_status = Some((false, "Both fields are required.".into()));
             cx.notify();
             return;
         }
         // Report what happened, not what was attempted. A read-only config directory
         // used to look exactly like success.
-        panel.cdn_status = Some(
-            match sirv::save_credentials(&sirv::Credentials {
-                client_id,
-                client_secret,
-            }) {
-                Ok(()) => (true, "Saved.".into()),
-                Err(error) => (false, format!("Could not save: {error}")),
-            },
-        );
+        let mut retry_walk = false;
+        let status = match sirv::save_credentials(&sirv::Credentials {
+            client_id: client_id.clone(),
+            client_secret: client_secret.clone(),
+        }) {
+            Ok(()) => {
+                if let Some(pairing) = self.sirv_pairing.as_mut() {
+                    // An in-flight transfer owns an Arc to the old client.
+                    pairing.client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                        sirv::Credentials {
+                            client_id,
+                            client_secret,
+                        },
+                    )));
+                    if matches!(pairing.files, Listing::Failed(_)) {
+                        pairing.files = Listing::Walking;
+                        retry_walk = true;
+                    }
+                }
+                (true, "Saved.".into())
+            }
+            Err(error) => (false, format!("Could not save: {error}")),
+        };
+        self.settings_panel.as_mut().unwrap().cdn_status = Some(status);
+        if retry_walk {
+            self.walk_sirv_pairing(cx);
+        }
         cx.notify();
     }
 
@@ -323,6 +351,7 @@ impl Audit {
     /// local work. Installation enforces that promise with an atomic no-replace
     /// link, not an inference from the image scan.
     pub(super) fn start_pull(&mut self, cx: &mut Context<Self>) {
+        self.sirv_confirm = None;
         self.run_pull(false, cx);
     }
 
@@ -391,6 +420,7 @@ impl Audit {
                         total,
                         failures: Vec::new(),
                         finished: false,
+                        stopping: false,
                         generation,
                     });
                     cx.notify();
@@ -404,6 +434,23 @@ impl Audit {
             let mut failures = Vec::new();
             for (ix, key) in plan.iter().enumerate() {
                 if Self::sirv_superseded(&this, cx, generation) {
+                    this.update(cx, |audit, cx| {
+                        let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                            && job.generation == generation
+                            && !job.finished
+                        {
+                            job.finished = true;
+                            job.failures.push("stopped".into());
+                            true
+                        } else {
+                            false
+                        };
+                        if acknowledged {
+                            audit.request_path(audit.root.clone(), cx);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                     return;
                 }
                 let outcome = cx
@@ -447,15 +494,20 @@ impl Audit {
                 .ok();
             }
             this.update(cx, |audit, cx| {
-                if let Some(job) = audit.sirv_job.as_mut()
+                let owns_job = if let Some(job) = audit.sirv_job.as_mut()
                     && job.generation == generation
                 {
                     job.finished = true;
+                    true
+                } else {
+                    false
+                };
+                if owns_job {
+                    // The pulled files belong in the table: a full rescan, through
+                    // the same path a folder change takes.
+                    audit.request_path(audit.root.clone(), cx);
+                    cx.notify();
                 }
-                // The pulled files belong in the table: a full rescan, through
-                // the same path a folder change takes.
-                audit.request_path(audit.root.clone(), cx);
-                cx.notify();
             })
             .ok();
         })
@@ -464,6 +516,7 @@ impl Audit {
 
     /// Upload every local file Sirv lacks.
     pub(super) fn start_push(&mut self, cx: &mut Context<Self>) {
+        self.sirv_confirm = None;
         self.run_push(sirv::SyncState::OnlyLocal, cx);
     }
 
@@ -501,6 +554,7 @@ impl Audit {
             total,
             failures: Vec::new(),
             finished: false,
+            stopping: false,
             generation,
         });
         cx.notify();
@@ -510,6 +564,28 @@ impl Audit {
         cx.spawn(async move |this, cx| {
             let mut failures = Vec::new();
 
+            if Self::sirv_superseded(&this, cx, generation) {
+                this.update(cx, |audit, cx| {
+                    let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                        && !job.finished
+                    {
+                        job.finished = true;
+                        job.failures.push("stopped".into());
+                        true
+                    } else {
+                        false
+                    };
+                    if acknowledged {
+                        audit.walk_sirv_pairing(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+                return;
+            }
+
+            // A cancel during this locked task completes one provisioning batch.
             let made = cx
                 .background_executor()
                 .spawn({
@@ -532,8 +608,46 @@ impl Audit {
                 failures.push(message);
             }
 
+            if Self::sirv_superseded(&this, cx, generation) {
+                this.update(cx, |audit, cx| {
+                    let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                        && !job.finished
+                    {
+                        job.finished = true;
+                        job.failures.push("stopped".into());
+                        true
+                    } else {
+                        false
+                    };
+                    if acknowledged {
+                        audit.walk_sirv_pairing(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+                return;
+            }
+
             for (ix, (key, path)) in plan.iter().enumerate() {
                 if Self::sirv_superseded(&this, cx, generation) {
+                    this.update(cx, |audit, cx| {
+                        let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                            && job.generation == generation
+                            && !job.finished
+                        {
+                            job.finished = true;
+                            job.failures.push("stopped".into());
+                            true
+                        } else {
+                            false
+                        };
+                        if acknowledged {
+                            audit.walk_sirv_pairing(cx);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                     return;
                 }
                 let outcome = cx
@@ -575,14 +689,19 @@ impl Audit {
                 .ok();
             }
             this.update(cx, |audit, cx| {
-                if let Some(job) = audit.sirv_job.as_mut()
+                let owns_job = if let Some(job) = audit.sirv_job.as_mut()
                     && job.generation == generation
                 {
                     job.finished = true;
+                    true
+                } else {
+                    false
+                };
+                if owns_job {
+                    // Re-list the pair: pushed files must stop reading as new.
+                    audit.walk_sirv_pairing(cx);
+                    cx.notify();
                 }
-                // Re-list the pair: pushed files must stop reading as new.
-                audit.walk_sirv_pairing(cx);
-                cx.notify();
             })
             .ok();
         })

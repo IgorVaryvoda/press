@@ -260,7 +260,9 @@ impl Audit {
         {
             parts.push(format!("could not list {}: {reason}", pairing.dir));
         }
-        if let Some(job) = &self.sirv_job {
+        if let Some(job) = &self.sirv_job
+            && (!job.finished || !job.failures.is_empty())
+        {
             let verb = match job.kind {
                 SirvJobKind::Pull => "Sirv pull",
                 SirvJobKind::PullChanged => "Sirv pull (overwrite)",
@@ -270,15 +272,21 @@ impl Audit {
             let failures = if job.failures.is_empty() {
                 String::new()
             } else {
+                let rest = job.failures.len().saturating_sub(3);
                 format!(
-                    ", {} failed: {}",
+                    ", {} failed: {}{}",
                     job.failures.len(),
                     job.failures
                         .iter()
                         .take(3)
                         .cloned()
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join(", "),
+                    if rest == 0 {
+                        String::new()
+                    } else {
+                        format!(" and {rest} more")
+                    },
                 )
             };
             parts.push(format!("{verb}: {} of {}{failures}", job.done, job.total));

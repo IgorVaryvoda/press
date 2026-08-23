@@ -229,6 +229,8 @@ pub(crate) struct Audit {
     sirv_local_presence: HashSet<String>,
     /// A running or finished Sirv transfer, shown in the notices line.
     sirv_job: Option<SirvJob>,
+    /// The destructive transfer awaiting its second click.
+    sirv_confirm: Option<SirvJobKind>,
     /// Bumped whenever a running transfer stops being wanted.
     sirv_generation: u64,
     /// Bumped whenever a pairing changes, so an old recursive listing cannot
@@ -392,6 +394,8 @@ struct SirvJob {
     total: usize,
     failures: Vec<String>,
     finished: bool,
+    /// A stop has been requested; the in-flight file still has to acknowledge it.
+    stopping: bool,
     /// The transfer generation this job belongs to. Unpairing or opening another
     /// folder bumps `sirv_generation`, and the loop stops at its next file rather
     /// than uploading the rest of a folder nobody is paired to any more.
@@ -853,6 +857,7 @@ pub(crate) fn build_audit(
             sirv_counts: None,
             sirv_local_presence: HashSet::new(),
             sirv_job: None,
+            sirv_confirm: None,
             sirv_generation: 0,
             sirv_pairing_generation: 0,
             sirv_browser: None,

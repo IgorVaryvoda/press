@@ -82,7 +82,21 @@ pub struct Error {
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Sirv {}: {}", self.status, self.message)
+        match self.status {
+            0 => write!(f, "{}", self.message),
+            401 | 403 => write!(
+                f,
+                "Sirv rejected the credentials ({}): {}",
+                self.status, self.message
+            ),
+            404 => write!(f, "not found on Sirv ({}): {}", self.status, self.message),
+            429 => write!(
+                f,
+                "Sirv is rate limiting this account ({}): {}",
+                self.status, self.message
+            ),
+            status => write!(f, "Sirv error {status}: {}", self.message),
+        }
     }
 }
 
@@ -795,6 +809,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the pull test directory is created");
         root
+    }
+
+    #[test]
+    fn a_401_reads_as_a_credentials_problem() {
+        let error = Error {
+            status: 401,
+            message: "token: {...}".into(),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("Sirv rejected the credentials")
+        );
+    }
+
+    #[test]
+    fn a_transport_error_keeps_its_message() {
+        let error = Error {
+            status: 0,
+            message: "connection refused".into(),
+        };
+
+        assert_eq!(error.to_string(), "connection refused");
+    }
+
+    #[test]
+    fn an_unmapped_status_keeps_its_code_and_detail() {
+        let error = Error {
+            status: 500,
+            message: "upstream unavailable".into(),
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("500"));
+        assert!(message.contains("upstream unavailable"));
     }
 
     #[test]
