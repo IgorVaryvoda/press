@@ -17,7 +17,8 @@ impl Audit {
             0
         };
 
-        // Four states, one shape: a headline, the share it leaves behind, and a
+        // Four states, one shape: a headline, the share it leaves behind (every
+        // branch passes remaining, and the consumer draws 1 - remaining), and a
         // sentence of detail.
         let (headline, tone, detail, bar, tag) = if self.converting {
             let done = self.results.len() + self.failures.len();
@@ -30,7 +31,7 @@ impl Audit {
                     self.format.label().to_uppercase(),
                     self.quality.label()
                 ),
-                Some((done as f32 / total.max(1) as f32, cx.theme().primary)),
+                Some((1. - done as f32 / total.max(1) as f32, cx.theme().primary)),
                 None,
             )
         } else if !self.results.is_empty() {
