@@ -35,6 +35,10 @@ const MAX_TRANSFER: u64 = 512 * 1024 * 1024;
 /// A walk that finds more files than this is treated as an error rather than
 /// listed forever.
 const WALK_LIMIT: usize = 20_000;
+/// A broken server can mint unique continuation tokens forever without adding
+/// entries. This stays comfortably above any listing that could fit below the
+/// file limit.
+const READDIR_PAGE_LIMIT: usize = 512;
 /// One entry as Sirv reports it from readdir. Unknown fields are ignored, so a
 /// server-side addition never breaks the parse.
 #[derive(Clone, Debug, Deserialize)]
@@ -78,7 +82,21 @@ pub struct Error {
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Sirv {}: {}", self.status, self.message)
+        match self.status {
+            0 => write!(f, "{}", self.message),
+            401 | 403 => write!(
+                f,
+                "Sirv rejected the credentials ({}): {}",
+                self.status, self.message
+            ),
+            404 => write!(f, "not found on Sirv ({}): {}", self.status, self.message),
+            429 => write!(
+                f,
+                "Sirv is rate limiting this account ({}): {}",
+                self.status, self.message
+            ),
+            status => write!(f, "Sirv error {status}: {}", self.message),
+        }
     }
 }
 
@@ -158,6 +176,32 @@ pub fn unpair_remote(dir: &str, filename: &str) -> Option<String> {
     }
 }
 
+/// Join a readdir entry name onto the folder that was listed. Some account
+/// shapes return absolute names, others names relative to the listed folder;
+/// recursion and diff keys both need the absolute form.
+pub fn join_listing_name(current: &str, name: &str) -> String {
+    let name = name.trim_end_matches('/');
+    if name.starts_with('/') {
+        name.to_string()
+    } else {
+        format!("{}/{name}", current.trim_end_matches('/'))
+    }
+}
+
+/// True when this continuation token has not been seen before in this
+/// listing. A repeated token — adjacent or in a cycle — means the server is
+/// looping, and following it would list forever.
+pub fn continuation_advances(seen: &mut HashSet<String>, token: &str) -> bool {
+    seen.insert(token.to_string())
+}
+
+fn walk_limit_error() -> Error {
+    Error {
+        status: 0,
+        message: format!("holds more than {WALK_LIMIT} entries; open or sync a smaller folder"),
+    }
+}
+
 /// True when a remote key is safe to join onto a local folder.
 ///
 /// A pull turns a name the server chose into a path this machine writes to. Rust's
@@ -195,6 +239,118 @@ pub fn pull_plan(
         })
         .map(|(key, _)| key)
         .collect()
+}
+
+/// The on-disk size of every remote key's local twin. The image scan is the
+/// wrong source for this: it drops RAW files, non-images and `optimized/`
+/// output, and a pull that trusts it will overwrite exactly those. The disk
+/// is the only honest witness for "exists locally". `symlink_metadata`, not
+/// `metadata`: a symlink counts as "something is here".
+pub fn local_sizes_for<'a>(
+    root: &Path,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, u64> {
+    keys.into_iter()
+        .filter(|key| safe_key(key))
+        .filter_map(|key| {
+            let meta = root.join(key).symlink_metadata().ok()?;
+            Some((key.to_string(), meta.len()))
+        })
+        .collect()
+}
+
+/// Read at most `cap` bytes and refuse a body that reaches past it. The old
+/// `.take(cap)` alone returned a silently truncated buffer as success, and a
+/// truncated image written to disk is corruption with a success message.
+pub fn read_capped(reader: impl Read, cap: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > cap {
+        return Err(format!("larger than the {cap}-byte transfer cap"));
+    }
+    Ok(bytes)
+}
+
+/// Write pulled bytes for `key` under `root`.
+///
+/// Three properties, each load-bearing:
+/// - **Confinement.** `safe_key` is lexical; a local symlink ancestor
+///   (`root/sub -> /outside`) still redirects the write. Every existing
+///   ancestor between `root` and the target is checked with
+///   `symlink_metadata` and refused if it is a symlink.
+/// - **No silent replace.** Without `overwrite`, the final installation is
+///   `hard_link(part, target)`, which fails atomically if the target
+///   exists — there is no check-then-rename window for another writer.
+/// - **No partial files.** Bytes land in an exclusively created `.part`
+///   sibling first (`create_new` refuses to follow a symlink or truncate a
+///   leftover), then move into place.
+///
+/// Filesystems without hard-link support fail with their OS error rather than
+/// silently falling back to replacement.
+pub fn write_pulled(root: &Path, key: &str, bytes: &[u8], overwrite: bool) -> Result<(), String> {
+    if !safe_key(key) {
+        return Err("unsafe remote name".into());
+    }
+    let target = root.join(key);
+
+    // Refuse symlinked ancestors before creating anything through them.
+    let mut ancestor = root.to_path_buf();
+    let parts: Vec<&str> = key.split('/').collect();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        ancestor = ancestor.join(part);
+        match ancestor.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "{} is a symlink; refusing to write through it",
+                    ancestor.display()
+                ));
+            }
+            _ => {}
+        }
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create folder: {error}"))?;
+    }
+
+    let mut part_name = target.as_os_str().to_owned();
+    part_name.push(".part");
+    let part = PathBuf::from(part_name);
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+            .map_err(|error| format!("could not create {}: {error}", part.display()))?;
+        file.write_all(bytes).map_err(|error| {
+            let _ = std::fs::remove_file(&part);
+            error.to_string()
+        })?;
+    }
+
+    let installed = if overwrite {
+        std::fs::rename(&part, &target).map_err(|error| error.to_string())
+    } else {
+        // hard_link is the atomic "create only if absent" install; a target
+        // that appeared since planning fails here instead of being replaced.
+        std::fs::hard_link(&part, &target)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "exists locally; use overwrite to replace it".to_string()
+                } else {
+                    error.to_string()
+                }
+            })
+            .and_then(|()| std::fs::remove_file(&part).map_err(|error| error.to_string()))
+    };
+    if installed.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    installed
 }
 
 /// The ancestor folders a relative key needs, in creation order:
@@ -337,7 +493,18 @@ impl Client {
     pub fn readdir(&mut self, dirname: &str) -> Result<Vec<Node>, Error> {
         let mut nodes = Vec::new();
         let mut continuation: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut pages = 0;
         loop {
+            pages += 1;
+            if pages > READDIR_PAGE_LIMIT {
+                return Err(Error {
+                    status: 0,
+                    message: format!(
+                        "{dirname}: listing did not finish after {READDIR_PAGE_LIMIT} pages"
+                    ),
+                });
+            }
             let mut url = format!("{API}/v2/files/readdir?dirname={}", encode_path(dirname));
             if let Some(token) = &continuation {
                 url.push_str(&format!("&continuation={}", encode_path(token)));
@@ -360,8 +527,19 @@ impl Client {
                 continuation: next,
             } = listing;
             nodes.extend(contents);
+            if nodes.len() > WALK_LIMIT {
+                return Err(walk_limit_error());
+            }
             match next {
-                Some(token) => continuation = Some(token),
+                Some(token) => {
+                    if !continuation_advances(&mut seen, &token) {
+                        return Err(Error {
+                            status: 0,
+                            message: format!("{dirname}: readdir repeated a continuation token"),
+                        });
+                    }
+                    continuation = Some(token);
+                }
                 None => return Ok(nodes),
             }
         }
@@ -386,6 +564,7 @@ impl Client {
             });
         }
         let mut all = Vec::new();
+        let mut visited = HashSet::from([root.clone()]);
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
             // Name the page that failed. The pairing root in the notice is
@@ -396,25 +575,26 @@ impl Client {
                 }
                 error
             })?;
-            for node in nodes {
+            for mut node in nodes {
+                let name = node.filename.trim_end_matches('/');
+                if matches!(name, "" | "." | "..") {
+                    continue;
+                }
                 if node.is_folder() {
-                    let name = node.filename.trim_end_matches('/');
-                    // Absolute entries pass through; relative ones join the parent.
-                    let child = if name.starts_with('/') {
-                        name.to_string()
-                    } else {
-                        format!("{current}/{name}")
-                    };
-                    stack.push(child);
+                    let child = join_listing_name(&current, name);
+                    if visited.insert(child.clone()) {
+                        if visited.len() > WALK_LIMIT {
+                            return Err(walk_limit_error());
+                        }
+                        stack.push(child);
+                    }
                 } else {
+                    node.filename = join_listing_name(&current, name);
                     all.push(node);
                 }
             }
             if all.len() > WALK_LIMIT {
-                return Err(Error {
-                    status: 0,
-                    message: format!("folder holds more than {WALK_LIMIT} files; sync it in parts"),
-                });
+                return Err(walk_limit_error());
             }
         }
         Ok(all)
@@ -432,14 +612,10 @@ impl Client {
                 .timeout(TRANSFER_TIMEOUT)
                 .call()
                 .map_err(sirv_error("download"))?;
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .take(MAX_TRANSFER)
-                .read_to_end(&mut bytes)
-                .map_err(|error| Error {
+            let bytes =
+                read_capped(response.into_reader(), MAX_TRANSFER).map_err(|message| Error {
                     status: 0,
-                    message: format!("download body: {error}"),
+                    message: format!("download body: {message}"),
                 })?;
             Ok(bytes)
         })
@@ -627,6 +803,189 @@ fn owner_only(_path: &Path) {}
 mod tests {
     use super::*;
 
+    fn pull_test_dir(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("imageguide-pull-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the pull test directory is created");
+        root
+    }
+
+    #[test]
+    fn a_401_reads_as_a_credentials_problem() {
+        let error = Error {
+            status: 401,
+            message: "token: {...}".into(),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("Sirv rejected the credentials")
+        );
+    }
+
+    #[test]
+    fn a_transport_error_keeps_its_message() {
+        let error = Error {
+            status: 0,
+            message: "connection refused".into(),
+        };
+
+        assert_eq!(error.to_string(), "connection refused");
+    }
+
+    #[test]
+    fn an_unmapped_status_keeps_its_code_and_detail() {
+        let error = Error {
+            status: 500,
+            message: "upstream unavailable".into(),
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("500"));
+        assert!(message.contains("upstream unavailable"));
+    }
+
+    #[test]
+    fn a_plain_pull_refuses_an_existing_file() {
+        let root = pull_test_dir("existing");
+        let target = root.join("a.jpg");
+        std::fs::write(&target, b"old").unwrap();
+
+        let error = write_pulled(&root, "a.jpg", b"new", false).unwrap_err();
+        assert!(error.contains("exists locally"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_overwrite_pull_replaces_atomically() {
+        let root = pull_test_dir("overwrite");
+        let target = root.join("a.jpg");
+        std::fs::write(&target, b"old").unwrap();
+
+        write_pulled(&root, "a.jpg", b"new", true).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!root.join("a.jpg.part").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_parent_is_created() {
+        let root = pull_test_dir("parents");
+
+        write_pulled(&root, "one/two/a.jpg", b"new", false).unwrap();
+        assert_eq!(std::fs::read(root.join("one/two/a.jpg")).unwrap(), b"new");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_leftover_part_file_is_never_truncated() {
+        let root = pull_test_dir("part");
+        let part = root.join("a.jpg.part");
+        std::fs::write(&part, b"unfinished").unwrap();
+
+        assert!(write_pulled(&root, "a.jpg", b"new", false).is_err());
+        assert_eq!(std::fs::read(&part).unwrap(), b"unfinished");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ancestor_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let root = pull_test_dir("ancestor-symlink");
+        let outside =
+            root.with_file_name(format!("imageguide-pull-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("sub")).unwrap();
+
+        let error = write_pulled(&root, "sub/a.jpg", b"new", false).unwrap_err();
+        assert!(error.contains("is a symlink"));
+        assert!(!outside.join("a.jpg").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_target_counts_as_existing() {
+        use std::os::unix::fs::symlink;
+
+        let root = pull_test_dir("target-symlink");
+        let outside = root.join("outside.jpg");
+        std::fs::write(&outside, b"old").unwrap();
+        symlink(&outside, root.join("a.jpg")).unwrap();
+
+        let error = write_pulled(&root, "a.jpg", b"new", false).unwrap_err();
+        assert!(error.contains("exists locally"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"old");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_sizes_sees_every_file_kind() {
+        let root = pull_test_dir("sizes");
+        std::fs::write(root.join("a.jpg"), b"one").unwrap();
+        std::fs::write(root.join("notes.txt"), b"twos").unwrap();
+        std::fs::create_dir_all(root.join("optimized")).unwrap();
+        std::fs::write(root.join("optimized/out.webp"), b"three").unwrap();
+
+        assert_eq!(
+            local_sizes_for(&root, ["a.jpg", "notes.txt", "optimized/out.webp"],),
+            HashMap::from([
+                ("a.jpg".to_string(), 3),
+                ("notes.txt".to_string(), 4),
+                ("optimized/out.webp".to_string(), 5),
+            ])
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_body_at_the_cap_passes_and_one_past_it_fails() {
+        assert_eq!(
+            read_capped(std::io::Cursor::new(b"1234"), 4).unwrap(),
+            b"1234"
+        );
+        assert!(
+            read_capped(std::io::Cursor::new(b"12345"), 4)
+                .unwrap_err()
+                .contains("transfer cap")
+        );
+    }
+
+    #[test]
+    fn a_differing_pull_never_selects_files_the_audit_does_not_show() {
+        let remote = vec![
+            Node {
+                filename: "/d/notes.txt".into(),
+                is_directory: false,
+                kind: None,
+                size: 5,
+            },
+            Node {
+                filename: "/d/a.jpg".into(),
+                is_directory: false,
+                kind: None,
+                size: 5,
+            },
+        ];
+        let local = HashMap::from([("a.jpg".into(), 9)]);
+
+        assert_eq!(pull_plan(&remote, "/d", &local, true), ["a.jpg"]);
+    }
+
     #[test]
     fn paths_escape_for_query_strings() {
         assert_eq!(encode_path("/a b/c.jpg"), "%2Fa%20b%2Fc.jpg");
@@ -673,6 +1032,43 @@ mod tests {
         );
         // Absolute and outside the pair is skipped.
         assert_eq!(unpair_remote("/photos", "/other/a.jpg"), None);
+    }
+
+    #[test]
+    fn a_relative_file_name_joins_the_folder_being_listed() {
+        let filename = join_listing_name("/photos/sub", "c.jpg");
+        assert_eq!(filename, "/photos/sub/c.jpg");
+        assert_eq!(
+            unpair_remote("/photos", &filename),
+            Some("sub/c.jpg".into())
+        );
+    }
+
+    #[test]
+    fn an_absolute_file_name_passes_through() {
+        assert_eq!(
+            join_listing_name("/photos/sub", "/photos/sub/c.jpg"),
+            "/photos/sub/c.jpg"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_folder_does_not_double() {
+        assert_eq!(join_listing_name("/photos/", "sub"), "/photos/sub");
+    }
+
+    #[test]
+    fn a_fresh_token_advances_the_listing() {
+        let mut seen = HashSet::new();
+        assert!(continuation_advances(&mut seen, "next"));
+    }
+
+    #[test]
+    fn a_token_cycle_is_refused_even_when_not_adjacent() {
+        let mut seen = HashSet::new();
+        assert!(continuation_advances(&mut seen, "a"));
+        assert!(continuation_advances(&mut seen, "b"));
+        assert!(!continuation_advances(&mut seen, "a"));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use super::sirv_actions::walk_landing_applies;
 use super::*;
 use crate::{
     Launch, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
@@ -342,11 +343,10 @@ fn a_finding_narrows_the_list_and_a_second_click_widens_it(cx: &mut TestAppConte
     });
 }
 
-/// Unpairing has to stop a transfer, not leave it uploading into a folder the
-/// window is no longer paired to. The loop reads `sirv_generation` before each
-/// file, so bumping it is the stop.
+/// Unpairing retires the loop before dropping its status, so the next loop
+/// check cannot keep uploading into a folder this window no longer owns.
 #[gpui::test]
-fn unpairing_stops_a_running_transfer(cx: &mut TestAppContext) {
+fn unpairing_discards_the_job_and_stops_the_loop(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
     audit.update(cx, |audit, cx| {
@@ -356,6 +356,7 @@ fn unpairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             total: 100,
             failures: Vec::new(),
             finished: false,
+            stopping: false,
             generation: audit.sirv_generation,
         });
         let running = audit.sirv_generation;
@@ -366,14 +367,142 @@ fn unpairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             audit.sirv_generation, running,
             "the loop's next check has to fail"
         );
-        let job = audit.sirv_job.as_ref().expect("the job is still reported");
-        assert!(job.finished, "and it stops saying it is running");
-        assert_eq!(
-            job.failures,
-            ["stopped"],
-            "the reason is named, not implied"
-        );
+        assert!(audit.sirv_job.is_none());
+        assert!(audit.sirv_pairing.is_none());
     });
+}
+
+#[gpui::test]
+fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Push,
+            done: 3,
+            total: 100,
+            failures: Vec::new(),
+            finished: false,
+            stopping: false,
+            generation: audit.sirv_generation,
+        });
+        audit.sirv_browser = Some(SirvBrowser {
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+            path: "/photos".into(),
+            nodes: None,
+            generation: 0,
+            focus: cx.focus_handle(),
+        });
+
+        audit.pair_sirv(cx);
+
+        let job = audit
+            .sirv_job
+            .as_ref()
+            .expect("the retiring job stays busy");
+        assert!(
+            job.stopping,
+            "the loop acknowledges after its in-flight file"
+        );
+        assert_eq!(audit.sirv_pairing.as_ref().unwrap().dir, "/photos");
+    });
+}
+
+#[gpui::test]
+fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Pull,
+            done: 1,
+            total: 1,
+            failures: Vec::new(),
+            finished: true,
+            stopping: false,
+            generation: audit.sirv_generation,
+        });
+
+        audit.unpair_sirv(cx);
+
+        assert!(audit.sirv_job.is_none());
+    });
+}
+
+#[gpui::test]
+fn an_armed_overwrite_is_withdrawn_by_unpair(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.sirv_confirm = Some(SirvJobKind::PushChanged);
+        audit.unpair_sirv(cx);
+        assert!(audit.sirv_confirm.is_none());
+    });
+}
+
+#[gpui::test]
+fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        let old_client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+            sirv::Credentials {
+                client_id: "old-id".into(),
+                client_secret: "old-secret".into(),
+            },
+        )));
+        audit.sirv_pairing = Some(SirvPairing {
+            dir: "/photos".into(),
+            files: Listing::Ready(HashMap::new()),
+            client: old_client.clone(),
+        });
+        audit.sirv_local_presence.insert("old.jpg".into());
+        audit.sirv_counts = Some((1, 1, 1));
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Push,
+            done: 3,
+            total: 100,
+            failures: Vec::new(),
+            finished: false,
+            stopping: false,
+            generation: audit.sirv_generation,
+        });
+        let generation_before = audit.sirv_pairing_generation;
+
+        audit.adopt_new_credentials(
+            sirv::Credentials {
+                client_id: "new-id".into(),
+                client_secret: "new-secret".into(),
+            },
+            cx,
+        );
+
+        let pairing = audit.sirv_pairing.as_ref().unwrap();
+        assert!(matches!(pairing.files, Listing::Walking));
+        assert!(audit.sirv_local_presence.is_empty());
+        assert!(audit.sirv_counts.is_none());
+        assert!(!Arc::ptr_eq(&pairing.client, &old_client));
+        assert!(audit.sirv_job.as_ref().unwrap().stopping);
+        // This rejects stale walks through walk_landing_applies.
+        assert_ne!(audit.sirv_pairing_generation, generation_before);
+    });
+}
+
+#[test]
+fn a_walk_from_a_previous_pairing_lands_nowhere() {
+    assert!(!walk_landing_applies(1, 2, 3, 3));
+    assert!(!walk_landing_applies(2, 1, 3, 3));
+    assert!(!walk_landing_applies(1, 1, 3, 4));
+    assert!(!walk_landing_applies(1, 1, 4, 3));
+}
+
+#[test]
+fn a_current_walk_lands() {
+    assert!(walk_landing_applies(1, 1, 2, 2));
 }
 
 /// A finding belongs to the folder it was found in.
@@ -404,6 +533,50 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.finding, None);
         assert_eq!(audit.visible.len(), 1);
+    });
+}
+
+#[gpui::test]
+fn opening_another_folder_rewalks_the_pairing(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.sirv_pairing = Some(SirvPairing {
+            dir: "/photos".into(),
+            files: Listing::Ready(HashMap::new()),
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+        });
+        audit.sirv_local_presence.insert("a.jpg".into());
+    });
+
+    cx.update(|window, cx| {
+        audit.update(cx, |audit, cx| {
+            audit.install_dataset(
+                scan::Scan {
+                    entries: vec![entry("new.png", 10, 10, 100, ImageFormat::Png)],
+                    skipped_raw: 0,
+                    unreadable: Vec::new(),
+                    walk_errors: Vec::new(),
+                    existing_output: 0,
+                },
+                PathBuf::from("/elsewhere"),
+                false,
+                window,
+                cx,
+            );
+        });
+    });
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sirv_local_presence.is_empty());
+        assert!(matches!(
+            audit.sirv_pairing.as_ref().map(|pairing| &pairing.files),
+            Some(Listing::Walking)
+        ));
     });
 }
 

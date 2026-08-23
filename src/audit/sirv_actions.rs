@@ -2,10 +2,24 @@
 
 use super::*;
 
+/// True when a finished walk still describes the current world: same
+/// dataset, same pairing as when it started. A walk that outlives either
+/// must land nowhere — installing folder A's listing under folder B's
+/// pairing arms a full-folder push at the wrong remote directory.
+pub(super) fn walk_landing_applies(
+    dataset_then: u64,
+    dataset_now: u64,
+    pairing_then: u64,
+    pairing_now: u64,
+) -> bool {
+    dataset_then == dataset_now && pairing_then == pairing_now
+}
+
 impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
     /// missing store opens the browser on an error that names the file to fix.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
+        self.sirv_confirm = None;
         // A live pairing already holds a warm client; reuse it so the browser
         // and later pushes share one token cache.
         let client = self
@@ -135,6 +149,16 @@ impl Audit {
                 browser.path.trim_end_matches('/').to_string(),
             )
         };
+        // The account root pairs to "", which `walk` rejects; a pairing
+        // whose header reads "Unpair " with no name is worse than no
+        // pairing. The browser's button says why; this guard holds even
+        // if a future caller forgets to.
+        if dir.is_empty() {
+            return;
+        }
+        // A transfer aimed at the old pairing must not outlive it, same rule as unpair.
+        self.cancel_sirv_transfer();
+        self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = Some(SirvPairing {
             dir: dir.clone(),
             files: Listing::Walking,
@@ -154,32 +178,46 @@ impl Audit {
         };
         let client = pairing.client.clone();
         let dir = pairing.dir.clone();
+        let walked_dir = dir.clone();
+        let root = self.root.clone();
         let generation = self.dataset_generation;
+        let pairing_generation = self.sirv_pairing_generation;
         cx.spawn(async move |this, cx| {
             let walked = cx
                 .background_executor()
-                .spawn(async move { client.lock().walk(&dir).map_err(|error| error.to_string()) })
+                .spawn(async move {
+                    let nodes = client
+                        .lock()
+                        .walk(&dir)
+                        .map_err(|error| error.to_string())?;
+                    let files: HashMap<String, sirv::Node> = nodes
+                        .into_iter()
+                        .filter_map(|node| {
+                            sirv::unpair_remote(&walked_dir, &node.filename).map(|key| (key, node))
+                        })
+                        .collect();
+                    let presence = sirv::local_sizes_for(&root, files.keys().map(String::as_str))
+                        .into_keys()
+                        .collect();
+                    Ok((files, presence))
+                })
                 .await;
             this.update(cx, |audit, cx| {
-                // A folder swap mid-walk retires this listing with the rest of
-                // the detached work the old dataset owned.
-                if audit.dataset_generation != generation {
+                if !walk_landing_applies(
+                    generation,
+                    audit.dataset_generation,
+                    pairing_generation,
+                    audit.sirv_pairing_generation,
+                ) {
                     return;
                 }
                 let Some(pairing) = audit.sirv_pairing.as_mut() else {
                     return;
                 };
                 match walked {
-                    Ok(nodes) => {
-                        let dir = pairing.dir.clone();
-                        pairing.files = Listing::Ready(
-                            nodes
-                                .into_iter()
-                                .filter_map(|node| {
-                                    sirv::unpair_remote(&dir, &node.filename).map(|key| (key, node))
-                                })
-                                .collect(),
-                        );
+                    Ok((files, presence)) => {
+                        pairing.files = Listing::Ready(files);
+                        audit.sirv_local_presence = presence;
                         audit.refresh_sirv_counts();
                     }
                     // A listing that failed is not a transfer that failed. It used to
@@ -195,10 +233,15 @@ impl Audit {
     }
 
     pub(super) fn unpair_sirv(&mut self, cx: &mut Context<Self>) {
+        self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
         self.sirv_counts = None;
+        self.sirv_local_presence.clear();
         self.sirv_browser = None;
         self.cancel_sirv_transfer();
+        // The detached loop may finish one file, but has no pairing to update.
+        self.sirv_job = None;
+        self.sirv_confirm = None;
         cx.notify();
     }
 
@@ -213,15 +256,16 @@ impl Audit {
             .unwrap_or(true)
     }
 
-    /// Retire any running transfer. The loop checks the generation before each file,
-    /// so the file in flight finishes and nothing after it starts.
+    /// Ask the running transfer to stop. The loop checks before each file,
+    /// so the file in flight finishes and nothing after it starts. The job
+    /// stays busy until the loop acknowledges, preventing another transfer
+    /// from racing that last file.
     pub(super) fn cancel_sirv_transfer(&mut self) {
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         if let Some(job) = self.sirv_job.as_mut()
             && !job.finished
         {
-            job.finished = true;
-            job.failures.push("stopped".into());
+            job.stopping = true;
         }
     }
 
@@ -249,28 +293,67 @@ impl Audit {
 
     /// Store the CDN credentials.
     pub(super) fn save_sirv_settings(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.settings_panel.as_mut() else {
-            return;
+        let (client_id, client_secret) = {
+            let Some(panel) = self.settings_panel.as_mut() else {
+                return;
+            };
+            (
+                panel.client_id.read(cx).value().trim().to_string(),
+                panel.client_secret.read(cx).value().trim().to_string(),
+            )
         };
-        let client_id = panel.client_id.read(cx).value().trim().to_string();
-        let client_secret = panel.client_secret.read(cx).value().trim().to_string();
         if client_id.is_empty() || client_secret.is_empty() {
+            let panel = self.settings_panel.as_mut().unwrap();
             panel.cdn_status = Some((false, "Both fields are required.".into()));
             cx.notify();
             return;
         }
         // Report what happened, not what was attempted. A read-only config directory
         // used to look exactly like success.
-        panel.cdn_status = Some(
-            match sirv::save_credentials(&sirv::Credentials {
-                client_id,
-                client_secret,
-            }) {
-                Ok(()) => (true, "Saved.".into()),
-                Err(error) => (false, format!("Could not save: {error}")),
-            },
-        );
+        let mut new_credentials = None;
+        let status = match sirv::save_credentials(&sirv::Credentials {
+            client_id: client_id.clone(),
+            client_secret: client_secret.clone(),
+        }) {
+            Ok(()) => {
+                new_credentials = Some(sirv::Credentials {
+                    client_id,
+                    client_secret,
+                });
+                (true, "Saved.".into())
+            }
+            Err(error) => (false, format!("Could not save: {error}")),
+        };
+        self.settings_panel.as_mut().unwrap().cdn_status = Some(status);
+        if let Some(credentials) = new_credentials {
+            self.adopt_new_credentials(credentials, cx);
+        }
         cx.notify();
+    }
+
+    /// New credentials mean a possibly different account: the old client,
+    /// its cached token, any listing built under it, any transfer, and any
+    /// walk in flight all describe a world that may no longer exist. Retire
+    /// all of them and re-list.
+    pub(super) fn adopt_new_credentials(
+        &mut self,
+        credentials: sirv::Credentials,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pairing) = self.sirv_pairing.as_mut() {
+            pairing.client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(credentials)));
+            pairing.files = Listing::Walking;
+        } else {
+            return;
+        }
+        // A walk started under the old credentials must land nowhere: it
+        // carries the old account's listing. Same invalidation pair_sirv
+        // and unpair_sirv already use.
+        self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
+        self.cancel_sirv_transfer();
+        self.sirv_local_presence.clear();
+        self.sirv_counts = None;
+        self.walk_sirv_pairing(cx);
     }
 
     /// A transfer is already running. One at a time: the client serialises on
@@ -281,8 +364,10 @@ impl Audit {
 
     /// Download every remote file the local folder lacks. Existing files are
     /// never overwritten — pull is additive by design, so it can never destroy
-    /// local work.
+    /// local work. Installation enforces that promise with an atomic no-replace
+    /// link, not an inference from the image scan.
     pub(super) fn start_pull(&mut self, cx: &mut Context<Self>) {
+        self.sirv_confirm = None;
         self.run_pull(false, cx);
     }
 
@@ -304,40 +389,84 @@ impl Audit {
         let files = files.clone();
         let dir = pairing.dir.clone();
         let client = pairing.client.clone();
-        let remote: Vec<sirv::Node> = files.values().cloned().collect();
-        let local_sizes: HashMap<String, u64> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                sirv::relative_key(&self.root, &entry.path).map(|key| (key, entry.bytes))
-            })
-            .collect();
-        let plan = sirv::pull_plan(&remote, &dir, &local_sizes, differing);
-        if plan.is_empty() {
-            return;
-        }
-        let total = plan.len();
+        let entry_sizes = if differing {
+            self.entries
+                .iter()
+                .filter_map(|entry| {
+                    sirv::relative_key(&self.root, &entry.path).map(|key| (key, entry.bytes))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         let generation = self.sirv_generation;
-        self.sirv_job = Some(SirvJob {
-            kind: if differing {
-                SirvJobKind::PullChanged
-            } else {
-                SirvJobKind::Pull
-            },
-            done: 0,
-            total,
-            failures: Vec::new(),
-            finished: false,
-            generation,
-        });
-        cx.notify();
-
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_executor()
+                .spawn({
+                    let root = root.clone();
+                    let files = files.clone();
+                    let dir = dir.clone();
+                    async move {
+                        let remote: Vec<sirv::Node> = files.values().cloned().collect();
+                        let local_sizes = if differing {
+                            entry_sizes
+                        } else {
+                            sirv::local_sizes_for(&root, files.keys().map(String::as_str))
+                        };
+                        sirv::pull_plan(&remote, &dir, &local_sizes, differing)
+                    }
+                })
+                .await;
+            let Some(_) = this
+                .update(cx, |audit, cx| {
+                    if audit.sirv_generation != generation || audit.sirv_busy() || plan.is_empty() {
+                        return None;
+                    }
+                    let total = plan.len();
+                    audit.sirv_job = Some(SirvJob {
+                        kind: if differing {
+                            SirvJobKind::PullChanged
+                        } else {
+                            SirvJobKind::Pull
+                        },
+                        done: 0,
+                        total,
+                        failures: Vec::new(),
+                        finished: false,
+                        stopping: false,
+                        generation,
+                    });
+                    cx.notify();
+                    Some(total)
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
             let mut failures = Vec::new();
             for (ix, key) in plan.iter().enumerate() {
                 if Self::sirv_superseded(&this, cx, generation) {
+                    this.update(cx, |audit, cx| {
+                        let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                            && job.generation == generation
+                            && !job.finished
+                        {
+                            job.finished = true;
+                            job.failures.push("stopped".into());
+                            true
+                        } else {
+                            false
+                        };
+                        if acknowledged {
+                            audit.request_path(audit.root.clone(), cx);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                     return;
                 }
                 let outcome = cx
@@ -345,26 +474,22 @@ impl Audit {
                     .spawn({
                         let client = client.clone();
                         let remote_path = format!("{dir}/{key}");
-                        async move { client.lock().download(&remote_path) }
+                        let root = root.clone();
+                        let key = key.clone();
+                        async move {
+                            let bytes = client
+                                .lock()
+                                .download(&remote_path)
+                                .map_err(|error| error.to_string())?;
+                            sirv::write_pulled(&root, &key, &bytes, differing)
+                        }
                     })
                     .await;
                 // Keep the reason. "1 failed: a.jpg" sends the user hunting;
                 // "a.jpg: 403 forbidden" or "a.jpg: No space left on device"
                 // says what to do about it.
-                let failure = match outcome {
-                    Ok(bytes) => {
-                        let target = root.join(key);
-                        match target.parent().map(std::fs::create_dir_all) {
-                            Some(Err(error)) => {
-                                Some(format!("{key}: could not create folder: {error}"))
-                            }
-                            None | Some(Ok(())) => std::fs::write(&target, bytes)
-                                .err()
-                                .map(|error| format!("{key}: {error}")),
-                        }
-                    }
-                    Err(error) => Some(format!("{key}: {error}")),
-                };
+                let failure = outcome.err().map(|error| format!("{key}: {error}"));
+                let succeeded = failure.is_none();
                 if let Some(message) = failure {
                     failures.push(message);
                 }
@@ -376,21 +501,29 @@ impl Audit {
                     {
                         job.done = ix + 1;
                         job.failures = failures.clone();
+                        if succeeded {
+                            audit.sirv_local_presence.insert(key.clone());
+                        }
                         cx.notify();
                     }
                 })
                 .ok();
             }
             this.update(cx, |audit, cx| {
-                if let Some(job) = audit.sirv_job.as_mut()
+                let owns_job = if let Some(job) = audit.sirv_job.as_mut()
                     && job.generation == generation
                 {
                     job.finished = true;
+                    true
+                } else {
+                    false
+                };
+                if owns_job {
+                    // The pulled files belong in the table: a full rescan, through
+                    // the same path a folder change takes.
+                    audit.request_path(audit.root.clone(), cx);
+                    cx.notify();
                 }
-                // The pulled files belong in the table: a full rescan, through
-                // the same path a folder change takes.
-                audit.request_path(audit.root.clone(), cx);
-                cx.notify();
             })
             .ok();
         })
@@ -399,6 +532,7 @@ impl Audit {
 
     /// Upload every local file Sirv lacks.
     pub(super) fn start_push(&mut self, cx: &mut Context<Self>) {
+        self.sirv_confirm = None;
         self.run_push(sirv::SyncState::OnlyLocal, cx);
     }
 
@@ -436,6 +570,7 @@ impl Audit {
             total,
             failures: Vec::new(),
             finished: false,
+            stopping: false,
             generation,
         });
         cx.notify();
@@ -445,6 +580,28 @@ impl Audit {
         cx.spawn(async move |this, cx| {
             let mut failures = Vec::new();
 
+            if Self::sirv_superseded(&this, cx, generation) {
+                this.update(cx, |audit, cx| {
+                    let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                        && !job.finished
+                    {
+                        job.finished = true;
+                        job.failures.push("stopped".into());
+                        true
+                    } else {
+                        false
+                    };
+                    if acknowledged {
+                        audit.walk_sirv_pairing(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+                return;
+            }
+
+            // A cancel during this locked task completes one provisioning batch.
             let made = cx
                 .background_executor()
                 .spawn({
@@ -467,8 +624,46 @@ impl Audit {
                 failures.push(message);
             }
 
+            if Self::sirv_superseded(&this, cx, generation) {
+                this.update(cx, |audit, cx| {
+                    let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                        && !job.finished
+                    {
+                        job.finished = true;
+                        job.failures.push("stopped".into());
+                        true
+                    } else {
+                        false
+                    };
+                    if acknowledged {
+                        audit.walk_sirv_pairing(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+                return;
+            }
+
             for (ix, (key, path)) in plan.iter().enumerate() {
                 if Self::sirv_superseded(&this, cx, generation) {
+                    this.update(cx, |audit, cx| {
+                        let acknowledged = if let Some(job) = audit.sirv_job.as_mut()
+                            && job.generation == generation
+                            && !job.finished
+                        {
+                            job.finished = true;
+                            job.failures.push("stopped".into());
+                            true
+                        } else {
+                            false
+                        };
+                        if acknowledged {
+                            audit.walk_sirv_pairing(cx);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                     return;
                 }
                 let outcome = cx
@@ -510,14 +705,19 @@ impl Audit {
                 .ok();
             }
             this.update(cx, |audit, cx| {
-                if let Some(job) = audit.sirv_job.as_mut()
+                let owns_job = if let Some(job) = audit.sirv_job.as_mut()
                     && job.generation == generation
                 {
                     job.finished = true;
+                    true
+                } else {
+                    false
+                };
+                if owns_job {
+                    // Re-list the pair: pushed files must stop reading as new.
+                    audit.walk_sirv_pairing(cx);
+                    cx.notify();
                 }
-                // Re-list the pair: pushed files must stop reading as new.
-                audit.walk_sirv_pairing(cx);
-                cx.notify();
             })
             .ok();
         })
@@ -532,12 +732,10 @@ impl Audit {
             Some(Listing::Ready(files)) => {
                 let mut to_push = 0;
                 let mut changed = 0;
-                let mut local_keys = HashSet::new();
                 for entry in &self.entries {
                     let Some(key) = sirv::relative_key(&self.root, &entry.path) else {
                         continue;
                     };
-                    local_keys.insert(key.clone());
                     match sirv::classify(entry.bytes, files.get(&key)) {
                         sirv::SyncState::OnlyLocal => to_push += 1,
                         sirv::SyncState::Changed => changed += 1,
@@ -546,7 +744,7 @@ impl Audit {
                 }
                 let to_pull = files
                     .keys()
-                    .filter(|key| !local_keys.contains(*key))
+                    .filter(|key| !self.sirv_local_presence.contains(*key))
                     .count();
                 Some((to_push, changed, to_pull))
             }
