@@ -376,6 +376,41 @@ fn unpairing_stops_a_running_transfer(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Push,
+            done: 3,
+            total: 100,
+            failures: Vec::new(),
+            finished: false,
+            generation: audit.sirv_generation,
+        });
+        audit.sirv_browser = Some(SirvBrowser {
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+            path: "/photos".into(),
+            nodes: None,
+            generation: 0,
+            focus: cx.focus_handle(),
+        });
+
+        audit.pair_sirv(cx);
+
+        let job = audit.sirv_job.as_ref().expect("the job is still reported");
+        assert!(job.finished, "and it stops saying it is running");
+        assert_eq!(job.failures, ["stopped"]);
+        assert_eq!(audit.sirv_pairing.as_ref().unwrap().dir, "/photos");
+    });
+}
+
 #[test]
 fn a_walk_from_a_previous_pairing_lands_nowhere() {
     assert!(!walk_landing_applies(1, 2, 3, 3));

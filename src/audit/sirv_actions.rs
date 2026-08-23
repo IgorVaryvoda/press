@@ -155,6 +155,8 @@ impl Audit {
         if dir.is_empty() {
             return;
         }
+        // A transfer aimed at the old pairing must not outlive it, same rule as unpair.
+        self.cancel_sirv_transfer();
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = Some(SirvPairing {
             dir: dir.clone(),

@@ -184,7 +184,7 @@ pub fn continuation_advances(seen: &mut HashSet<String>, token: &str) -> bool {
 fn walk_limit_error() -> Error {
     Error {
         status: 0,
-        message: format!("folder holds more than {WALK_LIMIT} files; sync it in parts"),
+        message: format!("holds more than {WALK_LIMIT} entries; open or sync a smaller folder"),
     }
 }
 
