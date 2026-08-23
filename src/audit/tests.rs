@@ -562,6 +562,7 @@ fn opening_another_folder_rewalks_the_pairing(cx: &mut TestAppContext) {
                     unreadable: Vec::new(),
                     walk_errors: Vec::new(),
                     existing_output: 0,
+                    skipped_packages: 0,
                 },
                 PathBuf::from("/elsewhere"),
                 false,
