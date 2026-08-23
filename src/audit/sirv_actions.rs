@@ -310,34 +310,46 @@ impl Audit {
         }
         // Report what happened, not what was attempted. A read-only config directory
         // used to look exactly like success.
-        let mut retry_walk = false;
+        let mut new_credentials = None;
         let status = match sirv::save_credentials(&sirv::Credentials {
             client_id: client_id.clone(),
             client_secret: client_secret.clone(),
         }) {
             Ok(()) => {
-                if let Some(pairing) = self.sirv_pairing.as_mut() {
-                    // An in-flight transfer owns an Arc to the old client.
-                    pairing.client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(
-                        sirv::Credentials {
-                            client_id,
-                            client_secret,
-                        },
-                    )));
-                    if matches!(pairing.files, Listing::Failed(_)) {
-                        pairing.files = Listing::Walking;
-                        retry_walk = true;
-                    }
-                }
+                new_credentials = Some(sirv::Credentials {
+                    client_id,
+                    client_secret,
+                });
                 (true, "Saved.".into())
             }
             Err(error) => (false, format!("Could not save: {error}")),
         };
         self.settings_panel.as_mut().unwrap().cdn_status = Some(status);
-        if retry_walk {
-            self.walk_sirv_pairing(cx);
+        if let Some(credentials) = new_credentials {
+            self.adopt_new_credentials(credentials, cx);
         }
         cx.notify();
+    }
+
+    /// New credentials mean a possibly different account: the old client,
+    /// its cached token, any listing built under it, and any transfer in
+    /// flight all describe a world that may no longer exist. Retire all of
+    /// them and re-list.
+    pub(super) fn adopt_new_credentials(
+        &mut self,
+        credentials: sirv::Credentials,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pairing) = self.sirv_pairing.as_mut() {
+            pairing.client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(credentials)));
+            pairing.files = Listing::Walking;
+        } else {
+            return;
+        }
+        self.cancel_sirv_transfer();
+        self.sirv_local_presence.clear();
+        self.sirv_counts = None;
+        self.walk_sirv_pairing(cx);
     }
 
     /// A transfer is already running. One at a time: the client serialises on

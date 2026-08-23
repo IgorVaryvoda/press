@@ -445,47 +445,47 @@ fn an_armed_overwrite_is_withdrawn_by_unpair(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn saving_credentials_retries_a_failed_listing(cx: &mut TestAppContext) {
-    let config =
-        std::env::temp_dir().join(format!("imageguide-audit-store-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&config);
-    // SAFETY: this test restores its process-wide override before it returns.
-    unsafe { std::env::set_var("IMAGEGUIDE_CONFIG_DIR", &config) };
-
+fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
-    cx.update(|window, cx| {
-        audit.update(cx, |audit, cx| {
-            let old_client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(
-                sirv::Credentials {
-                    client_id: "old-id".into(),
-                    client_secret: "old-secret".into(),
-                },
-            )));
-            audit.sirv_pairing = Some(SirvPairing {
-                dir: "/photos".into(),
-                files: Listing::Failed("old secret".into()),
-                client: old_client.clone(),
-            });
-            audit.open_settings(window, cx);
-            let panel = audit.settings_panel.as_ref().unwrap();
-            panel
-                .client_id
-                .update(cx, |input, cx| input.set_value("new-id", window, cx));
-            panel
-                .client_secret
-                .update(cx, |input, cx| input.set_value("new-secret", window, cx));
-
-            audit.save_sirv_settings(cx);
-
-            let pairing = audit.sirv_pairing.as_ref().unwrap();
-            assert!(matches!(pairing.files, Listing::Walking));
-            assert!(!Arc::ptr_eq(&pairing.client, &old_client));
+    audit.update(cx, |audit, cx| {
+        let old_client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+            sirv::Credentials {
+                client_id: "old-id".into(),
+                client_secret: "old-secret".into(),
+            },
+        )));
+        audit.sirv_pairing = Some(SirvPairing {
+            dir: "/photos".into(),
+            files: Listing::Ready(HashMap::new()),
+            client: old_client.clone(),
         });
-    });
+        audit.sirv_local_presence.insert("old.jpg".into());
+        audit.sirv_counts = Some((1, 1, 1));
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Push,
+            done: 3,
+            total: 100,
+            failures: Vec::new(),
+            finished: false,
+            stopping: false,
+            generation: audit.sirv_generation,
+        });
 
-    // SAFETY: this restores the test-only configuration override above.
-    unsafe { std::env::remove_var("IMAGEGUIDE_CONFIG_DIR") };
-    let _ = std::fs::remove_dir_all(config);
+        audit.adopt_new_credentials(
+            sirv::Credentials {
+                client_id: "new-id".into(),
+                client_secret: "new-secret".into(),
+            },
+            cx,
+        );
+
+        let pairing = audit.sirv_pairing.as_ref().unwrap();
+        assert!(matches!(pairing.files, Listing::Walking));
+        assert!(audit.sirv_local_presence.is_empty());
+        assert!(audit.sirv_counts.is_none());
+        assert!(!Arc::ptr_eq(&pairing.client, &old_client));
+        assert!(audit.sirv_job.as_ref().unwrap().stopping);
+    });
 }
 
 #[test]
