@@ -154,8 +154,8 @@ pub fn scan(root: &Path) -> Scan {
         if !file.file_type().is_file() {
             continue;
         }
-        if file
-            .path()
+        let relative = file.path().strip_prefix(root).unwrap_or(file.path());
+        if relative
             .components()
             .any(|part| part.as_os_str() == OUTPUT_DIR)
         {
@@ -389,6 +389,17 @@ mod tests {
             scanned.existing_output, 1,
             "and it says what it would replace"
         );
+    }
+
+    #[test]
+    fn a_root_named_optimized_is_still_audited() {
+        let parent = temp_dir("root-named");
+        let dir = parent.join(OUTPUT_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_sample(&dir, "source.png", 16, 16);
+
+        let scanned = scan(&dir);
+        assert_eq!(scanned.entries.len(), 1);
     }
 
     /// Every `optimized` folder is skipped as input, but only this root's own is what a
