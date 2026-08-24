@@ -4,7 +4,8 @@
 //! dependency that walks platform config directories costs more than the ten lines
 //! it would save.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -46,10 +47,42 @@ pub fn save(settings: &Settings) {
     let Some(path) = path() else {
         return;
     };
+    let _ = save_to(&path, settings);
+}
+
+fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::write(path, render(settings));
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.part", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let _ = std::fs::remove_file(&temporary);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(render(settings).as_bytes())?;
+        file.sync_all()?;
+        replace(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if to.exists() => {
+            std::fs::remove_file(to)?;
+            std::fs::rename(from, to).map_err(|_| error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn parse(text: &str) -> Settings {
@@ -112,5 +145,28 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(parse(&render(&settings)).folder, settings.folder);
+    }
+
+    #[test]
+    fn a_save_replaces_the_whole_file_without_leaving_a_partial() {
+        let dir = std::env::temp_dir().join(format!(
+            "imageguide-settings-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "width=1\ntrailing=old\n").unwrap();
+
+        let settings = Settings {
+            width: Some(900.),
+            ..Settings::default()
+        };
+        save_to(&path, &settings).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "width=900\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

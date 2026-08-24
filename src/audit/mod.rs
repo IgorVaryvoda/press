@@ -240,6 +240,12 @@ pub(crate) struct Audit {
     /// Bumped whenever a pairing changes, so an old recursive listing cannot
     /// land under a newly selected remote folder.
     sirv_pairing_generation: u64,
+    /// Lets a superseded recursive walk stop between pages and directories instead
+    /// of consuming the whole bounded request budget before its result is discarded.
+    sirv_walk_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Identity of the current browser instance. Per-path request numbers restart
+    /// when the overlay reopens, so they cannot identify the instance by themselves.
+    sirv_browser_generation: u64,
     /// The open remote-folder browser.
     sirv_browser: Option<SirvBrowser>,
     /// The open settings overlay.
@@ -396,6 +402,8 @@ struct SirvJob {
     kind: SirvJobKind,
     done: usize,
     total: usize,
+    /// Total failures. Only the first few messages are retained below.
+    failed: usize,
     failures: Vec<String>,
     finished: bool,
     /// A stop has been requested; the in-flight file still has to acknowledge it.
@@ -416,6 +424,10 @@ struct SirvBrowser {
     /// Bumped per request, so a listing for a folder the user has already left
     /// cannot overwrite the one they are looking at.
     generation: u64,
+    /// The audit-owned identity of this browser instance.
+    session: u64,
+    /// Take focus once after the overlay tree exists, then leave child controls alone.
+    focused: bool,
     focus: gpui::FocusHandle,
 }
 
@@ -473,6 +485,7 @@ impl Audit {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let root_changed = self.root != root;
         self.dataset_generation = self.dataset_generation.wrapping_add(1);
         self.estimate_generation = self.estimate_generation.wrapping_add(1);
         self.estimate = None;
@@ -490,6 +503,11 @@ impl Audit {
         // be relied on to bring its first image into view.
         self.gallery_scroll
             .scroll_to_item_strict(0, ScrollStrategy::Top);
+        if let Some(table) = self.table.clone() {
+            cx.defer(move |cx| {
+                table.update(cx, |table, cx| table.scroll_to_row(0, cx));
+            });
+        }
         self.skipped_raw = scanned.skipped_raw;
         self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
@@ -513,16 +531,20 @@ impl Audit {
         self.cursor = 0;
         self.anchor = 0;
         self.refresh_visible();
-        // A new folder is a new diff: the pairing survives, the numbers do not, and a
-        // transfer aimed at the old folder must not keep running against the new one.
-        self.cancel_sirv_transfer();
-        if let Some(pairing) = self.sirv_pairing.as_mut() {
-            self.sirv_local_presence.clear();
-            pairing.files = Listing::Walking;
-            self.sirv_counts = None;
-            self.walk_sirv_pairing(cx);
+        // A pairing maps one local root to one remote folder. A rescan of that root
+        // keeps it; replacing the root retires it before the new rows can be pushed.
+        if root_changed {
+            self.unpair_sirv(cx);
         } else {
-            self.refresh_sirv_counts();
+            self.cancel_sirv_transfer();
+            if let Some(pairing) = self.sirv_pairing.as_mut() {
+                self.sirv_local_presence.clear();
+                pairing.files = Listing::Walking;
+                self.sirv_counts = None;
+                self.walk_sirv_pairing(cx);
+            } else {
+                self.refresh_sirv_counts();
+            }
         }
         self.schedule_estimate(cx);
         cx.notify();
@@ -534,7 +556,7 @@ impl Audit {
 
     /// Scan a requested path away from the UI thread. A newer request wins, while a
     /// failed current request leaves the last usable dataset in place.
-    fn request_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(super) fn request_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.converting {
             return;
         }
@@ -868,6 +890,8 @@ pub(crate) fn build_audit(
             sirv_confirm: None,
             sirv_generation: 0,
             sirv_pairing_generation: 0,
+            sirv_walk_cancel: None,
+            sirv_browser_generation: 0,
             sirv_browser: None,
             settings_panel: None,
             compare: None,

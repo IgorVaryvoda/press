@@ -103,9 +103,8 @@ impl Audit {
                                     .ghost()
                                     .small()
                                     .label("Close")
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        audit.settings_panel = None;
-                                        cx.notify();
+                                    .on_click(cx.listener(|audit, _, window, cx| {
+                                        audit.close_settings(window, cx);
                                     })),
                             )
                             .child(

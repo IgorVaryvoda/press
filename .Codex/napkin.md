@@ -3,6 +3,8 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-23 | self | Used `rm -f` to clean isolated visual-proof files, then tried `gio trash`, which `/tmp` does not support | For exact `/tmp` proof targets, use `unlink` for files and `find <validated-dir> -depth -delete` for trees |
+| 2026-08-23 | self | Passed several test-name filters to one `cargo test` invocation, but Cargo accepts only one positional filter | Use one shared substring filter or run focused filters as separate commands |
 | 2026-08-22 | self | Treated `webp::WebPConfig::new()` as `Option` in an `Option`-returning encoder | It returns `Result`; use `.ok()?` at this deliberately lossy error boundary |
 | 2026-08-22 | self | Timed a long conversion through an `exec` wrapper that hid the yielded `exec_command` session id, then accidentally started a second conversion beside it | Print the full `exec_command` result as JSON and resume its `session_id` with `write_stdin`; never trust timing while another benchmark process exists |
 | 2026-08-22 | self | Tried to execute the skill-creator Python helper directly, but it is not executable on this host | Invoke skill-creator helpers with `python`, even when the usage examples show the script path directly |
@@ -15,6 +17,7 @@
 - For pre-alpha UI work, reshape the design freely and make real app screenshots yourself; do not wait for an in-repo headless capture test.
 
 ## Patterns That Work
+- `TableState::refresh` rebuilds cached column groups but does not notify its entity; after changing a delegate for resize, call `cx.notify()` in the same deferred table update or the old columns stay visible until another input event.
 - In the audit toolbar, group filtering separately from conversion settings and stack those groups at the default/minimum widths; this keeps Resize, Format, and Quality together instead of letting one long flex row orphan Quality.
 - The in-process system libavif 1.4.2 + libaom 3.14.1 + libyuv path took 9.070s versus rav1e speed 8's 21.503s on the same 64-file / 134.1MB sample (57.8% faster); output fell 8.7%, and PSNR was higher on four of five spot checks. A tiny C bridge avoids stale Rust wrappers and subprocess overhead.
 - On the 5,739-image corpus, bundled libwebp 1.6.0 with zero-copy RGB/RGBA input took 28.512s versus 29.569s for the 1.3.1 wrapper (3.6% faster) and encoded five formats the wrapper rejected; converting every image to a fresh RGB buffer first regressed to 33.119s.
@@ -51,6 +54,7 @@
 - A normal live app run writes its viewport and folder to `~/.config/imageguide/settings`; save or isolate that config before scripted resize tests, then restore it exactly.
 - `DISPLAY=:N import -window <id>` against the nested Xwayland server returns a 235-byte grey rectangle. The app draws through Wayland and wgpu, so its pixels only exist on Gamescope's PipeWire node.
 - A `cx.defer_in` focus grab written without a "once" guard runs on every render of the view that schedules it. In the settings panel that made Tab look broken: focus went back to the first field before the next keystroke arrived.
+- I ignored the existing `/tmp` cross-filesystem warning and emitted one error per hard link again. Create the fixture under `/home/igor/.cache` and validate one link before starting the loop.
 
 - A plan status in `plans/README.md` is a claim, not a fact. On 2026-08-22 eleven of twelve batch-2 rows said DONE and eight were not implemented; the file was also edited mid-session to mark 029 DONE while its own dependencies were open. Verify against `src/` before building on a row.
 - A test that only pairs `save_credentials_at` with `load_credentials_from` proves nothing about `save_credentials` and `load_credentials`. That gap hid a path bug that meant Sirv keys never persisted at all. Test the pair the application calls.

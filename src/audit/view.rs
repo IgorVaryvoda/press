@@ -142,7 +142,7 @@ impl Audit {
                     div()
                         .text_size(px(11.))
                         .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(if job.failures.is_empty() {
+                        .text_color(if job.failed == 0 {
                             cx.theme().muted_foreground
                         } else {
                             cx.theme().yellow
@@ -167,19 +167,14 @@ impl Audit {
                                     SirvJobKind::Push => "Pushed",
                                     SirvJobKind::PushChanged => "Overwrote on Sirv",
                                 };
-                                let failures = if job.failures.is_empty() {
+                                let failures = if job.failed == 0 {
                                     String::new()
                                 } else {
-                                    let rest = job.failures.len().saturating_sub(3);
+                                    let rest = job.failed.saturating_sub(job.failures.len());
                                     format!(
                                         ", {} failed: {}{}",
-                                        job.failures.len(),
-                                        job.failures
-                                            .iter()
-                                            .take(3)
-                                            .cloned()
-                                            .collect::<Vec<_>>()
-                                            .join(", "),
+                                        job.failed,
+                                        job.failures.join(", "),
                                         if rest == 0 {
                                             String::new()
                                         } else {
@@ -289,8 +284,9 @@ impl Audit {
                                     .small()
                                     .label(format!("Unpair {dir}"))
                                     .disabled(busy)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                    .on_click(cx.listener(|audit, _, window, cx| {
                                         audit.unpair_sirv(cx);
+                                        Self::restore_audit_focus(window, cx);
                                     })),
                             )
                         }),
@@ -305,10 +301,8 @@ impl Audit {
                             .ghost()
                             .small()
                             .label("Close")
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.sirv_browser = None;
-                                audit.sirv_confirm = None;
-                                cx.notify();
+                            .on_click(cx.listener(|audit, _, window, cx| {
+                                audit.close_sirv_browser(window, cx);
                             })),
                     )
                     .child(
@@ -321,7 +315,10 @@ impl Audit {
                                 "Pair this folder"
                             })
                             .disabled(at_root || !matches!(browser.nodes, Some(Ok(_))))
-                            .on_click(cx.listener(|audit, _, _, cx| audit.pair_sirv(cx))),
+                            .on_click(cx.listener(|audit, _, window, cx| {
+                                audit.pair_sirv(cx);
+                                Self::restore_audit_focus(window, cx);
+                            })),
                     ),
             )
             .into_any_element()
@@ -365,7 +362,9 @@ impl Render for Audit {
         if let Some(table) = self.table.clone() {
             // The table lives left of the output panel; handing it the full
             // viewport would make every column calculation 264px too wide.
-            let width = f32::from(viewport.width) - panel::OUTPUT_PANEL_WIDTH;
+            let (root_left, root_right) = root_horizontal_chrome(window);
+            let width =
+                f32::from(viewport.width) - panel::OUTPUT_PANEL_WIDTH - root_left - root_right;
             let show_result = !self.results.is_empty();
             let signature = (width.round().max(0.) as u32, show_result);
             if self.table_signature != Some(signature) {
@@ -374,6 +373,7 @@ impl Render for Audit {
                     table.update(cx, |table, cx| {
                         table.delegate_mut().set_viewport_width(width, show_result);
                         table.refresh(cx);
+                        cx.notify();
                     });
                 });
             }
@@ -553,8 +553,7 @@ impl Render for Audit {
                     cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
                         match event.keystroke.key.as_str() {
                             "escape" => {
-                                audit.settings_panel = None;
-                                cx.notify();
+                                audit.close_settings(window, cx);
                             }
                             "tab" => {
                                 const FIELDS: usize = 2;
@@ -588,7 +587,10 @@ impl Render for Audit {
             // button it replaced, so Escape had nowhere to land. Same fix as
             // the comparison: take focus next frame, once this tree exists.
             cx.defer_in(window, |audit, window, cx| {
-                if let Some(browser) = audit.sirv_browser.as_ref() {
+                if let Some(browser) = audit.sirv_browser.as_mut()
+                    && !browser.focused
+                {
+                    browser.focused = true;
                     window.focus(&browser.focus, cx);
                 }
             });
@@ -599,12 +601,13 @@ impl Render for Audit {
                 .justify_center()
                 .bg(cx.theme().background)
                 .track_focus(&self.sirv_browser.as_ref().unwrap().focus)
-                .on_key_down(cx.listener(|audit, event: &gpui::KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        audit.sirv_browser = None;
-                        cx.notify();
-                    }
-                }))
+                .on_key_down(
+                    cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" {
+                            audit.close_sirv_browser(window, cx);
+                        }
+                    }),
+                )
                 .child(view)
                 .into_any_element();
         }

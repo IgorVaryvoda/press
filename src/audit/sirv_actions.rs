@@ -2,6 +2,16 @@
 
 use super::*;
 
+const FAILURE_EXAMPLES: usize = 3;
+const CONSECUTIVE_REMOTE_FAILURES: usize = 3;
+
+pub(super) fn remember_failure(count: &mut usize, examples: &mut Vec<String>, message: String) {
+    *count += 1;
+    if examples.len() < FAILURE_EXAMPLES {
+        examples.push(message);
+    }
+}
+
 /// True when a finished walk still describes the current world: same
 /// dataset, same pairing as when it started. A walk that outlives either
 /// must land nowhere — installing folder A's listing under folder B's
@@ -15,11 +25,24 @@ pub(super) fn walk_landing_applies(
     dataset_then == dataset_now && pairing_then == pairing_now
 }
 
+pub(super) fn browser_landing_applies(
+    session_then: u64,
+    session_now: u64,
+    request_then: u64,
+    request_now: u64,
+    path_then: &str,
+    path_now: &str,
+) -> bool {
+    session_then == session_now && request_then == request_now && path_then == path_now
+}
+
 impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
     /// missing store opens the browser on an error that names the file to fix.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
         self.sirv_confirm = None;
+        self.sirv_browser_generation = self.sirv_browser_generation.wrapping_add(1);
+        let session = self.sirv_browser_generation;
         // A live pairing already holds a warm client; reuse it so the browser
         // and later pushes share one token cache.
         let client = self
@@ -47,6 +70,8 @@ impl Audit {
                         path: "/".into(),
                         nodes: Some(Err(message)),
                         generation: 0,
+                        session,
+                        focused: false,
                         focus: cx.focus_handle(),
                     });
                     cx.notify();
@@ -60,6 +85,8 @@ impl Audit {
             path: "/".into(),
             nodes: None,
             generation: 0,
+            session,
+            focused: false,
             focus: cx.focus_handle(),
         };
         if let Some(pairing) = &self.sirv_pairing {
@@ -79,22 +106,31 @@ impl Audit {
     pub(super) fn browse_sirv_path(browser: &mut SirvBrowser, cx: &mut Context<Self>) {
         browser.generation = browser.generation.wrapping_add(1);
         let request = browser.generation;
+        let session = browser.session;
         browser.nodes = None;
         let client = browser.client.clone();
         let path = browser.path.clone();
         cx.spawn(async move |this, cx| {
+            let requested_path = path.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     client
                         .lock()
-                        .readdir(&path)
+                        .readdir(&requested_path)
                         .map_err(|error| error.to_string())
                 })
                 .await;
             this.update(cx, |audit, cx| {
                 if let Some(browser) = audit.sirv_browser.as_mut()
-                    && browser.generation == request
+                    && browser_landing_applies(
+                        session,
+                        browser.session,
+                        request,
+                        browser.generation,
+                        &path,
+                        &browser.path,
+                    )
                 {
                     browser.nodes = Some(result);
                     cx.notify();
@@ -102,6 +138,22 @@ impl Audit {
             })
         })
         .detach();
+    }
+
+    pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_panel = None;
+        Self::restore_audit_focus(window, cx);
+    }
+
+    pub(super) fn close_sirv_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sirv_browser = None;
+        self.sirv_confirm = None;
+        Self::restore_audit_focus(window, cx);
+    }
+
+    pub(super) fn restore_audit_focus(window: &mut Window, cx: &mut Context<Self>) {
+        cx.defer_in(window, |audit, window, cx| window.focus(&audit.focus, cx));
+        cx.notify();
     }
 
     /// Enter a folder of the listing.
@@ -182,14 +234,22 @@ impl Audit {
         let root = self.root.clone();
         let generation = self.dataset_generation;
         let pairing_generation = self.sirv_pairing_generation;
+        if let Some(cancelled) = self.sirv_walk_cancel.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.sirv_walk_cancel = Some(cancelled.clone());
         cx.spawn(async move |this, cx| {
             let walked = cx
                 .background_executor()
                 .spawn(async move {
-                    let nodes = client
+                    let Some(nodes) = client
                         .lock()
-                        .walk(&dir)
-                        .map_err(|error| error.to_string())?;
+                        .walk(&dir, &cancelled)
+                        .map_err(|error| error.to_string())?
+                    else {
+                        return Ok(None);
+                    };
                     let files: HashMap<String, sirv::Node> = nodes
                         .into_iter()
                         .filter_map(|node| {
@@ -199,7 +259,7 @@ impl Audit {
                     let presence = sirv::local_sizes_for(&root, files.keys().map(String::as_str))
                         .into_keys()
                         .collect();
-                    Ok((files, presence))
+                    Ok(Some((files, presence)))
                 })
                 .await;
             this.update(cx, |audit, cx| {
@@ -211,6 +271,12 @@ impl Audit {
                 ) {
                     return;
                 }
+                let walked = match walked {
+                    Ok(Some(walked)) => Ok(walked),
+                    Ok(None) => return,
+                    Err(error) => Err(error),
+                };
+                audit.sirv_walk_cancel = None;
                 let Some(pairing) = audit.sirv_pairing.as_mut() else {
                     return;
                 };
@@ -238,6 +304,9 @@ impl Audit {
         self.sirv_counts = None;
         self.sirv_local_presence.clear();
         self.sirv_browser = None;
+        if let Some(cancelled) = self.sirv_walk_cancel.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.cancel_sirv_transfer();
         // The detached loop may finish one file, but has no pairing to update.
         self.sirv_job = None;
@@ -434,6 +503,7 @@ impl Audit {
                         },
                         done: 0,
                         total,
+                        failed: 0,
                         failures: Vec::new(),
                         finished: false,
                         stopping: false,
@@ -447,7 +517,9 @@ impl Audit {
             else {
                 return;
             };
+            let mut failed = 0;
             let mut failures = Vec::new();
+            let mut consecutive_remote_failures = 0;
             for (ix, key) in plan.iter().enumerate() {
                 if Self::sirv_superseded(&this, cx, generation) {
                     this.update(cx, |audit, cx| {
@@ -456,7 +528,7 @@ impl Audit {
                             && !job.finished
                         {
                             job.finished = true;
-                            job.failures.push("stopped".into());
+                            remember_failure(&mut job.failed, &mut job.failures, "stopped".into());
                             true
                         } else {
                             false
@@ -477,21 +549,35 @@ impl Audit {
                         let root = root.clone();
                         let key = key.clone();
                         async move {
-                            let bytes = client
-                                .lock()
-                                .download(&remote_path)
-                                .map_err(|error| error.to_string())?;
-                            sirv::write_pulled(&root, &key, &bytes, differing)
+                            match client.lock().download(&remote_path) {
+                                Ok(bytes) => sirv::write_pulled(&root, &key, &bytes, differing)
+                                    .map_err(|error| (error, false)),
+                                Err(error) => {
+                                    let retryable = error.retryable();
+                                    Err((error.to_string(), retryable))
+                                }
+                            }
                         }
                     })
                     .await;
                 // Keep the reason. "1 failed: a.jpg" sends the user hunting;
                 // "a.jpg: 403 forbidden" or "a.jpg: No space left on device"
                 // says what to do about it.
-                let failure = outcome.err().map(|error| format!("{key}: {error}"));
-                let succeeded = failure.is_none();
-                if let Some(message) = failure {
-                    failures.push(message);
+                let succeeded = outcome.is_ok();
+                match outcome {
+                    Ok(()) => consecutive_remote_failures = 0,
+                    Err((error, retryable)) => {
+                        consecutive_remote_failures = if retryable {
+                            consecutive_remote_failures + 1
+                        } else {
+                            0
+                        };
+                        remember_failure(&mut failed, &mut failures, format!("{key}: {error}"));
+                    }
+                }
+                let abort = consecutive_remote_failures >= CONSECUTIVE_REMOTE_FAILURES;
+                if abort && let Some(last) = failures.last_mut() {
+                    *last = "stopped after repeated Sirv failures".into();
                 }
                 this.update(cx, |audit, cx| {
                     // Only onto this loop's own job. A slow last file can land after
@@ -500,6 +586,7 @@ impl Audit {
                         && job.generation == generation
                     {
                         job.done = ix + 1;
+                        job.failed = failed;
                         job.failures = failures.clone();
                         if succeeded {
                             audit.sirv_local_presence.insert(key.clone());
@@ -508,6 +595,9 @@ impl Audit {
                     }
                 })
                 .ok();
+                if abort {
+                    break;
+                }
             }
             this.update(cx, |audit, cx| {
                 let owns_job = if let Some(job) = audit.sirv_job.as_mut()
@@ -568,6 +658,7 @@ impl Audit {
             },
             done: 0,
             total,
+            failed: 0,
             failures: Vec::new(),
             finished: false,
             stopping: false,
@@ -578,7 +669,9 @@ impl Audit {
         let folders = sirv::push_folders(plan.iter().map(|(key, _)| key));
 
         cx.spawn(async move |this, cx| {
+            let mut failed = 0;
             let mut failures = Vec::new();
+            let mut consecutive_remote_failures = 0;
 
             if Self::sirv_superseded(&this, cx, generation) {
                 this.update(cx, |audit, cx| {
@@ -587,7 +680,7 @@ impl Audit {
                         && !job.finished
                     {
                         job.finished = true;
-                        job.failures.push("stopped".into());
+                        remember_failure(&mut job.failed, &mut job.failures, "stopped".into());
                         true
                     } else {
                         false
@@ -621,7 +714,20 @@ impl Audit {
                 })
                 .await;
             if let Err(message) = made {
-                failures.push(message);
+                remember_failure(&mut failed, &mut failures, message);
+                this.update(cx, |audit, cx| {
+                    if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                    {
+                        job.failed = failed;
+                        job.failures = failures;
+                        job.finished = true;
+                        audit.walk_sirv_pairing(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+                return;
             }
 
             if Self::sirv_superseded(&this, cx, generation) {
@@ -631,7 +737,7 @@ impl Audit {
                         && !job.finished
                     {
                         job.finished = true;
-                        job.failures.push("stopped".into());
+                        remember_failure(&mut job.failed, &mut job.failures, "stopped".into());
                         true
                     } else {
                         false
@@ -653,7 +759,7 @@ impl Audit {
                             && !job.finished
                         {
                             job.finished = true;
-                            job.failures.push("stopped".into());
+                            remember_failure(&mut job.failed, &mut job.failures, "stopped".into());
                             true
                         } else {
                             false
@@ -674,22 +780,44 @@ impl Audit {
                         let path = path.clone();
                         let dir = dir.clone();
                         async move {
-                            let mut client = client.lock();
-                            match std::fs::read(&path) {
-                                Ok(bytes) => client
-                                    .upload(
-                                        &format!("{dir}/{key}"),
-                                        &bytes,
-                                        sirv::content_type(&key),
-                                    )
-                                    .map_err(|error| format!("{key}: {error}")),
-                                Err(error) => Err(format!("{key}: {error}")),
+                            let size = std::fs::metadata(&path)
+                                .map_err(|error| (format!("{key}: {error}"), false))?
+                                .len();
+                            if size > sirv::MAX_TRANSFER {
+                                return Err((
+                                    format!(
+                                        "{key}: larger than the {}-byte transfer cap",
+                                        sirv::MAX_TRANSFER
+                                    ),
+                                    false,
+                                ));
                             }
+                            let bytes = std::fs::read(&path)
+                                .map_err(|error| (format!("{key}: {error}"), false))?;
+                            client
+                                .lock()
+                                .upload(&format!("{dir}/{key}"), &bytes, sirv::content_type(&key))
+                                .map_err(|error| {
+                                    let retryable = error.retryable();
+                                    (format!("{key}: {error}"), retryable)
+                                })
                         }
                     })
                     .await;
-                if let Err(message) = outcome {
-                    failures.push(message);
+                match outcome {
+                    Ok(()) => consecutive_remote_failures = 0,
+                    Err((message, retryable)) => {
+                        consecutive_remote_failures = if retryable {
+                            consecutive_remote_failures + 1
+                        } else {
+                            0
+                        };
+                        remember_failure(&mut failed, &mut failures, message);
+                    }
+                }
+                let abort = consecutive_remote_failures >= CONSECUTIVE_REMOTE_FAILURES;
+                if abort && let Some(last) = failures.last_mut() {
+                    *last = "stopped after repeated Sirv failures".into();
                 }
                 this.update(cx, |audit, cx| {
                     // Only onto this loop's own job. A slow last file can land after
@@ -698,11 +826,15 @@ impl Audit {
                         && job.generation == generation
                     {
                         job.done = ix + 1;
+                        job.failed = failed;
                         job.failures = failures.clone();
                         cx.notify();
                     }
                 })
                 .ok();
+                if abort {
+                    break;
+                }
             }
             this.update(cx, |audit, cx| {
                 let owns_job = if let Some(job) = audit.sirv_job.as_mut()

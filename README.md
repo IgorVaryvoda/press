@@ -1,11 +1,12 @@
 # ImageGuide Desktop
 
-Audit and optimise a folder of images without uploading them anywhere.
+Audit and optimise a folder of images locally.
 
 The conversion tools on [imageguide.dev](https://www.imageguide.dev) post your files
 to a worker to do the work. That is fine for one screenshot and wrong for a client
-shoot. This does the same job locally: nothing leaves the machine, and the folder size
-is bounded by the disk rather than by a browser tab.
+shoot. This does the same job on your computer: auditing, comparing, and converting
+do not upload files, and the folder size is bounded by the disk rather than by a
+browser tab. Files leave the machine only when you explicitly use Sirv sync.
 
 ![ImageGuide auditing a mixed folder of PNG and JPEG images](docs/audit.webp)
 
@@ -81,6 +82,19 @@ screen. A folder of 6,000 images does not decode 6,000 files.
 Reading headers only is deliberate. Decoding a 6000px JPEG to learn that it is 6000px
 wide costs a hundred times what reading its header costs, and a shoot folder holds
 thousands of them.
+
+## Optional Sirv sync
+
+Open the Sirv folder browser, choose a remote folder, and pair it with the current
+local folder. ImageGuide then shows files that exist on only one side or have a
+different byte size. **Push** uploads missing local originals. **Pull** downloads
+missing remote files. Replacing a different file requires a second confirming click,
+and **Stop** prevents the next file in the transfer from starting.
+
+Sirv credentials stay in ImageGuide's platform config directory. The credentials
+file is written owner-only on Unix systems. Changing credentials or opening another
+local folder retires the old remote listing and pairing. No Sirv request happens as
+part of a normal audit, comparison, or conversion.
 
 ## Converting
 

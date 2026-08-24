@@ -10,8 +10,9 @@
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const API: &str = "https://api.sirv.com";
@@ -24,6 +25,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// File transfers get their own, much looser ceiling: a photo shoot folder
 /// holds files that legitimately take minutes.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
+const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(150), Duration::from_millis(500)];
 #[derive(Clone, Debug, PartialEq)]
 pub struct Credentials {
     pub client_id: String,
@@ -31,7 +33,7 @@ pub struct Credentials {
 }
 
 /// A hard cap on one transfer, so a confused server cannot grow memory forever.
-const MAX_TRANSFER: u64 = 512 * 1024 * 1024;
+pub const MAX_TRANSFER: u64 = 512 * 1024 * 1024;
 /// A walk that finds more files than this is treated as an error rather than
 /// listed forever.
 const WALK_LIMIT: usize = 20_000;
@@ -101,6 +103,12 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    pub fn retryable(&self) -> bool {
+        self.status == 0 || self.status == 429 || self.status >= 500
+    }
+}
 
 /// Percent-encode a path for a Sirv query string. Everything outside the
 /// unreserved set escapes, including `/` as `%2F`, which is what the API docs
@@ -414,6 +422,7 @@ pub struct Client {
     token: Option<(String, Instant)>,
     token_lifetime: Duration,
     agent: ureq::Agent,
+    api: String,
 }
 
 impl Client {
@@ -423,16 +432,24 @@ impl Client {
             token: None,
             token_lifetime: DEFAULT_TOKEN_LIFETIME,
             agent: ureq::AgentBuilder::new().timeout(TIMEOUT).build(),
+            api: API.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_api(credentials: Credentials, api: String) -> Self {
+        Self {
+            api,
+            ..Self::new(credentials)
         }
     }
 
     /// A valid token, fetching or refreshing one when needed.
     fn token(&mut self) -> Result<String, Error> {
-        if let Some((token, fetched_at)) = &self.token {
-            let fresh_for = self.token_lifetime.saturating_sub(TOKEN_MARGIN);
-            if fetched_at.elapsed() < fresh_for {
-                return Ok(token.clone());
-            }
+        if let Some((token, fetched_at)) = &self.token
+            && token_is_fresh(*fetched_at, self.token_lifetime)
+        {
+            return Ok(token.clone());
         }
         self.fetch_token()
     }
@@ -450,7 +467,7 @@ impl Client {
 
         let response = self
             .agent
-            .post(&format!("{API}/v2/token"))
+            .post(&format!("{}/v2/token", self.api))
             .send_json(serde_json::json!({
                 "clientId": self.credentials.client_id,
                 "clientSecret": self.credentials.client_secret,
@@ -475,12 +492,20 @@ impl Client {
         &mut self,
         call: impl Fn(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        match call(self) {
-            Err(Error { status: 401, .. }) => {
-                self.token = None;
-                call(self)
+        let mut refreshed = false;
+        let mut retry = 0;
+        loop {
+            match call(self) {
+                Err(Error { status: 401, .. }) if !refreshed => {
+                    self.token = None;
+                    refreshed = true;
+                }
+                Err(error) if error.retryable() && retry < RETRY_DELAYS.len() => {
+                    std::thread::sleep(RETRY_DELAYS[retry]);
+                    retry += 1;
+                }
+                result => return result,
             }
-            other => other,
         }
     }
 
@@ -491,11 +516,23 @@ impl Client {
     /// One directory listing, following `continuation` pages. The API returns
     /// up to 100 entries per page; stopping early would make the sync diff lie.
     pub fn readdir(&mut self, dirname: &str) -> Result<Vec<Node>, Error> {
+        self.readdir_cancellable(dirname, None)
+            .map(|nodes| nodes.unwrap_or_default())
+    }
+
+    fn readdir_cancellable(
+        &mut self,
+        dirname: &str,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Option<Vec<Node>>, Error> {
         let mut nodes = Vec::new();
         let mut continuation: Option<String> = None;
         let mut seen = HashSet::new();
         let mut pages = 0;
         loop {
+            if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Ok(None);
+            }
             pages += 1;
             if pages > READDIR_PAGE_LIMIT {
                 return Err(Error {
@@ -505,7 +542,11 @@ impl Client {
                     ),
                 });
             }
-            let mut url = format!("{API}/v2/files/readdir?dirname={}", encode_path(dirname));
+            let mut url = format!(
+                "{}/v2/files/readdir?dirname={}",
+                self.api,
+                encode_path(dirname)
+            );
             if let Some(token) = &continuation {
                 url.push_str(&format!("&continuation={}", encode_path(token)));
             }
@@ -526,6 +567,9 @@ impl Client {
                 contents,
                 continuation: next,
             } = listing;
+            if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Ok(None);
+            }
             nodes.extend(contents);
             if nodes.len() > WALK_LIMIT {
                 return Err(walk_limit_error());
@@ -540,7 +584,7 @@ impl Client {
                     }
                     continuation = Some(token);
                 }
-                None => return Ok(nodes),
+                None => return Ok(Some(nodes)),
             }
         }
     }
@@ -554,7 +598,7 @@ impl Client {
     /// the folder being listed is what keeps the recursion on absolute paths;
     /// pushing the bare name made the next call ask Sirv for
     /// `dirname=subfolder` and every nested listing died with a 400.
-    pub fn walk(&mut self, dir: &str) -> Result<Vec<Node>, Error> {
+    pub fn walk(&mut self, dir: &str, cancelled: &AtomicBool) -> Result<Option<Vec<Node>>, Error> {
         let root = format!("/{}", dir.trim().trim_start_matches('/'));
         let root = root.trim_end_matches('/').to_string();
         if root.is_empty() {
@@ -567,14 +611,22 @@ impl Client {
         let mut visited = HashSet::from([root.clone()]);
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
             // Name the page that failed. The pairing root in the notice is
             // useless when a subfolder three levels down rejected the call.
-            let nodes = self.readdir(&current).map_err(|mut error| {
-                if !error.message.contains(&current) {
-                    error.message = format!("{current}: {}", error.message);
-                }
-                error
-            })?;
+            let Some(nodes) = self
+                .readdir_cancellable(&current, Some(cancelled))
+                .map_err(|mut error| {
+                    if !error.message.contains(&current) {
+                        error.message = format!("{current}: {}", error.message);
+                    }
+                    error
+                })?
+            else {
+                return Ok(None);
+            };
             for mut node in nodes {
                 let name = node.filename.trim_end_matches('/');
                 if matches!(name, "" | "." | "..") {
@@ -597,12 +649,16 @@ impl Client {
                 return Err(walk_limit_error());
             }
         }
-        Ok(all)
+        Ok(Some(all))
     }
 
     /// One file's bytes.
     pub fn download(&mut self, filename: &str) -> Result<Vec<u8>, Error> {
-        let url = format!("{API}/v2/files/download?filename={}", encode_path(filename));
+        let url = format!(
+            "{}/v2/files/download?filename={}",
+            self.api,
+            encode_path(filename)
+        );
         self.authenticated(|client| {
             let authorization = client.bearer()?;
             let response = client
@@ -629,8 +685,17 @@ impl Client {
         bytes: &[u8],
         content_type: &str,
     ) -> Result<(), Error> {
-        let url = format!("{API}/v2/files/upload?filename={}", encode_path(filename));
-        let body = bytes.to_vec();
+        if bytes.len() as u64 > MAX_TRANSFER {
+            return Err(Error {
+                status: 0,
+                message: format!("upload is larger than the {MAX_TRANSFER}-byte transfer cap"),
+            });
+        }
+        let url = format!(
+            "{}/v2/files/upload?filename={}",
+            self.api,
+            encode_path(filename)
+        );
         self.authenticated(|client| {
             let authorization = client.bearer()?;
             client
@@ -639,7 +704,7 @@ impl Client {
                 .set("Authorization", &authorization)
                 .set("Content-Type", content_type)
                 .timeout(TRANSFER_TIMEOUT)
-                .send_bytes(&body)
+                .send_bytes(bytes)
                 .map_err(sirv_error("upload"))?;
             Ok(())
         })
@@ -648,7 +713,11 @@ impl Client {
     /// Create a folder. The one that already exists is success, not conflict:
     /// pushes re-check ancestors for every file.
     pub fn mkdir(&mut self, dirname: &str) -> Result<(), Error> {
-        let url = format!("{API}/v2/files/mkdir?dirname={}", encode_path(dirname));
+        let url = format!(
+            "{}/v2/files/mkdir?dirname={}",
+            self.api,
+            encode_path(dirname)
+        );
         self.authenticated(|client| {
             let authorization = client.bearer()?;
             match client
@@ -663,6 +732,10 @@ impl Client {
             }
         })
     }
+}
+
+fn token_is_fresh(fetched_at: Instant, lifetime: Duration) -> bool {
+    fetched_at.elapsed() < lifetime.saturating_sub(TOKEN_MARGIN)
 }
 
 fn sirv_error(stage: &'static str) -> impl Fn(ureq::Error) -> Error {
@@ -781,23 +854,59 @@ fn write_credentials(path: &Path, credentials: &Credentials) -> Result<(), Strin
         "client_id={}\nclient_secret={}\n",
         credentials.client_id, credentials.client_secret
     );
-    std::fs::write(path, body).map_err(|error| error.to_string())?;
-    owner_only(path);
-    Ok(())
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.part", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let _ = std::fs::remove_file(&temporary);
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        file.write_all(body.as_bytes())
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        owner_only(&temporary)?;
+        replace_file(&temporary, path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Take the group and world bits off a file. An API secret written under the usual
 /// umask is 0644, which every other account on the machine can read.
 #[cfg(unix)]
-fn owner_only(path: &Path) {
+fn owner_only(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())
 }
 
-/// Windows and macOS keep their own defaults. Windows has no mode bits, and a macOS
-/// home directory is already private to its owner.
+/// Windows has no Unix mode bits.
 #[cfg(not(unix))]
-fn owner_only(_path: &Path) {}
+fn owner_only(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if to.exists() => {
+            std::fs::remove_file(to)?;
+            std::fs::rename(from, to).map_err(|_| error)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1114,17 +1223,77 @@ mod tests {
 
     #[test]
     fn an_expired_token_is_refreshed_not_returned() {
+        // Fetched 20 minutes ago: outside any fresh window.
+        assert!(!token_is_fresh(
+            Instant::now() - Duration::from_secs(1200),
+            Duration::from_secs(1200)
+        ));
+    }
+
+    #[test]
+    fn a_transient_authenticated_failure_is_retried() {
         let mut client = Client::new(Credentials {
             client_id: "id".into(),
             client_secret: "secret".into(),
         });
-        client.token_lifetime = Duration::from_secs(1200);
-        // Fetched 20 minutes ago: outside any fresh window.
-        client.token = Some(("stale".into(), Instant::now() - Duration::from_secs(1200)));
-        // fetch_token will fail against the network with fake credentials;
-        // what matters is that the stale token did not come back as if fresh.
-        let result = client.token().unwrap_err();
-        assert_ne!(result.message, "");
+        let calls = std::cell::Cell::new(0);
+        let result = client.authenticated(|_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(Error {
+                    status: 500,
+                    message: "temporary".into(),
+                })
+            } else {
+                Ok("done")
+            }
+        });
+
+        assert_eq!(result.unwrap(), "done");
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn the_test_client_uses_its_injected_api_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /v2/token "));
+            let body = r#"{"token":"local","expiresIn":1200}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let mut client = Client::with_api(
+            Credentials {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            format!("http://{address}"),
+        );
+
+        assert_eq!(client.fetch_token().unwrap(), "local");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_walk_makes_no_request() {
+        let mut client = Client::with_api(
+            Credentials {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            "http://127.0.0.1:1".into(),
+        );
+        let cancelled = AtomicBool::new(true);
+
+        assert!(client.walk("/photos", &cancelled).unwrap().is_none());
     }
 
     #[test]

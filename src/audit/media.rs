@@ -2,6 +2,19 @@
 
 use super::*;
 
+pub(super) fn comparison_landing_applies(
+    open: Option<&Comparison>,
+    index: usize,
+    dataset_generation: u64,
+    key: &compare::Key,
+) -> bool {
+    open.is_some_and(|comparison| {
+        comparison.index == index
+            && comparison.dataset_generation == dataset_generation
+            && comparison.key == *key
+    })
+}
+
 impl Audit {
     /// Open the side-by-side view for a row and start building both sides.
     pub(super) fn open_compare(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -45,10 +58,12 @@ impl Audit {
             cx.background_executor().timer(COMPARE_DELAY).await;
             let still_open = this
                 .read_with(cx, |audit, _| {
-                    audit
-                        .compare
-                        .as_ref()
-                        .is_some_and(|open| open.index == index && open.key == key)
+                    comparison_landing_applies(
+                        audit.compare.as_ref(),
+                        index,
+                        dataset_generation,
+                        &key,
+                    )
                 })
                 .unwrap_or(false);
             if !still_open {
@@ -62,15 +77,18 @@ impl Audit {
                 .map(Arc::new);
 
             let _ = this.update(cx, |audit, cx| {
-                if let Some(pair) = built.as_ref() {
-                    audit.cached = Some((key.clone(), pair.clone()));
-                }
                 // Ignore a result the user already navigated away from.
-                if let Some(comparison) = audit.compare.as_mut()
-                    && comparison.index == index
-                    && comparison.dataset_generation == dataset_generation
-                    && comparison.key == key
-                {
+                let applies = comparison_landing_applies(
+                    audit.compare.as_ref(),
+                    index,
+                    dataset_generation,
+                    &key,
+                );
+                if applies {
+                    if let Some(pair) = built.as_ref() {
+                        audit.cached = Some((key.clone(), pair.clone()));
+                    }
+                    let comparison = audit.compare.as_mut().unwrap();
                     comparison.failed = built.is_none();
                     comparison.pair = built;
                     cx.notify();

@@ -50,35 +50,44 @@ impl Audit {
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
-            .child(self.panel_heading("Output", cx))
             .child(
                 div()
+                    .id("output-settings")
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(self.preset_row(0, cx))
-                    .child(self.preset_row(1, cx))
-                    .child(self.preset_row(2, cx)),
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .gap_3()
+                    .child(self.panel_heading("Output", cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(self.preset_row(0, cx))
+                            .child(self.preset_row(1, cx))
+                            .child(self.preset_row(2, cx)),
+                    )
+                    .child(self.panel_heading("Fine-tune", cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(self.panel_setting(
+                                "Format",
+                                self.format_group(cx).small().compact(),
+                                cx,
+                            ))
+                            .child(self.panel_quality(cx))
+                            .child(self.panel_setting(
+                                "Max size",
+                                self.resize_group(cx).small().compact(),
+                                cx,
+                            )),
+                    ),
             )
-            .child(self.panel_heading("Fine-tune", cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(self.panel_setting(
-                        "Format",
-                        self.format_group(cx).small().compact(),
-                        cx,
-                    ))
-                    .child(self.panel_quality(cx))
-                    .child(self.panel_setting(
-                        "Max size",
-                        self.resize_group(cx).small().compact(),
-                        cx,
-                    )),
-            )
-            .child(div().flex_1())
             .child(self.output_summary(cx))
     }
 

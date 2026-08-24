@@ -41,7 +41,7 @@ impl Audit {
             parts.push(format!("could not list {}: {reason}", pairing.dir));
         }
         if let Some(job) = &self.sirv_job
-            && (!job.finished || !job.failures.is_empty())
+            && (!job.finished || job.failed > 0)
         {
             let verb = match job.kind {
                 SirvJobKind::Pull => "Sirv pull",
@@ -49,19 +49,14 @@ impl Audit {
                 SirvJobKind::Push => "Sirv push",
                 SirvJobKind::PushChanged => "Sirv push (overwrite)",
             };
-            let failures = if job.failures.is_empty() {
+            let failures = if job.failed == 0 {
                 String::new()
             } else {
-                let rest = job.failures.len().saturating_sub(3);
+                let rest = job.failed.saturating_sub(job.failures.len());
                 format!(
                     ", {} failed: {}{}",
-                    job.failures.len(),
-                    job.failures
-                        .iter()
-                        .take(3)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    job.failed,
+                    job.failures.join(", "),
                     if rest == 0 {
                         String::new()
                     } else {

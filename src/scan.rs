@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use image::{ImageFormat, ImageReader};
+use image::{
+    AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader,
+    codecs::gif::GifDecoder, metadata::Orientation,
+};
 use walkdir::WalkDir;
 
 /// Camera raw formats. Most are TIFF containers, so a plain header read reports the
@@ -140,7 +143,11 @@ pub fn probe(path: &Path) -> Option<Entry> {
     let bytes = std::fs::metadata(path).ok()?.len();
     let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
     let format = reader.format()?;
-    let (width, height) = reader.into_dimensions().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let (mut width, mut height) = decoder.dimensions();
+    if orientation_swaps_dimensions(decoder.orientation().unwrap_or(Orientation::NoTransforms)) {
+        std::mem::swap(&mut width, &mut height);
+    }
 
     Some(Entry {
         path: path.to_path_buf(),
@@ -159,13 +166,62 @@ pub fn probe(path: &Path) -> Option<Entry> {
 /// precisely because extensions lie. Using both meant the files the audit flagged as
 /// mislabelled were exactly the files it then failed to convert, thumbnail or open,
 /// with no error beyond a missing row.
-pub fn decode(path: &Path) -> Option<image::DynamicImage> {
-    ImageReader::open(path)
-        .ok()?
+pub fn decode(path: &Path) -> Option<DynamicImage> {
+    let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder).ok()?;
+    image.apply_orientation(orientation);
+    Some(image)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversionDecodeError {
+    Failed,
+    AnimatedGif,
+}
+
+/// Decode one still image for conversion. GIF is the exception to the generic
+/// decoder: it exposes only the first frame as a `DynamicImage`, so accepting an
+/// animation here would silently replace it with a still.
+pub fn decode_for_conversion(path: &Path) -> Result<DynamicImage, ConversionDecodeError> {
+    let reader = ImageReader::open(path)
+        .map_err(|_| ConversionDecodeError::Failed)?
         .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()
+        .map_err(|_| ConversionDecodeError::Failed)?;
+    if reader.format() == Some(ImageFormat::Gif) {
+        let file = std::fs::File::open(path).map_err(|_| ConversionDecodeError::Failed)?;
+        let decoder = GifDecoder::new(std::io::BufReader::new(file))
+            .map_err(|_| ConversionDecodeError::Failed)?;
+        let mut frames = decoder.into_frames();
+        let first = frames
+            .next()
+            .ok_or(ConversionDecodeError::Failed)?
+            .map_err(|_| ConversionDecodeError::Failed)?;
+        if frames.next().is_some() {
+            return Err(ConversionDecodeError::AnimatedGif);
+        }
+        return Ok(DynamicImage::ImageRgba8(first.into_buffer()));
+    }
+
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|_| ConversionDecodeError::Failed)?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image =
+        DynamicImage::from_decoder(decoder).map_err(|_| ConversionDecodeError::Failed)?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+
+fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
+    matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    )
 }
 
 /// Walk a folder and probe every image in it, subfolders included.
@@ -322,7 +378,7 @@ pub fn format_name(format: ImageFormat) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb};
+    use image::{Frame, ImageBuffer, Rgb, Rgba, codecs::gif::GifEncoder};
     use std::os::unix::fs::PermissionsExt;
 
     fn write_sample(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
@@ -352,6 +408,29 @@ mod tests {
         assert_eq!(entry.bytes, std::fs::metadata(&path).unwrap().len());
     }
 
+    #[test]
+    fn exif_orientation_is_applied_to_dimensions_and_pixels() {
+        const EXIF_ROTATE_90: [u8; 36] = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2a, 0, 0, 0, 8,
+            0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let dir = temp_dir("orientation");
+        let path = write_sample(&dir, "camera.jpg", 40, 20);
+        let jpeg = std::fs::read(&path).unwrap();
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+        let mut oriented = Vec::with_capacity(jpeg.len() + EXIF_ROTATE_90.len());
+        oriented.extend_from_slice(&jpeg[..2]);
+        oriented.extend_from_slice(&EXIF_ROTATE_90);
+        oriented.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&path, oriented).unwrap();
+
+        let entry = probe(&path).expect("oriented JPEG is probed");
+        let decoded = decode(&path).expect("oriented JPEG is decoded");
+        assert_eq!((entry.width, entry.height), (20, 40));
+        assert_eq!((decoded.width(), decoded.height()), (20, 40));
+    }
+
     /// The mislabelled files are the whole point, so they have to survive every path
     /// and not just the one that counts them. Decoding by extension meant the folder
     /// this app was built for — 169 files named `.webp`, 59 of them PNG — listed
@@ -367,6 +446,24 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (24, 16));
         // And the audit agrees about what it actually is.
         assert_eq!(probe(&liar).unwrap().format, ImageFormat::Png);
+    }
+
+    #[test]
+    fn an_animated_gif_is_not_decoded_as_a_still_for_conversion() {
+        let dir = temp_dir("animated-gif");
+        let path = dir.join("moving.gif");
+        let file = std::fs::File::create(&path).unwrap();
+        GifEncoder::new(file)
+            .encode_frames([
+                Frame::new(ImageBuffer::from_pixel(2, 2, Rgba([255, 0, 0, 255]))),
+                Frame::new(ImageBuffer::from_pixel(2, 2, Rgba([0, 0, 255, 255]))),
+            ])
+            .unwrap();
+
+        assert_eq!(
+            decode_for_conversion(&path),
+            Err(ConversionDecodeError::AnimatedGif)
+        );
     }
 
     /// The audit's best finding is a file whose name disagrees with its bytes, so

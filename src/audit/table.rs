@@ -39,7 +39,6 @@ pub(super) struct AuditTable {
     /// share, so somebody has to do the arithmetic.
     name_width: f32,
     compact: bool,
-    show_result: bool,
 }
 
 /// The columns, in display order. `Column` is what the audit sorts by; this adds the
@@ -130,9 +129,21 @@ impl AuditTable {
 
     pub(super) fn layout(width: f32, show_result: bool) -> (bool, f32, Vec<TableColumn>) {
         let compact = width < 900.;
-        let name_width =
-            (width - Self::fixed_width(compact, show_result) - Self::CHROME).max(W_NAME_MIN);
-        let columns = if compact {
+        let narrow = width < Self::fixed_width(compact, show_result) + Self::CHROME + W_NAME_MIN;
+        let columns = if narrow {
+            let mut columns = vec![
+                TableColumn::Tick,
+                TableColumn::Thumb,
+                TableColumn::Name,
+                TableColumn::Density,
+            ];
+            columns.push(if show_result {
+                TableColumn::Result
+            } else {
+                TableColumn::Weight
+            });
+            columns
+        } else if compact {
             vec![
                 TableColumn::Tick,
                 TableColumn::Thumb,
@@ -141,7 +152,6 @@ impl AuditTable {
                 TableColumn::Pixels,
                 TableColumn::Density,
                 TableColumn::Weight,
-                TableColumn::Result,
             ]
         } else {
             vec![
@@ -153,9 +163,26 @@ impl AuditTable {
                 TableColumn::Density,
                 TableColumn::Weight,
                 TableColumn::Sync,
-                TableColumn::Result,
             ]
         };
+        let mut columns = columns;
+        if show_result && !narrow {
+            columns.push(TableColumn::Result);
+        }
+        let fixed_width = if narrow {
+            W_TICK
+                + THUMB_SLOT
+                + 12.
+                + W_DENSITY_COMPACT
+                + if show_result {
+                    W_RESULT
+                } else {
+                    W_WEIGHT_COMPACT
+                }
+        } else {
+            Self::fixed_width(compact, show_result)
+        };
+        let name_width = (width - fixed_width - Self::CHROME).max(W_NAME_MIN);
         (compact, name_width, columns)
     }
 
@@ -164,7 +191,6 @@ impl AuditTable {
             audit,
             name_width: W_NAME_MIN,
             compact: false,
-            show_result: false,
             columns: Vec::new(),
         };
         table.set_viewport_width(f32::from(window.viewport_size().width), false);
@@ -172,21 +198,13 @@ impl AuditTable {
     }
 
     pub(super) fn set_viewport_width(&mut self, width: f32, show_result: bool) {
-        self.show_result = show_result;
         (self.compact, self.name_width, self.columns) = Self::layout(width, show_result);
     }
 }
 
 impl TableDelegate for AuditTable {
     fn columns_count(&self, _cx: &App) -> usize {
-        // The result column only exists once there is something to put in it.
-        // Reserving its width up front left a fifth of the window empty in the
-        // common case.
-        if self.show_result {
-            self.columns.len()
-        } else {
-            self.columns.len() - 1
-        }
+        self.columns.len()
     }
 
     fn rows_count(&self, cx: &App) -> usize {

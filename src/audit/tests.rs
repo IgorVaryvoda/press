@@ -1,4 +1,5 @@
-use super::sirv_actions::walk_landing_applies;
+use super::media::comparison_landing_applies;
+use super::sirv_actions::{browser_landing_applies, remember_failure, walk_landing_applies};
 use super::*;
 use crate::{
     Launch, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
@@ -255,13 +256,44 @@ fn conversion_progress_publishes_by_worker_window_and_flushes_the_tail() {
 }
 
 #[test]
+fn a_comparison_result_only_belongs_to_its_exact_request() {
+    let key = compare::Key::new(
+        Path::new("photo.jpg"),
+        Format::WebP,
+        Quality::lossy(80.),
+        MaxEdge::FULL,
+    );
+    let comparison = Comparison {
+        index: 2,
+        dataset_generation: 7,
+        key: key.clone(),
+        pair: None,
+        failed: false,
+        split: 0.5,
+        pan: (0., 0.),
+        zoom: None,
+        drag: None,
+    };
+
+    assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
+    assert!(!comparison_landing_applies(Some(&comparison), 2, 8, &key));
+}
+
+#[test]
 fn table_layout_keeps_decision_columns_at_compact_width() {
-    let (compact, compact_name, compact_columns) = AuditTable::layout(760., true);
+    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::OUTPUT_PANEL_WIDTH - 44.;
+    let (compact, compact_name, compact_columns) = AuditTable::layout(minimum_left_pane, true);
     assert!(compact);
     assert!(compact_name >= W_NAME_MIN);
-    assert!(compact_columns.contains(&TableColumn::Weight));
     assert!(compact_columns.contains(&TableColumn::Result));
     assert!(compact_columns.contains(&TableColumn::Density));
+    assert!(!compact_columns.contains(&TableColumn::Weight));
+    assert!(!compact_columns.contains(&TableColumn::Pixels));
+
+    let (_, _, before_columns) = AuditTable::layout(minimum_left_pane, false);
+    assert!(before_columns.contains(&TableColumn::Density));
+    assert!(before_columns.contains(&TableColumn::Weight));
+    assert!(!before_columns.contains(&TableColumn::Result));
 
     let (wide, wide_name, wide_columns) = AuditTable::layout(1100., true);
     assert!(!wide);
@@ -354,6 +386,7 @@ fn unpairing_discards_the_job_and_stops_the_loop(cx: &mut TestAppContext) {
             kind: SirvJobKind::Push,
             done: 3,
             total: 100,
+            failed: 0,
             failures: Vec::new(),
             finished: false,
             stopping: false,
@@ -381,6 +414,7 @@ fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             kind: SirvJobKind::Push,
             done: 3,
             total: 100,
+            failed: 0,
             failures: Vec::new(),
             finished: false,
             stopping: false,
@@ -396,6 +430,8 @@ fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             path: "/photos".into(),
             nodes: None,
             generation: 0,
+            session: 1,
+            focused: false,
             focus: cx.focus_handle(),
         });
 
@@ -413,6 +449,24 @@ fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
     });
 }
 
+#[test]
+fn a_listing_from_a_closed_browser_cannot_land_in_its_replacement() {
+    assert!(!browser_landing_applies(4, 5, 1, 1, "/photos", "/photos"));
+    assert!(browser_landing_applies(5, 5, 2, 2, "/photos", "/photos"));
+}
+
+#[test]
+fn sirv_jobs_count_every_failure_but_keep_three_examples() {
+    let mut count = 0;
+    let mut examples = Vec::new();
+    for index in 0..5 {
+        remember_failure(&mut count, &mut examples, format!("file-{index}"));
+    }
+
+    assert_eq!(count, 5);
+    assert_eq!(examples, ["file-0", "file-1", "file-2"]);
+}
+
 #[gpui::test]
 fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -422,6 +476,7 @@ fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
             kind: SirvJobKind::Pull,
             done: 1,
             total: 1,
+            failed: 0,
             failures: Vec::new(),
             finished: true,
             stopping: false,
@@ -466,6 +521,7 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
             kind: SirvJobKind::Push,
             done: 3,
             total: 100,
+            failed: 0,
             failures: Vec::new(),
             finished: false,
             stopping: false,
@@ -537,7 +593,7 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn opening_another_folder_rewalks_the_pairing(cx: &mut TestAppContext) {
+fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
         audit.sirv_pairing = Some(SirvPairing {
@@ -574,10 +630,7 @@ fn opening_another_folder_rewalks_the_pairing(cx: &mut TestAppContext) {
 
     audit.read_with(cx, |audit, _| {
         assert!(audit.sirv_local_presence.is_empty());
-        assert!(matches!(
-            audit.sirv_pairing.as_ref().map(|pairing| &pairing.files),
-            Some(Listing::Walking)
-        ));
+        assert!(audit.sirv_pairing.is_none());
     });
 }
 
@@ -608,6 +661,52 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
     });
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
     (audit, cx)
+}
+
+#[gpui::test]
+fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update_in(cx, |audit, window, cx| {
+        audit.open_settings(window, cx);
+        let field = audit
+            .settings_panel
+            .as_ref()
+            .unwrap()
+            .client_id
+            .read(cx)
+            .focus_handle(cx);
+        window.focus(&field, cx);
+        audit.close_settings(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(audit.read(cx).focus.is_focused(window));
+    });
+
+    audit.update_in(cx, |audit, window, cx| {
+        let browser_focus = cx.focus_handle();
+        audit.sirv_browser = Some(SirvBrowser {
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+            path: "/".into(),
+            nodes: None,
+            generation: 0,
+            session: 1,
+            focused: true,
+            focus: browser_focus.clone(),
+        });
+        window.focus(&browser_focus, cx);
+        audit.close_sirv_browser(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(audit.read(cx).focus.is_focused(window));
+    });
 }
 
 #[gpui::test]
@@ -1055,4 +1154,65 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
     );
 
     std::fs::remove_dir_all(test_root).expect("the test gallery folders are removed");
+}
+
+#[gpui::test]
+fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContext) {
+    cx.update(init_theme);
+    let entries = (0..120)
+        .map(|index| entry(&format!("old-{index}.png"), 1, 1, 1, ImageFormat::Png))
+        .collect();
+    let mut audit_entity = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let audit = build_audit(
+            Launch {
+                root: PathBuf::from("old"),
+                entries,
+                skipped_raw: 0,
+                skipped_packages: 0,
+                unreadable: Vec::new(),
+                walk_errors: Vec::new(),
+                existing_output: 0,
+                open_single: false,
+                format: Format::WebP,
+                quality: Quality::lossy(80.),
+                max_edge: MaxEdge::FULL,
+                grid: false,
+            },
+            window,
+            cx,
+        );
+        audit_entity = Some(audit.clone());
+        Root::new(audit, window, cx).bg(cx.theme().background)
+    });
+    let audit = audit_entity.unwrap();
+    cx.simulate_resize(size(px(900.), px(640.)));
+    cx.run_until_parked();
+    let table = audit.read_with(cx, |audit, _| audit.table.clone().unwrap());
+    table.update(cx, |table, cx| table.scroll_to_row(90, cx));
+    cx.simulate_resize(size(px(900.), px(640.)));
+    cx.run_until_parked();
+    assert!(table.read_with(cx, |table, _| table.visible_range().rows().start > 0));
+
+    let scanned = scan::Scan {
+        entries: (0..120)
+            .map(|index| entry(&format!("new-{index}.png"), 1, 1, 1, ImageFormat::Png))
+            .collect(),
+        skipped_raw: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+    };
+    audit.update_in(cx, |audit, window, cx| {
+        audit.install_dataset(scanned, PathBuf::from("new"), false, window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(900.), px(640.)));
+    cx.run_until_parked();
+
+    assert_eq!(
+        table.read_with(cx, |table, _| table.visible_range().rows().start),
+        0
+    );
 }

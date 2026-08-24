@@ -1,8 +1,9 @@
-//! ImageGuide Desktop — audit a folder of images without uploading them anywhere.
+//! ImageGuide Desktop — audit and convert a folder of images locally.
 //!
 //! The browser tools on imageguide.dev post files to a worker to convert them. This
-//! does the same work locally, so nothing leaves the machine and the folder size is
-//! bounded by the disk rather than by a tab.
+//! does the same work locally, so auditing and conversion send nothing away and the
+//! folder size is bounded by the disk rather than by a tab. Files move over the
+//! network only when the user explicitly uses the optional Sirv sync actions.
 
 mod audit;
 mod avif;
@@ -94,9 +95,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--lossless" => quality = Quality::LOSSLESS,
             "--quality" => {
                 let value = rest.next().unwrap_or_else(|| "nothing".to_string());
-                let quality_value = value
+                let quality_value: f32 = value
                     .parse()
                     .map_err(|_| format!("--quality needs a number, got {value:?}"))?;
+                if !quality_value.is_finite() {
+                    return Err(format!("--quality needs a finite number, got {value:?}"));
+                }
                 quality = Quality::lossy(quality_value);
             }
             "--" => {
@@ -108,6 +112,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             _ if argument.starts_with('-') => unknown.push(argument),
             _ => root = Some(PathBuf::from(argument)),
         }
+    }
+
+    if format == Format::Avif && quality == Quality::LOSSLESS {
+        return Err("--lossless is available only with --webp".into());
     }
 
     Ok(Args {
@@ -152,7 +160,7 @@ fn convert_headless(
             };
             let mut totals = totals.lock();
             match converted {
-                Some(converted) => {
+                Ok(converted) => {
                     totals.0 += entry.bytes;
                     totals.1 += converted.bytes;
                     let delta = entry.bytes as i64 - converted.bytes as i64;
@@ -169,9 +177,13 @@ fn convert_headless(
                         format_bytes(converted.bytes)
                     );
                 }
-                None => {
+                Err(error) => {
                     totals.2 += 1;
-                    println!("{:<52} failed", entry.name());
+                    let reason = error
+                        .reason()
+                        .map(|reason| format!(": {reason}"))
+                        .unwrap_or_default();
+                    println!("{:<52} failed{reason}", entry.name());
                 }
             }
         },
@@ -231,20 +243,23 @@ fn main() {
             std::process::exit(2);
         }
         // No path given: open the window on its empty state and let the user pick.
-        return run_window(Launch {
-            root: PathBuf::new(),
-            entries: Vec::new(),
-            skipped_raw: 0,
-            skipped_packages: 0,
-            unreadable: Vec::new(),
-            walk_errors: Vec::new(),
-            existing_output: 0,
-            open_single: false,
-            format: args.format,
-            quality: args.quality,
-            max_edge: args.max_edge,
-            grid: args.grid,
-        });
+        return run_window(
+            Launch {
+                root: PathBuf::new(),
+                entries: Vec::new(),
+                skipped_raw: 0,
+                skipped_packages: 0,
+                unreadable: Vec::new(),
+                walk_errors: Vec::new(),
+                existing_output: 0,
+                open_single: false,
+                format: args.format,
+                quality: args.quality,
+                max_edge: args.max_edge,
+                grid: args.grid,
+            },
+            None,
+        );
     };
 
     // A single file opens straight into the comparison. A folder opens the audit.
@@ -252,6 +267,26 @@ fn main() {
     if !target.is_dir() && !open_single {
         eprintln!("imageguide: {} is not a file or folder", target.display());
         std::process::exit(2);
+    }
+
+    if !args.convert {
+        return run_window(
+            Launch {
+                root: PathBuf::new(),
+                entries: Vec::new(),
+                skipped_raw: 0,
+                skipped_packages: 0,
+                unreadable: Vec::new(),
+                walk_errors: Vec::new(),
+                existing_output: 0,
+                open_single: false,
+                format: args.format,
+                quality: args.quality,
+                max_edge: args.max_edge,
+                grid: args.grid,
+            },
+            Some(target),
+        );
     }
 
     let (scanned, root) = if open_single {
@@ -292,29 +327,12 @@ fn main() {
         many => println!("{many} macOS packages skipped"),
     }
 
-    if args.convert {
-        let failed = convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
-        let unread = scanned_unreadable_count + walk_error_count;
-        if unread > 0 {
-            eprintln!("imageguide: {unread} files or folders could not be read");
-        }
-        std::process::exit(if failed + unread == 0 { 0 } else { 1 });
+    let failed = convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
+    let unread = scanned_unreadable_count + walk_error_count;
+    if unread > 0 {
+        eprintln!("imageguide: {unread} files or folders could not be read");
     }
-
-    run_window(Launch {
-        root,
-        entries,
-        skipped_raw: scanned.skipped_raw,
-        skipped_packages: scanned.skipped_packages,
-        unreadable: scanned.unreadable,
-        walk_errors: scanned.walk_errors,
-        existing_output: scanned.existing_output,
-        open_single,
-        format: args.format,
-        quality: args.quality,
-        max_edge: args.max_edge,
-        grid: args.grid,
-    });
+    std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
 
 /// Build the audit view for a window. Shared by the app and the screenshot harness
@@ -403,10 +421,7 @@ struct Launch {
     grid: bool,
 }
 
-fn run_window(launch: Launch) {
-    #[cfg(feature = "updater")]
-    update::install_if_available();
-
+fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
     application()
         // Every `IconName` is an SVG loaded through the app's asset source. Without
         // this the icons resolve to nothing and the toolbar renders as bare words.
@@ -445,6 +460,20 @@ fn run_window(launch: Launch) {
             )
             .unwrap();
             if let Some(audit) = audit_slot {
+                if let Some(path) = startup_path {
+                    audit.update(cx, |audit, cx| audit.request_path(path, cx));
+                }
+                #[cfg(feature = "updater")]
+                {
+                    let audit = audit.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .spawn(async { update::install_if_available() })
+                            .await;
+                        audit.update(cx, |_, cx| cx.notify());
+                    })
+                    .detach();
+                }
                 // cfg! keeps the call compiled (and the module alive) on every
                 // platform while running it only where a menu bar exists.
                 if cfg!(target_os = "macos") {
@@ -504,6 +533,19 @@ mod tests {
             Err(error) => assert!(error.contains("--quality")),
             Ok(_) => panic!("a bad quality value must be an error"),
         }
+    }
+
+    #[test]
+    fn a_non_finite_quality_is_an_error() {
+        for value in ["NaN", "inf", "-inf"] {
+            assert!(parse(&["--quality", value]).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn lossless_avif_is_rejected_in_either_flag_order() {
+        assert!(parse(&["--avif", "--lossless"]).is_err());
+        assert!(parse(&["--lossless", "--avif"]).is_err());
     }
 
     #[test]

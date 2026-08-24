@@ -40,6 +40,21 @@ impl Quality {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    Failed,
+    AnimatedGif,
+}
+
+impl Failure {
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Failed => None,
+            Self::AnimatedGif => Some("animated GIFs are not converted"),
+        }
+    }
+}
+
 /// Longest edge of the exported image. `None` leaves the source alone.
 ///
 /// This is where most of the weight actually is. Re-encoding a 6400px photo as AVIF
@@ -327,7 +342,7 @@ pub fn convert_each(
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
-    report: impl Fn(&Path, Option<Converted>) + Sync,
+    report: impl Fn(&Path, Result<Converted, Failure>) + Sync,
 ) {
     let planned = &plan_outputs(root, sources, out_dir, format);
     // A shared cursor rather than a slice per thread: files in one folder differ in
@@ -344,7 +359,7 @@ pub fn convert_each(
                     else {
                         return;
                     };
-                    let converted = convert_to(source, written, format, quality, max_edge);
+                    let converted = convert_to(root, source, written, format, quality, max_edge);
                     let _ordered = reporting.lock();
                     report(source, converted);
                 }
@@ -367,7 +382,8 @@ pub fn output_path(root: &Path, source: &Path, out_dir: &Path, format: Format) -
 /// folder both ask for `optimized/shot.webp`. Whichever finished second replaced the
 /// other, and the run still reported two files converted and a saving that counted
 /// bytes no longer on disk. A second claim on a name keeps its source extension:
-/// `optimized/shot-jpg.webp`, then `-2`, `-3` if even that is taken.
+/// `optimized/shot-jpg.webp`, then `-2`, `-3` if even that is taken. Claims are
+/// assigned in source-path order, independent of the current table sort.
 pub fn plan_outputs(
     root: &Path,
     sources: &[PathBuf],
@@ -380,62 +396,107 @@ pub fn plan_outputs(
     let mut taken: HashSet<String> = HashSet::new();
     let key = |path: &Path| path.to_string_lossy().to_lowercase();
 
-    sources
-        .iter()
-        .map(|source| {
-            let plain = output_path(root, source, out_dir, format);
-            if taken.insert(key(&plain)) {
-                return plain;
+    let mut planned = vec![PathBuf::new(); sources.len()];
+    let mut order: Vec<usize> = (0..sources.len()).collect();
+    order.sort_by(|left, right| {
+        key(&sources[*left])
+            .cmp(&key(&sources[*right]))
+            .then_with(|| sources[*left].cmp(&sources[*right]))
+    });
+
+    for index in order {
+        let source = &sources[index];
+        let plain = output_path(root, source, out_dir, format);
+        if taken.insert(key(&plain)) {
+            planned[index] = plain;
+            continue;
+        }
+        let extension = source
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "file".to_string());
+        let stem = plain.file_stem().unwrap_or_default().to_string_lossy();
+        let parent = plain.parent().unwrap_or(out_dir);
+        for attempt in 1.. {
+            let suffix = if attempt == 1 {
+                String::new()
+            } else {
+                format!("-{attempt}")
+            };
+            let candidate = parent
+                .join(format!("{stem}-{extension}{suffix}"))
+                .with_extension(format.extension());
+            if taken.insert(key(&candidate)) {
+                planned[index] = candidate;
+                break;
             }
-            let extension = source
-                .extension()
-                .map(|extension| extension.to_string_lossy().to_lowercase())
-                .unwrap_or_else(|| "file".to_string());
-            let stem = plain.file_stem().unwrap_or_default().to_string_lossy();
-            let parent = plain.parent().unwrap_or(out_dir);
-            for attempt in 1.. {
-                let suffix = if attempt == 1 {
-                    String::new()
-                } else {
-                    format!("-{attempt}")
-                };
-                let candidate = parent
-                    .join(format!("{stem}-{extension}{suffix}"))
-                    .with_extension(format.extension());
-                if taken.insert(key(&candidate)) {
-                    return candidate;
-                }
-            }
-            unreachable!("the loop returns as soon as a name is free")
-        })
-        .collect()
+        }
+    }
+    planned
 }
 
 /// Read, encode, and write one file to the path `plan_outputs` chose for it.
 pub fn convert_to(
+    root: &Path,
     source: &Path,
     written: &Path,
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
-) -> Option<Converted> {
-    let decoded = max_edge.apply(crate::scan::decode(source)?);
+) -> Result<Converted, Failure> {
+    let decoded = crate::scan::decode_for_conversion(source).map_err(|error| match error {
+        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
+        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+    })?;
+    let decoded = max_edge.apply(decoded);
     let (width, height) = (decoded.width(), decoded.height());
-    let encoded = encode(&decoded, format, quality)?;
+    let encoded = encode(&decoded, format, quality).ok_or(Failure::Failed)?;
 
-    std::fs::create_dir_all(written.parent()?).ok()?;
+    let relative = written.strip_prefix(root).map_err(|_| Failure::Failed)?;
+    let mut ancestor = root.to_path_buf();
+    for component in relative.parent().ok_or(Failure::Failed)?.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(Failure::Failed);
+        };
+        ancestor.push(component);
+        match ancestor.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(Failure::Failed);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&ancestor) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let metadata = ancestor.symlink_metadata().map_err(|_| Failure::Failed)?;
+                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                            return Err(Failure::Failed);
+                        }
+                    }
+                    Err(_) => return Err(Failure::Failed),
+                }
+            }
+            Err(_) => return Err(Failure::Failed),
+        }
+    }
     // Write beside the target and rename onto it. A crash or a full disk part-way
     // through the write would otherwise leave a short `.webp` that looks finished, and
     // the next run would list it as a real image.
     let mut partial = written.to_path_buf().into_os_string();
     partial.push(".part");
     let partial = PathBuf::from(partial);
-    if std::fs::write(&partial, &encoded).is_err() || std::fs::rename(&partial, written).is_err() {
+    use std::io::Write;
+    let staged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)
+        .and_then(|mut file| file.write_all(&encoded));
+    if staged.is_err() || std::fs::rename(&partial, written).is_err() {
         let _ = std::fs::remove_file(&partial);
-        return None;
+        return Err(Failure::Failed);
     }
 
-    Some(Converted {
+    Ok(Converted {
         written: written.to_path_buf(),
         bytes: encoded.len() as u64,
         width,
@@ -580,6 +641,7 @@ mod tests {
         let out = dir.join("optimised");
 
         let converted = convert_to(
+            &dir,
             &source,
             &output_path(&dir, &source, &out, Format::WebP),
             Format::WebP,
@@ -625,6 +687,7 @@ mod tests {
         photo(600, 300).save(&source).unwrap();
 
         let converted = convert_to(
+            &dir,
             &source,
             &output_path(&dir, &source, &dir.join("out"), Format::WebP),
             Format::WebP,
@@ -679,7 +742,23 @@ mod tests {
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["a.webp", "A-png.webp", "a-png-2.webp"]);
+        assert_eq!(names, ["a-png-2.webp", "A.webp", "a-png.webp"]);
+    }
+
+    #[test]
+    fn collision_ownership_does_not_follow_the_input_order() {
+        let root = Path::new("/photos");
+        let out = Path::new("/photos/optimized");
+        let sources = [
+            PathBuf::from("/photos/shot.png"),
+            PathBuf::from("/photos/shot.jpg"),
+        ];
+        let forward = plan_outputs(root, &sources, out, Format::WebP);
+        let reversed_sources = [sources[1].clone(), sources[0].clone()];
+        let reversed = plan_outputs(root, &reversed_sources, out, Format::WebP);
+
+        assert_eq!(forward[0], reversed[1]);
+        assert_eq!(forward[1], reversed[0]);
     }
 
     /// A part-written file must never be left looking like a finished one.
@@ -691,6 +770,7 @@ mod tests {
         let written = dir.join("out").join("in.webp");
 
         convert_to(
+            &dir,
             &source,
             &written,
             Format::WebP,
@@ -706,6 +786,59 @@ mod tests {
             .filter(|name| name.ends_with(".part"))
             .collect();
         assert!(leftovers.is_empty(), "found {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conversion_refuses_a_symlinked_output_folder() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("output-symlink");
+        let outside = temp_dir("output-symlink-outside");
+        let source = dir.join("in.png");
+        photo(32, 32).save(&source).unwrap();
+        symlink(&outside, dir.join("optimized")).unwrap();
+
+        assert!(
+            convert_to(
+                &dir,
+                &source,
+                &dir.join("optimized/in.webp"),
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+            )
+            .is_err()
+        );
+        assert!(!outside.join("in.webp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conversion_refuses_a_symlinked_partial_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("part-symlink");
+        let source = dir.join("in.png");
+        let output = dir.join("optimized/in.webp");
+        let victim = dir.join("victim");
+        photo(32, 32).save(&source).unwrap();
+        std::fs::create_dir(dir.join("optimized")).unwrap();
+        std::fs::write(&victim, b"keep me").unwrap();
+        symlink(&victim, dir.join("optimized/in.webp.part")).unwrap();
+
+        assert!(
+            convert_to(
+                &dir,
+                &source,
+                &output,
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
     }
 
     #[test]

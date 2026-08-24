@@ -48,6 +48,13 @@ pub fn notice() -> Option<String> {
 /// walking up two parents from the executable, so
 /// `Foo.app/Contents/MacOS/helpers/exe` would resolve to `Foo.app/Contents`
 /// and delete that. Only the immediate layout counts.
+fn updater_shell_path_is_safe(path: &std::path::Path) -> bool {
+    !path
+        .to_string_lossy()
+        .chars()
+        .any(|character| matches!(character, '\'' | '"' | '\\' | '\n' | '\r'))
+}
+
 fn mac_bundle_path(exe: &std::path::Path) -> bool {
     let parent_is = |path: Option<&std::path::Path>, name: &str| {
         path.and_then(|p| p.file_name()).is_some_and(|n| n == name)
@@ -61,6 +68,10 @@ fn mac_bundle_path(exe: &std::path::Path) -> bool {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.ends_with(".app"))
+        // updater 0.2.3 inserts this path into both an AppleScript string and a
+        // single-quoted privileged shell command when /Applications needs admin
+        // access. Refuse characters that can end either string.
+        && updater_shell_path_is_safe(exe)
 }
 
 /// True when this process is actually an AppImage payload run: the runtime
@@ -79,7 +90,7 @@ fn appimage_run(
 
 fn updatable_install(exe: &std::path::Path) -> bool {
     if cfg!(target_os = "macos") {
-        mac_bundle_path(exe)
+        mac_bundle_path(exe) && updater_shell_path_is_safe(&std::env::temp_dir())
     } else if cfg!(target_os = "linux") {
         let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
         appimage_run(
@@ -102,37 +113,35 @@ pub fn install_if_available() {
         return;
     }
 
-    std::thread::spawn(|| {
-        let config = Config {
-            endpoints: vec![ENDPOINT.parse().expect("the update URL is valid")],
-            pubkey: include_str!("../assets/updater.pub").into(),
-            ..Default::default()
-        };
-        let version = env!("CARGO_PKG_VERSION")
-            .parse()
-            .expect("the package version is semver");
+    let config = Config {
+        endpoints: vec![ENDPOINT.parse().expect("the update URL is valid")],
+        pubkey: include_str!("../assets/updater.pub").into(),
+        ..Default::default()
+    };
+    let version = env!("CARGO_PKG_VERSION")
+        .parse()
+        .expect("the package version is semver");
 
-        match check_update(version, config) {
-            Ok(Some(update)) => match update.download_and_install() {
-                Ok(()) => {
-                    *UPDATE_MESSAGE.lock() = None;
-                    UPDATE_STATE.store(1, Ordering::Relaxed);
-                    eprintln!("imageguide: installed update; restart to use it");
-                }
-                Err(error) => {
-                    *UPDATE_MESSAGE.lock() = Some(error.to_string());
-                    UPDATE_STATE.store(2, Ordering::Relaxed);
-                    eprintln!("imageguide: could not install update: {error}");
-                }
-            },
-            Ok(None) => {}
+    match check_update(version, config) {
+        Ok(Some(update)) => match update.download_and_install() {
+            Ok(()) => {
+                *UPDATE_MESSAGE.lock() = None;
+                UPDATE_STATE.store(1, Ordering::Relaxed);
+                eprintln!("imageguide: installed update; restart to use it");
+            }
             Err(error) => {
                 *UPDATE_MESSAGE.lock() = Some(error.to_string());
                 UPDATE_STATE.store(2, Ordering::Relaxed);
-                eprintln!("imageguide: could not check for updates: {error}");
+                eprintln!("imageguide: could not install update: {error}");
             }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            *UPDATE_MESSAGE.lock() = Some(error.to_string());
+            UPDATE_STATE.store(2, Ordering::Relaxed);
+            eprintln!("imageguide: could not check for updates: {error}");
         }
-    });
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +178,19 @@ mod tests {
     fn a_helper_nested_below_macos_is_refused() {
         assert!(!mac_bundle_path(std::path::Path::new(
             "/tmp/Foo.app/Contents/MacOS/helpers/imageguide"
+        )));
+    }
+
+    #[test]
+    fn a_mac_bundle_path_that_can_escape_the_updaters_shell_quote_is_refused() {
+        assert!(!mac_bundle_path(std::path::Path::new(
+            "/Applications/ImageGuide'; touch pwned; '.app/Contents/MacOS/imageguide"
+        )));
+        assert!(!mac_bundle_path(std::path::Path::new(
+            "/Applications/ImageGuide\".app/Contents/MacOS/imageguide"
+        )));
+        assert!(!updater_shell_path_is_safe(std::path::Path::new(
+            "/tmp/ImageGuide' && touch pwned && '"
         )));
     }
 

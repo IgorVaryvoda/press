@@ -44,7 +44,9 @@ impl Audit {
             // idle; here a finished file is replaced immediately. The window is what
             // bounds memory: every file in flight holds a fully decoded image.
             let workers = convert::workers(format);
-            let mut inflight: Vec<gpui::Task<(usize, Option<convert::Converted>)>> = Vec::new();
+            let mut inflight: Vec<
+                gpui::Task<(usize, Result<convert::Converted, convert::Failure>)>,
+            > = Vec::new();
             let mut queued = sources.iter();
             let mut completed = Vec::with_capacity(workers);
 
@@ -54,10 +56,13 @@ impl Audit {
                         break;
                     };
                     let (index, source, written) = (*index, source.clone(), written.clone());
+                    let root = root.clone();
                     inflight.push(cx.background_executor().spawn(async move {
                         (
                             index,
-                            convert::convert_to(&source, &written, format, quality, max_edge),
+                            convert::convert_to(
+                                &root, &source, &written, format, quality, max_edge,
+                            ),
                         )
                     }));
                 }
@@ -86,16 +91,19 @@ impl Audit {
                         }
                         for (index, result) in batch {
                             match result {
-                                Some(converted) => {
+                                Ok(converted) => {
                                     audit.results.insert(index, converted.bytes);
                                 }
-                                None => {
+                                Err(error) => {
                                     let name = audit
                                         .entries
                                         .get(index)
                                         .map(|entry| entry.name())
                                         .unwrap_or_default();
-                                    audit.failures.push(name);
+                                    audit.failures.push(match error.reason() {
+                                        Some(reason) => format!("{name} ({reason})"),
+                                        None => name,
+                                    });
                                 }
                             }
                         }
