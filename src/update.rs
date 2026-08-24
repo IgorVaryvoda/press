@@ -105,6 +105,12 @@ fn updatable_install(exe: &std::path::Path) -> bool {
     }
 }
 
+fn public_key() -> &'static str {
+    // include_str! preserves the key file's final newline, but the updater's
+    // strict base64 decoder does not accept whitespace.
+    include_str!("../assets/updater.pub").trim()
+}
+
 pub fn install_if_available() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -115,7 +121,7 @@ pub fn install_if_available() {
 
     let config = Config {
         endpoints: vec![ENDPOINT.parse().expect("the update URL is valid")],
-        pubkey: include_str!("../assets/updater.pub").into(),
+        pubkey: public_key().into(),
         ..Default::default()
     };
     let version = env!("CARGO_PKG_VERSION")
@@ -151,6 +157,11 @@ mod tests {
     #[test]
     fn release_endpoint_is_https() {
         assert!(ENDPOINT.starts_with("https://"));
+    }
+
+    #[test]
+    fn embedded_public_key_is_ready_for_the_strict_base64_decoder() {
+        assert!(!public_key().bytes().any(|byte| byte.is_ascii_whitespace()));
     }
 
     #[test]
