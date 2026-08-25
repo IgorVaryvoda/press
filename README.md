@@ -24,8 +24,8 @@ Download the current installer from [GitHub Releases](https://github.com/IgorVar
 - Windows: `.exe` installer
 
 Packaged builds check that release feed in the background at launch. An available
-update is downloaded, signature-checked, and installed for the next launch. Source
-builds do not update themselves.
+update is downloaded, signature-checked, and installed before Press relaunches itself.
+Source builds do not update themselves.
 
 ## Status
 
@@ -118,7 +118,8 @@ folder, mirroring its subfolder layout. Sources are never touched, and that outp
 folder is excluded from later scans so a second run does not offer to convert its own
 output.
 
-WebP encodes up to eight files at once; AVIF and JPEG XL encode two. Each in-flight
+WebP encodes up to eight files at once and AVIF encodes two. JPEG XL encodes one file
+at a time because jixel uses the machine's cores inside each encode. Each in-flight
 file holds a fully decoded image, so those limits bound memory as much as CPU.
 
 **WebP with real transparency goes lossless** whatever quality you asked for.
