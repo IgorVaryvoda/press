@@ -367,9 +367,10 @@ fn provision_runtime(base: &Path, cancelled: &AtomicBool) -> Result<PathBuf, Str
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn provision_runtime(_base: &Path, _cancelled: &AtomicBool) -> Result<PathBuf, String> {
-    Err(format!(
+    Err(
         "automatic vision.cpp 0.3.0 setup is not available on this platform; set PRESS_VISION_CLI to a local build"
-    ))
+            .to_string(),
+    )
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

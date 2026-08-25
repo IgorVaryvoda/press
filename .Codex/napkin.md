@@ -6,6 +6,7 @@
 | 2026-08-23 | self | Used `rm -f` to clean isolated visual-proof files, then tried `gio trash`, which `/tmp` does not support | For exact `/tmp` proof targets, use `unlink` for files and `find <validated-dir> -depth -delete` for trees |
 | 2026-08-25 | user | Opened the Studio handoff on `www.sirv.studio`, whose route did not preload the image | The companion route is `https://dev.sirv.studio/tools/image-to-image`; prove the exact CDN fetch there |
 | 2026-08-25 | self | Put Markdown backticks inside a double-quoted shell search, so Bash tried to execute the text between them | Use single quotes for shell patterns that contain backticks |
+| 2026-08-25 | self | Linux Clippy did not compile the non-Linux runtime fallback, where a fixed string used `format!` | Treat the macOS CI Clippy job as a release gate for target-gated branches |
 | 2026-08-23 | self | Passed several test-name filters to one `cargo test` invocation, but Cargo accepts only one positional filter | Use one shared substring filter or run focused filters as separate commands |
 | 2026-08-22 | self | Treated `webp::WebPConfig::new()` as `Option` in an `Option`-returning encoder | It returns `Result`; use `.ok()?` at this deliberately lossy error boundary |
 | 2026-08-22 | self | Timed a long conversion through an `exec` wrapper that hid the yielded `exec_command` session id, then accidentally started a second conversion beside it | Print the full `exec_command` result as JSON and resume its `session_id` with `write_stdin`; never trust timing while another benchmark process exists |
