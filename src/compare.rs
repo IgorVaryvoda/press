@@ -37,7 +37,7 @@ impl Key {
 pub struct Pair {
     pub original: Arc<RenderImage>,
     pub converted: Arc<RenderImage>,
-    /// Bytes the encoded WebP would occupy on disk.
+    /// Bytes the selected encoded format would occupy on disk.
     pub converted_bytes: u64,
     pub width: u32,
     pub height: u32,
@@ -63,7 +63,7 @@ impl Pair {
 pub fn build(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -> Option<Pair> {
     let original = max_edge.apply(crate::scan::decode(path)?);
     let encoded = convert::encode(&original, format, quality)?;
-    let decoded = image::load_from_memory(&encoded).ok()?;
+    let decoded = crate::scan::decode_bytes(&encoded)?;
 
     let (width, height) = (original.width(), original.height());
 
@@ -122,6 +122,10 @@ mod tests {
         assert_ne!(
             base,
             Key::new(path, Format::Avif, Quality::lossy(80.), MaxEdge::FULL)
+        );
+        assert_ne!(
+            base,
+            Key::new(path, Format::JpegXl, Quality::lossy(80.), MaxEdge::FULL)
         );
         assert_ne!(
             base,

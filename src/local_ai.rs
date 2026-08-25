@@ -122,6 +122,9 @@ pub fn process(
     check_cancelled(cancelled)?;
     let decoded = scan::decode_for_conversion(source).map_err(|error| match error {
         scan::ConversionDecodeError::AnimatedGif => "animated GIFs cannot use local AI".to_string(),
+        scan::ConversionDecodeError::AnimatedJpegXl => {
+            "animated JPEG XL files cannot use local AI".to_string()
+        }
         scan::ConversionDecodeError::Failed => "the source image would not decode".to_string(),
     })?;
     let (width, height) = (decoded.width(), decoded.height());

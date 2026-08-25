@@ -48,36 +48,26 @@ impl Audit {
             }))
     }
 
-    pub(super) fn format_group(&self, cx: &mut Context<Self>) -> ButtonGroup {
-        let options = [Format::WebP, Format::Avif];
-        ButtonGroup::new("format")
-            .children(options.iter().map(|format| {
-                segment(
-                    format.label(),
-                    format.label().to_uppercase(),
-                    self.format == *format,
-                )
-                .disabled(self.converting)
-            }))
-            .on_click(cx.listener(move |audit, clicked: &Vec<usize>, _, cx| {
-                if audit.converting {
-                    return;
-                }
-                let Some(format) = clicked.first().and_then(|index| options.get(*index)) else {
-                    return;
-                };
-                audit.format = *format;
-                // There is no lossless AVIF here: the encoder maps LOSSLESS to a
-                // lossy quality (aom_quality). Carrying the flag across would
-                // convert lossy while every label says lossless.
-                if *format == Format::Avif && audit.quality == Quality::LOSSLESS {
-                    audit.quality = Quality::lossy(audit.slider_quality);
-                }
-                // Results describe the old format; keeping them would mislabel them.
-                audit.clear_results();
-                audit.schedule_estimate(cx);
-                cx.notify();
-            }))
+    pub(super) fn format_picker(&self) -> Select<Vec<Format>> {
+        Select::new(&self.format_select)
+            .small()
+            .w_full()
+            .disabled(self.converting)
+    }
+
+    pub(super) fn apply_format(&mut self, format: Format, cx: &mut Context<Self>) {
+        if self.converting || self.format == format {
+            return;
+        }
+        self.format = format;
+        // There is no lossless AVIF here: carrying the flag across would convert
+        // lossy while every label says lossless.
+        if !format.supports_lossless() && self.quality == Quality::LOSSLESS {
+            self.quality = Quality::lossy(self.slider_quality);
+        }
+        self.clear_results();
+        self.schedule_estimate(cx);
+        cx.notify();
     }
 
     pub(super) fn toolbar_button(

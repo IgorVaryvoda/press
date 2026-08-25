@@ -29,7 +29,7 @@ builds do not update themselves.
 
 ## Status
 
-Audit, thumbnails, and WebP conversion all work.
+Audit, thumbnails, and WebP, AVIF, and JPEG XL conversion all work.
 
 ```bash
 press                                         # empty state: pick or drop
@@ -37,9 +37,11 @@ press ~/path/to/folder                        # audit, in a window
 press ~/photo.jpg                             # straight into the comparison
 press ~/path/to/folder --convert              # convert to WebP, no window
 press ~/path/to/folder --convert --avif
+press ~/path/to/folder --convert --jxl
 press ~/path/to/folder --convert --max-edge 1600
 press ~/path/to/folder --convert --quality 60
-press ~/path/to/folder --convert --lossless  # WebP only
+press ~/path/to/folder --convert --lossless       # lossless WebP
+press ~/path/to/folder --convert --jxl --lossless
 ```
 
 Launched with no path it opens on an empty state: **Open folder…**, **Open image…**,
@@ -110,18 +112,19 @@ part of a normal audit, comparison, or conversion.
 
 ## Converting
 
-Pick a quality in the header and press **Convert to WebP**, or use `--convert` to do
-the same work without a window. Files are written to `optimized/` inside the folder,
-mirroring its subfolder layout. Sources are never touched, and that output folder is
-excluded from later scans so a second run does not offer to convert its own output.
+Pick a format and quality in the output panel and press **Convert**, or use `--convert`
+to do the same work without a window. Files are written to `optimized/` inside the
+folder, mirroring its subfolder layout. Sources are never touched, and that output
+folder is excluded from later scans so a second run does not offer to convert its own
+output.
 
-Eight files encode at once. Each holds a fully decoded image in memory, so that
-number is a memory bound as much as a CPU one.
+WebP encodes up to eight files at once; AVIF and JPEG XL encode two. Each in-flight
+file holds a fully decoded image, so those limits bound memory as much as CPU.
 
-**Anything with real transparency goes lossless** whatever quality you asked for.
-libwebp's lossy path mangles alpha in ways that ruin cut-outs. An image with an alpha
-channel that is entirely opaque is treated as opaque, because that is just an RGB
-image paying for a fourth channel.
+**WebP with real transparency goes lossless** whatever quality you asked for.
+libwebp's lossy path mangles alpha in ways that ruin cut-outs. AVIF and JPEG XL keep
+alpha on their normal paths. An image with an alpha channel that is entirely opaque
+is treated as opaque, because that is just an RGB image paying for a fourth channel.
 
 A file that grew is reported as grown rather than hidden. Re-encoding an
 already-optimal JPEG usually costs bytes, and that is worth seeing.
@@ -194,7 +197,7 @@ Tick rows to convert only those. With nothing ticked, Convert takes the whole fo
 so the common case needs no ticking. On a 5,733-image folder you usually want the top
 twenty, which are already at the top.
 
-### WebP or AVIF
+### WebP, AVIF, or JPEG XL
 
 64 size-stratified files from a real photo library, at q80 on a 16-thread machine:
 
@@ -208,8 +211,13 @@ The current path is 58% faster and 9% smaller than the former rav1e path at matc
 visual quality. It uses the system libavif and libaom libraries directly, with libyuv
 acceleration where packaged, so there is no subprocess per image.
 
-AVIF has no lossless option here. Lossless AVIF is routinely larger than lossless
-WebP and much slower to produce, so `--lossless` means WebP.
+JPEG XL is available from the same format dropdown and from `--jxl`. It supports both
+lossy quality levels and true lossless output. Press audits `.jxl` inputs by their
+contents, makes thumbnails and comparisons from them, and refuses to flatten an
+animated JPEG XL into a still during conversion.
+
+AVIF has no lossless option here. Lossless AVIF is routinely larger than the other
+lossless options and much slower to produce, so the UI hides that switch for AVIF.
 
 AVIF carries alpha in its own plane, so unlike WebP it needs no transparency special
 case. A test encodes a half-transparent image and decodes it back, because a
@@ -218,9 +226,9 @@ regression there would silently flatten every cut-out.
 ## Comparing
 
 Double-click any row, press **Enter**, or pass a single file to open the original
-against the WebP the current quality setting would produce. The encode happens in
-memory — nothing is written, because the point is to decide whether the trade is
-acceptable *before* committing to it.
+against the selected format at the current quality. The encode happens in memory —
+nothing is written, because the point is to decide whether the trade is acceptable
+*before* committing to it.
 
 ![A fitted original-versus-WebP comparison with a draggable divider](docs/comparison.webp)
 
@@ -246,13 +254,13 @@ cargo build --release   # fetches the pinned Rust toolchain on first run
 cargo test
 ```
 
-Needs `dav1d` to decode AVIF and libavif with libaom to encode it. Linux packages
-also provide libyuv for faster pixel conversion:
+Needs `dav1d` to decode AVIF, libavif with libaom to encode it, and libjxl to encode
+JPEG XL. Linux packages also provide libyuv for faster AVIF pixel conversion:
 
 ```bash
-sudo pacman -S dav1d libavif aom libyuv                  # Arch and derivatives
-sudo apt install libdav1d-dev libavif-dev libaom-dev libyuv-dev
-brew install libavif                                      # macOS
+sudo pacman -S dav1d libavif aom libyuv libjxl           # Arch and derivatives
+sudo apt install libdav1d-dev libavif-dev libaom-dev libyuv-dev libjxl-dev
+brew install libavif jpeg-xl                              # macOS
 ```
 
 Nothing in `src/` is platform-specific. Two dependencies are, and `Cargo.toml` splits

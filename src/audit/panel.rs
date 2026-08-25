@@ -75,11 +75,7 @@ impl Audit {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(self.panel_setting(
-                                "Format",
-                                self.format_group(cx).small().compact(),
-                                cx,
-                            ))
+                            .child(self.panel_setting("Format", self.format_picker(), cx))
                             .child(self.panel_quality(cx))
                             .child(self.panel_setting(
                                 "Max size",
@@ -162,6 +158,9 @@ impl Audit {
                     return;
                 }
                 let (_, _, format, quality, edge) = PRESETS[index];
+                audit.format_select.update(cx, |select, cx| {
+                    select.set_selected_value(&format, window, cx)
+                });
                 audit.format = format;
                 audit.quality = quality;
                 audit.max_edge = edge;
@@ -231,10 +230,9 @@ impl Audit {
                         rail.child(Slider::new(&self.quality_slider).horizontal())
                     }),
             )
-            // Lossless is a WebP capability; the AVIF path encodes lossy
-            // regardless (aom_quality), and a switch that lies about that is
-            // worse than no switch.
-            .children((self.format == Format::WebP).then(|| {
+            // AVIF is lossy-only here, and a switch that lies about that is worse
+            // than no switch.
+            .children(self.format.supports_lossless().then(|| {
                 Switch::new("lossless")
                     .checked(lossless)
                     .label("Lossless")

@@ -21,14 +21,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # libavif uses libaom to encode and libyuv where the package provides it.
+      # libavif uses libaom to encode and libyuv where the package provides it;
+      # libjxl encodes JPEG XL.
       # The rest is what gpui needs to link a window on Linux.
       - name: System dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libdav1d-dev libavif-dev libaom-dev libyuv-dev \
+            libdav1d-dev libavif-dev libaom-dev libyuv-dev libjxl-dev \
             cmake clang pkg-config \
             libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev \
             libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
@@ -36,7 +37,7 @@ jobs:
 
       - name: System dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install libavif
+        run: brew install libavif jpeg-xl
 
       - uses: dtolnay/rust-toolchain@stable
 

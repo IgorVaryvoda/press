@@ -60,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libdav1d-dev libavif-dev libaom-dev libyuv-dev \
+            libdav1d-dev libavif-dev libaom-dev libyuv-dev libjxl-dev \
             cmake clang pkg-config \
             libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev \
             libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
@@ -70,7 +70,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install nasm
-          "$VCPKG_INSTALLATION_ROOT/vcpkg" install "libavif[aom,dav1d]:${{ matrix.vcpkg_triplet }}"
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install \
+            "libavif[aom,dav1d]:${{ matrix.vcpkg_triplet }}" \
+            "libjxl:${{ matrix.vcpkg_triplet }}"
           echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
           echo "VCPKGRS_TRIPLET=${{ matrix.vcpkg_triplet }}" >> "$GITHUB_ENV"
           echo "DAV1D_STATIC=1" >> "$GITHUB_ENV"
@@ -81,7 +83,9 @@ jobs:
         shell: pwsh
         run: |
           choco install nsis pkgconfiglite -y --no-progress
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "libavif[aom,dav1d]:${{ matrix.vcpkg_triplet }}"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            "libavif[aom,dav1d]:${{ matrix.vcpkg_triplet }}" `
+            "libjxl:${{ matrix.vcpkg_triplet }}"
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
           "VCPKGRS_TRIPLET=x64-windows-static" >> $env:GITHUB_ENV
           "DAV1D_STATIC=1" >> $env:GITHUB_ENV

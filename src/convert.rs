@@ -8,6 +8,9 @@
 //! AVIF goes through libavif's libaom backend, with libyuv colour conversion where
 //! packaged. The system libraries are the same path as `avifenc`, without starting a
 //! process per image.
+//!
+//! JPEG XL uses the same small system-library boundary for encoding. Input decoding
+//! stays in safe Rust through jxl-oxide.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,7 @@ impl Quality {
 pub enum Failure {
     Failed,
     AnimatedGif,
+    AnimatedJpegXl,
 }
 
 impl Failure {
@@ -51,6 +55,7 @@ impl Failure {
         match self {
             Self::Failed => None,
             Self::AnimatedGif => Some("animated GIFs are not converted"),
+            Self::AnimatedJpegXl => Some("animated JPEG XL files are not converted"),
         }
     }
 }
@@ -102,6 +107,7 @@ impl MaxEdge {
 pub enum Format {
     WebP,
     Avif,
+    JpegXl,
 }
 
 impl Format {
@@ -109,6 +115,7 @@ impl Format {
         match self {
             Format::WebP => "webp",
             Format::Avif => "avif",
+            Format::JpegXl => "jxl",
         }
     }
 
@@ -116,7 +123,12 @@ impl Format {
         match self {
             Format::WebP => "webp",
             Format::Avif => "avif",
+            Format::JpegXl => "jxl",
         }
+    }
+
+    pub fn supports_lossless(self) -> bool {
+        self != Self::Avif
     }
 }
 
@@ -135,6 +147,7 @@ pub fn encode(image: &DynamicImage, format: Format, quality: Quality) -> Option<
     match format {
         Format::WebP => encode_webp(image, quality),
         Format::Avif => encode_avif(image, quality),
+        Format::JpegXl => encode_jpeg_xl(image, quality),
     }
 }
 
@@ -294,6 +307,35 @@ fn encode_avif(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
     }
 }
 
+fn encode_jpeg_xl(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
+    let has_alpha = has_transparency(image);
+    let pixels = if has_alpha {
+        image.to_rgba8().into_raw()
+    } else {
+        image.to_rgb8().into_raw()
+    };
+    crate::jxl::encode(
+        &pixels,
+        image.width(),
+        image.height(),
+        has_alpha,
+        quality == Quality::LOSSLESS,
+        quality.0.map_or(0., jpeg_xl_distance),
+    )
+}
+
+/// libjxl's pre-0.9 quality mapping. Keeping it here lets the Linux package use the
+/// long-stable 0.7 encoder API while matching current `cjxl --quality` behavior.
+fn jpeg_xl_distance(quality: f32) -> f32 {
+    if quality >= 100. {
+        0.
+    } else if quality >= 30. {
+        0.1 + (100. - quality) * 0.09
+    } else {
+        53. / 3000. * quality * quality - 23. / 20. * quality + 25.
+    }
+}
+
 fn aom_quality(quality: Quality) -> u8 {
     ((quality.0.unwrap_or(90.) * 0.75).round() as u8).clamp(1, 75)
 }
@@ -326,6 +368,9 @@ pub fn workers(format: Format) -> usize {
     match format {
         Format::WebP => cores.clamp(2, 8),
         Format::Avif => 2,
+        // libjxl is single-threaded here. Two files keep memory bounded like AVIF;
+        // add its parallel runner only if a measured corpus justifies the extra API.
+        Format::JpegXl => 2,
     }
 }
 
@@ -369,8 +414,8 @@ pub fn convert_each(
 }
 
 /// Where a converted file goes: the same layout as the source, rooted at `out_dir`,
-/// with a `.webp` extension. Keeping the tree means a folder of albums stays a folder
-/// of albums.
+/// with the selected extension. Keeping the tree means a folder of albums stays a
+/// folder of albums.
 pub fn output_path(root: &Path, source: &Path, out_dir: &Path, format: Format) -> PathBuf {
     let relative = source.strip_prefix(root).unwrap_or(source);
     out_dir.join(relative).with_extension(format.extension())
@@ -500,6 +545,7 @@ pub fn convert_to(
     let decoded = crate::scan::decode_for_conversion(source).map_err(|error| match error {
         crate::scan::ConversionDecodeError::Failed => Failure::Failed,
         crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
     })?;
     let decoded = max_edge.apply(decoded);
     let (width, height) = (decoded.width(), decoded.height());
@@ -577,8 +623,45 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_xl_round_trips_through_the_rust_decoder() {
+        let image = photo(32, 32);
+        let encoded = encode(&image, Format::JpegXl, Quality::lossy(80.)).unwrap();
+        assert_eq!(&encoded[..2], &[0xff, 0x0a]);
+
+        let decoded = crate::jxl::decode_bytes(&encoded).expect("JPEG XL decodes");
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (image.width(), image.height())
+        );
+    }
+
+    #[test]
+    fn lossless_jpeg_xl_preserves_rgba_pixels() {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(12, 8, |x, y| {
+            Rgba([
+                (x * 17) as u8,
+                (y * 29) as u8,
+                ((x + y) * 11) as u8,
+                ((x * 19 + y * 7) % 256) as u8,
+            ])
+        }));
+        let encoded = encode(&image, Format::JpegXl, Quality::LOSSLESS).unwrap();
+        let decoded = crate::jxl::decode_bytes(&encoded).expect("lossless JPEG XL decodes");
+
+        assert_eq!(decoded.into_rgba8(), image.into_rgba8());
+    }
+
+    #[test]
     fn aom_quality_matches_the_measured_rav1e_output() {
         assert_eq!(aom_quality(Quality::lossy(80.)), 60);
+    }
+
+    #[test]
+    fn jpeg_xl_quality_maps_to_libjxl_distance() {
+        assert_eq!(jpeg_xl_distance(100.), 0.);
+        assert!((jpeg_xl_distance(90.) - 1.).abs() < f32::EPSILON);
+        assert!((jpeg_xl_distance(30.) - 6.4).abs() < 0.0001);
+        assert!(jpeg_xl_distance(20.) > jpeg_xl_distance(30.));
     }
 
     /// Alpha survives the trip. AVIF carries it in its own plane, so unlike WebP there
@@ -641,6 +724,14 @@ mod tests {
             Format::Avif,
         );
         assert_eq!(avif, Path::new("/photos/optimised/album/one.avif"));
+
+        let jpeg_xl = output_path(
+            Path::new("/photos"),
+            Path::new("/photos/album/one.PNG"),
+            Path::new("/photos/optimised"),
+            Format::JpegXl,
+        );
+        assert_eq!(jpeg_xl, Path::new("/photos/optimised/album/one.jxl"));
     }
 
     #[test]

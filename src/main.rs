@@ -9,6 +9,7 @@ mod audit;
 mod avif;
 mod compare;
 mod convert;
+mod jxl;
 mod local_ai;
 mod menus;
 mod scan;
@@ -81,6 +82,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         match argument.as_str() {
             "--convert" => convert = true,
             "--avif" => format = Format::Avif,
+            "--jxl" => format = Format::JpegXl,
             "--max-edge" => {
                 let value = rest.next().unwrap_or_else(|| "nothing".to_string());
                 let edge = value
@@ -115,8 +117,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         }
     }
 
-    if format == Format::Avif && quality == Quality::LOSSLESS {
-        return Err("--lossless is available only with --webp".into());
+    if !format.supports_lossless() && quality == Quality::LOSSLESS {
+        return Err("--lossless is available only with --webp or --jxl".into());
     }
 
     Ok(Args {
@@ -515,6 +517,15 @@ mod tests {
                 Quality::LOSSLESS,
                 MaxEdge(Some(1600)),
                 true,
+                "x",
+            ),
+            (
+                vec!["--convert", "--jxl", "--lossless", "x"],
+                true,
+                Format::JpegXl,
+                Quality::LOSSLESS,
+                MaxEdge::FULL,
+                false,
                 "x",
             ),
         ];

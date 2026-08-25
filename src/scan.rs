@@ -97,11 +97,32 @@ pub struct Scan {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub path: PathBuf,
-    pub format: ImageFormat,
+    pub format: FileFormat,
     pub width: u32,
     pub height: u32,
     /// Bytes on disk, not decoded size.
     pub bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileFormat {
+    Image(ImageFormat),
+    JpegXl,
+}
+
+impl FileFormat {
+    fn extensions_str(self) -> &'static [&'static str] {
+        match self {
+            Self::Image(format) => format.extensions_str(),
+            Self::JpegXl => &["jxl"],
+        }
+    }
+}
+
+impl From<ImageFormat> for FileFormat {
+    fn from(format: ImageFormat) -> Self {
+        Self::Image(format)
+    }
 }
 
 impl Entry {
@@ -149,19 +170,30 @@ impl Entry {
 /// Read one file's header. `None` when it is not an image we can read.
 pub fn probe(path: &Path) -> Option<Entry> {
     let bytes = std::fs::metadata(path).ok()?.len();
-    let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
-    let format = reader.format()?;
-    let mut decoder = reader.into_decoder().ok()?;
-    let (mut width, mut height) = decoder.dimensions();
-    if orientation_swaps_dimensions(decoder.orientation().unwrap_or(Orientation::NoTransforms)) {
-        std::mem::swap(&mut width, &mut height);
+    if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
+        && let Some(format) = reader.format()
+        && let Ok(mut decoder) = reader.into_decoder()
+    {
+        let (mut width, mut height) = decoder.dimensions();
+        if orientation_swaps_dimensions(decoder.orientation().unwrap_or(Orientation::NoTransforms))
+        {
+            std::mem::swap(&mut width, &mut height);
+        }
+        return Some(Entry {
+            path: path.to_path_buf(),
+            format: format.into(),
+            width,
+            height,
+            bytes,
+        });
     }
 
+    let info = crate::jxl::probe(path)?;
     Some(Entry {
         path: path.to_path_buf(),
-        format,
-        width,
-        height,
+        format: FileFormat::JpegXl,
+        width: info.width,
+        height: info.height,
         bytes,
     })
 }
@@ -175,51 +207,65 @@ pub fn probe(path: &Path) -> Option<Entry> {
 /// mislabelled were exactly the files it then failed to convert, thumbnail or open,
 /// with no error beyond a missing row.
 pub fn decode(path: &Path) -> Option<DynamicImage> {
-    let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
-    let mut decoder = reader.into_decoder().ok()?;
-    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder).ok()?;
-    image.apply_orientation(orientation);
-    Some(image)
+    if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
+        && let Ok(mut decoder) = reader.into_decoder()
+    {
+        let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+        if let Ok(mut image) = DynamicImage::from_decoder(decoder) {
+            image.apply_orientation(orientation);
+            return Some(image);
+        }
+    }
+    crate::jxl::decode_path(path)
+}
+
+pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
+    image::load_from_memory(bytes)
+        .ok()
+        .or_else(|| crate::jxl::decode_bytes(bytes))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversionDecodeError {
     Failed,
     AnimatedGif,
+    AnimatedJpegXl,
 }
 
 /// Decode one still image for conversion. GIF is the exception to the generic
 /// decoder: it exposes only the first frame as a `DynamicImage`, so accepting an
 /// animation here would silently replace it with a still.
 pub fn decode_for_conversion(path: &Path) -> Result<DynamicImage, ConversionDecodeError> {
-    let reader = ImageReader::open(path)
-        .map_err(|_| ConversionDecodeError::Failed)?
-        .with_guessed_format()
-        .map_err(|_| ConversionDecodeError::Failed)?;
-    if reader.format() == Some(ImageFormat::Gif) {
-        let file = std::fs::File::open(path).map_err(|_| ConversionDecodeError::Failed)?;
-        let decoder = GifDecoder::new(std::io::BufReader::new(file))
-            .map_err(|_| ConversionDecodeError::Failed)?;
-        let mut frames = decoder.into_frames();
-        let first = frames
-            .next()
-            .ok_or(ConversionDecodeError::Failed)?
-            .map_err(|_| ConversionDecodeError::Failed)?;
-        if frames.next().is_some() {
-            return Err(ConversionDecodeError::AnimatedGif);
+    if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format) {
+        if reader.format() == Some(ImageFormat::Gif) {
+            let file = std::fs::File::open(path).map_err(|_| ConversionDecodeError::Failed)?;
+            let decoder = GifDecoder::new(std::io::BufReader::new(file))
+                .map_err(|_| ConversionDecodeError::Failed)?;
+            let mut frames = decoder.into_frames();
+            let first = frames
+                .next()
+                .ok_or(ConversionDecodeError::Failed)?
+                .map_err(|_| ConversionDecodeError::Failed)?;
+            if frames.next().is_some() {
+                return Err(ConversionDecodeError::AnimatedGif);
+            }
+            return Ok(DynamicImage::ImageRgba8(first.into_buffer()));
         }
-        return Ok(DynamicImage::ImageRgba8(first.into_buffer()));
+
+        if let Ok(mut decoder) = reader.into_decoder() {
+            let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+            if let Ok(mut image) = DynamicImage::from_decoder(decoder) {
+                image.apply_orientation(orientation);
+                return Ok(image);
+            }
+        }
     }
 
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|_| ConversionDecodeError::Failed)?;
-    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let mut image =
-        DynamicImage::from_decoder(decoder).map_err(|_| ConversionDecodeError::Failed)?;
-    image.apply_orientation(orientation);
-    Ok(image)
+    let info = crate::jxl::probe(path).ok_or(ConversionDecodeError::Failed)?;
+    if info.animated {
+        return Err(ConversionDecodeError::AnimatedJpegXl);
+    }
+    crate::jxl::decode_path(path).ok_or(ConversionDecodeError::Failed)
 }
 
 fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
@@ -350,8 +396,8 @@ pub fn scan(root: &Path) -> Scan {
 
 /// Extension-only guess, used to decide whether a decode failure is worth reporting.
 fn looks_like_an_image(path: &Path) -> bool {
-    const EXTENSIONS: [&str; 9] = [
-        "jpg", "jpeg", "png", "webp", "avif", "gif", "tif", "tiff", "bmp",
+    const EXTENSIONS: [&str; 10] = [
+        "jpg", "jpeg", "png", "webp", "avif", "jxl", "gif", "tif", "tiff", "bmp",
     ];
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -370,16 +416,17 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// The short name shown in the format column.
-pub fn format_name(format: ImageFormat) -> &'static str {
+pub fn format_name(format: FileFormat) -> &'static str {
     match format {
-        ImageFormat::Jpeg => "JPEG",
-        ImageFormat::Png => "PNG",
-        ImageFormat::WebP => "WebP",
-        ImageFormat::Avif => "AVIF",
-        ImageFormat::Gif => "GIF",
-        ImageFormat::Tiff => "TIFF",
-        ImageFormat::Bmp => "BMP",
-        other => other.extensions_str().first().copied().unwrap_or("?"),
+        FileFormat::JpegXl => "JPEG XL",
+        FileFormat::Image(ImageFormat::Jpeg) => "JPEG",
+        FileFormat::Image(ImageFormat::Png) => "PNG",
+        FileFormat::Image(ImageFormat::WebP) => "WebP",
+        FileFormat::Image(ImageFormat::Avif) => "AVIF",
+        FileFormat::Image(ImageFormat::Gif) => "GIF",
+        FileFormat::Image(ImageFormat::Tiff) => "TIFF",
+        FileFormat::Image(ImageFormat::Bmp) => "BMP",
+        FileFormat::Image(other) => other.extensions_str().first().copied().unwrap_or("?"),
     }
 }
 
@@ -411,7 +458,7 @@ mod tests {
         let path = write_sample(&dir, "sample.png", 40, 25);
 
         let entry = probe(&path).expect("png is readable");
-        assert_eq!(entry.format, ImageFormat::Png);
+        assert_eq!(entry.format, FileFormat::Image(ImageFormat::Png));
         assert_eq!((entry.width, entry.height), (40, 25));
         assert_eq!(entry.bytes, std::fs::metadata(&path).unwrap().len());
     }
@@ -453,7 +500,34 @@ mod tests {
         let decoded = decode(&liar).expect("a PNG named .webp still decodes");
         assert_eq!((decoded.width(), decoded.height()), (24, 16));
         // And the audit agrees about what it actually is.
-        assert_eq!(probe(&liar).unwrap().format, ImageFormat::Png);
+        assert_eq!(
+            probe(&liar).unwrap().format,
+            FileFormat::Image(ImageFormat::Png)
+        );
+    }
+
+    #[test]
+    fn jpeg_xl_is_probed_and_decoded_by_its_contents() {
+        let dir = temp_dir("jpeg-xl");
+        let path = dir.join("photo.png");
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(18, 12, |x, y| {
+            Rgb([(x * 9) as u8, (y * 13) as u8, 80])
+        }));
+        let encoded = crate::convert::encode(
+            &image,
+            crate::convert::Format::JpegXl,
+            crate::convert::Quality::lossy(80.),
+        )
+        .expect("JPEG XL encodes");
+        std::fs::write(&path, encoded).unwrap();
+
+        let entry = probe(&path).expect("JPEG XL header is readable");
+        assert_eq!(entry.format, FileFormat::JpegXl);
+        assert_eq!((entry.width, entry.height), (18, 12));
+        assert!(entry.extension_lies());
+
+        let decoded = decode(&path).expect("JPEG XL named .png still decodes");
+        assert_eq!((decoded.width(), decoded.height()), (18, 12));
     }
 
     #[test]
@@ -474,6 +548,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_animated_jpeg_xl_is_not_decoded_as_a_still_for_conversion() {
+        const TWO_FRAME_JXL: &[u8] = &[
+            0xff, 0x0a, 0x08, 0x10, 0x41, 0x00, 0x02, 0x8a, 0x4b, 0x02, 0x08, 0x00, 0x2a, 0x00,
+            0x00, 0x44, 0x00, 0x4b, 0x12, 0xa5, 0x42, 0x85, 0x24, 0xd6, 0x68, 0x60, 0xfb, 0xc6,
+            0x07, 0x20, 0xc7, 0x7d, 0xac, 0x03, 0x08, 0x00, 0x2a, 0x04, 0x00, 0x44, 0x00, 0x4b,
+            0x12, 0xa5, 0x42, 0x85, 0x24, 0xd6, 0x68, 0x60, 0xfb, 0xc6, 0x07, 0x20, 0xc7, 0x7b,
+            0xac, 0x03,
+        ];
+        let dir = temp_dir("animated-jpeg-xl");
+        let path = dir.join("moving.jxl");
+        std::fs::write(&path, TWO_FRAME_JXL).unwrap();
+
+        assert_eq!(
+            decode_for_conversion(&path),
+            Err(ConversionDecodeError::AnimatedJpegXl)
+        );
+    }
+
     /// The audit's best finding is a file whose name disagrees with its bytes, so
     /// the check has to be right about which disagreements are real. `jpg` and
     /// `jpeg` naming the same format is not a finding.
@@ -481,7 +574,7 @@ mod tests {
     fn an_extension_only_lies_when_it_names_another_format() {
         let png = Entry {
             path: PathBuf::from("/photos/promo.png"),
-            format: ImageFormat::Png,
+            format: ImageFormat::Png.into(),
             width: 10,
             height: 10,
             bytes: 100,
@@ -502,7 +595,7 @@ mod tests {
 
         let jpeg = Entry {
             path: PathBuf::from("/photos/shot.jpg"),
-            format: ImageFormat::Jpeg,
+            format: ImageFormat::Jpeg.into(),
             ..png.clone()
         };
         assert!(!jpeg.extension_lies(), "jpg and jpeg are one format");
@@ -734,7 +827,10 @@ mod tests {
         let scanned = scan(&dir);
         assert_eq!(scanned.entries.len(), 1);
         assert_eq!(scanned.entries[0].path, disguised);
-        assert_eq!(scanned.entries[0].format, ImageFormat::Png);
+        assert_eq!(
+            scanned.entries[0].format,
+            FileFormat::Image(ImageFormat::Png)
+        );
         assert_eq!(scanned.skipped_packages, 0);
     }
 
@@ -767,7 +863,7 @@ mod tests {
     fn bytes_per_pixel_is_zero_for_an_empty_image() {
         let entry = Entry {
             path: PathBuf::from("x.png"),
-            format: ImageFormat::Png,
+            format: ImageFormat::Png.into(),
             width: 0,
             height: 0,
             bytes: 100,

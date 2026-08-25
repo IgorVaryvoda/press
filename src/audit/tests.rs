@@ -109,7 +109,7 @@ impl gpui::Render for AuditHarness {
 fn entry(name: &str, width: u32, height: u32, bytes: u64, format: ImageFormat) -> Entry {
     Entry {
         path: PathBuf::from(name),
-        format,
+        format: format.into(),
         width,
         height,
         bytes,
@@ -781,6 +781,19 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
     });
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
     (audit, cx)
+}
+
+#[gpui::test]
+fn choosing_avif_leaves_lossless_for_the_last_slider_quality(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.quality = Quality::LOSSLESS;
+        audit.slider_quality = 73.;
+        audit.apply_format(Format::Avif, cx);
+
+        assert_eq!(audit.format, Format::Avif);
+        assert_eq!(audit.quality, Quality::lossy(73.));
+    });
 }
 
 #[gpui::test]
