@@ -21,6 +21,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 futures = "0.3"
 image = { version = "0.25", features = ["avif-native"] }
+jixel = "0.2.19"
 jxl-oxide = { version = "0.12.6", features = ["image"] }
 walkdir = "2"
 libwebp-sys = "0.14.4"

@@ -9,8 +9,7 @@
 //! packaged. The system libraries are the same path as `avifenc`, without starting a
 //! process per image.
 //!
-//! JPEG XL uses the same small system-library boundary for encoding. Input decoding
-//! stays in safe Rust through jxl-oxide.
+//! JPEG XL encoding uses jixel and decoding uses jxl-oxide, both in Rust.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -314,26 +313,7 @@ fn encode_jpeg_xl(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
     } else {
         image.to_rgb8().into_raw()
     };
-    crate::jxl::encode(
-        &pixels,
-        image.width(),
-        image.height(),
-        has_alpha,
-        quality == Quality::LOSSLESS,
-        quality.0.map_or(0., jpeg_xl_distance),
-    )
-}
-
-/// libjxl's pre-0.9 quality mapping. Keeping it here lets the Linux package use the
-/// long-stable 0.7 encoder API while matching current `cjxl --quality` behavior.
-fn jpeg_xl_distance(quality: f32) -> f32 {
-    if quality >= 100. {
-        0.
-    } else if quality >= 30. {
-        0.1 + (100. - quality) * 0.09
-    } else {
-        53. / 3000. * quality * quality - 23. / 20. * quality + 25.
-    }
+    crate::jxl::encode(&pixels, image.width(), image.height(), has_alpha, quality.0)
 }
 
 fn aom_quality(quality: Quality) -> u8 {
@@ -368,9 +348,9 @@ pub fn workers(format: Format) -> usize {
     match format {
         Format::WebP => cores.clamp(2, 8),
         Format::Avif => 2,
-        // libjxl is single-threaded here. Two files keep memory bounded like AVIF;
-        // add its parallel runner only if a measured corpus justifies the extra API.
-        Format::JpegXl => 2,
+        // jixel uses the machine's cores inside one encode. A second decoded image
+        // would add memory and contention without adding useful parallelism.
+        Format::JpegXl => 1,
     }
 }
 
@@ -657,11 +637,11 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_xl_quality_maps_to_libjxl_distance() {
-        assert_eq!(jpeg_xl_distance(100.), 0.);
-        assert!((jpeg_xl_distance(90.) - 1.).abs() < f32::EPSILON);
-        assert!((jpeg_xl_distance(30.) - 6.4).abs() < 0.0001);
-        assert!(jpeg_xl_distance(20.) > jpeg_xl_distance(30.));
+    fn lower_jpeg_xl_quality_produces_fewer_bytes() {
+        let image = photo(128, 128);
+        let low = encode(&image, Format::JpegXl, Quality::lossy(20.)).unwrap();
+        let high = encode(&image, Format::JpegXl, Quality::lossy(95.)).unwrap();
+        assert!(low.len() < high.len());
     }
 
     /// Alpha survives the trip. AVIF carries it in its own plane, so unlike WebP there

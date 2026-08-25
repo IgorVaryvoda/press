@@ -211,10 +211,11 @@ The current path is 58% faster and 9% smaller than the former rav1e path at matc
 visual quality. It uses the system libavif and libaom libraries directly, with libyuv
 acceleration where packaged, so there is no subprocess per image.
 
-JPEG XL is available from the same format dropdown and from `--jxl`. It supports both
-lossy quality levels and true lossless output. Press audits `.jxl` inputs by their
-contents, makes thumbnails and comparisons from them, and refuses to flatten an
-animated JPEG XL into a still during conversion.
+JPEG XL is available from the same format dropdown and from `--jxl`. Its jixel
+encoder and jxl-oxide decoder are both written in Rust. It supports both lossy
+quality levels and true lossless output. Press audits `.jxl` inputs by their contents,
+makes thumbnails and comparisons from them, and refuses to flatten an animated JPEG
+XL into a still during conversion.
 
 AVIF has no lossless option here. Lossless AVIF is routinely larger than the other
 lossless options and much slower to produce, so the UI hides that switch for AVIF.
@@ -254,13 +255,14 @@ cargo build --release   # fetches the pinned Rust toolchain on first run
 cargo test
 ```
 
-Needs `dav1d` to decode AVIF, libavif with libaom to encode it, and libjxl to encode
-JPEG XL. Linux packages also provide libyuv for faster AVIF pixel conversion:
+Needs `dav1d` to decode AVIF and libavif with libaom to encode it. JPEG XL encoding
+and decoding are Rust dependencies. Linux packages also provide libyuv for faster
+AVIF pixel conversion:
 
 ```bash
-sudo pacman -S dav1d libavif aom libyuv libjxl           # Arch and derivatives
-sudo apt install libdav1d-dev libavif-dev libaom-dev libyuv-dev libjxl-dev
-brew install libavif jpeg-xl                              # macOS
+sudo pacman -S dav1d libavif aom libyuv                  # Arch and derivatives
+sudo apt install libdav1d-dev libavif-dev libaom-dev libyuv-dev
+brew install libavif                                     # macOS
 ```
 
 Nothing in `src/` is platform-specific. Two dependencies are, and `Cargo.toml` splits

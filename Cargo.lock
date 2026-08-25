@@ -3564,6 +3564,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jixel"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abbba9bc8b24b86e8a78c969b50cc14ac90a6d7b37683e6f6692e55d780ec75d"
+
+[[package]]
 name = "jni-sys"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5341,6 +5347,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "jixel",
  "jxl-oxide",
  "libwebp-sys",
  "parking_lot",
