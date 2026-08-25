@@ -4,7 +4,10 @@
 //! costs a hundred times what reading its header costs, and a shoot folder has
 //! thousands of them.
 
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 use image::{
     AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader,
@@ -103,9 +106,13 @@ pub struct Entry {
 
 impl Entry {
     pub fn name(&self) -> String {
+        self.name_lossy().into_owned()
+    }
+
+    pub fn name_lossy(&self) -> Cow<'_, str> {
         self.path
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+            .map(|name| name.to_string_lossy())
             .unwrap_or_default()
     }
 
@@ -134,7 +141,8 @@ impl Entry {
         !self
             .format
             .extensions_str()
-            .contains(&extension.to_ascii_lowercase().as_str())
+            .iter()
+            .any(|expected| extension.eq_ignore_ascii_case(expected))
     }
 }
 

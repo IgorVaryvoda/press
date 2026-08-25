@@ -15,7 +15,7 @@ impl Audit {
         let dataset_generation = self.dataset_generation;
         self.converting = true;
         self.active_target_count = Some(target_count);
-        self.results.clear();
+        self.clear_results();
         self.failures.clear();
         cx.notify();
 
@@ -92,7 +92,7 @@ impl Audit {
                         for (index, result) in batch {
                             match result {
                                 Ok(converted) => {
-                                    audit.results.insert(index, converted.bytes);
+                                    audit.record_result(index, converted.bytes);
                                 }
                                 Err(error) => {
                                     let name = audit

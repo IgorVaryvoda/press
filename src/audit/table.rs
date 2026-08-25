@@ -311,12 +311,16 @@ impl TableDelegate for AuditTable {
             return div().into_any_element();
         };
 
-        // The row the viewport asked for is the row worth decoding.
-        handle.update(cx, |audit, cx| {
-            if let Some(entry) = audit.entry_at(row_ix) {
-                audit.request_thumb(entry, cx);
-            }
-        });
+        // Ask once per row. This delegate is called once per visible cell, so
+        // putting the request above the match entered the same mutable path for
+        // every column even though only this column can draw the image.
+        if column == TableColumn::Thumb {
+            handle.update(cx, |audit, cx| {
+                if let Some(entry) = audit.entry_at(row_ix) {
+                    audit.request_thumb(entry, cx);
+                }
+            });
+        }
 
         let audit = handle.read(cx);
         let Some(index) = audit.entry_at(row_ix) else {
@@ -354,8 +358,7 @@ impl TableDelegate for AuditTable {
                                     if !audit.selected.remove(&index) {
                                         audit.selected.insert(index);
                                     }
-                                    audit.schedule_estimate(cx);
-                                    cx.notify();
+                                    audit.selection_changed(cx);
                                 });
                             })),
                     )

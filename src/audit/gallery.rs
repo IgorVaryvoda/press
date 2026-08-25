@@ -87,8 +87,7 @@ impl Audit {
                                         if !audit.selected.remove(&index) {
                                             audit.selected.insert(index);
                                         }
-                                        audit.schedule_estimate(cx);
-                                        cx.notify();
+                                        audit.selection_changed(cx);
                                     })),
                             ),
                     )

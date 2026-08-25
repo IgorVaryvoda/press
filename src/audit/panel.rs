@@ -173,7 +173,7 @@ impl Audit {
                         .quality_slider
                         .update(cx, |slider, cx| slider.set_value(value, window, cx));
                 }
-                audit.results.clear();
+                audit.clear_results();
                 audit.schedule_estimate(cx);
                 cx.notify();
             }))
@@ -250,7 +250,7 @@ impl Audit {
                         } else {
                             Quality::LOSSLESS
                         };
-                        audit.results.clear();
+                        audit.clear_results();
                         audit.schedule_estimate(cx);
                         cx.notify();
                     }))
@@ -420,8 +420,7 @@ impl Audit {
                                 .label("Clear")
                                 .on_click(cx.listener(|audit, _, _, cx| {
                                     audit.selected.clear();
-                                    audit.schedule_estimate(cx);
-                                    cx.notify();
+                                    audit.selection_changed(cx);
                                 })),
                         ),
                 )

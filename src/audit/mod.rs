@@ -99,6 +99,7 @@ const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// is about 150KB of texture at that size against 25KB before, so 512 of them would be
 /// 75MB of video memory for rows nobody is looking at.
 const THUMB_CACHE: usize = 192;
+const THUMB_SETTLE: Duration = Duration::from_millis(300);
 
 fn is_checkbox_activation_key(event: &gpui::KeyDownEvent) -> bool {
     matches!(event.keystroke.key.as_str(), "space" | "enter")
@@ -203,6 +204,10 @@ pub(crate) struct Audit {
     selected: HashSet<usize>,
     /// Encoded size per row, filled in as conversion progresses.
     results: HashMap<usize, u64>,
+    /// Source and output bytes for `results`. Conversion progress redraws often,
+    /// so rebuilding these totals from every completed row would get slower as
+    /// the job advances.
+    converted_totals: (u64, u64),
     converting: bool,
     /// The immutable denominator owned by the active conversion.
     active_target_count: Option<usize>,
@@ -264,6 +269,10 @@ pub(crate) struct Audit {
     filter_input: gpui::Entity<InputState>,
     /// Row the keyboard is on, as a position in `visible`.
     cursor: usize,
+    /// High-rate key repeats update the cursor faster than a display can present.
+    /// One next-frame callback draws the latest position instead of rebuilding
+    /// the table once for every queued key event.
+    cursor_redraw_pending: bool,
     /// Where the last plain click landed, which is the fixed end of a shift-click
     /// range. Separate from `cursor` so arrowing around does not move the anchor.
     anchor: usize,
@@ -276,6 +285,8 @@ pub(crate) struct Audit {
     gallery_scroll: UniformListScrollHandle,
     /// The column count laid out last frame. `None` deliberately leaves initial layout alone.
     gallery_columns: Option<usize>,
+    /// Bands GPUI asked the virtualised gallery to render this frame.
+    gallery_visible: std::ops::Range<usize>,
     /// Projected output size for the current settings, and how many files were
     /// actually encoded to get it.
     estimate: Option<(u64, usize)>,
@@ -309,10 +320,14 @@ pub(crate) struct Audit {
     /// Cached with `heaviest`; progress and thumbnail redraws must not rescan the
     /// entire visible folder just to rebuild the header.
     visible_bytes: u64,
-    /// Files whose extension disagrees with their contents. Counted once when the
-    /// folder is read, because the check allocates and the filter box would
-    /// otherwise redo it for every entry on every keystroke.
+    /// Counted once when the folder is read; findings do not change between scans.
+    heavy: usize,
+    /// Files whose extension disagrees with their contents, also fixed for a scan.
     mislabelled: usize,
+    /// The visible part of a non-empty selection. Cached because the output panel
+    /// is rebuilt by cursor, thumbnail and comparison interaction.
+    selected_target_count: usize,
+    selected_target_bytes: u64,
     /// The list, which the component library owns. It holds a weak handle back to
     /// this audit and reads its rows through that, so it cannot be built until this
     /// audit is a live entity: `TableState::new` asks the delegate for its row and
@@ -341,26 +356,29 @@ pub enum Column {
 /// Ties fall back to the filename so the order is stable between runs — a list that
 /// reshuffles itself is worse than one sorted badly.
 fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> std::cmp::Ordering {
-    {
-        let ordering = match sort.column {
-            Column::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
-            Column::Format => format_name(a.format).cmp(format_name(b.format)),
-            Column::Pixels => {
-                (a.width as u64 * a.height as u64).cmp(&(b.width as u64 * b.height as u64))
-            }
-            Column::Density => a
-                .bytes_per_pixel()
-                .partial_cmp(&b.bytes_per_pixel())
-                .unwrap_or(std::cmp::Ordering::Equal),
-            Column::Weight => a.bytes.cmp(&b.bytes),
+    let a_name = a.name_lossy();
+    let b_name = b.name_lossy();
+    let ordering = match sort.column {
+        Column::Name => a_name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .cmp(b_name.chars().flat_map(char::to_lowercase)),
+        Column::Format => format_name(a.format).cmp(format_name(b.format)),
+        Column::Pixels => {
+            (a.width as u64 * a.height as u64).cmp(&(b.width as u64 * b.height as u64))
         }
-        .then_with(|| a.name().cmp(&b.name()));
+        Column::Density => a
+            .bytes_per_pixel()
+            .partial_cmp(&b.bytes_per_pixel())
+            .unwrap_or(std::cmp::Ordering::Equal),
+        Column::Weight => a.bytes.cmp(&b.bytes),
+    }
+    .then_with(|| a_name.as_ref().cmp(b_name.as_ref()));
 
-        if sort.descending {
-            ordering.reverse()
-        } else {
-            ordering
-        }
+    if sort.descending {
+        ordering.reverse()
+    } else {
+        ordering
     }
 }
 
@@ -497,6 +515,11 @@ impl Audit {
             .iter()
             .filter(|entry| entry.extension_lies())
             .count();
+        self.heavy = scanned
+            .entries
+            .iter()
+            .filter(|entry| Finding::Heavy.holds(entry))
+            .count();
         self.entries = scanned.entries;
         // The scroll handle belongs to the gallery rather than its data. A new folder
         // can have the same column count, so a render-time column transition cannot
@@ -517,7 +540,7 @@ impl Audit {
         self.thumb_order.clear();
         self.requested.clear();
         self.selected.clear();
-        self.results.clear();
+        self.clear_results();
         self.failures.clear();
         self.compare = None;
         self.cached = None;
@@ -823,7 +846,7 @@ pub(crate) fn build_audit(
                 }
                 audit.quality = Quality::lossy(value.start());
                 audit.slider_quality = value.start();
-                audit.results.clear();
+                audit.clear_results();
                 audit.schedule_estimate(cx);
                 cx.notify();
             },
@@ -832,6 +855,10 @@ pub(crate) fn build_audit(
         let mislabelled = entries
             .iter()
             .filter(|entry| entry.extension_lies())
+            .count();
+        let heavy = entries
+            .iter()
+            .filter(|entry| Finding::Heavy.holds(entry))
             .count();
         let mut audit = Audit {
             table: None,
@@ -842,7 +869,10 @@ pub(crate) fn build_audit(
             skipped_packages,
             heaviest: 0,
             visible_bytes: 0,
+            heavy,
             mislabelled,
+            selected_target_count: 0,
+            selected_target_bytes: 0,
             thumbs: HashMap::new(),
             requested: HashSet::new(),
             thumb_order: VecDeque::new(),
@@ -860,11 +890,13 @@ pub(crate) fn build_audit(
             finding: None,
             filter_input,
             cursor: 0,
+            cursor_redraw_pending: false,
             anchor: 0,
             slider_quality: quality.0.unwrap_or(80.),
             grid,
             gallery_scroll: UniformListScrollHandle::new(),
             gallery_columns: None,
+            gallery_visible: 0..0,
             estimate: None,
             estimate_generation: 0,
             dataset_generation: 0,
@@ -876,6 +908,7 @@ pub(crate) fn build_audit(
             settings_save_pending: false,
             cached: None,
             results: HashMap::new(),
+            converted_totals: (0, 0),
             converting: false,
             active_target_count: None,
             failures: Vec::new(),

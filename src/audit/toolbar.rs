@@ -42,7 +42,7 @@ impl Audit {
                     return;
                 };
                 audit.max_edge = *edge;
-                audit.results.clear();
+                audit.clear_results();
                 audit.schedule_estimate(cx);
                 cx.notify();
             }))
@@ -74,7 +74,7 @@ impl Audit {
                     audit.quality = Quality::lossy(audit.slider_quality);
                 }
                 // Results describe the old format; keeping them would mislabel them.
-                audit.results.clear();
+                audit.clear_results();
                 audit.schedule_estimate(cx);
                 cx.notify();
             }))

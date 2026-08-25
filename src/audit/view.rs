@@ -683,21 +683,20 @@ impl Render for Audit {
                     // drag from the anchor.
                     let extend = event.keystroke.modifiers.shift;
                     match event.keystroke.key.as_str() {
-                        "down" => audit.step_cursor(1, extend, cx),
-                        "up" => audit.step_cursor(-1, extend, cx),
-                        "left" => audit.step_cursor_lateral(-1, extend, cx),
-                        "right" => audit.step_cursor_lateral(1, extend, cx),
-                        "pagedown" => audit.step_cursor(10, extend, cx),
-                        "pageup" => audit.step_cursor(-10, extend, cx),
-                        "home" => audit.step_cursor(isize::MIN / 2, extend, cx),
-                        "end" => audit.step_cursor(isize::MAX / 2, extend, cx),
+                        "down" => audit.step_cursor(1, extend, window, cx),
+                        "up" => audit.step_cursor(-1, extend, window, cx),
+                        "left" => audit.step_cursor_lateral(-1, extend, window, cx),
+                        "right" => audit.step_cursor_lateral(1, extend, window, cx),
+                        "pagedown" => audit.step_cursor(10, extend, window, cx),
+                        "pageup" => audit.step_cursor(-10, extend, window, cx),
+                        "home" => audit.step_cursor(isize::MIN / 2, extend, window, cx),
+                        "end" => audit.step_cursor(isize::MAX / 2, extend, window, cx),
                         "escape" => {
                             // Nothing is open here, so escape means "put the list down":
                             // the ticked set clears, the way it does in every file manager.
                             if !audit.selected.is_empty() && !audit.converting {
                                 audit.selected.clear();
-                                audit.schedule_estimate(cx);
-                                cx.notify();
+                                audit.selection_changed(cx);
                             }
                         }
                         "a" if event.keystroke.modifiers.control
@@ -708,8 +707,7 @@ impl Render for Audit {
                             // from Convert too.
                             if !audit.converting {
                                 audit.selected.extend(audit.visible.iter().copied());
-                                audit.schedule_estimate(cx);
-                                cx.notify();
+                                audit.selection_changed(cx);
                             }
                         }
                         "," if event.keystroke.modifiers.control
@@ -798,6 +796,7 @@ impl Audit {
                     "gallery",
                     layout.rows,
                     cx.processor(|audit, range: std::ops::Range<usize>, _window, cx| {
+                        audit.gallery_visible = range.clone();
                         range
                             .map(|band| {
                                 // A plain loop: the closure form borrows `audit`

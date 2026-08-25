@@ -664,6 +664,68 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
 }
 
 #[gpui::test]
+fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        assert_eq!(audit.heavy, 1);
+        assert_eq!(audit.mislabelled, 1);
+        assert_eq!(audit.target_count(), 3);
+        assert_eq!(audit.target_bytes(), 401_000);
+
+        audit.selected.extend([0, 2, 99]);
+        audit.refresh_target_summary();
+        assert_eq!(
+            audit.target_count(),
+            2,
+            "a hidden or stale index is not a target"
+        );
+        assert_eq!(audit.target_bytes(), 101_000);
+
+        audit.record_result(0, 50_000);
+        audit.record_result(2, 500);
+        assert_eq!(audit.converted_totals(), (101_000, 50_500));
+        audit.record_result(0, 40_000);
+        assert_eq!(audit.converted_totals(), (101_000, 40_500));
+        audit.clear_results();
+        assert_eq!(audit.converted_totals(), (0, 0));
+    });
+}
+
+#[gpui::test]
+fn key_repeats_share_one_next_frame_redraw(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.step_cursor(1, false, window, cx);
+        audit.step_cursor(1, false, window, cx);
+        assert_eq!(audit.cursor, 2);
+        assert!(audit.cursor_redraw_pending);
+    });
+
+    cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.cursor_redraw_pending);
+        assert_eq!(audit.cursor, 2);
+    });
+}
+
+#[gpui::test]
+fn delayed_gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        let first = audit.entry_at(0).unwrap();
+        let third = audit.entry_at(2).unwrap();
+        audit.grid = true;
+        audit.gallery_columns = Some(2);
+        audit.gallery_visible = 1..2;
+
+        assert!(!audit.thumb_is_visible(first, cx));
+        assert!(audit.thumb_is_visible(third, cx));
+    });
+}
+
+#[gpui::test]
 fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -752,6 +814,7 @@ fn pointer_checkbox_audit(
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
     audit.update(cx, |audit, _| {
         audit.selected.extend([0, 1]);
+        audit.refresh_target_summary();
         audit.estimate = Some((123, 2));
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));

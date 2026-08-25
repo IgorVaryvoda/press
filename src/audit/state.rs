@@ -48,31 +48,55 @@ impl Audit {
         if self.selected.is_empty() {
             self.visible.len()
         } else {
-            self.visible
-                .iter()
-                .filter(|index| self.selected.contains(index))
-                .count()
+            self.selected_target_count
         }
     }
 
     pub(super) fn target_bytes(&self) -> u64 {
-        self.visible
-            .iter()
-            .filter(|index| self.selected.is_empty() || self.selected.contains(index))
-            .filter_map(|index| self.entries.get(*index))
-            .map(|entry| entry.bytes)
-            .sum()
+        if self.selected.is_empty() {
+            self.visible_bytes
+        } else {
+            self.selected_target_bytes
+        }
     }
 
     /// Bytes before and after, counting only the files actually converted. Comparing
     /// against the whole folder mid-run would report a fake saving.
     pub(super) fn converted_totals(&self) -> (u64, u64) {
-        self.results
+        self.converted_totals
+    }
+
+    pub(super) fn clear_results(&mut self) {
+        self.results.clear();
+        self.converted_totals = (0, 0);
+    }
+
+    pub(super) fn record_result(&mut self, index: usize, bytes: u64) {
+        let source = self.entries.get(index).map_or(0, |entry| entry.bytes);
+        match self.results.insert(index, bytes) {
+            Some(previous) => self.converted_totals.1 = self.converted_totals.1 - previous + bytes,
+            None => {
+                self.converted_totals.0 += source;
+                self.converted_totals.1 += bytes;
+            }
+        }
+    }
+
+    pub(super) fn refresh_target_summary(&mut self) {
+        (self.selected_target_count, self.selected_target_bytes) = self
+            .visible
             .iter()
-            .fold((0, 0), |(before, after), (index, bytes)| {
-                let source = self.entries.get(*index).map_or(0, |entry| entry.bytes);
-                (before + source, after + bytes)
-            })
+            .filter(|index| self.selected.contains(index))
+            .filter_map(|index| self.entries.get(*index))
+            .fold((0, 0), |(count, bytes), entry| {
+                (count + 1, bytes + entry.bytes)
+            });
+    }
+
+    pub(super) fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.refresh_target_summary();
+        self.schedule_estimate(cx);
+        cx.notify();
     }
     /// Rebuild the filtered, sorted view. Nothing keyed by entry index is touched:
     /// a file keeps its thumbnail, its tick and its result through any re-ordering.
@@ -83,7 +107,9 @@ impl Audit {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| needle.is_empty() || entry.name().to_lowercase().contains(&needle))
+            .filter(|(_, entry)| {
+                needle.is_empty() || entry.name_lossy().to_lowercase().contains(&needle)
+            })
             .filter(|(_, entry)| finding.is_none_or(|finding| finding.holds(entry)))
             .map(|(index, _)| index)
             .collect();
@@ -103,6 +129,7 @@ impl Audit {
                 (heaviest.max(entry.bytes), total + entry.bytes)
             });
         self.visible = visible;
+        self.refresh_target_summary();
     }
 
     pub(super) fn set_sort(&mut self, column: Column, cx: &mut Context<Self>) {
@@ -241,32 +268,67 @@ impl Audit {
     }
 
     /// Move the keyboard cursor, clamped to the list.
-    pub(super) fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn move_cursor(&mut self, delta: isize) -> bool {
         if self.visible.is_empty() {
-            return;
+            return false;
         }
         let last = self.visible.len() - 1;
-        self.cursor = (self.cursor as isize + delta).clamp(0, last as isize) as usize;
+        let cursor = (self.cursor as isize + delta).clamp(0, last as isize) as usize;
+        if cursor == self.cursor {
+            return false;
+        }
+        self.cursor = cursor;
+        true
+    }
+
+    fn schedule_cursor_redraw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor_redraw_pending {
+            return;
+        }
+        self.cursor_redraw_pending = true;
+        cx.on_next_frame(window, |audit, _, cx| {
+            audit.cursor_redraw_pending = false;
+            audit.redraw_cursor(cx);
+        });
+    }
+
+    fn redraw_cursor(&mut self, cx: &mut Context<Self>) {
         if self.grid {
             let columns = self.gallery_columns.unwrap_or(1).max(1);
             self.gallery_scroll
                 .scroll_to_item_strict(self.cursor / columns, ScrollStrategy::Nearest);
+            cx.notify();
         } else if let Some(table) = self.table.clone() {
             let visible = table.read(cx).visible_range().rows().clone();
-            if !visible.contains(&self.cursor) {
-                table.update(cx, |table, cx| table.scroll_to_row(self.cursor, cx));
-            }
+            let cursor = self.cursor;
+            table.update(cx, |table, cx| {
+                if !visible.contains(&cursor) {
+                    table.scroll_to_row(cursor, cx);
+                }
+                cx.notify();
+            });
+        } else {
+            cx.notify();
         }
-        cx.notify();
     }
 
     /// One keyboard step. With shift held it is a selection drag: the run from
     /// the anchor to the new cursor joins the selection, exactly as a
     /// shift-click does.
-    pub(super) fn step_cursor(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
-        self.move_cursor(delta, cx);
+    pub(super) fn step_cursor(
+        &mut self,
+        delta: isize,
+        extend: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.move_cursor(delta) {
+            return;
+        }
         if extend {
             self.select_through_cursor(cx);
+        } else {
+            self.schedule_cursor_redraw(window, cx);
         }
     }
 
@@ -275,6 +337,7 @@ impl Audit {
         &mut self,
         direction: isize,
         extend: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let columns = if self.grid {
@@ -282,7 +345,7 @@ impl Audit {
         } else {
             1
         };
-        self.step_cursor(direction * columns, extend, cx);
+        self.step_cursor(direction * columns, extend, window, cx);
     }
 
     pub(super) fn select_through_cursor(&mut self, cx: &mut Context<Self>) {
@@ -296,8 +359,7 @@ impl Audit {
         };
         let run: Vec<usize> = (from..=to).filter_map(|row| self.entry_at(row)).collect();
         self.selected.extend(run);
-        self.schedule_estimate(cx);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     /// What a click on a row means, by the rules every file list uses: plain click
@@ -348,8 +410,7 @@ impl Audit {
         }
 
         self.cursor = row;
-        self.schedule_estimate(cx);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     pub(super) fn toggle_cursor_selection(&mut self, cx: &mut Context<Self>) {
@@ -362,8 +423,7 @@ impl Audit {
         if !self.selected.remove(&entry) {
             self.selected.insert(entry);
         }
-        self.schedule_estimate(cx);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     /// The entry a visible row points at.

@@ -16,6 +16,29 @@ pub(super) fn comparison_landing_applies(
 }
 
 impl Audit {
+    pub(super) fn thumb_is_visible(&self, index: usize, cx: &App) -> bool {
+        let Some(row) = self.row_of(index) else {
+            return false;
+        };
+        if self.grid {
+            let columns = self.gallery_columns.unwrap_or(1).max(1);
+            let band = row / columns;
+            self.gallery_visible.contains(&band)
+        } else {
+            self.table
+                .as_ref()
+                .is_some_and(|table| table.read(cx).visible_range().rows().contains(&row))
+        }
+    }
+
+    fn notify_thumbs(&self, cx: &mut Context<Self>) {
+        if self.grid {
+            cx.notify();
+        } else if let Some(table) = self.table.clone() {
+            table.update(cx, |_, cx| cx.notify());
+        }
+    }
+
     /// Open the side-by-side view for a row and start building both sides.
     pub(super) fn open_compare(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
@@ -104,14 +127,39 @@ impl Audit {
             return;
         }
         let dataset_generation = self.dataset_generation;
+        let edge = if self.grid {
+            thumbs::THUMB_EDGE
+        } else {
+            thumbs::TABLE_THUMB_EDGE
+        };
         let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
         };
 
         cx.spawn(async move |this, cx| {
+            // Rows crossed during a fast scroll are never seen long enough to
+            // justify a decode or a texture upload. Once the list settles, only
+            // the rows still in the viewport continue.
+            cx.background_executor().timer(THUMB_SETTLE).await;
+            let ready = this
+                .update(cx, |audit, cx| {
+                    if audit.dataset_generation != dataset_generation {
+                        return false;
+                    }
+                    if audit.thumb_is_visible(index, cx) {
+                        return true;
+                    }
+                    audit.requested.remove(&index);
+                    false
+                })
+                .unwrap_or(false);
+            if !ready {
+                return;
+            }
+
             let loaded = cx
                 .background_executor()
-                .spawn(async move { thumbs::load(&path, thumbs::THUMB_EDGE) })
+                .spawn(async move { thumbs::load(&path, edge) })
                 .await;
 
             if let Some(image) = loaded {
@@ -120,7 +168,9 @@ impl Audit {
                         audit.thumbs.insert(index, image);
                         audit.thumb_order.push_back(index);
                         audit.trim_thumbs();
-                        cx.notify();
+                        if audit.thumb_is_visible(index, cx) {
+                            audit.notify_thumbs(cx);
+                        }
                     }
                 });
             }

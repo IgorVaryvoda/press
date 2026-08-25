@@ -176,6 +176,11 @@ impl Audit {
                     cx,
                     |audit, cx| {
                         audit.grid = !audit.grid;
+                        // The list needs 96 px thumbs; the gallery needs 224 px.
+                        // Keep one cache and refill it on this rare mode switch.
+                        audit.thumbs.clear();
+                        audit.requested.clear();
+                        audit.thumb_order.clear();
                         cx.notify();
                     },
                 )
@@ -196,12 +201,6 @@ impl Audit {
     /// Conversion settings live in the output panel on the right, next to the
     /// estimate and the button they drive.
     pub(super) fn controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let heavy = self
-            .entries
-            .iter()
-            .filter(|entry| Finding::Heavy.holds(entry))
-            .count();
-
         div()
             .flex()
             .flex_wrap()
@@ -222,11 +221,11 @@ impl Audit {
             )
             // The audit colours every row by weight per pixel and then asks
             // you to find the heavy ones yourself.
-            .children((heavy > 0).then(|| {
+            .children((self.heavy > 0).then(|| {
                 self.finding_button(
                     Finding::Heavy,
                     IconName::TriangleAlert,
-                    format!("{heavy} heavy"),
+                    format!("{} heavy", self.heavy),
                     "Files carrying more bytes per pixel than a photograph \
                      needs. Click to show only them.",
                     cx,

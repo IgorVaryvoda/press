@@ -26,14 +26,15 @@ use image::{DynamicImage, Frame, RgbaImage};
 /// pictures floating in the middle of 200px tiles. `gallery_never_asks_for_more_than_a_
 /// thumbnail_holds` keeps the two in step.
 ///
-/// One size for both views rather than one each. The list shrinks this to a 34px slot,
-/// which costs nothing, while a second size would mean a second decode and a second
-/// cache entry per file the first time anyone switched between list and grid.
+/// The list uses 96px: uploading a 224px texture into its 34px slot made fast scrolling
+/// miss frames. The mode switch clears the memory cache, while the disk cache keeps both
+/// sizes so returning to either view is still cheap.
 ///
 // ponytail: a logical pixel, not a device one. On a 2x display the gallery scales this
 // up again — far less than it did at 96, but visibly. Ask the window for its scale
 // factor if that ever matters.
 pub const THUMB_EDGE: u32 = 224;
+pub const TABLE_THUMB_EDGE: u32 = 96;
 
 /// Thumbnails kept on disk. Measured at 38KB of lossless WebP each at `THUMB_EDGE` on
 /// real photographs, so this bounds the cache near 110MB.
