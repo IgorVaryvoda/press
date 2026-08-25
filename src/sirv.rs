@@ -989,6 +989,39 @@ mod tests {
         root
     }
 
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 2048];
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(
+                read > 0,
+                "the test client closed before sending its request"
+            );
+            request.extend_from_slice(&chunk[..read]);
+
+            let Some(headers_end) = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..headers_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= headers_end + content_length {
+                return String::from_utf8(request).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn a_401_reads_as_a_credentials_problem() {
         let error = Error {
@@ -1345,35 +1378,6 @@ mod tests {
     }
 
     #[test]
-    fn the_test_client_uses_its_injected_api_url() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 2048];
-            let read = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..read]).starts_with("POST /v2/token "));
-            let body = r#"{"token":"local","expiresIn":1200}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        });
-        let mut client = Client::with_api(
-            Credentials {
-                client_id: "id".into(),
-                client_secret: "secret".into(),
-            },
-            format!("http://{address}"),
-        );
-
-        assert_eq!(client.fetch_token().unwrap(), "local");
-        server.join().unwrap();
-    }
-
-    #[test]
     fn an_account_cdn_host_comes_from_the_authenticated_endpoint() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1383,9 +1387,7 @@ mod tests {
                 ("GET /v2/account ", r#"{"cdnURL":"demo.sirv.com"}"#),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 2048];
-                let read = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..read]);
+                let request = read_http_request(&mut stream);
                 assert!(
                     request.starts_with(expected),
                     "unexpected request: {request}"
@@ -1399,6 +1401,7 @@ mod tests {
                     body.len()
                 )
                 .unwrap();
+                stream.flush().unwrap();
             }
         });
         let mut client = Client::with_api(
