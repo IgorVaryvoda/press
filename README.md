@@ -1,4 +1,4 @@
-# ImageGuide Desktop
+# Press
 
 Audit and optimise a folder of images locally.
 
@@ -8,9 +8,9 @@ shoot. This does the same job on your computer: auditing, comparing, and convert
 do not upload files, and the folder size is bounded by the disk rather than by a
 browser tab. Files leave the machine only when you explicitly use Sirv sync.
 
-![ImageGuide auditing a mixed folder of PNG and JPEG images](docs/audit.webp)
+![Press auditing a mixed folder of PNG and JPEG images](docs/audit.webp)
 
-It is the desktop companion to the site and the
+Press is the desktop companion to the site and the
 [Chrome extension](https://chromewebstore.google.com/detail/hinifcidioledficgenmdncpkifnngap).
 The extension audits the images on a page and stops there, because a browser cannot
 rewrite your files. This one can.
@@ -32,14 +32,14 @@ builds do not update themselves.
 Audit, thumbnails, and WebP conversion all work.
 
 ```bash
-imageguide                                         # empty state: pick or drop
-imageguide ~/path/to/folder                        # audit, in a window
-imageguide ~/photo.jpg                             # straight into the comparison
-imageguide ~/path/to/folder --convert              # convert to WebP, no window
-imageguide ~/path/to/folder --convert --avif
-imageguide ~/path/to/folder --convert --max-edge 1600
-imageguide ~/path/to/folder --convert --quality 60
-imageguide ~/path/to/folder --convert --lossless  # WebP only
+press                                         # empty state: pick or drop
+press ~/path/to/folder                        # audit, in a window
+press ~/photo.jpg                             # straight into the comparison
+press ~/path/to/folder --convert              # convert to WebP, no window
+press ~/path/to/folder --convert --avif
+press ~/path/to/folder --convert --max-edge 1600
+press ~/path/to/folder --convert --quality 60
+press ~/path/to/folder --convert --lossless  # WebP only
 ```
 
 Launched with no path it opens on an empty state: **Open folder…**, **Open image…**,
@@ -74,7 +74,7 @@ shortening the total.
 
 On macOS, nested packages such as Photos libraries and application bundles are
 counted and skipped for the same reason: their internal assets are not web-delivery
-images. Pointing ImageGuide directly at a package still scans it.
+images. Pointing Press directly at a package still scans it.
 
 The list is virtualised, and a row's thumbnail is decoded only once it has been on
 screen. A folder of 6,000 images does not decode 6,000 files.
@@ -86,12 +86,12 @@ thousands of them.
 ## Optional Sirv sync
 
 Open the Sirv folder browser, choose a remote folder, and pair it with the current
-local folder. ImageGuide then shows files that exist on only one side or have a
+local folder. Press then shows files that exist on only one side or have a
 different byte size. **Push** uploads missing local originals. **Pull** downloads
 missing remote files. Replacing a different file requires a second confirming click,
 and **Stop** prevents the next file in the transfer from starting.
 
-Sirv credentials stay in ImageGuide's platform config directory. The credentials
+Sirv credentials stay in the platform config directory. The credentials
 file is written owner-only on Unix systems. Changing credentials or opening another
 local folder retires the old remote listing and pairing. No Sirv request happens as
 part of a normal audit, comparison, or conversion.

@@ -791,6 +791,9 @@ fn store_path() -> Option<PathBuf> {
 }
 
 fn store_path_in(base: impl AsRef<Path>) -> PathBuf {
+    // Still `imageguide`, matching `settings::path`. The rename to Press left
+    // on-disk state alone: an orphaned credentials file reads as "Press forgot
+    // my keys", which is worse than a folder whose name is out of date.
     base.as_ref().join("imageguide").join("sirv")
 }
 

@@ -57,7 +57,7 @@ impl Audit {
                         "No Sirv credentials. Add client_id and client_secret to {}",
                         sirv::credentials_path()
                             .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "the ImageGuide config file".into())
+                            .unwrap_or_else(|| "the Press config file".into())
                     );
                     self.sirv_browser = Some(SirvBrowser {
                         // Never used on this path: the listing is already an error.

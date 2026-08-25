@@ -16,7 +16,7 @@ use std::path::PathBuf;
 /// screen and no screen-recording permission — the alternative was describing the
 /// window to someone else and asking them what they saw.
 ///
-///     cargo test --bin imageguide -- --ignored --nocapture screenshot
+///     cargo test --bin press -- --ignored --nocapture screenshot
 ///
 /// Set `IMAGEGUIDE_SHOT_DIR` to choose the folder to audit and `IMAGEGUIDE_SHOT_OUT`
 /// to choose where the picture lands.

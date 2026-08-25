@@ -339,8 +339,8 @@ impl Render for Audit {
         let count = self.visible.len();
 
         let title = match self.root.file_name() {
-            Some(name) => format!("{} — ImageGuide", name.to_string_lossy()),
-            None => "ImageGuide".to_string(),
+            Some(name) => format!("{} — Press", name.to_string_lossy()),
+            None => "Press".to_string(),
         };
         if title != self.titled {
             window.set_window_title(&title);

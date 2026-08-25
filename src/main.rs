@@ -1,4 +1,4 @@
-//! ImageGuide Desktop — audit and convert a folder of images locally.
+//! Press — audit and convert a folder of images locally.
 //!
 //! The browser tools on imageguide.dev post files to a worker to convert them. This
 //! does the same work locally, so auditing and conversion send nothing away and the
@@ -61,7 +61,7 @@ fn parse_args() -> Args {
     match parse_args_from(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(message) => {
-            eprintln!("imageguide: {message}");
+            eprintln!("press: {message}");
             std::process::exit(2);
         }
     }
@@ -220,12 +220,12 @@ fn main() {
 
     if args.convert {
         if let Some(first) = args.unknown.first() {
-            eprintln!("imageguide: unknown option {first}");
+            eprintln!("press: unknown option {first}");
             std::process::exit(2);
         }
     } else {
         for argument in &args.unknown {
-            eprintln!("imageguide: ignoring unknown option {argument}");
+            eprintln!("press: ignoring unknown option {argument}");
         }
     }
 
@@ -239,7 +239,7 @@ fn main() {
 
     let Some(target) = target else {
         if args.convert {
-            eprintln!("imageguide: --convert needs a folder");
+            eprintln!("press: --convert needs a folder");
             std::process::exit(2);
         }
         // No path given: open the window on its empty state and let the user pick.
@@ -265,7 +265,7 @@ fn main() {
     // A single file opens straight into the comparison. A folder opens the audit.
     let open_single = target.is_file();
     if !target.is_dir() && !open_single {
-        eprintln!("imageguide: {} is not a file or folder", target.display());
+        eprintln!("press: {} is not a file or folder", target.display());
         std::process::exit(2);
     }
 
@@ -292,7 +292,7 @@ fn main() {
     let (scanned, root) = if open_single {
         let parent = target.parent().unwrap_or(Path::new(".")).to_path_buf();
         let Some(entry) = scan::probe(&target) else {
-            eprintln!("imageguide: {} is not an image", target.display());
+            eprintln!("press: {} is not an image", target.display());
             std::process::exit(2);
         };
         (
@@ -319,7 +319,7 @@ fn main() {
         scanned.skipped_raw
     );
     for path in &scanned.walk_errors {
-        eprintln!("imageguide: could not enter {}", path.display());
+        eprintln!("press: could not enter {}", path.display());
     }
     match scanned.skipped_packages {
         0 => {}
@@ -330,7 +330,7 @@ fn main() {
     let failed = convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
     let unread = scanned_unreadable_count + walk_error_count;
     if unread > 0 {
-        eprintln!("imageguide: {unread} files or folders could not be read");
+        eprintln!("press: {unread} files or folders could not be read");
     }
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
@@ -447,7 +447,9 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
-                    app_id: Some("imageguide".to_string()),
+                    // Matches the desktop entry cargo-packager derives from
+                    // product-name; a mismatch loses the icon under Wayland.
+                    app_id: Some("press".to_string()),
                     ..Default::default()
                 },
                 |window, cx| {

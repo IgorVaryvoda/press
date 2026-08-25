@@ -3377,29 +3377,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "imageguide-desktop"
-version = "0.2.1"
-dependencies = [
- "cargo-packager-updater",
- "cc",
- "futures",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "image",
- "libwebp-sys",
- "parking_lot",
- "pkg-config",
- "rfd",
- "serde",
- "serde_json",
- "ureq",
- "vcpkg",
- "walkdir",
-]
-
-[[package]]
 name = "imagesize"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5145,6 +5122,29 @@ name = "precomputed-hash"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
+
+[[package]]
+name = "press"
+version = "0.2.1"
+dependencies = [
+ "cargo-packager-updater",
+ "cc",
+ "futures",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "image",
+ "libwebp-sys",
+ "parking_lot",
+ "pkg-config",
+ "rfd",
+ "serde",
+ "serde_json",
+ "ureq",
+ "vcpkg",
+ "walkdir",
+]
 
 [[package]]
 name = "presser"

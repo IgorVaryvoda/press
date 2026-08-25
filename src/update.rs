@@ -1,6 +1,9 @@
 use cargo_packager_updater::{Config, check_update};
 use std::sync::atomic::{AtomicU8, Ordering};
 
+/// Still the old repository path. Installed copies poll this exact URL, so it
+/// moves only when the GitHub repository is renamed, and then only behind a
+/// release that keeps the old feed alive until the fleet has rolled over.
 const ENDPOINT: &str =
     "https://github.com/IgorVaryvoda/imageguide-desktop/releases/latest/download/latest.json";
 
@@ -35,7 +38,7 @@ pub fn notice() -> Option<String> {
 /// cargo-packager-updater resolves the "installed app" from this path, and
 /// outside a real bundle that resolution is the executable's parent
 /// directory, which an update then `remove_dir_all`s — for a
-/// `target/release/imageguide` that deletes the build tree.
+/// `target/release/press` that deletes the build tree.
 ///
 /// Known accepted-but-imperfect cases, on purpose: an app run straight off
 /// a read-only DMG and a Gatekeeper-translocated app both still match this
@@ -133,19 +136,19 @@ pub fn install_if_available() {
             Ok(()) => {
                 *UPDATE_MESSAGE.lock() = None;
                 UPDATE_STATE.store(1, Ordering::Relaxed);
-                eprintln!("imageguide: installed update; restart to use it");
+                eprintln!("press: installed update; restart to use it");
             }
             Err(error) => {
                 *UPDATE_MESSAGE.lock() = Some(error.to_string());
                 UPDATE_STATE.store(2, Ordering::Relaxed);
-                eprintln!("imageguide: could not install update: {error}");
+                eprintln!("press: could not install update: {error}");
             }
         },
         Ok(None) => {}
         Err(error) => {
             *UPDATE_MESSAGE.lock() = Some(error.to_string());
             UPDATE_STATE.store(2, Ordering::Relaxed);
-            eprintln!("imageguide: could not check for updates: {error}");
+            eprintln!("press: could not check for updates: {error}");
         }
     }
 }
@@ -167,62 +170,62 @@ mod tests {
     #[test]
     fn a_bundled_mac_path_is_updatable() {
         assert!(mac_bundle_path(std::path::Path::new(
-            "/Applications/ImageGuide.app/Contents/MacOS/imageguide"
+            "/Applications/Press.app/Contents/MacOS/press"
         )));
     }
 
     #[test]
     fn a_target_release_binary_is_not_a_mac_bundle() {
         assert!(!mac_bundle_path(std::path::Path::new(
-            "/home/user/repo/target/release/imageguide"
+            "/home/user/repo/target/release/press"
         )));
     }
 
     #[test]
     fn a_bare_contents_macos_layout_without_an_app_is_refused() {
         assert!(!mac_bundle_path(std::path::Path::new(
-            "/tmp/build/Contents/MacOS/imageguide"
+            "/tmp/build/Contents/MacOS/press"
         )));
     }
 
     #[test]
     fn a_helper_nested_below_macos_is_refused() {
         assert!(!mac_bundle_path(std::path::Path::new(
-            "/tmp/Foo.app/Contents/MacOS/helpers/imageguide"
+            "/tmp/Foo.app/Contents/MacOS/helpers/press"
         )));
     }
 
     #[test]
     fn a_mac_bundle_path_that_can_escape_the_updaters_shell_quote_is_refused() {
         assert!(!mac_bundle_path(std::path::Path::new(
-            "/Applications/ImageGuide'; touch pwned; '.app/Contents/MacOS/imageguide"
+            "/Applications/Press'; touch pwned; '.app/Contents/MacOS/press"
         )));
         assert!(!mac_bundle_path(std::path::Path::new(
-            "/Applications/ImageGuide\".app/Contents/MacOS/imageguide"
+            "/Applications/Press\".app/Contents/MacOS/press"
         )));
         assert!(!updater_shell_path_is_safe(std::path::Path::new(
-            "/tmp/ImageGuide' && touch pwned && '"
+            "/tmp/Press' && touch pwned && '"
         )));
     }
 
     #[test]
     fn an_appimage_payload_under_its_appdir_is_updatable() {
         assert!(appimage_run(
-            std::path::Path::new("/tmp/.mount_ImageGkQjHd/usr/bin/imageguide"),
+            std::path::Path::new("/tmp/.mount_PresskQjHd/usr/bin/press"),
             true,
-            Some(std::path::Path::new("/tmp/.mount_ImageGkQjHd")),
+            Some(std::path::Path::new("/tmp/.mount_PresskQjHd")),
         ));
     }
 
     #[test]
     fn an_inherited_appimage_variable_does_not_match_a_loose_binary() {
         assert!(!appimage_run(
-            std::path::Path::new("/home/user/repo/target/release/imageguide"),
+            std::path::Path::new("/home/user/repo/target/release/press"),
             true,
             Some(std::path::Path::new("/tmp/.mount_Other")),
         ));
         assert!(!appimage_run(
-            std::path::Path::new("/home/user/repo/target/release/imageguide"),
+            std::path::Path::new("/home/user/repo/target/release/press"),
             true,
             None,
         ));
@@ -231,7 +234,7 @@ mod tests {
     #[test]
     fn an_extracted_appimage_run_is_still_updatable() {
         assert!(appimage_run(
-            std::path::Path::new("/tmp/appimage_extracted_1234/usr/bin/imageguide"),
+            std::path::Path::new("/tmp/appimage_extracted_1234/usr/bin/press"),
             true,
             Some(std::path::Path::new("/tmp/appimage_extracted_1234")),
         ));

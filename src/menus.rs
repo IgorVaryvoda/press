@@ -6,7 +6,7 @@ use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 use crate::audit::Audit;
 
 actions!(
-    imageguide,
+    press,
     [
         Quit,
         HideSelf,
@@ -65,12 +65,12 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
     ]);
 
     cx.set_menus(vec![
-        Menu::new("ImageGuide").items(vec![
-            MenuItem::action("Hide ImageGuide", HideSelf),
+        Menu::new("Press").items(vec![
+            MenuItem::action("Hide Press", HideSelf),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
-            MenuItem::action("Quit ImageGuide", Quit),
+            MenuItem::action("Quit Press", Quit),
         ]),
         Menu::new("File").items(vec![
             MenuItem::action("Open Folder…", OpenFolder),

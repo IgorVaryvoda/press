@@ -33,6 +33,9 @@ pub fn path() -> Option<PathBuf> {
             })
     }?;
 
+    // The folder keeps the old name on purpose. Renaming it to `press` would
+    // orphan every existing settings file and Sirv credential pair without a
+    // migration, and losing a saved secret to a cosmetic change is not a trade.
     Some(base.join("imageguide").join("settings"))
 }
 
