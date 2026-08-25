@@ -94,6 +94,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Check out vision.cpp for macOS local AI
+        if: runner.os == 'macOS'
+        uses: actions/checkout@v4
+        with:
+          repository: Acly/vision.cpp
+          ref: b766b0acc30f6706f1bfe46769635e361172ce96
+          path: .visioncpp
+          submodules: recursive
+
+      - name: Build macOS local AI runtime
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S .visioncpp -B target/visioncpp-build -G Ninja \
+            -D CMAKE_BUILD_TYPE=Release \
+            -D CMAKE_INSTALL_PREFIX="$PWD/target/visioncpp-runtime" \
+            -D CMAKE_INSTALL_LIBDIR=lib \
+            -D VISP_TESTS=OFF \
+            -D GGML_METAL=OFF
+          cmake --build target/visioncpp-build --config Release --parallel 3
+          cmake --install target/visioncpp-build --config Release
+          test -x target/visioncpp-runtime/bin/vision-cli
+          test -f target/visioncpp-runtime/LICENSE
+
       - name: Install packager
         run: cargo install cargo-packager --version 0.11.8 --locked
 
@@ -129,7 +152,10 @@ jobs:
       - name: Reject Homebrew-linked macOS binaries
         if: runner.os == 'macOS'
         run: |
-          if otool -L target/release/press | grep -E '/(opt/homebrew|usr/local)/'; then
+          runtime=dist/Press.app/Contents/Resources/visioncpp
+          test -x "$runtime/bin/vision-cli"
+          DYLD_LIBRARY_PATH="$runtime/bin:$runtime/lib" "$runtime/bin/vision-cli" --help >/dev/null
+          if otool -L target/release/press "$runtime/bin/vision-cli" "$runtime"/lib/*.dylib | grep -E '/(opt/homebrew|usr/local)/'; then
             echo "The app still depends on Homebrew libraries" >&2
             exit 1
           fi

@@ -35,6 +35,7 @@ impl Audit {
         let entry = self.entries.get(comparison.index);
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let name = entry.map(|entry| entry.name()).unwrap_or_default();
+        let local_ai_available = local_ai::available();
         let local_status = self.local_ai_job.as_ref().filter(|job| {
             job.index == comparison.index && job.dataset_generation == comparison.dataset_generation
         });
@@ -344,7 +345,7 @@ impl Audit {
                                 audit.start_conversion(cx);
                             }))
                     })
-                    .child({
+                    .when(local_ai_available, |bar| bar.child({
                         let index = comparison.index;
                         let busy = self.local_ai_busy();
                         let running = self.local_ai_job.as_ref().is_some_and(|job| {
@@ -356,7 +357,7 @@ impl Audit {
                                 .map(|job| job.message(&self.root))
                                 .unwrap_or_else(|| "Local AI is running…".into())
                         } else {
-                            "Remove the background locally with BiRefNet Lite; first use downloads the engine and model".into()
+                            "Remove the background locally with BiRefNet Lite; first use downloads the model".into()
                         };
                         Button::new("compare-remove-background")
                             .small()
@@ -376,8 +377,8 @@ impl Audit {
                                     cx,
                                 );
                             }))
-                    })
-                    .child({
+                    }))
+                    .when(local_ai_available, |bar| bar.child({
                         let index = comparison.index;
                         let busy = self.local_ai_busy();
                         let running = self
@@ -395,7 +396,7 @@ impl Audit {
                         } else if let Some(message) = upscale_error.as_ref() {
                             format!("{message}; use Sirv Studio for this image")
                         } else {
-                            "Upscale 4× locally with Remacri ESRGAN; first use downloads the engine and model".into()
+                            "Upscale 4× locally with Remacri ESRGAN; first use downloads the model".into()
                         };
                         Button::new("compare-upscale")
                             .small()
@@ -407,7 +408,7 @@ impl Audit {
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 audit.start_local_ai(local_ai::Tool::Upscale, index, cx);
                             }))
-                    })
+                    }))
                     .child({
                         let studio = entry.map_or_else(
                             || Err("This image is no longer in the audit".to_string()),

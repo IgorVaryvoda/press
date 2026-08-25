@@ -87,6 +87,14 @@ pub struct Prepared {
     tool: Tool,
 }
 
+pub fn available() -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        || data_dir()
+            .ok()
+            .and_then(|base| discover_runtime(&base).ok().flatten())
+            .is_some()
+}
+
 pub fn installed(tool: Tool) -> bool {
     let Ok(base) = data_dir() else {
         return false;
@@ -297,18 +305,28 @@ fn discover_runtime(base: &Path) -> Result<Option<PathBuf>, String> {
         ));
     }
     if let Ok(executable) = std::env::current_exe()
-        && let Some(parent) = executable.parent()
+        && let Some(bundled) = bundled_runtime(&executable)
     {
-        let bundled = parent.join(vision_binary_name());
-        if bundled.is_file() {
-            return Ok(Some(bundled));
-        }
+        return Ok(Some(bundled));
     }
     let cached = base
         .join(RUNTIME_DIR)
         .join("bin")
         .join(vision_binary_name());
     Ok(cached.is_file().then_some(cached))
+}
+
+fn bundled_runtime(executable: &Path) -> Option<PathBuf> {
+    let parent = executable.parent()?;
+    let adjacent = parent.join(vision_binary_name());
+    if adjacent.is_file() {
+        return Some(adjacent);
+    }
+    let resource = parent
+        .parent()?
+        .join("Resources/visioncpp/bin")
+        .join(vision_binary_name());
+    resource.is_file().then_some(resource)
 }
 
 fn ensure_runtime(base: &Path, cancelled: &AtomicBool) -> Result<PathBuf, String> {
@@ -595,6 +613,20 @@ mod tests {
         assert!(verify_asset(&path, asset).unwrap());
         std::fs::write(&path, b"abd").unwrap();
         assert!(!verify_asset(&path, asset).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundled_runtime_is_found_inside_a_macos_app() {
+        let root = temp_dir("bundled-runtime");
+        let executable = root.join("Press.app/Contents/MacOS/press");
+        let runtime = root
+            .join("Press.app/Contents/Resources/visioncpp/bin")
+            .join(vision_binary_name());
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        std::fs::write(&runtime, b"runtime").unwrap();
+        assert_eq!(bundled_runtime(&executable), Some(runtime));
         let _ = std::fs::remove_dir_all(root);
     }
 }

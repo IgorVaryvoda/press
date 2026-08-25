@@ -99,11 +99,11 @@ pushed explicitly first; opening Studio never uploads a file.
 
 The comparison has two local actions that never upload the source:
 **Remove background** uses BiRefNet Lite and **Upscale 4×** uses tiled Real-ESRGAN.
-The first use downloads a pinned, checksum-verified vision.cpp runtime and only the
-selected model (about 104 MB for background removal or 49 MB for upscaling). Results
-are lossless PNGs under `optimized/`; an existing result is never replaced. Automatic
-runtime setup currently supports Linux x64. Other platforms can point
-`PRESS_VISION_CLI` at a local vision.cpp build.
+Packaged macOS builds include the pinned vision.cpp runtime. Linux x64 downloads a
+checksum-verified copy on first use. Both download only the selected model (up to
+104 MB total for background removal or 49 MB for upscaling). Results are lossless
+PNGs under `optimized/`; an existing result is never replaced. Other builds can
+point `PRESS_VISION_CLI` at a local vision.cpp build.
 
 Sirv credentials stay in the platform config directory. The credentials
 file is written owner-only on Unix systems. Changing credentials or opening another

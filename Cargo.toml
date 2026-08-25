@@ -73,6 +73,11 @@ homepage = "https://imageguide.dev"
 license-file = "LICENSE"
 category = "Graphics and Design"
 icons = ["assets/app-icon.png"]
+resources = [
+    { src = "target/visioncpp-runtime/bin", target = "visioncpp/bin" },
+    { src = "target/visioncpp-runtime/lib", target = "visioncpp/lib" },
+    { src = "target/visioncpp-runtime/LICENSE", target = "visioncpp/LICENSE" },
+]
 
 [package.metadata.packager.macos]
 # The env var override did not take, so the real identity lives here. Ad-hoc
