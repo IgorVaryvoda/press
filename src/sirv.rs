@@ -126,6 +126,40 @@ pub fn encode_path(path: &str) -> String {
     out
 }
 
+fn validate_cdn_host(host: &str) -> Result<(), Error> {
+    if !host.is_empty()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return Ok(());
+    }
+    Err(Error {
+        status: 0,
+        message: format!("Sirv returned an invalid CDN host: {host}"),
+    })
+}
+
+/// The public HTTPS URL for one absolute filename returned by Sirv.
+pub fn public_url(cdn_host: &str, remote_filename: &str) -> Result<String, Error> {
+    validate_cdn_host(cdn_host)?;
+    let path = remote_filename
+        .trim_start_matches('/')
+        .split('/')
+        .map(encode_path)
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(format!("https://{cdn_host}/{path}"))
+}
+
+/// Open one public image in Studio without uploading another copy.
+pub fn studio_image_to_image_url(public_url: &str) -> String {
+    format!(
+        "https://dev.sirv.studio/tools/image-to-image?image={}",
+        encode_path(public_url)
+    )
+}
+
 /// How a local file stands against the paired remote folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncState {
@@ -420,6 +454,7 @@ pub fn content_type(key: &str) -> &'static str {
 pub struct Client {
     credentials: Credentials,
     token: Option<(String, Instant)>,
+    cdn_host: Option<String>,
     token_lifetime: Duration,
     agent: ureq::Agent,
     api: String,
@@ -430,6 +465,7 @@ impl Client {
         Self {
             credentials,
             token: None,
+            cdn_host: None,
             token_lifetime: DEFAULT_TOKEN_LIFETIME,
             agent: ureq::AgentBuilder::new().timeout(TIMEOUT).build(),
             api: API.to_string(),
@@ -511,6 +547,36 @@ impl Client {
 
     fn bearer(&mut self) -> Result<String, Error> {
         Ok(format!("Bearer {}", self.token()?))
+    }
+
+    /// The account's configured public image host, cached with its credentials.
+    pub fn cdn_host(&mut self) -> Result<String, Error> {
+        if let Some(host) = &self.cdn_host {
+            return Ok(host.clone());
+        }
+        #[derive(Deserialize)]
+        struct Account {
+            #[serde(rename = "cdnURL")]
+            cdn_url: String,
+        }
+
+        let url = format!("{}/v2/account", self.api);
+        let account: Account = self.authenticated(|client| {
+            let authorization = client.bearer()?;
+            let response = client
+                .agent
+                .get(&url)
+                .set("Authorization", &authorization)
+                .call()
+                .map_err(sirv_error("account"))?;
+            response.into_json().map_err(|error| Error {
+                status: 0,
+                message: format!("account body: {error}"),
+            })
+        })?;
+        validate_cdn_host(&account.cdn_url)?;
+        self.cdn_host = Some(account.cdn_url.clone());
+        Ok(account.cdn_url)
     }
 
     /// One directory listing, following `continuation` pages. The API returns
@@ -1106,6 +1172,28 @@ mod tests {
     }
 
     #[test]
+    fn a_public_url_preserves_folders_and_encodes_segments() {
+        assert_eq!(
+            public_url("demo.sirv.com", "/folder with spaces/café#%.png",).unwrap(),
+            "https://demo.sirv.com/folder%20with%20spaces/caf%C3%A9%23%25.png"
+        );
+    }
+
+    #[test]
+    fn an_invalid_cdn_host_is_rejected() {
+        assert!(public_url("https://demo.sirv.com", "/a.jpg").is_err());
+        assert!(public_url("demo.sirv.com/folder", "/a.jpg").is_err());
+    }
+
+    #[test]
+    fn a_studio_url_encodes_the_public_image() {
+        assert_eq!(
+            studio_image_to_image_url("https://demo.sirv.com/folder/a b.jpg"),
+            "https://dev.sirv.studio/tools/image-to-image?image=https%3A%2F%2Fdemo.sirv.com%2Ffolder%2Fa%20b.jpg"
+        );
+    }
+
+    #[test]
     fn classification_covers_the_three_states() {
         let node = Node {
             filename: "/d/a.png".into(),
@@ -1282,6 +1370,47 @@ mod tests {
         );
 
         assert_eq!(client.fetch_token().unwrap(), "local");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_account_cdn_host_comes_from_the_authenticated_endpoint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (expected, body) in [
+                ("POST /v2/token ", r#"{"token":"local","expiresIn":1200}"#),
+                ("GET /v2/account ", r#"{"cdnURL":"demo.sirv.com"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 2048];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(
+                    request.starts_with(expected),
+                    "unexpected request: {request}"
+                );
+                if expected.starts_with("GET") {
+                    assert!(request.contains("Authorization: Bearer local"));
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let mut client = Client::with_api(
+            Credentials {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            format!("http://{address}"),
+        );
+
+        assert_eq!(client.cdn_host().unwrap(), "demo.sirv.com");
+        assert_eq!(client.cdn_host().unwrap(), "demo.sirv.com");
         server.join().unwrap();
     }
 

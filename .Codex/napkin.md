@@ -4,6 +4,8 @@
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
 | 2026-08-23 | self | Used `rm -f` to clean isolated visual-proof files, then tried `gio trash`, which `/tmp` does not support | For exact `/tmp` proof targets, use `unlink` for files and `find <validated-dir> -depth -delete` for trees |
+| 2026-08-25 | user | Opened the Studio handoff on `www.sirv.studio`, whose route did not preload the image | The companion route is `https://dev.sirv.studio/tools/image-to-image`; prove the exact CDN fetch there |
+| 2026-08-25 | self | Put Markdown backticks inside a double-quoted shell search, so Bash tried to execute the text between them | Use single quotes for shell patterns that contain backticks |
 | 2026-08-23 | self | Passed several test-name filters to one `cargo test` invocation, but Cargo accepts only one positional filter | Use one shared substring filter or run focused filters as separate commands |
 | 2026-08-22 | self | Treated `webp::WebPConfig::new()` as `Option` in an `Option`-returning encoder | It returns `Result`; use `.ok()?` at this deliberately lossy error boundary |
 | 2026-08-22 | self | Timed a long conversion through an `exec` wrapper that hid the yielded `exec_command` session id, then accidentally started a second conversion beside it | Print the full `exec_command` result as JSON and resume its `session_id` with `write_stdin`; never trust timing while another benchmark process exists |
@@ -17,6 +19,9 @@
 - For pre-alpha UI work, reshape the design freely and make real app screenshots yourself; do not wait for an in-repo headless capture test.
 
 ## Patterns That Work
+- At the 760px comparison minimum, hide duplicate conversion metadata before truncating the filename, and shorten secondary action labels below 900px.
+- Two local AI actions fit as direct keyboard-native buttons; a dropdown adds a click and inherits the popover trigger's keyboard gaps. Put the active action in loading state and keep the full job message in the one-line footer.
+- vision.cpp 0.3.0's Linux package needs both `lib/` and `bin/` on `LD_LIBRARY_PATH`; its auto backend used Vulkan successfully, BiRefNet `--composite` produced RGBA, and tiled ESRGAN produced the expected 4x dimensions.
 - `TableState::refresh` rebuilds cached column groups but does not notify its entity; after changing a delegate for resize, call `cx.notify()` in the same deferred table update or the old columns stay visible until another input event.
 - In the audit toolbar, group filtering separately from conversion settings and stack those groups at the default/minimum widths; this keeps Resize, Format, and Quality together instead of letting one long flex row orphan Quality.
 - The in-process system libavif 1.4.2 + libaom 3.14.1 + libyuv path took 9.070s versus rav1e speed 8's 21.503s on the same 64-file / 134.1MB sample (57.8% faster); output fell 8.7%, and PSNR was higher on four of five spot checks. A tiny C bridge avoids stale Rust wrappers and subprocess overhead.

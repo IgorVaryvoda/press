@@ -4,6 +4,7 @@ mod compare_view;
 mod convert_job;
 mod gallery;
 mod header;
+mod local_ai_actions;
 mod media;
 mod panel;
 mod sirv_actions;
@@ -29,7 +30,7 @@ use std::time::Duration;
 use crate::compare::Pair;
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
-use crate::{Launch, compare, convert, scan, settings, sirv, thumbs};
+use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, thumbs};
 use futures::future::select_all;
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
@@ -239,6 +240,9 @@ pub(crate) struct Audit {
     drag_over: bool,
     /// The open side-by-side view, if any.
     compare: Option<Comparison>,
+    /// One local inference job. It stays visible after the comparison closes so a
+    /// completed file or named failure never disappears with the view that started it.
+    local_ai_job: Option<LocalAiJob>,
     /// The paired Sirv folder, if any: the client, the remote path, and its
     /// listing keyed by the same relative keys the local rows use.
     sirv_pairing: Option<SirvPairing>,
@@ -411,9 +415,16 @@ enum Listing {
     Ready(HashMap<String, sirv::Node>),
 }
 
+enum CdnHost {
+    Loading,
+    Failed(String),
+    Ready(String),
+}
+
 struct SirvPairing {
     dir: String,
     files: Listing,
+    cdn_host: CdnHost,
     client: Arc<parking_lot::Mutex<sirv::Client>>,
 }
 
@@ -480,6 +491,9 @@ struct SettingsPanel {
 struct Comparison {
     index: usize,
     dataset_generation: u64,
+    /// Take focus once after the comparison tree exists. Re-focusing on every
+    /// render steals keyboard ownership from the comparison buttons.
+    focused: bool,
     key: compare::Key,
     /// `None` while the two sides are still decoding.
     pair: Option<Arc<Pair>>,
@@ -494,6 +508,23 @@ struct Comparison {
     zoom: Option<f32>,
     /// Pointer position when the current drag began, and the pan it started from.
     drag: Option<((f32, f32), (f32, f32))>,
+}
+
+enum LocalAiJobState {
+    SettingUp,
+    Running,
+    Done(PathBuf),
+    Failed(String),
+}
+
+struct LocalAiJob {
+    tool: local_ai::Tool,
+    index: usize,
+    dataset_generation: u64,
+    source_name: String,
+    first_setup: bool,
+    state: LocalAiJobState,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Write the remembered state, except in tests, where a render must not touch the
@@ -522,6 +553,10 @@ impl Audit {
         self.estimate = None;
         self.converting = false;
         self.active_target_count = None;
+        if let Some(job) = self.local_ai_job.take() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.root = root;
         self.mislabelled = scanned
             .entries
@@ -944,6 +979,7 @@ pub(crate) fn build_audit(
             sirv_browser: None,
             settings_panel: None,
             compare: None,
+            local_ai_job: None,
         };
         audit.refresh_visible();
         audit.schedule_estimate(cx);

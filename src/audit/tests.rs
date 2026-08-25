@@ -1,3 +1,4 @@
+use super::local_ai_actions::local_ai_landing_applies;
 use super::media::comparison_landing_applies;
 use super::sirv_actions::{browser_landing_applies, remember_failure, walk_landing_applies};
 use super::*;
@@ -266,6 +267,7 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
     let comparison = Comparison {
         index: 2,
         dataset_generation: 7,
+        focused: false,
         key: key.clone(),
         pair: None,
         failed: false,
@@ -277,6 +279,46 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
 
     assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
     assert!(!comparison_landing_applies(Some(&comparison), 2, 8, &key));
+}
+
+#[test]
+fn a_local_ai_result_belongs_to_its_exact_file_and_dataset() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let job = LocalAiJob {
+        tool: local_ai::Tool::RemoveBackground,
+        index: 2,
+        dataset_generation: 7,
+        source_name: "photo.jpg".into(),
+        first_setup: false,
+        state: LocalAiJobState::Running,
+        cancelled: cancelled.clone(),
+    };
+
+    assert!(local_ai_landing_applies(
+        Some(&job),
+        2,
+        7,
+        local_ai::Tool::RemoveBackground
+    ));
+    assert!(!local_ai_landing_applies(
+        Some(&job),
+        2,
+        8,
+        local_ai::Tool::RemoveBackground
+    ));
+    assert!(!local_ai_landing_applies(
+        Some(&job),
+        2,
+        7,
+        local_ai::Tool::Upscale
+    ));
+    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!local_ai_landing_applies(
+        Some(&job),
+        2,
+        7,
+        local_ai::Tool::RemoveBackground
+    ));
 }
 
 #[test]
@@ -513,6 +555,7 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
         audit.sirv_pairing = Some(SirvPairing {
             dir: "/photos".into(),
             files: Listing::Ready(HashMap::new()),
+            cdn_host: CdnHost::Ready("old.sirv.com".into()),
             client: old_client.clone(),
         });
         audit.sirv_local_presence.insert("old.jpg".into());
@@ -539,12 +582,88 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
 
         let pairing = audit.sirv_pairing.as_ref().unwrap();
         assert!(matches!(pairing.files, Listing::Walking));
+        assert!(matches!(pairing.cdn_host, CdnHost::Loading));
         assert!(audit.sirv_local_presence.is_empty());
         assert!(audit.sirv_counts.is_none());
         assert!(!Arc::ptr_eq(&pairing.client, &old_client));
         assert!(audit.sirv_job.as_ref().unwrap().stopping);
         // This rejects stale walks through walk_landing_applies.
         assert_ne!(audit.sirv_pairing_generation, generation_before);
+    });
+}
+
+#[gpui::test]
+fn studio_handoff_requires_exact_remote_bytes_and_a_ready_host(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        let node = sirv::Node {
+            filename: "/photos/photo.jpg".into(),
+            size: 100_000,
+            is_directory: false,
+            kind: None,
+        };
+        audit.sirv_pairing = Some(SirvPairing {
+            dir: "/photos".into(),
+            files: Listing::Ready(HashMap::from([("photo.jpg".into(), node)])),
+            cdn_host: CdnHost::Ready("demo.sirv.com".into()),
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+        });
+
+        assert_eq!(
+            audit.studio_url_for(&audit.entries[0]).unwrap(),
+            "https://dev.sirv.studio/tools/image-to-image?image=https%3A%2F%2Fdemo.sirv.com%2Fphotos%2Fphoto.jpg"
+        );
+
+        if let Some(SirvPairing {
+            files: Listing::Ready(files),
+            ..
+        }) = audit.sirv_pairing.as_mut()
+        {
+            files.get_mut("photo.jpg").unwrap().size = 1;
+        }
+        assert_eq!(
+            audit.studio_url_for(&audit.entries[0]).unwrap_err(),
+            "Push the changed image to Sirv first"
+        );
+
+        if let Some(SirvPairing {
+            files: Listing::Ready(files),
+            ..
+        }) = audit.sirv_pairing.as_mut()
+        {
+            files.clear();
+        }
+        assert_eq!(
+            audit.studio_url_for(&audit.entries[0]).unwrap_err(),
+            "Push this image to Sirv first"
+        );
+
+        if let Some(SirvPairing {
+            files: Listing::Ready(files),
+            cdn_host,
+            ..
+        }) = audit.sirv_pairing.as_mut()
+        {
+            files.insert(
+                "photo.jpg".into(),
+                sirv::Node {
+                    filename: "/photos/photo.jpg".into(),
+                    size: 100_000,
+                    is_directory: false,
+                    kind: None,
+                },
+            );
+            *cdn_host = CdnHost::Failed("account unavailable".into());
+        }
+        assert_eq!(
+            audit.studio_url_for(&audit.entries[0]).unwrap_err(),
+            "Could not find the Sirv CDN host: account unavailable"
+        );
     });
 }
 
@@ -599,6 +718,7 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
         audit.sirv_pairing = Some(SirvPairing {
             dir: "/photos".into(),
             files: Listing::Ready(HashMap::new()),
+            cdn_host: CdnHost::Ready("demo.sirv.com".into()),
             client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
                 sirv::Credentials {
                     client_id: String::new(),

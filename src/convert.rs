@@ -435,23 +435,11 @@ pub fn plan_outputs(
     planned
 }
 
-/// Read, encode, and write one file to the path `plan_outputs` chose for it.
-pub fn convert_to(
-    root: &Path,
-    source: &Path,
-    written: &Path,
-    format: Format,
-    quality: Quality,
-    max_edge: MaxEdge,
-) -> Result<Converted, Failure> {
-    let decoded = crate::scan::decode_for_conversion(source).map_err(|error| match error {
-        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
-        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
-    })?;
-    let decoded = max_edge.apply(decoded);
-    let (width, height) = (decoded.width(), decoded.height());
-    let encoded = encode(&decoded, format, quality).ok_or(Failure::Failed)?;
-
+/// Safely install already-encoded bytes inside `root`.
+///
+/// AI tools and the normal encoder share the same output boundary: no symlinked
+/// ancestor, no half-written final file, and no path outside the audited folder.
+pub fn write_output(root: &Path, written: &Path, encoded: &[u8]) -> Result<(), Failure> {
     let relative = written.strip_prefix(root).map_err(|_| Failure::Failed)?;
     let mut ancestor = root.to_path_buf();
     for component in relative.parent().ok_or(Failure::Failed)?.components() {
@@ -480,8 +468,7 @@ pub fn convert_to(
         }
     }
     // Write beside the target and rename onto it. A crash or a full disk part-way
-    // through the write would otherwise leave a short `.webp` that looks finished, and
-    // the next run would list it as a real image.
+    // through the write would otherwise leave a short image that looks finished.
     let mut partial = written.to_path_buf().into_os_string();
     partial.push(".part");
     let partial = PathBuf::from(partial);
@@ -490,11 +477,34 @@ pub fn convert_to(
         .write(true)
         .create_new(true)
         .open(&partial)
-        .and_then(|mut file| file.write_all(&encoded));
+        .and_then(|mut file| {
+            file.write_all(encoded)?;
+            file.sync_all()
+        });
     if staged.is_err() || std::fs::rename(&partial, written).is_err() {
         let _ = std::fs::remove_file(&partial);
         return Err(Failure::Failed);
     }
+    Ok(())
+}
+
+/// Read, encode, and write one file to the path `plan_outputs` chose for it.
+pub fn convert_to(
+    root: &Path,
+    source: &Path,
+    written: &Path,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+) -> Result<Converted, Failure> {
+    let decoded = crate::scan::decode_for_conversion(source).map_err(|error| match error {
+        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
+        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+    })?;
+    let decoded = max_edge.apply(decoded);
+    let (width, height) = (decoded.width(), decoded.height());
+    let encoded = encode(&decoded, format, quality).ok_or(Failure::Failed)?;
+    write_output(root, written, &encoded)?;
 
     Ok(Converted {
         written: written.to_path_buf(),

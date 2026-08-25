@@ -91,6 +91,18 @@ different byte size. **Push** uploads missing local originals. **Pull** download
 missing remote files. Replacing a different file requires a second confirming click,
 and **Stop** prevents the next file in the transfer from starting.
 
+A byte-identical synced image has **Edit in Studio** in its comparison. The action
+opens that exact Sirv image in Sirv AI Studio. New or changed local bytes must be
+pushed explicitly first; opening Studio never uploads a file.
+
+The comparison has two local actions that never upload the source:
+**Remove background** uses BiRefNet Lite and **Upscale 4×** uses tiled Real-ESRGAN.
+The first use downloads a pinned, checksum-verified vision.cpp runtime and only the
+selected model (about 104 MB for background removal or 49 MB for upscaling). Results
+are lossless PNGs under `optimized/`; an existing result is never replaced. Automatic
+runtime setup currently supports Linux x64. Other platforms can point
+`PRESS_VISION_CLI` at a local vision.cpp build.
+
 Sirv credentials stay in the platform config directory. The credentials
 file is written owner-only on Unix systems. Changing credentials or opening another
 local folder retires the old remote listing and pairing. No Sirv request happens as

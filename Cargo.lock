@@ -5129,6 +5129,7 @@ version = "0.2.1"
 dependencies = [
  "cargo-packager-updater",
  "cc",
+ "flate2",
  "futures",
  "gpui",
  "gpui-component",
@@ -5141,6 +5142,8 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tar",
  "ureq",
  "vcpkg",
  "walkdir",

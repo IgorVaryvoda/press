@@ -425,17 +425,20 @@ impl Audit {
                         ),
                 )
             })
-            .when(!self.results.is_empty() && !self.converting, |block| {
-                block.child(
-                    Button::new("reveal")
-                        .outline()
-                        .small()
-                        .w_full()
-                        .icon(IconName::FolderOpen)
-                        .label("Show output")
-                        .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
-                )
-            })
+            .when(
+                (!self.results.is_empty() || self.existing_output > 0) && !self.converting,
+                |block| {
+                    block.child(
+                        Button::new("reveal")
+                            .outline()
+                            .small()
+                            .w_full()
+                            .icon(IconName::FolderOpen)
+                            .label("Show output")
+                            .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
+                    )
+                },
+            )
             .child(
                 Button::new("convert")
                     .primary()

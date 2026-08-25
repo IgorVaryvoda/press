@@ -214,6 +214,7 @@ impl Audit {
         self.sirv_pairing = Some(SirvPairing {
             dir: dir.clone(),
             files: Listing::Walking,
+            cdn_host: CdnHost::Loading,
             client,
         });
         self.sirv_counts = None;
@@ -243,12 +244,16 @@ impl Audit {
             let walked = cx
                 .background_executor()
                 .spawn(async move {
-                    let Some(nodes) = client
-                        .lock()
-                        .walk(&dir, &cancelled)
-                        .map_err(|error| error.to_string())?
-                    else {
-                        return Ok(None);
+                    let (cdn_host, walked) = {
+                        let mut client = client.lock();
+                        let cdn_host = client.cdn_host().map_err(|error| error.to_string());
+                        let walked = client.walk(&dir, &cancelled);
+                        (cdn_host, walked)
+                    };
+                    let nodes = match walked {
+                        Ok(Some(nodes)) => nodes,
+                        Ok(None) => return None,
+                        Err(error) => return Some((cdn_host, Err(error.to_string()))),
                     };
                     let files: HashMap<String, sirv::Node> = nodes
                         .into_iter()
@@ -259,7 +264,7 @@ impl Audit {
                     let presence = sirv::local_sizes_for(&root, files.keys().map(String::as_str))
                         .into_keys()
                         .collect();
-                    Ok(Some((files, presence)))
+                    Some((cdn_host, Ok((files, presence))))
                 })
                 .await;
             this.update(cx, |audit, cx| {
@@ -271,14 +276,16 @@ impl Audit {
                 ) {
                     return;
                 }
-                let walked = match walked {
-                    Ok(Some(walked)) => Ok(walked),
-                    Ok(None) => return,
-                    Err(error) => Err(error),
+                let Some((cdn_host, walked)) = walked else {
+                    return;
                 };
                 audit.sirv_walk_cancel = None;
                 let Some(pairing) = audit.sirv_pairing.as_mut() else {
                     return;
+                };
+                pairing.cdn_host = match cdn_host {
+                    Ok(host) => CdnHost::Ready(host),
+                    Err(message) => CdnHost::Failed(message),
                 };
                 match walked {
                     Ok((files, presence)) => {
@@ -296,6 +303,41 @@ impl Audit {
             })
         })
         .detach();
+    }
+
+    /// The exact synced remote image this local row can hand to Studio.
+    pub(super) fn studio_url_for(&self, entry: &Entry) -> Result<String, String> {
+        let pairing = self
+            .sirv_pairing
+            .as_ref()
+            .ok_or_else(|| "Pair this folder with Sirv first".to_string())?;
+        let files = match &pairing.files {
+            Listing::Walking => return Err("Waiting for the Sirv folder listing".into()),
+            Listing::Failed(message) => {
+                return Err(format!("Could not read the Sirv folder: {message}"));
+            }
+            Listing::Ready(files) => files,
+        };
+        let key = sirv::relative_key(&self.root, &entry.path)
+            .ok_or_else(|| "This image is outside the paired folder".to_string())?;
+        let remote = files.get(&key);
+        match sirv::classify(entry.bytes, remote) {
+            sirv::SyncState::OnlyLocal => return Err("Push this image to Sirv first".into()),
+            sirv::SyncState::Changed => {
+                return Err("Push the changed image to Sirv first".into());
+            }
+            sirv::SyncState::Same => {}
+        }
+        let host = match &pairing.cdn_host {
+            CdnHost::Loading => return Err("Finding the Sirv CDN host…".into()),
+            CdnHost::Failed(message) => {
+                return Err(format!("Could not find the Sirv CDN host: {message}"));
+            }
+            CdnHost::Ready(host) => host,
+        };
+        let public_url =
+            sirv::public_url(host, &remote.unwrap().filename).map_err(|error| error.to_string())?;
+        Ok(sirv::studio_image_to_image_url(&public_url))
     }
 
     pub(super) fn unpair_sirv(&mut self, cx: &mut Context<Self>) {
@@ -412,6 +454,7 @@ impl Audit {
         if let Some(pairing) = self.sirv_pairing.as_mut() {
             pairing.client = Arc::new(parking_lot::Mutex::new(sirv::Client::new(credentials)));
             pairing.files = Listing::Walking;
+            pairing.cdn_host = CdnHost::Loading;
         } else {
             return;
         }

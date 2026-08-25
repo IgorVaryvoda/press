@@ -3,6 +3,21 @@
 use super::*;
 
 impl Audit {
+    /// A local inference result stays visible after its comparison closes. Unlike
+    /// scan notices, this is normal work and uses info/success/error semantics.
+    pub(super) fn local_ai_notice(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let job = self.local_ai_job.as_ref()?;
+        let message = job.message(&self.root);
+        let alert = match job.state {
+            LocalAiJobState::SettingUp | LocalAiJobState::Running => {
+                Alert::info("local-ai-status", message)
+            }
+            LocalAiJobState::Done(_) => Alert::success("local-ai-status", message),
+            LocalAiJobState::Failed(_) => Alert::error("local-ai-status", message),
+        };
+        Some(alert.py_1().into_any_element())
+    }
+
     /// Everything the scan could not take at face value, in one line rather than
     /// three scattered ones. The mislabelled count is a button: it is the audit's best
     /// finding, and a number you cannot act on is a dead end.

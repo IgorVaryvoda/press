@@ -618,9 +618,16 @@ impl Render for Audit {
             let view = self.compare_view(&comparison, window, cx);
             self.compare = Some(comparison);
             // The click or Enter that opened this view left focus inside the list
-            // it replaced, so Escape had nowhere to land. Take focus back next
-            // frame, after the compare tree exists.
-            cx.defer_in(window, |audit, window, cx| window.focus(&audit.focus, cx));
+            // it replaced. Take focus once after the compare tree exists, then
+            // leave its buttons in charge of their own keyboard input.
+            cx.defer_in(window, |audit, window, cx| {
+                if let Some(comparison) = audit.compare.as_mut()
+                    && !comparison.focused
+                {
+                    comparison.focused = true;
+                    window.focus(&audit.focus, cx);
+                }
+            });
             return div()
                 .size_full()
                 .relative()
@@ -750,6 +757,7 @@ impl Render for Audit {
                             .overflow_hidden()
                             .child(self.controls(cx))
                             .children(self.notices(cx))
+                            .children(self.local_ai_notice(cx))
                             .child(self.audit_content(count, window, cx)),
                     )
                     .child(self.output_panel(cx)),

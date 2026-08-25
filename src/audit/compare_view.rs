@@ -29,9 +29,15 @@ impl Audit {
     ) -> gpui::AnyElement {
         let viewport = window.viewport_size();
         let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
+        // At the minimum width the conversion button already names the target format.
+        // Keep the image name readable and drop the duplicate byte summary first.
+        let compact = view_w < 900.;
         let entry = self.entries.get(comparison.index);
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let name = entry.map(|entry| entry.name()).unwrap_or_default();
+        let local_status = self.local_ai_job.as_ref().filter(|job| {
+            job.index == comparison.index && job.dataset_generation == comparison.dataset_generation
+        });
 
         let mut stage = div()
             .id("compare-stage")
@@ -293,23 +299,25 @@ impl Audit {
                             .font_weight(FontWeight::MEDIUM)
                             .child(name.clone()),
                     )
-                    .children(comparison.pair.as_ref().map(|pair| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .flex_shrink_0()
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .child(format!(
-                                "{} → {} {} · {}",
-                                format_bytes(source_bytes),
-                                self.format.label().to_uppercase(),
-                                self.quality.label(),
-                                format_bytes(pair.converted_bytes)
-                            ))
-                            .child(compare_chip(saving_text, saving_colour, cx))
-                    }))
+                    .when(!compact, |bar| {
+                        bar.children(comparison.pair.as_ref().map(|pair| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_nowrap()
+                                .child(format!(
+                                    "{} → {} {} · {}",
+                                    format_bytes(source_bytes),
+                                    self.format.label().to_uppercase(),
+                                    self.quality.label(),
+                                    format_bytes(pair.converted_bytes)
+                                ))
+                                .child(compare_chip(saving_text, saving_colour, cx))
+                        }))
+                    })
                     .child({
                         // The preview exists to answer "is this good enough?" —
                         // yes should not require finding your way back to a
@@ -336,6 +344,95 @@ impl Audit {
                                 audit.start_conversion(cx);
                             }))
                     })
+                    .child({
+                        let index = comparison.index;
+                        let busy = self.local_ai_busy();
+                        let running = self.local_ai_job.as_ref().is_some_and(|job| {
+                            job.busy() && job.tool == local_ai::Tool::RemoveBackground
+                        });
+                        let tooltip = if busy {
+                            self.local_ai_job
+                                .as_ref()
+                                .map(|job| job.message(&self.root))
+                                .unwrap_or_else(|| "Local AI is running…".into())
+                        } else {
+                            "Remove the background locally with BiRefNet Lite; first use downloads the engine and model".into()
+                        };
+                        Button::new("compare-remove-background")
+                            .small()
+                            .label(if compact {
+                                "Remove BG"
+                            } else {
+                                "Remove background"
+                            })
+                            .tooltip(tooltip)
+                            .disabled(entry.is_none() || (busy && !running))
+                            .when(running, |button| button.icon(IconName::Loader))
+                            .loading(running)
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                audit.start_local_ai(
+                                    local_ai::Tool::RemoveBackground,
+                                    index,
+                                    cx,
+                                );
+                            }))
+                    })
+                    .child({
+                        let index = comparison.index;
+                        let busy = self.local_ai_busy();
+                        let running = self
+                            .local_ai_job
+                            .as_ref()
+                            .is_some_and(|job| job.busy() && job.tool == local_ai::Tool::Upscale);
+                        let upscale_error = entry.and_then(|entry| {
+                            local_ai::upscale_dimensions(entry.width, entry.height).err()
+                        });
+                        let tooltip = if busy {
+                            self.local_ai_job
+                                .as_ref()
+                                .map(|job| job.message(&self.root))
+                                .unwrap_or_else(|| "Local AI is running…".into())
+                        } else if let Some(message) = upscale_error.as_ref() {
+                            format!("{message}; use Sirv Studio for this image")
+                        } else {
+                            "Upscale 4× locally with Remacri ESRGAN; first use downloads the engine and model".into()
+                        };
+                        Button::new("compare-upscale")
+                            .small()
+                            .label("Upscale 4×")
+                            .tooltip(tooltip)
+                            .disabled(entry.is_none() || upscale_error.is_some() || (busy && !running))
+                            .when(running, |button| button.icon(IconName::Loader))
+                            .loading(running)
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                audit.start_local_ai(local_ai::Tool::Upscale, index, cx);
+                            }))
+                    })
+                    .child({
+                        let studio = entry.map_or_else(
+                            || Err("This image is no longer in the audit".to_string()),
+                            |entry| self.studio_url_for(entry),
+                        );
+                        let (url, tooltip) = match studio {
+                            Ok(url) => (
+                                Some(url),
+                                "Open this synced image in Sirv AI Studio".to_string(),
+                            ),
+                            Err(reason) => (None, reason),
+                        };
+                        let disabled = url.is_none();
+                        Button::new("compare-edit-studio")
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label(if compact { "Studio" } else { "Edit in Studio" })
+                            .tooltip(tooltip)
+                            .disabled(disabled)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if let Some(url) = &url {
+                                    cx.open_url(url);
+                                }
+                            }))
+                    })
                     .child(
                         Button::new("compare-close")
                             .small()
@@ -354,26 +451,93 @@ impl Audit {
                     .right_0()
                     .bottom_0()
                     .flex()
-                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .px_3()
                     .py_2()
                     .bg(rgba(0x000000bf))
                     .text_size(px(12.))
-                    .child(
+                    .child({
+                        let (text, colour, busy) = match local_status {
+                            Some(job) => {
+                                let colour = match job.state {
+                                    LocalAiJobState::Done(_) => cx.theme().green,
+                                    LocalAiJobState::Failed(_) => cx.theme().red,
+                                    LocalAiJobState::SettingUp | LocalAiJobState::Running => {
+                                        gpui::Hsla::from(rgba(0xffffffcc))
+                                    }
+                                };
+                                (job.message(&self.root), colour, job.busy())
+                            }
+                            None => (
+                                match (comparison.pair.as_ref(), scale) {
+                                    (Some(pair), Some(scale)) => format!(
+                                        "{}×{} · {:.0}%",
+                                        pair.width,
+                                        pair.height,
+                                        scale * 100.
+                                    ),
+                                    (None, _) if comparison.failed => {
+                                        "Preview unavailable".to_string()
+                                    }
+                                    _ => "Building preview…".to_string(),
+                                },
+                                gpui::Hsla::from(rgba(0xffffffcc)),
+                                false,
+                            ),
+                        };
+                        let tooltip = local_status.map(|_| text.clone());
                         div()
                             .flex_1()
                             .min_w_0()
-                            .whitespace_nowrap()
-                            .text_color(rgba(0xffffffcc))
-                            .child(match (comparison.pair.as_ref(), scale) {
-                                (Some(pair), Some(scale)) => {
-                                    format!("{}×{} · {:.0}%", pair.width, pair.height, scale * 100.)
-                                }
-                                (None, _) if comparison.failed => "Preview unavailable".to_string(),
-                                _ => "decoding…".to_string(),
-                            }),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(busy, |status| {
+                                status.child(
+                                    gpui_component::spinner::Spinner::new()
+                                        .xsmall()
+                                        .color(colour),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("compare-status-text")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_color(colour)
+                                    .when_some(tooltip, |status, tooltip| {
+                                        status.tooltip(move |window, cx| {
+                                            let tooltip = tooltip.clone();
+                                            gpui_component::tooltip::Tooltip::element(move |_, _| {
+                                                div()
+                                                    .w(px(560.))
+                                                    .whitespace_normal()
+                                                    .child(tooltip.clone())
+                                            })
+                                            .build(window, cx)
+                                        })
+                                    })
+                                    .child(text),
+                            )
+                    })
+                    .when(
+                        local_status
+                            .is_some_and(|job| matches!(job.state, LocalAiJobState::Done(_))),
+                        |bar| {
+                            bar.child(
+                                Button::new("compare-show-output")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Show output")
+                                    .tooltip("Open optimized/ in the file manager")
+                                    .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
+                            )
+                        },
                     )
                     .child(
                         div()
@@ -427,13 +591,15 @@ impl Audit {
                                         audit.step_compare(1, cx);
                                     })),
                             )
-                            .child(
-                                div()
-                                    .ml_1()
-                                    .text_color(rgba(0xffffffcc))
-                                    .whitespace_nowrap()
-                                    .child("Scroll to zoom · drag to pan"),
-                            ),
+                            .when(!compact && local_status.is_none(), |controls| {
+                                controls.child(
+                                    div()
+                                        .ml_1()
+                                        .text_color(rgba(0xffffffcc))
+                                        .whitespace_nowrap()
+                                        .child("Scroll to zoom · drag to pan"),
+                                )
+                            }),
                     ),
             )
             .into_any_element()

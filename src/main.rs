@@ -9,6 +9,7 @@ mod audit;
 mod avif;
 mod compare;
 mod convert;
+mod local_ai;
 mod menus;
 mod scan;
 mod settings;

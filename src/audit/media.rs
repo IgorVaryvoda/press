@@ -61,6 +61,7 @@ impl Audit {
         self.compare = Some(Comparison {
             index,
             dataset_generation,
+            focused: false,
             key: key.clone(),
             pair: None,
             failed: false,
