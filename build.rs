@@ -21,6 +21,9 @@ fn main() {
         for line in avif.cargo_metadata.into_iter().chain(jxl.cargo_metadata) {
             println!("{line}");
         }
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+            println!("cargo:rustc-link-lib=c++");
+        }
         return;
     }
 
