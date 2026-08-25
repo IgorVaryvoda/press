@@ -5330,7 +5330,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "press"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "cargo-packager-updater",
  "cc",
