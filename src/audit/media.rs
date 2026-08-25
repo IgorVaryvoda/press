@@ -16,6 +16,18 @@ pub(super) fn comparison_landing_applies(
 }
 
 impl Audit {
+    fn thumb_edge(&self) -> u32 {
+        if self.grid {
+            thumbs::THUMB_EDGE
+        } else {
+            thumbs::TABLE_THUMB_EDGE
+        }
+    }
+
+    fn thumb_request_is_current(&self, request: &ThumbRequest) -> bool {
+        self.dataset_generation == request.dataset_generation && self.thumb_edge() == request.edge
+    }
+
     pub(super) fn thumb_is_visible(&self, index: usize, cx: &App) -> bool {
         let Some(row) = self.row_of(index) else {
             return false;
@@ -126,14 +138,14 @@ impl Audit {
         if self.thumbs.contains_key(&index) || !self.requested.insert(index) {
             return;
         }
-        let dataset_generation = self.dataset_generation;
-        let edge = if self.grid {
-            thumbs::THUMB_EDGE
-        } else {
-            thumbs::TABLE_THUMB_EDGE
-        };
         let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
+        };
+        let request = ThumbRequest {
+            index,
+            dataset_generation: self.dataset_generation,
+            edge: self.thumb_edge(),
+            path,
         };
 
         cx.spawn(async move |this, cx| {
@@ -141,30 +153,58 @@ impl Audit {
             // justify a decode or a texture upload. Once the list settles, only
             // the rows still in the viewport continue.
             cx.background_executor().timer(THUMB_SETTLE).await;
-            let ready = this
-                .update(cx, |audit, cx| {
-                    if audit.dataset_generation != dataset_generation {
-                        return false;
-                    }
-                    if audit.thumb_is_visible(index, cx) {
-                        return true;
-                    }
-                    audit.requested.remove(&index);
-                    false
-                })
-                .unwrap_or(false);
-            if !ready {
+            let _ = this.update(cx, |audit, cx| {
+                // A folder or view-mode change already cleared `requested`; do not
+                // remove a new request for the same row when this old timer wakes.
+                if !audit.thumb_request_is_current(&request) {
+                    return;
+                }
+                if !audit.thumb_is_visible(request.index, cx) {
+                    audit.requested.remove(&request.index);
+                    return;
+                }
+                audit.thumb_queue.push_back(request);
+                audit.start_thumb_jobs(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn start_thumb_jobs(&mut self, cx: &mut Context<Self>) {
+        while self.thumb_inflight < THUMB_WORKERS {
+            let Some(request) = self.thumb_queue.pop_front() else {
                 return;
+            };
+            if !self.thumb_request_is_current(&request) {
+                continue;
+            }
+            if self.thumbs.contains_key(&request.index) {
+                continue;
+            }
+            if !self.thumb_is_visible(request.index, cx) {
+                self.requested.remove(&request.index);
+                continue;
             }
 
-            let loaded = cx
-                .background_executor()
-                .spawn(async move { thumbs::load(&path, edge) })
-                .await;
+            self.thumb_inflight += 1;
+            let ThumbRequest {
+                index,
+                dataset_generation,
+                edge,
+                path,
+            } = request;
+            cx.spawn(async move |this, cx| {
+                let loaded = cx
+                    .background_executor()
+                    .spawn(async move { thumbs::load(&path, edge) })
+                    .await;
 
-            if let Some(image) = loaded {
                 let _ = this.update(cx, |audit, cx| {
-                    if audit.dataset_generation == dataset_generation {
+                    audit.thumb_inflight = audit.thumb_inflight.saturating_sub(1);
+                    if audit.dataset_generation == dataset_generation
+                        && audit.thumb_edge() == edge
+                        && let Some(image) = loaded
+                    {
                         audit.thumbs.insert(index, image);
                         audit.thumb_order.push_back(index);
                         audit.trim_thumbs();
@@ -172,10 +212,11 @@ impl Audit {
                             audit.notify_thumbs(cx);
                         }
                     }
+                    audit.start_thumb_jobs(cx);
                 });
-            }
-        })
-        .detach();
+            })
+            .detach();
+        }
     }
 
     /// How one file stands against the paired Sirv folder, as the word and colour the

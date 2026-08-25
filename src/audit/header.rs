@@ -180,6 +180,7 @@ impl Audit {
                         // Keep one cache and refill it on this rare mode switch.
                         audit.thumbs.clear();
                         audit.requested.clear();
+                        audit.thumb_queue.clear();
                         audit.thumb_order.clear();
                         cx.notify();
                     },

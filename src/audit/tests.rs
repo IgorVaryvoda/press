@@ -726,6 +726,35 @@ fn delayed_gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn thumbnail_decodes_fill_only_two_worker_slots(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.grid = true;
+        audit.gallery_columns = Some(1);
+        audit.gallery_visible = 0..1;
+        let index = audit.entry_at(0).unwrap();
+        for _ in 0..THUMB_WORKERS + 2 {
+            audit.thumb_queue.push_back(ThumbRequest {
+                index,
+                dataset_generation: audit.dataset_generation,
+                edge: thumbs::THUMB_EDGE,
+                path: PathBuf::from("missing-thumbnail.png"),
+            });
+        }
+
+        audit.start_thumb_jobs(cx);
+
+        assert_eq!(audit.thumb_inflight, THUMB_WORKERS);
+        assert_eq!(audit.thumb_queue.len(), 2);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.thumb_inflight, 0);
+        assert!(audit.thumb_queue.is_empty());
+    });
+}
+
+#[gpui::test]
 fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 

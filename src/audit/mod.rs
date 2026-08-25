@@ -100,6 +100,16 @@ const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// 75MB of video memory for rows nobody is looking at.
 const THUMB_CACHE: usize = 192;
 const THUMB_SETTLE: Duration = Duration::from_millis(300);
+/// Cold thumbnail work runs beside the eight-file WebP estimator. Two decodes keep
+/// enough CPU free for the window while still filling a viewport in one short wave.
+const THUMB_WORKERS: usize = 2;
+
+struct ThumbRequest {
+    index: usize,
+    dataset_generation: u64,
+    edge: u32,
+    path: PathBuf,
+}
 
 fn is_checkbox_activation_key(event: &gpui::KeyDownEvent) -> bool {
     matches!(event.keystroke.key.as_str(), "space" | "enter")
@@ -191,6 +201,9 @@ pub(crate) struct Audit {
     /// Rows already handed to a background thread, so scrolling past one twice does
     /// not decode it twice.
     requested: HashSet<usize>,
+    /// Settled, still-visible rows waiting for a bounded decode slot.
+    thumb_queue: VecDeque<ThumbRequest>,
+    thumb_inflight: usize,
     /// The order `thumbs` filled up in, so the oldest decode is the one that leaves
     /// when the cache reaches `THUMB_CACHE`.
     thumb_order: VecDeque<usize>,
@@ -539,6 +552,7 @@ impl Audit {
         self.thumbs.clear();
         self.thumb_order.clear();
         self.requested.clear();
+        self.thumb_queue.clear();
         self.selected.clear();
         self.clear_results();
         self.failures.clear();
@@ -875,6 +889,8 @@ pub(crate) fn build_audit(
             selected_target_bytes: 0,
             thumbs: HashMap::new(),
             requested: HashSet::new(),
+            thumb_queue: VecDeque::new(),
+            thumb_inflight: 0,
             thumb_order: VecDeque::new(),
             format,
             quality,
