@@ -4,6 +4,12 @@
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
 | 2026-08-23 | self | Used `rm -f` to clean isolated visual-proof files, then tried `gio trash`, which `/tmp` does not support | For exact `/tmp` proof targets, use `unlink` for files and `find <validated-dir> -depth -delete` for trees |
+| 2026-08-26 | self | Verified the update payload and feed but left the installed old process running, so the app looked unchanged until a manual restart | Updater proof must include the installed launch target, payload digest, and relaunch into the new process; an AppImage keeps its old filename when replaced |
+| 2026-08-26 | self | Treated `Entity::update` with `AsyncApp` as fallible even though this GPUI API returns the callback value directly | Check the context-specific `Entity::update` return type before adding `unwrap_or` |
+| 2026-08-26 | self | Used `--exact` with unqualified Rust test names, so Cargo reported success with zero tests run | Use the module-qualified name with `--exact`, or omit `--exact` and verify that one test actually ran |
+| 2026-08-26 | self | Kept `let _ =` around an `Entity::update` call that returns unit, which Clippy rejects | Call unit-returning GPUI updates directly |
+| 2026-08-26 | self | Looked only for a `press` process after an AppImage relaunch, but AppImageLauncher keeps a `Press.AppImage` binfmt-interpreter parent | Match the exact AppImage path, then inspect the interpreter's child and `/proc/<pid>/exe` |
+| 2026-08-26 | self | Matched an AppImage path with broad `pgrep -f`, which also selected the enclosing `timeout env APPIMAGE=...` command | Prove relaunch from ordered app logs or scope process matches to the launch subtree and start time |
 | 2026-08-25 | user | Opened the Studio handoff on `www.sirv.studio`, whose route did not preload the image | The companion route is `https://dev.sirv.studio/tools/image-to-image`; prove the exact CDN fetch there |
 | 2026-08-25 | self | Put Markdown backticks inside a double-quoted shell search, so Bash tried to execute the text between them | Use single quotes for shell patterns that contain backticks |
 | 2026-08-25 | self | Linux Clippy did not compile the non-Linux runtime fallback, where a fixed string used `format!` | Treat the macOS CI Clippy job as a release gate for target-gated branches |

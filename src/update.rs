@@ -8,7 +8,7 @@ const ENDPOINT: &str =
     "https://github.com/IgorVaryvoda/imageguide-desktop/releases/latest/download/latest.json";
 
 /// What the last update attempt did, for the window to show.
-/// 0 = nothing attempted yet, 1 = installed, restart pending,
+/// 0 = nothing attempted yet, 1 = installed while work was active,
 /// 2 = install or check failed (message in `UPDATE_MESSAGE`).
 static UPDATE_STATE: AtomicU8 = AtomicU8::new(0);
 static UPDATE_MESSAGE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
@@ -114,12 +114,12 @@ fn public_key() -> &'static str {
     include_str!("../assets/updater.pub").trim()
 }
 
-pub fn install_if_available() {
+pub fn install_if_available() -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
     if !updatable_install(&exe) {
-        return;
+        return false;
     }
 
     let config = Config {
@@ -136,21 +136,53 @@ pub fn install_if_available() {
             Ok(()) => {
                 *UPDATE_MESSAGE.lock() = None;
                 UPDATE_STATE.store(1, Ordering::Relaxed);
-                eprintln!("press: installed update; restart to use it");
+                eprintln!("press: installed update; restarting");
+                true
             }
             Err(error) => {
                 *UPDATE_MESSAGE.lock() = Some(error.to_string());
                 UPDATE_STATE.store(2, Ordering::Relaxed);
                 eprintln!("press: could not install update: {error}");
+                false
             }
         },
-        Ok(None) => {}
+        Ok(None) => false,
         Err(error) => {
             *UPDATE_MESSAGE.lock() = Some(error.to_string());
             UPDATE_STATE.store(2, Ordering::Relaxed);
             eprintln!("press: could not check for updates: {error}");
+            false
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_path(appimage: Option<std::ffi::OsString>) -> std::io::Result<std::ffi::OsString> {
+    appimage.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the AppImage path is unavailable",
+        )
+    })
+}
+
+/// Start the newly installed package with the same launch arguments. Windows'
+/// NSIS updater already exits and relaunches Press before installation returns.
+pub fn relaunch() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let executable = appimage_path(std::env::var_os("APPIMAGE"))?;
+    #[cfg(target_os = "macos")]
+    let executable = std::env::current_exe()?;
+    #[cfg(target_os = "windows")]
+    unreachable!("the NSIS updater relaunches before returning");
+
+    #[cfg(not(target_os = "windows"))]
+    std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .env_remove("APPIMAGE")
+        .env_remove("APPDIR")
+        .spawn()
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -238,6 +270,17 @@ mod tests {
             true,
             Some(std::path::Path::new("/tmp/appimage_extracted_1234")),
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_relaunch_uses_the_updated_outer_appimage() {
+        let path = std::ffi::OsString::from("/home/user/Applications/Press.AppImage");
+        assert_eq!(
+            appimage_path(Some(path.clone())).expect("the AppImage path is present"),
+            path
+        );
+        assert!(appimage_path(None).is_err());
     }
 }
 

@@ -472,9 +472,32 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                 {
                     let audit = audit.clone();
                     cx.spawn(async move |cx| {
-                        cx.background_executor()
+                        let installed = cx
+                            .background_executor()
                             .spawn(async { update::install_if_available() })
                             .await;
+                        if installed {
+                            let restart = audit.update(cx, |audit, _| {
+                                if !audit.automatic_update_can_restart() {
+                                    return false;
+                                }
+                                audit.flush_settings();
+                                true
+                            });
+                            if restart {
+                                match update::relaunch() {
+                                    Ok(()) => {
+                                        cx.update(|cx| cx.quit());
+                                        return;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "press: installed update but could not restart: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         audit.update(cx, |_, cx| cx.notify());
                     })
                     .detach();

@@ -3,6 +3,14 @@
 use super::*;
 
 impl Audit {
+    /// An update may replace the installed package while background reads continue,
+    /// but Press must not restart in the middle of a file-writing job.
+    pub(crate) fn automatic_update_can_restart(&self) -> bool {
+        !self.converting
+            && !self.local_ai_busy()
+            && self.sirv_job.as_ref().is_none_or(|job| job.finished)
+    }
+
     /// Store settings and schedule the write. The write is debounced: a
     /// delayed save collects the whole drag and stores the size it ended at.
     pub(super) fn remember_settings(

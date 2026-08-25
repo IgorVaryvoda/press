@@ -825,6 +825,46 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        assert!(audit.automatic_update_can_restart());
+
+        audit.converting = true;
+        assert!(!audit.automatic_update_can_restart());
+        audit.converting = false;
+
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Push,
+            done: 0,
+            total: 1,
+            failed: 0,
+            failures: Vec::new(),
+            finished: false,
+            stopping: false,
+            generation: audit.sirv_generation,
+        });
+        assert!(!audit.automatic_update_can_restart());
+        audit.sirv_job.as_mut().unwrap().finished = true;
+        assert!(audit.automatic_update_can_restart());
+
+        audit.local_ai_job = Some(LocalAiJob {
+            tool: local_ai::Tool::Upscale,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".to_string(),
+            first_setup: false,
+            state: LocalAiJobState::Running,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        assert!(!audit.automatic_update_can_restart());
+        audit.local_ai_job.as_mut().unwrap().state =
+            LocalAiJobState::Done(PathBuf::from("optimized/photo-4x.png"));
+        assert!(audit.automatic_update_can_restart());
+    });
+}
+
+#[gpui::test]
 fn key_repeats_share_one_next_frame_redraw(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| {
