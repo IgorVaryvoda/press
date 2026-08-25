@@ -1,6 +1,6 @@
 [package]
 name = "press"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Audit and optimise a folder of images without uploading them anywhere"
 
