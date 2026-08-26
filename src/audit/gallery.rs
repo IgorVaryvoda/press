@@ -2,6 +2,7 @@
 
 use super::toolbar::segment;
 use super::*;
+use table::finding_chip;
 
 const GALLERY_SORTS: [(Column, &str); 5] = [
     (Column::Name, "Name"),
@@ -243,11 +244,14 @@ impl Audit {
                                 }
                             )),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(density_colour(density, cx))
-                            .child(format!("{density:.2} B/px")),
+                    // The same word the list uses. A tile showing `0.14 B/px`
+                    // asked you to know the bands by heart, and it was taking
+                    // the room the file size needed to print in full.
+                    .children((density > DENSITY_HEAVY).then(|| finding_chip("heavy", cx)))
+                    .children(
+                        entry
+                            .extension_lies()
+                            .then(|| finding_chip("mislabelled", cx)),
                     ),
             )
     }

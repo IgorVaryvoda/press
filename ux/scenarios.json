@@ -7,7 +7,9 @@
       "The local-only privacy promise is clear before choosing a file.",
       "Keyboard and pointer users can reach both supported starting paths."
     ],
-    "launch": { "kind": "none" },
+    "launch": {
+      "kind": "none"
+    },
     "interaction_trace": [
       "Launch Press with no path.",
       "Choose Open folder, Open image, or drop a supported path."
@@ -18,9 +20,21 @@
       "Minimum-window behavior"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "empty-folder": {
@@ -31,7 +45,10 @@
       "The reason and next actions are visible without opening documentation.",
       "Folder, image, and drop recovery paths remain available."
     ],
-    "launch": { "kind": "folder", "path": "ux/fixtures/empty" },
+    "launch": {
+      "kind": "folder",
+      "path": "ux/fixtures/empty"
+    },
     "interaction_trace": [
       "Open a folder containing no supported images.",
       "Read the reason.",
@@ -43,9 +60,21 @@
       "Minimum-window behavior"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "audit-core": {
@@ -57,7 +86,10 @@
       "Output presets, fine tuning, projected result, and commitment read as one decision.",
       "The primary image list remains usable at the minimum supported width."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "interaction_trace": [
       "Open a folder and inspect the default ordering.",
       "Identify an expensive image and optionally filter or select it.",
@@ -70,9 +102,21 @@
       "Hierarchy and density across window sizes"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "keyboard-selection": {
@@ -83,8 +127,14 @@
       "The output panel immediately names the selected scope.",
       "The conversion command promises the same scope."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
-    "keys": ["Down", "space"],
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
+    "keys": [
+      "Down",
+      "space"
+    ],
     "interaction_trace": [
       "Open a folder.",
       "Press Down to move the cursor.",
@@ -97,9 +147,21 @@
       "Selected conversion scope"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "gallery-core": {
@@ -110,7 +172,13 @@
       "The gallery and output panel read as one workflow.",
       "Selection, focus, and conversion scope stay predictable across widths."
     ],
-    "launch": { "kind": "folder", "path": "docs", "args": ["--grid"] },
+    "launch": {
+      "kind": "folder",
+      "path": "docs",
+      "args": [
+        "--grid"
+      ]
+    },
     "interaction_trace": [
       "Open a folder in gallery view.",
       "Scan thumbnails and file facts for costly candidates.",
@@ -123,9 +191,21 @@
       "Selection and output-panel relationship"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "filter-no-results": {
@@ -136,10 +216,20 @@
       "Clearing the filter is obvious and keyboard-accessible.",
       "The output scope does not imply that hidden folder contents will be converted."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "click", "x": 120, "y": 80 },
-      { "type": "type", "value": "no-such-image" }
+      {
+        "type": "click",
+        "x": 120,
+        "y": 80
+      },
+      {
+        "type": "type",
+        "value": "no-such-image"
+      }
     ],
     "interaction_trace": [
       "Open a folder.",
@@ -153,9 +243,21 @@
       "Truthful zero-target conversion state"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "filter-clear-keyboard": {
@@ -166,12 +268,28 @@
       "Enter activates Clear and restores every matching row.",
       "Output settings remain unchanged and conversion returns to the full visible scope."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "click", "x": 100, "y": 80 },
-      { "type": "type", "value": "no-such-image" },
-      { "type": "key", "value": "Tab" },
-      { "type": "key", "value": "Return" }
+      {
+        "type": "click",
+        "x": 100,
+        "y": 80
+      },
+      {
+        "type": "type",
+        "value": "no-such-image"
+      },
+      {
+        "type": "key",
+        "value": "Tab"
+      },
+      {
+        "type": "key",
+        "value": "Return"
+      }
     ],
     "interaction_trace": [
       "Focus the filename filter and type a query with no matches.",
@@ -185,9 +303,21 @@
       "Unchanged output settings"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "sirv-settings": {
@@ -198,9 +328,15 @@
       "The local-storage promise and secret-field behavior are clear.",
       "Save, close, Tab, Shift-Tab, and Escape have predictable ownership."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "key", "value": "ctrl+comma" }
+      {
+        "type": "key",
+        "value": "ctrl+comma"
+      }
     ],
     "interaction_trace": [
       "Open Settings from the audit or press Control-comma.",
@@ -213,9 +349,21 @@
       "Save and exit actions"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "sirv-settings-complete": {
@@ -226,12 +374,27 @@
       "Tab moves to Client secret and both values remain visible or safely masked.",
       "Save credentials becomes enabled only after both fields contain values."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "key", "value": "ctrl+comma" },
-      { "type": "type", "value": "test-client" },
-      { "type": "key", "value": "Tab" },
-      { "type": "type", "value": "test-secret" }
+      {
+        "type": "key",
+        "value": "ctrl+comma"
+      },
+      {
+        "type": "type",
+        "value": "test-client"
+      },
+      {
+        "type": "key",
+        "value": "Tab"
+      },
+      {
+        "type": "type",
+        "value": "test-secret"
+      }
     ],
     "interaction_trace": [
       "Open Settings by keyboard.",
@@ -245,9 +408,21 @@
       "Save availability after complete input"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "sirv-settings-save-keyboard": {
@@ -258,13 +433,31 @@
       "A visible Saved confirmation appears without exposing the secret.",
       "Focus and the safe Escape route remain predictable after saving."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "key", "value": "ctrl+comma" },
-      { "type": "type", "value": "test-client" },
-      { "type": "key", "value": "Tab" },
-      { "type": "type", "value": "test-secret" },
-      { "type": "key", "value": "Return" }
+      {
+        "type": "key",
+        "value": "ctrl+comma"
+      },
+      {
+        "type": "type",
+        "value": "test-client"
+      },
+      {
+        "type": "key",
+        "value": "Tab"
+      },
+      {
+        "type": "type",
+        "value": "test-secret"
+      },
+      {
+        "type": "key",
+        "value": "Return"
+      }
     ],
     "interaction_trace": [
       "Open Settings and type both credentials.",
@@ -277,9 +470,21 @@
       "Secret masking and focus"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "sirv-missing-credentials": {
@@ -290,9 +495,16 @@
       "A visible action leads to the in-app credential form.",
       "Closing or pressing Escape returns to the unchanged local audit."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "click", "x": 250, "y": 23 }
+      {
+        "type": "click",
+        "x": 250,
+        "y": 23
+      }
     ],
     "interaction_trace": [
       "Open Sync with Sirv without saved credentials.",
@@ -305,9 +517,21 @@
       "Safe return to the local workflow"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "sirv-setup-from-error": {
@@ -318,10 +542,22 @@
       "Initial focus lands in Client ID and Save remains disabled while fields are empty.",
       "The form keeps its purpose, required-field, privacy, and secret-masking guidance."
     ],
-    "launch": { "kind": "folder", "path": "docs" },
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
     "actions": [
-      { "type": "click", "x": 250, "y": 23 },
-      { "type": "click", "relative_to": "center", "x": -92, "y": 40 }
+      {
+        "type": "click",
+        "x": 250,
+        "y": 23
+      },
+      {
+        "type": "click",
+        "relative_to": "center",
+        "x": -92,
+        "y": 40
+      }
     ],
     "interaction_trace": [
       "Open Sync with Sirv without saved credentials.",
@@ -334,9 +570,21 @@
       "Credential form state"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "conversion-result": {
@@ -347,10 +595,21 @@
       "The output-folder action is easy to find.",
       "The original folder remains clearly untouched and the next conversion action is unambiguous."
     ],
-    "launch": { "kind": "folder", "path": "docs", "copy": true },
+    "launch": {
+      "kind": "folder",
+      "path": "docs",
+      "copy": true
+    },
     "actions": [
-      { "type": "click", "x": -132, "y": 594 },
-      { "type": "wait", "seconds": 3 }
+      {
+        "type": "click",
+        "x": -153,
+        "y": -30
+      },
+      {
+        "type": "wait",
+        "seconds": 3
+      }
     ],
     "interaction_trace": [
       "Open a folder and accept the current output settings.",
@@ -364,9 +623,21 @@
       "Output discovery and repeat-conversion intent"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "conversion-retune": {
@@ -377,12 +648,30 @@
       "The primary action still predicts replacement and names the affected output count and format.",
       "The output-folder action stays available while considering the new estimate."
     ],
-    "launch": { "kind": "folder", "path": "docs", "copy": true },
+    "launch": {
+      "kind": "folder",
+      "path": "docs",
+      "copy": true
+    },
     "actions": [
-      { "type": "click", "x": -132, "y": 594 },
-      { "type": "wait", "seconds": 3 },
-      { "type": "click", "x": -120, "y": 400 },
-      { "type": "wait", "seconds": 2 }
+      {
+        "type": "click",
+        "x": -153,
+        "y": -30
+      },
+      {
+        "type": "wait",
+        "seconds": 3
+      },
+      {
+        "type": "click",
+        "x": -153,
+        "y": -30
+      },
+      {
+        "type": "wait",
+        "seconds": 2
+      }
     ],
     "interaction_trace": [
       "Convert all visible files.",
@@ -395,9 +684,21 @@
       "Output discovery"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "comparison-core": {
@@ -409,7 +710,10 @@
       "The current output format and size result remain clear.",
       "Failure and loading states cannot be confused with a finished preview."
     ],
-    "launch": { "kind": "file", "path": "assets/app-icon.png" },
+    "launch": {
+      "kind": "file",
+      "path": "assets/app-icon.png"
+    },
     "interaction_trace": [
       "Open an image or press Enter on an audit row.",
       "Inspect the fitted split view and drag the divider.",
@@ -423,9 +727,21 @@
       "Minimum-window control survival"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
     ]
   },
   "comparison-tools": {
@@ -436,9 +752,16 @@
       "One clearly named Tools action reveals all auxiliary image actions.",
       "The disclosed actions remain readable and unclipped at every supported width."
     ],
-    "launch": { "kind": "file", "path": "assets/app-icon.png" },
+    "launch": {
+      "kind": "file",
+      "path": "assets/app-icon.png"
+    },
     "actions": [
-      { "type": "click", "x": -78, "y": 20 }
+      {
+        "type": "click",
+        "x": -78,
+        "y": 20
+      }
     ],
     "interaction_trace": [
       "Open an image comparison.",
@@ -451,9 +774,132 @@
       "Minimum-window disclosure layout"
     ],
     "sizes": [
-      { "label": "minimum", "width": 760, "height": 640 },
-      { "label": "default", "width": 1100, "height": 720 },
-      { "label": "wide", "width": 1440, "height": 900 }
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
+    ]
+  },
+  "conversion-running": {
+    "name": "Watch a conversion run",
+    "goal": "Know that work is under way, how far along it is, what it is producing, and that nothing can be changed until it finishes.",
+    "success": [
+      "Progress is legible without hunting: how many files are done, out of how many.",
+      "Every control that would change the outcome mid-run is visibly unavailable.",
+      "The action bar and the rail agree about what is happening."
+    ],
+    "launch": {
+      "kind": "folder",
+      "path": "docs",
+      "copy": true
+    },
+    "actions": [
+      {
+        "type": "click",
+        "x": -153,
+        "y": 202
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      },
+      {
+        "type": "click",
+        "x": -153,
+        "y": -30
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      }
+    ],
+    "interaction_trace": [
+      "Open a folder and pick the AVIF preset, which is slow enough to watch.",
+      "Start the conversion.",
+      "Read progress while it runs and try to change a setting."
+    ],
+    "review_focus": [
+      "Progress legibility and its denominator",
+      "Which controls lock during a run and how that reads",
+      "Agreement between the bar and the rail"
+    ],
+    "sizes": [
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
+      }
+    ]
+  },
+  "local-ai-upscale": {
+    "name": "Upscale one image locally",
+    "goal": "Tick one image, open the upscale rail, and understand what it will produce, where it lands, and what the first run costs before committing.",
+    "success": [
+      "The two local models are unavailable until exactly one image is ticked, and say why.",
+      "The rail names the file, the resulting dimensions, and the model download.",
+      "Nothing suggests the image leaves the computer."
+    ],
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
+    "actions": [
+      {
+        "type": "click",
+        "x": 18,
+        "y": 89
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      },
+      {
+        "type": "click",
+        "x": 548,
+        "y": 677
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      }
+    ],
+    "interaction_trace": [
+      "Open a folder and tick one image.",
+      "Choose Upscale 4x in the action bar.",
+      "Read what the rail promises and commit or close it."
+    ],
+    "review_focus": [
+      "Single-image rule and how unavailability reads",
+      "What the rail owes you before a 49 MB download",
+      "Local-only reassurance"
+    ],
+    "sizes": [
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      }
     ]
   }
 }

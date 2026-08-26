@@ -172,6 +172,32 @@ impl Audit {
     /// one. Both are facts about what the verbs beside them would act on.
     fn bar_readout(&self, cx: &Context<Self>) -> impl IntoElement {
         let row = div().flex().items_center().gap_2().pl_2().pr_1();
+        // A run in progress outranks both the estimate and the selection: the
+        // bar has to stand on its own with every rail closed, and while work is
+        // happening the only fact worth its width is how far along it is.
+        if self.converting {
+            let done = self.results.len() + self.failures.len();
+            let total = self
+                .active_target_count
+                .unwrap_or_else(|| self.target_count());
+            return row
+                .child(
+                    div()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(cx.theme().foreground)
+                        .whitespace_nowrap()
+                        .child(format!("{done} of {total}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .child("converting"),
+                );
+        }
         if self.selected.is_empty() {
             let (headline, detail, tone) = match self.estimate {
                 Some((projected, _)) => {
@@ -462,14 +488,21 @@ impl Audit {
             Rail::Upscale => local_ai::Tool::Upscale,
             _ => local_ai::Tool::RemoveBackground,
         };
-        let entry = self
-            .single_target()
-            .and_then(|index| self.entries.get(index));
+        let index = self.single_target();
+        let entry = index.and_then(|index| self.entries.get(index));
+        // The thumbnail the list already decoded. A rail that names a file and
+        // then leaves 400px of nothing under it reads as unfinished, and the
+        // picture answers "which image" better than the name does.
+        let preview = index.and_then(|index| self.thumbs.get(&index).cloned());
         let installed = local_ai::installed(tool);
+        // The commit names the outcome rather than repeating the rail's own
+        // title, which the bar is already saying a third time.
+        let mut commit = rail.title().to_string();
         let detail = match (tool, entry) {
             (local_ai::Tool::Upscale, Some(entry)) => {
                 match local_ai::upscale_dimensions(entry.width, entry.height) {
                     Ok((width, height)) => {
+                        commit = format!("Upscale to {width}×{height}");
                         format!("{}×{} → {width}×{height}", entry.width, entry.height)
                     }
                     Err(message) => message,
@@ -505,6 +538,21 @@ impl Audit {
                     .gap_2()
                     .px_3()
                     .py_3()
+                    .children(preview.map(|image| {
+                        // Hugs the thumbnail the list decoded rather than
+                        // sitting it in a fixed box: blowing a 96px thumb up to
+                        // fill 260px would only show you the mush.
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .py_2()
+                            .rounded_md()
+                            .bg(cx.theme().background)
+                            .overflow_hidden()
+                            .child(img(image).max_w_full().max_h(px(160.)))
+                    }))
                     .child(
                         div()
                             .text_size(px(13.))
@@ -560,7 +608,7 @@ impl Audit {
                         Button::new("run-local-ai")
                             .primary()
                             .w_full()
-                            .label(rail.title())
+                            .label(commit)
                             .disabled(entry.is_none() || self.local_ai_busy() || self.converting)
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 if let Some(index) = audit.single_target() {
@@ -965,9 +1013,8 @@ impl Audit {
                 Button::new("convert")
                     .primary()
                     .w_full()
-                    .when(self.converting || target_count == 0, |button| {
-                        button.ghost()
-                    })
+                    .when(self.converting, |button| button.outline())
+                    .when(target_count == 0, |button| button.ghost())
                     .label(self.conversion_action_label())
                     .disabled(self.converting || self.scanning.is_some() || target_count == 0)
                     .on_click(cx.listener(|audit, _, _, cx| audit.start_conversion(cx))),

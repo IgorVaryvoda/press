@@ -533,7 +533,10 @@ impl TableDelegate for AuditTable {
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .whitespace_nowrap()
-                    .text_color(cx.theme().muted_foreground)
+                    // Banded, now that this column is opt-in: somebody who
+                    // turns B/px back on wants to read the number, and the
+                    // colour is what makes a column of them scannable.
+                    .text_color(density_colour(density, cx))
                     .child(format!("{density:.2}"))
                     .into_any_element()
             }
@@ -699,7 +702,7 @@ impl Audit {
     }
 }
 
-fn finding_chip(label: &'static str, cx: &App) -> impl IntoElement {
+pub(super) fn finding_chip(label: &'static str, cx: &App) -> impl IntoElement {
     div()
         .flex_shrink_0()
         .text_size(px(10.))
