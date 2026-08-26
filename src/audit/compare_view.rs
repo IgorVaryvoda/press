@@ -31,16 +31,16 @@ impl Audit {
         let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
         // At the minimum width the conversion button already names the target format.
         // Keep the image name readable and drop the duplicate byte summary first.
-        let compact = view_w < 900.;
         let entry = self.entries.get(comparison.index);
-        let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let name = entry.map(|entry| entry.name()).unwrap_or_default();
-        let local_ai_available = local_ai::available();
+        // Where this image sits in the folder, so stepping through it has a
+        // sense of distance rather than just a pair of arrows.
+        let position = match self.row_of(comparison.index) {
+            Some(row) => format!("{} of {}", row + 1, self.visible.len()),
+            None => String::new(),
+        };
         let can_previous = self.compare_target_from(comparison.index, -1).is_some();
         let can_next = self.compare_target_from(comparison.index, 1).is_some();
-        let local_status = self.local_ai_job.as_ref().filter(|job| {
-            job.index == comparison.index && job.dataset_generation == comparison.dataset_generation
-        });
 
         let mut stage = div()
             .id("compare-stage")
@@ -285,19 +285,10 @@ impl Audit {
         // Chrome as two full-width bars. These were black boxes pinned at
         // hand-computed offsets, the right-hand one at `view_w - 240` — a number
         // that stopped being the right edge the moment the text or window changed.
-        let (saving_text, saving_colour) = match comparison.pair.as_ref() {
-            Some(pair) => {
-                let saving = pair.saving_percent(source_bytes);
-                if saving >= 0. {
-                    (format!("−{saving:.0}%"), cx.theme().green)
-                } else {
-                    (format!("+{:.0}%", -saving), cx.theme().yellow)
-                }
-            }
-            None => (String::new(), cx.theme().green),
-        };
-
         stage
+            // The top line: which file, where it sits in the folder, and the
+            // way out. The verbs moved to the bar below, where the audit keeps
+            // the same four — one bar meaning one thing in both screens.
             .child(
                 div()
                     .absolute()
@@ -306,7 +297,7 @@ impl Audit {
                     .top_0()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .px_3()
                     .py_2()
                     .bg(rgba(0x000000bf))
@@ -322,150 +313,37 @@ impl Audit {
                             .font_weight(FontWeight::MEDIUM)
                             .child(name.clone()),
                     )
-                    .when(!compact, |bar| {
-                        bar.children(comparison.pair.as_ref().map(|pair| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .flex_shrink_0()
-                                .text_color(cx.theme().muted_foreground)
-                                .whitespace_nowrap()
-                                .child(format!(
-                                    "{} → {} {} · {}",
-                                    format_bytes(source_bytes),
-                                    self.format.label().to_uppercase(),
-                                    self.quality.label(),
-                                    format_bytes(pair.converted_bytes)
-                                ))
-                                .child(compare_chip(saving_text.clone(), saving_colour, cx))
-                        }))
-                    })
-                    .child({
-                        // The preview exists to answer "is this good enough?" —
-                        // yes should not require finding your way back to a
-                        // button on another screen.
-                        let target_count = self.target_count();
-                        Button::new("compare-convert")
-                            .primary()
-                            .small()
-                            .label(self.conversion_action_label())
-                            .disabled(self.converting || target_count == 0)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                // Back to the list, where the run's progress lives.
-                                audit.compare = None;
-                                audit.start_conversion(cx);
-                            }))
-                    })
-                    .when(local_ai_available, |bar| bar.child({
-                        let index = comparison.index;
-                        let busy = self.local_ai_busy();
-                        let running = self.local_ai_job.as_ref().is_some_and(|job| {
-                            job.busy() && job.tool == local_ai::Tool::RemoveBackground
-                        });
-                        let tooltip = if busy {
-                            self.local_ai_job
-                                .as_ref()
-                                .map(|job| job.message(&self.root))
-                                .unwrap_or_else(|| "Local AI is running…".into())
-                        } else {
-                            "Remove the background locally with BiRefNet Lite; first use downloads the model".into()
-                        };
-                        Button::new("compare-remove-background")
-                            .small()
-                            .label(if compact {
-                                "Remove BG"
-                            } else {
-                                "Remove background"
-                            })
-                            .tooltip(tooltip)
-                            .disabled(entry.is_none() || (busy && !running))
-                            .when(running, |button| button.icon(IconName::Loader))
-                            .loading(running)
-                            .on_click(cx.listener(move |audit, _, _, cx| {
-                                audit.start_local_ai(
-                                    local_ai::Tool::RemoveBackground,
-                                    index,
-                                    cx,
-                                );
-                            }))
-                    }))
-                    .when(local_ai_available, |bar| bar.child({
-                        let index = comparison.index;
-                        let busy = self.local_ai_busy();
-                        let running = self
-                            .local_ai_job
-                            .as_ref()
-                            .is_some_and(|job| job.busy() && job.tool == local_ai::Tool::Upscale);
-                        let upscale_error = entry.and_then(|entry| {
-                            local_ai::upscale_dimensions(entry.width, entry.height).err()
-                        });
-                        let tooltip = if busy {
-                            self.local_ai_job
-                                .as_ref()
-                                .map(|job| job.message(&self.root))
-                                .unwrap_or_else(|| "Local AI is running…".into())
-                        } else if let Some(message) = upscale_error.as_ref() {
-                            format!("{message}; use Sirv Studio for this image")
-                        } else {
-                            "Upscale 4× locally with Remacri ESRGAN; first use downloads the model".into()
-                        };
-                        Button::new("compare-upscale")
-                            .small()
-                            .label("Upscale 4×")
-                            .tooltip(tooltip)
-                            .disabled(entry.is_none() || upscale_error.is_some() || (busy && !running))
-                            .when(running, |button| button.icon(IconName::Loader))
-                            .loading(running)
-                            .on_click(cx.listener(move |audit, _, _, cx| {
-                                audit.start_local_ai(local_ai::Tool::Upscale, index, cx);
-                            }))
-                    }))
-                    .child({
-                        let studio = entry.map_or_else(
-                            || Err("This image is no longer in the audit".to_string()),
-                            |entry| self.studio_url_for(entry),
-                        );
-                        let (url, tooltip) = match studio {
-                            Ok(url) => (
-                                Some(url),
-                                "Open this synced image in Sirv AI Studio".to_string(),
-                            ),
-                            Err(reason) => (None, reason),
-                        };
-                        let disabled = url.is_none();
-                        Button::new("compare-edit-studio")
-                            .small()
-                            .icon(IconName::ExternalLink)
-                            .label(if compact { "Studio" } else { "Edit in Studio" })
-                            .tooltip(tooltip)
-                            .disabled(disabled)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(url) = &url {
-                                    cx.open_url(url);
-                                }
-                            }))
-                    })
                     .child(
-                        div().debug_selector(|| "compare-tools".into()).child(
-                            Button::new("compare-tools")
-                                .small()
-                                .ghost()
-                                .icon(IconName::Ellipsis)
-                                .label("Tools")
-                                .tooltip("Background removal, upscaling, and Sirv Studio")
-                                .selected(comparison.tools_open)
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    if let Some(comparison) = audit.compare.as_mut() {
-                                        comparison.tools_open = !comparison.tools_open;
-                                        cx.notify();
-                                    }
-                                })),
-                        ),
+                        div()
+                            .flex_shrink_0()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(rgba(0xffffffcc))
+                            .whitespace_nowrap()
+                            .child(position.clone()),
+                    )
+                    .child(
+                        Button::new("compare-prev")
+                            .small()
+                            .ghost()
+                            .icon(IconName::ArrowLeft)
+                            .tooltip("Previous image")
+                            .disabled(!can_previous)
+                            .on_click(cx.listener(|audit, _, _, cx| audit.step_compare(-1, cx))),
+                    )
+                    .child(
+                        Button::new("compare-next")
+                            .small()
+                            .ghost()
+                            .icon(IconName::ArrowRight)
+                            .tooltip("Next image")
+                            .disabled(!can_next)
+                            .on_click(cx.listener(|audit, _, _, cx| audit.step_compare(1, cx))),
                     )
                     .child(
                         Button::new("compare-close")
                             .small()
+                            .ghost()
                             .icon(IconName::Close)
                             .tooltip("Back to the audit")
                             .on_click(cx.listener(|audit, _, _, cx| {
@@ -474,303 +352,241 @@ impl Audit {
                             })),
                     ),
             )
-            .when(comparison.tools_open, |stage| {
-                stage.child(self.compare_tools_panel(comparison.index, entry, cx))
-            })
+            // Zoom, in its own cluster out of the way. It changes how you look
+            // at the image and nothing about the file.
             .child(
                 div()
                     .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
+                    .right(px(16.))
+                    .bottom(px(16.))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .bg(rgba(0x000000bf))
-                    .text_size(px(12.))
-                    .child({
-                        let (text, colour, busy) = match local_status {
-                            Some(job) => {
-                                let colour = match job.state {
-                                    LocalAiJobState::Done(_) => cx.theme().green,
-                                    LocalAiJobState::Failed(_) => cx.theme().red,
-                                    LocalAiJobState::SettingUp | LocalAiJobState::Running => {
-                                        gpui::Hsla::from(rgba(0xffffffcc))
-                                    }
-                                };
-                                (job.message(&self.root), colour, job.busy())
-                            }
-                            None => (
-                                match (comparison.pair.as_ref(), scale) {
-                                    (Some(pair), _) if compact => format!(
-                                        "{} → {} · {}",
-                                        format_bytes(source_bytes),
-                                        format_bytes(pair.converted_bytes),
-                                        saving_text
-                                    ),
-                                    (Some(pair), Some(_)) => format!(
-                                        "{}×{} px",
-                                        pair.width, pair.height
-                                    ),
-                                    (None, _) if comparison.failed => {
-                                        "Preview unavailable".to_string()
-                                    }
-                                    _ => "Building preview…".to_string(),
-                                },
-                                gpui::Hsla::from(rgba(0xffffffcc)),
-                                false,
-                            ),
-                        };
-                        let tooltip = local_status.map(|_| text.clone());
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .when(busy, |status| {
-                                status.child(
-                                    gpui_component::spinner::Spinner::new()
-                                        .xsmall()
-                                        .color(colour),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id("compare-status-text")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_color(colour)
-                                    .when_some(tooltip, |status, tooltip| {
-                                        status.tooltip(move |window, cx| {
-                                            let tooltip = tooltip.clone();
-                                            gpui_component::tooltip::Tooltip::element(move |_, _| {
-                                                div()
-                                                    .w(px(560.))
-                                                    .whitespace_normal()
-                                                    .child(tooltip.clone())
-                                            })
-                                            .build(window, cx)
-                                        })
-                                    })
-                                    .child(text),
-                            )
-                    })
-                    .when(
-                        local_status
-                            .is_some_and(|job| matches!(job.state, LocalAiJobState::Done(_))),
-                        |bar| {
-                            bar.child(
-                                Button::new("compare-show-output")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::FolderOpen)
-                                    .label("Show output")
-                                    .tooltip("Open optimized/ in the file manager")
-                                    .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
-                            )
-                        },
+                    .gap_1()
+                    .px_1()
+                    .py_1()
+                    .rounded_lg()
+                    .bg(cx.theme().secondary)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Button::new("compare-fit")
+                            .ghost()
+                            .small()
+                            .label("Fit")
+                            .selected(comparison.zoom.is_none())
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                if let Some(comparison) = audit.compare.as_mut() {
+                                    comparison.zoom = None;
+                                    comparison.pan = (0., 0.);
+                                    cx.notify();
+                                }
+                            })),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(
-                                Button::new("compare-fit")
-                                    .ghost()
-                                    .small()
-                                    .label("Fit")
-                                    .selected(comparison.zoom.is_none())
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        if let Some(comparison) = audit.compare.as_mut() {
-                                            comparison.zoom = None;
-                                            comparison.pan = (0., 0.);
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("compare-actual")
-                                    .ghost()
-                                    .small()
-                                    .label("100%")
-                                    .selected(comparison.zoom == Some(1.))
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        if let Some(comparison) = audit.compare.as_mut() {
-                                            comparison.zoom = Some(1.);
-                                            comparison.pan = (0., 0.);
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("compare-prev")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::ArrowLeft)
-                                    .label("Prev")
-                                    .disabled(!can_previous)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        audit.step_compare(-1, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("compare-next")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::ArrowRight)
-                                    .label("Next")
-                                    .disabled(!can_next)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        audit.step_compare(1, cx);
-                                    })),
-                            )
-                            .when(!compact && local_status.is_none(), |controls| {
-                                controls.child(
-                                    div()
-                                        .ml_1()
-                                        .text_color(rgba(0xffffffcc))
-                                        .whitespace_nowrap()
-                                        .child("Move divider to compare · scroll to zoom · drag to pan"),
-                                )
-                            }),
+                        Button::new("compare-actual")
+                            .ghost()
+                            .small()
+                            .label("100%")
+                            .selected(comparison.zoom == Some(1.))
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                if let Some(comparison) = audit.compare.as_mut() {
+                                    comparison.zoom = Some(1.);
+                                    comparison.pan = (0., 0.);
+                                    cx.notify();
+                                }
+                            })),
                     ),
             )
+            .child(self.compare_bar(comparison, entry, cx))
             .into_any_element()
     }
 
-    fn compare_tools_panel(
+    /// The comparison's action bar: what this image costs now and converted,
+    /// then the same four verbs the audit's bar carries. They act on the image
+    /// you are looking at, so none of them needs a selection rule.
+    fn compare_bar(
         &self,
-        index: usize,
+        comparison: &Comparison,
         entry: Option<&Entry>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let busy = self.local_ai_busy();
-        let remove_running = self
-            .local_ai_job
-            .as_ref()
-            .is_some_and(|job| job.busy() && job.tool == local_ai::Tool::RemoveBackground);
-        let remove_tooltip = if busy {
-            self.local_ai_job
-                .as_ref()
-                .map(|job| job.message(&self.root))
-                .unwrap_or_else(|| "Local AI is running…".into())
-        } else {
-            "Remove the background locally with BiRefNet Lite; first use downloads the engine and model".into()
-        };
-
-        let upscale_running = self
-            .local_ai_job
-            .as_ref()
-            .is_some_and(|job| job.busy() && job.tool == local_ai::Tool::Upscale);
-        let upscale_error =
-            entry.and_then(|entry| local_ai::upscale_dimensions(entry.width, entry.height).err());
-        let upscale_tooltip = if busy {
-            self.local_ai_job
-                .as_ref()
-                .map(|job| job.message(&self.root))
-                .unwrap_or_else(|| "Local AI is running…".into())
-        } else if let Some(message) = upscale_error.as_ref() {
-            format!("{message}; use Sirv Studio for this image")
-        } else {
-            "Upscale 4× locally with Remacri ESRGAN; first use downloads the engine and model"
-                .into()
-        };
-
+        let index = comparison.index;
+        let source_bytes = entry.map_or(0, |entry| entry.bytes);
+        let busy = self.local_ai_busy() || self.converting;
         let studio = entry.map_or_else(
             || Err("This image is no longer in the audit".to_string()),
             |entry| self.studio_url_for(entry),
         );
-        let (studio_url, studio_tooltip) = match studio {
-            Ok(url) => (
-                Some(url),
-                "Open this synced image in Sirv AI Studio".to_string(),
+        let upscale_error =
+            entry.and_then(|entry| local_ai::upscale_dimensions(entry.width, entry.height).err());
+
+        // One readout, in this order of usefulness: a running job, then the
+        // encoded result, then why there is not one yet.
+        let (text, colour) = match (self.local_ai_job.as_ref(), comparison.pair.as_ref()) {
+            (Some(job), _) if job.busy() => (job.message(&self.root), cx.theme().muted_foreground),
+            (_, Some(pair)) => {
+                let saving = pair.saving_percent(source_bytes);
+                (
+                    format!(
+                        "{} → {} · {}",
+                        format_bytes(source_bytes),
+                        format_bytes(pair.converted_bytes),
+                        if saving >= 0. {
+                            format!("−{saving:.0}%")
+                        } else {
+                            format!("+{:.0}%", -saving)
+                        }
+                    ),
+                    if saving >= 0. {
+                        cx.theme().green
+                    } else {
+                        cx.theme().yellow
+                    },
+                )
+            }
+            (_, None) if comparison.failed => (
+                "Preview unavailable".to_string(),
+                cx.theme().muted_foreground,
             ),
-            Err(reason) => (None, reason),
+            (_, None) => ("Building preview…".to_string(), cx.theme().muted_foreground),
         };
-        let studio_disabled = studio_url.is_none();
 
         div()
-            .id("compare-tools-panel")
-            .debug_selector(|| "compare-tools-panel".into())
             .absolute()
-            .top(px(44.))
-            .right(px(44.))
-            .w(px(240.))
+            .left_0()
+            .right_0()
+            .bottom(px(16.))
             .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+            .justify_center()
             .child(
                 div()
-                    .px_1()
-                    .pb_1()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("IMAGE TOOLS"),
-            )
-            .child(
-                Button::new("compare-remove-background")
-                    .small()
-                    .w_full()
-                    .label("Remove background")
-                    .tooltip(remove_tooltip)
-                    .disabled(entry.is_none() || (busy && !remove_running))
-                    .when(remove_running, |button| button.icon(IconName::Loader))
-                    .loading(remove_running)
-                    .on_click(cx.listener(move |audit, _, _, cx| {
-                        if let Some(comparison) = audit.compare.as_mut() {
-                            comparison.tools_open = false;
-                        }
-                        audit.start_local_ai(local_ai::Tool::RemoveBackground, index, cx);
-                    })),
-            )
-            .child(
-                Button::new("compare-upscale")
-                    .small()
-                    .w_full()
-                    .label("Upscale 4×")
-                    .tooltip(upscale_tooltip)
-                    .disabled(
-                        entry.is_none() || upscale_error.is_some() || (busy && !upscale_running),
+                    .debug_selector(|| "compare-bar".into())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(46.))
+                    .px_2()
+                    .rounded_lg()
+                    .bg(cx.theme().secondary)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .pl_2()
+                            .pr_1()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colour)
+                            .whitespace_nowrap()
+                            .child(text),
                     )
-                    .when(upscale_running, |button| button.icon(IconName::Loader))
-                    .loading(upscale_running)
-                    .on_click(cx.listener(move |audit, _, _, cx| {
-                        if let Some(comparison) = audit.compare.as_mut() {
-                            comparison.tools_open = false;
-                        }
-                        audit.start_local_ai(local_ai::Tool::Upscale, index, cx);
-                    })),
+                    .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border))
+                    .child(
+                        Button::new("compare-convert")
+                            .small()
+                            .outline()
+                            .icon(IconName::Replace)
+                            .label("Convert this")
+                            .tooltip("Convert this image with the current settings")
+                            .disabled(busy || entry.is_none())
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                // The run's progress lives in the list, and the
+                                // list is where the result lands.
+                                audit.compare = None;
+                                audit.selected.clear();
+                                if let Some(entry) = audit.entries.get(index).map(|_| index) {
+                                    audit.selected.insert(entry);
+                                }
+                                audit.selection_changed(cx);
+                                audit.start_conversion(cx);
+                            })),
+                    )
+                    // Not every platform ships the local models. A verb that
+                    // cannot run anywhere on this machine is not disabled, it
+                    // is absent.
+                    .children(local_ai::available().then(|| {
+                        self.compare_local_ai(
+                            "compare-remove-background",
+                            IconName::Frame,
+                            "Remove background",
+                            local_ai::Tool::RemoveBackground,
+                            index,
+                            entry.is_none(),
+                            busy,
+                            cx,
+                        )
+                    }))
+                    .children(local_ai::available().then(|| {
+                        self.compare_local_ai(
+                            "compare-upscale",
+                            IconName::Maximize,
+                            "Upscale 4×",
+                            local_ai::Tool::Upscale,
+                            index,
+                            entry.is_none() || upscale_error.is_some(),
+                            busy,
+                            cx,
+                        )
+                    }))
+                    .child({
+                        let url = studio.as_ref().ok().cloned();
+                        Button::new("compare-edit-studio")
+                            .small()
+                            .outline()
+                            .icon(IconName::ExternalLink)
+                            .label("Edit in Studio")
+                            .tooltip(match &studio {
+                                Ok(_) => "Open this synced image in Sirv AI Studio".to_string(),
+                                Err(reason) => reason.clone(),
+                            })
+                            .disabled(url.is_none() || busy)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if let Some(url) = &url {
+                                    cx.open_url(url);
+                                }
+                            }))
+                    }),
             )
-            .child(
-                Button::new("compare-edit-studio")
-                    .small()
-                    .w_full()
-                    .icon(IconName::ExternalLink)
-                    .label("Edit in Sirv Studio")
-                    .tooltip(studio_tooltip)
-                    .disabled(studio_disabled)
-                    .on_click(cx.listener(move |audit, _, _, cx| {
-                        if let Some(comparison) = audit.compare.as_mut() {
-                            comparison.tools_open = false;
-                        }
-                        if let Some(url) = &studio_url {
-                            cx.open_url(url);
-                        }
-                    })),
-            )
+    }
+
+    /// One local model in the comparison bar. Same shape as the audit's, minus
+    /// the selection rule: the image you are looking at is the target.
+    #[allow(clippy::too_many_arguments)]
+    fn compare_local_ai(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        tool: local_ai::Tool,
+        index: usize,
+        blocked: bool,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let running = self
+            .local_ai_job
+            .as_ref()
+            .is_some_and(|job| job.busy() && job.tool == tool);
+        let tooltip = if busy && !running {
+            self.local_ai_job
+                .as_ref()
+                .map(|job| job.message(&self.root))
+                .unwrap_or_else(|| "Local AI is running…".into())
+        } else {
+            format!("{label} on this computer; the first run downloads the model")
+        };
+        Button::new(id)
+            .small()
+            .outline()
+            .icon(icon)
+            .label(label)
+            .tooltip(tooltip)
+            .loading(running)
+            .disabled(blocked || (busy && !running))
+            .on_click(cx.listener(move |audit, _, _, cx| {
+                audit.start_local_ai(tool, index, cx);
+            }))
     }
 }

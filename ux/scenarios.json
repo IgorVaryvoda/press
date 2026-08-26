@@ -744,53 +744,6 @@
       }
     ]
   },
-  "comparison-tools": {
-    "name": "Choose an auxiliary image tool",
-    "goal": "Find background removal, local upscaling, or Sirv Studio without confusing those actions with conversion.",
-    "success": [
-      "Convert remains the only primary action in the comparison header.",
-      "One clearly named Tools action reveals all auxiliary image actions.",
-      "The disclosed actions remain readable and unclipped at every supported width."
-    ],
-    "launch": {
-      "kind": "file",
-      "path": "assets/app-icon.png"
-    },
-    "actions": [
-      {
-        "type": "click",
-        "x": -78,
-        "y": 20
-      }
-    ],
-    "interaction_trace": [
-      "Open an image comparison.",
-      "Activate Tools.",
-      "Choose a local image action or Sirv Studio, or dismiss the disclosure."
-    ],
-    "review_focus": [
-      "Primary conversion hierarchy",
-      "Auxiliary action discoverability",
-      "Minimum-window disclosure layout"
-    ],
-    "sizes": [
-      {
-        "label": "minimum",
-        "width": 760,
-        "height": 640
-      },
-      {
-        "label": "default",
-        "width": 1100,
-        "height": 720
-      },
-      {
-        "label": "wide",
-        "width": 1440,
-        "height": 900
-      }
-    ]
-  },
   "conversion-running": {
     "name": "Watch a conversion run",
     "goal": "Know that work is under way, how far along it is, what it is producing, and that nothing can be changed until it finishes.",
@@ -949,6 +902,52 @@
         "label": "default",
         "width": 1100,
         "height": 720
+      }
+    ]
+  },
+  "comparison-actions": {
+    "name": "Act on the image you are comparing",
+    "goal": "Judge one image against its conversion and act on it — convert, run a local model, or hand it to Studio — without leaving the screen or hunting through a menu.",
+    "success": [
+      "Every action available for this image is visible in the bar, with no disclosure to open first.",
+      "The readout says what this image costs now and converted, and updates when settings change.",
+      "Nothing in the bar claims an action that cannot run on this file or this machine."
+    ],
+    "launch": {
+      "kind": "file",
+      "path": "assets/app-icon.png"
+    },
+    "actions": [
+      {
+        "type": "wait",
+        "seconds": 2
+      }
+    ],
+    "interaction_trace": [
+      "Open a folder and open one image for comparison.",
+      "Read the before and after in the bar.",
+      "Convert it, run a local model on it, or open it in Studio."
+    ],
+    "review_focus": [
+      "Action legibility in the bar",
+      "Readout accuracy",
+      "Honest unavailability"
+    ],
+    "sizes": [
+      {
+        "label": "minimum",
+        "width": 760,
+        "height": 640
+      },
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      },
+      {
+        "label": "wide",
+        "width": 1440,
+        "height": 900
       }
     ]
   }

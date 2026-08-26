@@ -694,13 +694,7 @@ impl Render for Audit {
                 .on_key_down(cx.listener(|audit, event: &gpui::KeyDownEvent, _, cx| {
                     match event.keystroke.key.as_str() {
                         "escape" => {
-                            if let Some(comparison) = audit.compare.as_mut()
-                                && comparison.tools_open
-                            {
-                                comparison.tools_open = false;
-                            } else {
-                                audit.compare = None;
-                            }
+                            audit.compare = None;
                             cx.notify();
                         }
                         "right" | "down" => audit.step_compare(1, cx),

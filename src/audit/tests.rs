@@ -323,7 +323,6 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
         pan: (0., 0.),
         zoom: None,
         drag: None,
-        tools_open: false,
     };
 
     assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
@@ -1228,30 +1227,6 @@ fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext
         );
         assert_eq!(audit.selected, [0, 1].into_iter().collect());
     });
-}
-
-#[gpui::test]
-fn comparison_tools_disclose_without_competing_with_convert(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    let index = audit.read_with(cx, |audit, _| audit.visible[0]);
-    audit.update(cx, |audit, cx| audit.open_compare(index, cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-
-    let tools = cx
-        .debug_bounds("compare-tools")
-        .expect("the comparison header exposes one Tools action");
-    cx.simulate_click(tools.center(), gpui::Modifiers::none());
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-
-    audit.read_with(cx, |audit, _| {
-        assert!(
-            audit
-                .compare
-                .as_ref()
-                .is_some_and(|comparison| comparison.tools_open)
-        );
-    });
-    assert!(cx.debug_bounds("compare-tools-panel").is_some());
 }
 
 /// The picker's toggle has to reach the table, not only the state: the delegate

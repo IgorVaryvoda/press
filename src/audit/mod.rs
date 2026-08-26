@@ -546,9 +546,6 @@ struct Comparison {
     zoom: Option<f32>,
     /// Pointer position when the current drag began, and the pan it started from.
     drag: Option<((f32, f32), (f32, f32))>,
-    /// Auxiliary editing actions stay behind one named control so they do not
-    /// compete with the conversion decision in the comparison header.
-    tools_open: bool,
 }
 
 enum LocalAiJobState {

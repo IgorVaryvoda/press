@@ -121,28 +121,33 @@ impl Audit {
                                 cx.listener(|audit, _, _, cx| audit.open_rail(Rail::Convert, cx)),
                             ),
                     )
-                    .child(self.local_ai_action(
-                        "rail-remove-background",
-                        Rail::RemoveBackground,
-                        IconName::Frame,
-                        "Remove background",
-                        local_ai::Tool::RemoveBackground,
-                        single,
-                        busy,
-                        labelled,
-                        cx,
-                    ))
-                    .child(self.local_ai_action(
-                        "rail-upscale",
-                        Rail::Upscale,
-                        IconName::Maximize,
-                        "Upscale 4×",
-                        local_ai::Tool::Upscale,
-                        single,
-                        busy,
-                        labelled,
-                        cx,
-                    ))
+                    // Absent rather than disabled where the models cannot run.
+                    .children(local_ai::available().then(|| {
+                        self.local_ai_action(
+                            "rail-remove-background",
+                            Rail::RemoveBackground,
+                            IconName::Frame,
+                            "Remove background",
+                            local_ai::Tool::RemoveBackground,
+                            single,
+                            busy,
+                            labelled,
+                            cx,
+                        )
+                    }))
+                    .children(local_ai::available().then(|| {
+                        self.local_ai_action(
+                            "rail-upscale",
+                            Rail::Upscale,
+                            IconName::Maximize,
+                            "Upscale 4×",
+                            local_ai::Tool::Upscale,
+                            single,
+                            busy,
+                            labelled,
+                            cx,
+                        )
+                    }))
                     .child(
                         Button::new("studio")
                             .small()
