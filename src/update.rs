@@ -1,11 +1,11 @@
 use cargo_packager_updater::{Config, check_update};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// Still the old repository path. Installed copies poll this exact URL, so it
-/// moves only when the GitHub repository is renamed, and then only behind a
-/// release that keeps the old feed alive until the fleet has rolled over.
-const ENDPOINT: &str =
-    "https://github.com/IgorVaryvoda/imageguide-desktop/releases/latest/download/latest.json";
+/// The repository was renamed from `imageguide-desktop` to `press`. Every copy
+/// installed before that polls the old path, and GitHub redirects it here for
+/// as long as nothing else claims the old name — so the old name must never be
+/// used for another repository under this account.
+const ENDPOINT: &str = "https://github.com/IgorVaryvoda/press/releases/latest/download/latest.json";
 
 /// What the last update attempt did, for the window to show.
 /// 0 = nothing attempted yet, 1 = installed while work was active,

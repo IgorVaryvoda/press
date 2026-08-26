@@ -3,6 +3,7 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-26 | self | Resolved the active Ponytail skill under the general agents skill root even though the session catalog mapped it to the plugin cache | Expand the exact root alias from the available-skills catalog before reading any skill |
 | 2026-08-26 | self | Built the comparison fixture out of `docs/audit.webp` and `docs/comparison.webp`, then spent an hour chasing "duplicate chrome" that was the old UI inside the picture being compared — the exact trap already recorded on this napkin | Generate neutral fixture images (gradients and rings via Pillow) for any comparison evidence, and read the napkin's own corrections before debugging a visual oddity |
 | 2026-08-26 | user | Painted `tokens.table_active` an opaque colour; the table draws its selected row as an absolutely-positioned overlay ON TOP of the cells, so clicking a row hid its tick, thumbnail and every column | Keep any token the library paints as an overlay translucent, and click a row in the real window before calling a theme change done |
 | 2026-08-26 | self | Edited six files in place while another session committed and fast-forwarded the same tree, so a hard reset discarded the half-finished change | On a shared checkout, land each file's change and check it before starting the next, and re-read `git status` after any long tool run |

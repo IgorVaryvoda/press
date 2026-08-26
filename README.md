@@ -17,7 +17,7 @@ rewrite your files. This one can.
 
 ## Install
 
-Download the current installer from [GitHub Releases](https://github.com/IgorVaryvoda/imageguide-desktop/releases/latest):
+Download the current installer from [GitHub Releases](https://github.com/IgorVaryvoda/press/releases/latest):
 
 - Linux: `.AppImage`
 - macOS: `.dmg` for Apple Silicon or Intel
