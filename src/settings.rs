@@ -13,6 +13,39 @@ pub struct Settings {
     pub height: Option<f32>,
     pub folder: Option<PathBuf>,
     pub columns: ColumnPrefs,
+    pub output: Output,
+}
+
+/// Where converted files and local-model results land.
+///
+/// The default keeps them beside the originals in `optimized/`, which is what
+/// makes "originals unchanged" true and easy to check. A chosen folder is for
+/// people whose output belongs somewhere else entirely — a staging directory, a
+/// share, a build tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Output {
+    #[default]
+    Optimized,
+    Folder(PathBuf),
+}
+
+impl Output {
+    /// The folder outputs are written into, for a given audited root.
+    pub fn root(&self, audited: &Path) -> PathBuf {
+        match self {
+            Output::Optimized => audited.join(crate::scan::OUTPUT_DIR),
+            Output::Folder(path) => path.clone(),
+        }
+    }
+
+    /// How the destination reads in the window: a name for the default, the
+    /// path itself for anywhere else.
+    pub fn label(&self) -> String {
+        match self {
+            Output::Optimized => format!("{}/", crate::scan::OUTPUT_DIR),
+            Output::Folder(path) => path.display().to_string(),
+        }
+    }
 }
 
 /// Which optional table columns are on. Sirv and Result are not here: they
@@ -167,6 +200,14 @@ fn parse(text: &str) -> Settings {
             "height" => settings.height = value.trim().parse().ok(),
             "folder" => settings.folder = Some(PathBuf::from(value.trim())),
             "columns" => settings.columns = ColumnPrefs::parse(value),
+            "output" => {
+                let value = value.trim();
+                settings.output = if value.is_empty() {
+                    Output::Optimized
+                } else {
+                    Output::Folder(PathBuf::from(value))
+                };
+            }
             _ => {}
         }
     }
@@ -187,6 +228,11 @@ fn render(settings: &Settings) -> String {
     // Always written, including when every column is off: an empty value is a
     // choice, and leaving the line out would restore the defaults next launch.
     out.push_str(&format!("columns={}\n", settings.columns.render()));
+    // The default writes no path, so a settings file says nothing about where
+    // output goes until somebody chooses somewhere else.
+    if let Output::Folder(path) = &settings.output {
+        out.push_str(&format!("output={}\n", path.display()));
+    }
     out
 }
 
@@ -201,8 +247,28 @@ mod tests {
             height: Some(720.5),
             folder: Some(PathBuf::from("/photos/library")),
             columns: ColumnPrefs::default(),
+            output: Output::Folder(PathBuf::from("/exports/web")),
         };
         assert_eq!(parse(&render(&settings)), settings);
+    }
+
+    /// The default writes no `output` line, so an older settings file — and a
+    /// hand-edited one that drops it — keeps writing beside the originals.
+    #[test]
+    fn a_chosen_output_folder_survives_a_round_trip() {
+        let chosen = Settings {
+            output: Output::Folder(PathBuf::from("/exports/web assets")),
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&chosen)).output, chosen.output);
+
+        let default = Settings::default();
+        assert!(!render(&default).contains("output="));
+        assert_eq!(parse(&render(&default)).output, Output::Optimized);
+        assert_eq!(
+            Output::Optimized.root(Path::new("/photos")),
+            Path::new("/photos/optimized")
+        );
     }
 
     /// A hand-edited or half-written file must not stop the app opening.

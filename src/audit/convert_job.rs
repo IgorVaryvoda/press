@@ -20,7 +20,7 @@ impl Audit {
         cx.notify();
 
         let root = self.root.clone();
-        let out_dir = self.root.join(scan::OUTPUT_DIR);
+        let out_dir = self.output.root(&self.root);
         let quality = self.quality;
         let format = self.format;
         let max_edge = self.max_edge;

@@ -279,14 +279,16 @@ fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
 }
 
 /// Walk a folder and probe every image in it, subfolders included.
-pub fn scan(root: &Path) -> Scan {
+/// Walk `root` for images. `output_root` is where this audit writes its output;
+/// files under it are counted, never audited — otherwise the second scan of a
+/// folder offers you last run's WebPs as candidates for conversion.
+pub fn scan(root: &Path, output_root: &Path) -> Scan {
     let mut candidates = Vec::new();
     let mut skipped_raw = 0;
     let mut existing_output = 0;
     let mut walk_errors = Vec::new();
     let mut skipped_packages = 0;
     let counted_packages = &mut skipped_packages;
-    let output_root = root.join(OUTPUT_DIR);
 
     // `filter_entry` prunes: a package directory is never descended into, so its
     // unreadable interior is never even attempted. Walk errors pass the predicate
@@ -305,6 +307,7 @@ pub fn scan(root: &Path) -> Scan {
                 .path()
                 .components()
                 .any(|part| part.as_os_str() == OUTPUT_DIR)
+                || entry.path().starts_with(output_root)
             {
                 return true;
             }
@@ -329,11 +332,13 @@ pub fn scan(root: &Path) -> Scan {
             continue;
         }
         let relative = file.path().strip_prefix(root).unwrap_or(file.path());
-        if relative
-            .components()
-            .any(|part| part.as_os_str() == OUTPUT_DIR)
+        let in_output = file.path().starts_with(output_root);
+        if in_output
+            || relative
+                .components()
+                .any(|part| part.as_os_str() == OUTPUT_DIR)
         {
-            if file.path().starts_with(&output_root) {
+            if in_output {
                 existing_output += 1;
             }
             continue;
@@ -613,7 +618,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not an image").unwrap();
         write_sample(&dir, "real.png", 8, 8);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
         assert_eq!(scanned.entries[0].name(), "real.png");
     }
@@ -625,7 +630,7 @@ mod tests {
         write_sample(&dir, "small.png", 8, 8);
         write_sample(&dir.join("nested"), "big.png", 300, 300);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 2);
         assert_eq!(
             scanned.entries[0].name(),
@@ -642,7 +647,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(OUTPUT_DIR)).unwrap();
         write_sample(&dir.join(OUTPUT_DIR), "source.png", 16, 16);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(
             scanned.entries.len(),
             1,
@@ -661,7 +666,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_sample(&dir, "source.png", 16, 16);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
     }
 
@@ -677,7 +682,7 @@ mod tests {
         write_sample(&nested, "old.png", 8, 8);
         write_sample(&nested, "older.png", 8, 8);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(
             scanned.entries.len(),
             1,
@@ -697,7 +702,7 @@ mod tests {
         std::fs::write(dir.join("DSC_0001.NEF"), b"not really a nef").unwrap();
         std::fs::write(dir.join("DSC_0002.cr2"), b"nor this").unwrap();
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
         assert_eq!(
             scanned.skipped_raw, 2,
@@ -715,7 +720,7 @@ mod tests {
         }
         std::fs::write(dir.join("broken.png"), b"not a png").unwrap();
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 40, "no file is probed twice or lost");
         assert_eq!(scanned.unreadable.len(), 1, "failures survive the join");
         assert!(
@@ -734,7 +739,7 @@ mod tests {
         std::fs::write(dir.join("truncated.png"), b"not a png at all").unwrap();
         std::fs::write(dir.join("notes.txt"), b"plain text").unwrap();
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
         assert_eq!(
             scanned.unreadable.len(),
@@ -756,7 +761,7 @@ mod tests {
         // No read or execute permission: readdir on it fails.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
 
         // Restore before asserting so cleanup cannot fail on the locked folder.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -785,7 +790,7 @@ mod tests {
         write_sample(&library, "master.png", 8, 8);
         write_sample(&dir, "keep.png", 8, 8);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(
             scanned.entries.len(),
             1,
@@ -808,7 +813,7 @@ mod tests {
         let dir = temp_dir("package-root");
         write_sample(&dir, "inside.png", 8, 8);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
         assert_eq!(scanned.skipped_packages, 0);
     }
@@ -824,7 +829,7 @@ mod tests {
         let disguised = dir.join("image.app");
         std::fs::rename(png, &disguised).unwrap();
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
         assert_eq!(scanned.entries[0].path, disguised);
         assert_eq!(
@@ -844,7 +849,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         write_sample(&package, "inside.png", 8, 8);
 
-        let scanned = scan(&dir);
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert!(scanned.entries.is_empty());
         assert_eq!(scanned.existing_output, 1);
         assert_eq!(scanned.skipped_packages, 0);
@@ -876,5 +881,27 @@ mod tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(2048), "2.0 KB");
         assert_eq!(format_bytes(5 * (1 << 20)), "5.0 MB");
+    }
+
+    /// A destination the user chose inside the audited folder is still output:
+    /// counted, never offered back as a candidate. Without this the second scan
+    /// of a folder hands you last run's WebPs to convert again.
+    #[test]
+    fn a_chosen_output_folder_inside_the_root_is_not_audited() {
+        let dir = temp_dir("chosen-output");
+        write_sample(&dir, "source.png", 16, 16);
+        let chosen = dir.join("exports");
+        std::fs::create_dir_all(&chosen).unwrap();
+        write_sample(&chosen, "source.webp", 16, 16);
+
+        let scanned = scan(&dir, &chosen);
+        assert_eq!(scanned.entries.len(), 1, "only the original is audited");
+        assert!(scanned.entries[0].path.ends_with("source.png"));
+        assert_eq!(scanned.existing_output, 1);
+
+        // Pointed elsewhere, the same folder is ordinary input again.
+        let elsewhere = scan(&dir, &dir.join("optimized"));
+        assert_eq!(elsewhere.entries.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

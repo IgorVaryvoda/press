@@ -405,17 +405,7 @@ impl Audit {
                     // Where the output lands, said once and always. Every other
                     // number in this rail is about size; this one is about the
                     // question people actually ask before pressing Convert.
-                    .child(
-                        div()
-                            .debug_selector(|| "output-destination".into())
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().foreground)
-                            .child(IconName::FolderOpen)
-                            .child("optimized/ · originals unchanged"),
-                    )
+                    .child(self.destination_row(cx))
                     .child(
                         div()
                             .flex()
@@ -685,6 +675,71 @@ impl Audit {
                     }),
             )
             .into_any_element()
+    }
+
+    /// Where the output lands, said once and always — and changeable, because
+    /// `optimized/` beside the originals is the right default and the wrong
+    /// answer for anyone whose output belongs in a staging folder or a build
+    /// tree. The originals never move either way.
+    fn destination_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let custom = self.output != Output::Optimized;
+        div()
+            .debug_selector(|| "output-destination".into())
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().foreground)
+                            .child(IconName::FolderOpen)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(self.output.label()),
+                            ),
+                    )
+                    .children(custom.then(|| {
+                        Button::new("output-default")
+                            .xsmall()
+                            .ghost()
+                            .label("Reset")
+                            .tooltip("Write into optimized/ beside the originals again")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, _, cx| audit.reset_output(cx)))
+                    }))
+                    .child(
+                        Button::new("output-choose")
+                            .xsmall()
+                            .ghost()
+                            .label("Change")
+                            .tooltip("Choose the folder converted files are written to")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, _, cx| audit.pick_output(cx))),
+                    ),
+            )
+            // The promise the whole app rests on, kept in view rather than
+            // discovered afterwards.
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Originals are never touched"),
+            )
     }
 
     /// A label over its control, each on its own line: the column is narrow on

@@ -17,7 +17,7 @@ mod tests;
 mod toolbar;
 mod view;
 
-use crate::settings::ColumnPrefs;
+use crate::settings::{ColumnPrefs, Output};
 use table::AuditTable;
 #[cfg(test)]
 use table::{TableColumn, W_NAME_MIN};
@@ -381,6 +381,8 @@ pub(crate) struct Audit {
     table_signature: Option<(u32, ColumnPrefs, bool, bool)>,
     /// Which optional columns the picker has on.
     column_prefs: ColumnPrefs,
+    /// Where conversions and local-model results are written.
+    output: Output,
     /// The open rail, if any. A folder opens on Convert: it is the app's job,
     /// and an empty right-hand edge on launch would hide it.
     rail: Rail,
@@ -682,6 +684,9 @@ impl Audit {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         self.scanning = Some(label);
+        // A chosen destination follows the audit to the new folder: it is a
+        // preference about where output belongs, not about this folder.
+        let output = self.output.clone();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -704,7 +709,7 @@ impl Audit {
                             true,
                         ))
                     } else {
-                        Some((scan::scan(&path), path, false))
+                        Some((scan::scan(&path, &output.root(&path)), path, false))
                     }
                 })
                 .await;
@@ -727,7 +732,7 @@ impl Audit {
     /// Hand the output folder to the desktop's file manager.
     // ponytail: three names for one idea, and no crate needed for it.
     fn reveal_output(&self) {
-        let path = self.root.join(scan::OUTPUT_DIR);
+        let path = self.output.root(&self.root);
         if !path.exists() {
             return;
         }
@@ -743,6 +748,40 @@ impl Audit {
 
     /// Ask the desktop for a folder or a file. The dialog runs off the main thread so
     /// the window keeps drawing while it is open.
+    /// Choose where output lands. The originals never move, so this only ever
+    /// changes the destination of new files — which is why it can be changed
+    /// mid-audit without invalidating anything already on screen.
+    pub(super) fn pick_output(&mut self, cx: &mut Context<Self>) {
+        if self.converting {
+            return;
+        }
+        let start = self.output.root(&self.root);
+        let start = if start.is_dir() {
+            start
+        } else {
+            self.root.clone()
+        };
+        cx.spawn(async move |this, cx| {
+            let chosen = cx
+                .background_executor()
+                .spawn(async move { rfd::FileDialog::new().set_directory(&start).pick_folder() })
+                .await;
+            if let Some(path) = chosen {
+                let _ = this.update_in(cx, |audit, window, cx| {
+                    audit.output = Output::Folder(path);
+                    cx.notify();
+                    window.refresh();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn reset_output(&mut self, cx: &mut Context<Self>) {
+        self.output = Output::Optimized;
+        cx.notify();
+    }
+
     pub(crate) fn pick(&mut self, folders: bool, cx: &mut Context<Self>) {
         if self.converting {
             return;
@@ -897,6 +936,7 @@ pub(crate) fn build_audit(
         max_edge,
         grid,
         columns: column_prefs,
+        output,
     } = launch;
 
     let audit = cx.new(|cx| {
@@ -1022,6 +1062,7 @@ pub(crate) fn build_audit(
             compare: None,
             local_ai_job: None,
             column_prefs,
+            output,
             rail: Rail::Convert,
         };
         audit.refresh_visible();

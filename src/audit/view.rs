@@ -371,6 +371,7 @@ impl Render for Audit {
             height: Some(f32::from(viewport.height)),
             folder: self.root.is_dir().then(|| self.root.clone()),
             columns: self.column_prefs,
+            output: self.output.clone(),
         };
         if current != self.settings {
             self.remember_settings(current, cx);

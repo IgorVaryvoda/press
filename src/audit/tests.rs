@@ -32,7 +32,7 @@ fn screenshot() {
     // Which of the shapes the window can take: list, grid, compare or empty.
     let mode = std::env::var("IMAGEGUIDE_SHOT_MODE").unwrap_or_else(|_| "list".to_string());
 
-    let mut scanned = scan::scan(&folder);
+    let mut scanned = scan::scan(&folder, &folder.join(scan::OUTPUT_DIR));
     assert!(
         !scanned.entries.is_empty(),
         "{} holds no images to draw",
@@ -74,6 +74,7 @@ fn screenshot() {
                     max_edge: MaxEdge::FULL,
                     grid: mode == "grid",
                     columns: ColumnPrefs::default(),
+                    output: crate::settings::Output::default(),
                 },
                 window,
                 cx,
@@ -893,6 +894,7 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
         max_edge: MaxEdge::FULL,
         grid: false,
         columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -1195,6 +1197,7 @@ fn pointer_checkbox_audit(
         max_edge: MaxEdge::FULL,
         grid,
         columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| {
         let built = build_audit(launch, window, cx);
@@ -1546,6 +1549,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 max_edge: MaxEdge::FULL,
                 grid: true,
                 columns: ColumnPrefs::default(),
+                output: crate::settings::Output::default(),
             },
             window,
             cx,
@@ -1654,6 +1658,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 max_edge: MaxEdge::FULL,
                 grid: true,
                 columns: ColumnPrefs::default(),
+                output: crate::settings::Output::default(),
             },
             window,
             cx,
@@ -1667,7 +1672,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
     cx.run_until_parked();
     cx.simulate_resize(size(px(873.), px(720.)));
     cx.run_until_parked();
-    let first_scan = scan::scan(&first_folder);
+    let first_scan = scan::scan(&first_folder, &first_folder.join(scan::OUTPUT_DIR));
     audit.update_in(cx, |audit, window, cx| {
         audit.install_dataset(first_scan, first_folder.clone(), false, window, cx);
         window.refresh();
@@ -1686,7 +1691,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
         audit.gallery_scroll.0.borrow().base_handle.offset().y < px(0.)
     }));
 
-    let second_scan = scan::scan(&second_folder);
+    let second_scan = scan::scan(&second_folder, &second_folder.join(scan::OUTPUT_DIR));
     audit.update_in(cx, |audit, window, cx| {
         audit.install_dataset(second_scan, second_folder.clone(), false, window, cx);
         window.refresh();
@@ -1730,6 +1735,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
                 max_edge: MaxEdge::FULL,
                 grid: false,
                 columns: ColumnPrefs::default(),
+                output: crate::settings::Output::default(),
             },
             window,
             cx,

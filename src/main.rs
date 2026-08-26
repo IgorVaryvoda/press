@@ -261,6 +261,7 @@ fn main() {
                 max_edge: args.max_edge,
                 grid: args.grid,
                 columns: remembered.columns,
+                output: remembered.output.clone(),
             },
             None,
         );
@@ -289,6 +290,7 @@ fn main() {
                 max_edge: args.max_edge,
                 grid: args.grid,
                 columns: remembered.columns,
+                output: remembered.output.clone(),
             },
             Some(target),
         );
@@ -312,7 +314,10 @@ fn main() {
             parent,
         )
     } else {
-        (scan::scan(&target), target.clone())
+        (
+            scan::scan(&target, &remembered.output.root(&target)),
+            target.clone(),
+        )
     };
     let scanned_unreadable_count = scanned.unreadable.len();
     let walk_error_count = scanned.walk_errors.len();
@@ -449,6 +454,7 @@ struct Launch {
     max_edge: MaxEdge,
     grid: bool,
     columns: settings::ColumnPrefs,
+    output: settings::Output,
 }
 
 fn run_window(launch: Launch, startup_path: Option<PathBuf>) {

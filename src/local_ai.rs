@@ -124,6 +124,7 @@ pub fn prepare(tool: Tool, cancelled: &AtomicBool) -> Result<Prepared, String> {
 pub fn process(
     prepared: Prepared,
     root: &Path,
+    out_dir: &Path,
     source: &Path,
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
@@ -181,7 +182,7 @@ pub fn process(
     validate_result(&result, prepared.tool, width, height)?;
     let encoded = std::fs::read(&result)
         .map_err(|error| format!("could not read the local AI result: {error}"))?;
-    let written = output_path(root, source, prepared.tool)?;
+    let written = output_path(root, out_dir, source, prepared.tool)?;
     check_cancelled(cancelled)?;
     convert::write_output(root, &written, &encoded)
         .map_err(|_| "could not safely write the local AI result".to_string())?;
@@ -203,7 +204,7 @@ pub fn upscale_dimensions(width: u32, height: u32) -> Result<(u32, u32), String>
     Ok((out_width, out_height))
 }
 
-fn output_path(root: &Path, source: &Path, tool: Tool) -> Result<PathBuf, String> {
+fn output_path(root: &Path, out_dir: &Path, source: &Path, tool: Tool) -> Result<PathBuf, String> {
     let relative = source
         .strip_prefix(root)
         .map_err(|_| "the source image is outside the audited folder".to_string())?;
@@ -214,7 +215,7 @@ fn output_path(root: &Path, source: &Path, tool: Tool) -> Result<PathBuf, String
     {
         return Err("the source image has an unsafe relative path".into());
     }
-    let parent = root.join(scan::OUTPUT_DIR).join(relative_parent);
+    let parent = out_dir.join(relative_parent);
     let stem = relative
         .file_stem()
         .filter(|stem| !stem.is_empty())
@@ -585,7 +586,8 @@ mod tests {
         let source = root.join("products/chair.jpg");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::write(&source, b"source").unwrap();
-        let first = output_path(&root, &source, Tool::RemoveBackground).unwrap();
+        let out_dir = root.join(scan::OUTPUT_DIR);
+        let first = output_path(&root, &out_dir, &source, Tool::RemoveBackground).unwrap();
         assert_eq!(
             first,
             root.join("optimized/products/chair-background-removed.png")
@@ -593,7 +595,7 @@ mod tests {
         std::fs::create_dir_all(first.parent().unwrap()).unwrap();
         std::fs::write(&first, b"existing").unwrap();
         assert_eq!(
-            output_path(&root, &source, Tool::RemoveBackground).unwrap(),
+            output_path(&root, &out_dir, &source, Tool::RemoveBackground).unwrap(),
             root.join("optimized/products/chair-background-removed-2.png")
         );
         let _ = std::fs::remove_dir_all(root);

@@ -95,6 +95,7 @@ impl Audit {
         let source = entry.path.clone();
         let source_name = entry.name();
         let root = self.root.clone();
+        let out_dir = self.output.root(&self.root);
         let dataset_generation = self.dataset_generation;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.local_ai_job = Some(LocalAiJob {
@@ -156,9 +157,9 @@ impl Audit {
             let process_cancelled = cancelled.clone();
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { local_ai::process(prepared, &root, &source, &process_cancelled) },
-                )
+                .spawn(async move {
+                    local_ai::process(prepared, &root, &out_dir, &source, &process_cancelled)
+                })
                 .await;
             let _ = this.update(cx, |audit, cx| {
                 if !local_ai_landing_applies(
