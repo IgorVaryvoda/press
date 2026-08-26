@@ -82,7 +82,7 @@ pub(super) const OPTIONAL_COLUMNS: [OptionalColumn; 5] = [
     ("Thumbnail", |p| p.thumb, |p| p.thumb = !p.thumb),
     ("Format", |p| p.format, |p| p.format = !p.format),
     ("Size", |p| p.pixels, |p| p.pixels = !p.pixels),
-    ("B/px", |p| p.density, |p| p.density = !p.density),
+    ("Bytes per pixel", |p| p.density, |p| p.density = !p.density),
     ("File size", |p| p.weight, |p| p.weight = !p.weight),
 ];
 

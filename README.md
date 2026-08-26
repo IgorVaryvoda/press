@@ -59,7 +59,7 @@ found — heaviest first, because that is where the work is.
 | Format | The real format, read from the file's magic bytes, not its extension |
 | Size | Pixel dimensions |
 | File size | Bytes on disk |
-| B/px | Bytes on disk per output pixel — off by default |
+| Bytes per pixel | Bytes on disk per output pixel — off by default, shown as `B/px` |
 
 Columns are chosen from the icon at the right end of the header, and the choice is
 remembered.

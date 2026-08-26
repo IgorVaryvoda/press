@@ -8,7 +8,7 @@ const GALLERY_SORTS: [(Column, &str); 5] = [
     (Column::Name, "Name"),
     (Column::Format, "Format"),
     (Column::Pixels, "Pixels"),
-    (Column::Density, "B/px"),
+    (Column::Density, "Bytes/pixel"),
     (Column::Weight, "File size"),
 ];
 
