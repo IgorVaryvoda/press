@@ -92,7 +92,12 @@ impl Audit {
                         for (index, result) in batch {
                             match result {
                                 Ok(converted) => {
-                                    audit.record_result(index, format, converted.bytes);
+                                    audit.record_result(
+                                        index,
+                                        format,
+                                        converted.bytes,
+                                        converted.written,
+                                    );
                                 }
                                 Err(error) => {
                                     let name = audit
@@ -119,6 +124,12 @@ impl Audit {
                 if audit.dataset_generation == dataset_generation {
                     audit.converting = false;
                     audit.active_target_count = None;
+                    // A finished run has produced something to look at, and
+                    // until now the app said so in a column and left you to
+                    // find it. Open it.
+                    if let Some(first) = audit.result_rows().first().copied() {
+                        audit.open_result(first, cx);
+                    }
                 }
                 cx.notify();
             });

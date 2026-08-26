@@ -242,6 +242,9 @@ pub(crate) struct Audit {
     selected: HashSet<usize>,
     /// Encoded size per row, filled in as conversion progresses.
     results: HashMap<usize, u64>,
+    /// Where each of those rows was written. Kept because a run renames on a
+    /// name clash, so the path cannot be recomputed from the source afterwards.
+    result_paths: HashMap<usize, PathBuf>,
     /// Outputs successfully written in this session, retained when settings change
     /// so the next action can say that it will replace them.
     completed_outputs: HashSet<(usize, Format)>,
@@ -548,6 +551,9 @@ struct Comparison {
     zoom: Option<f32>,
     /// Pointer position when the current drag began, and the pan it started from.
     drag: Option<((f32, f32), (f32, f32))>,
+    /// The output being examined, when this is a finished result rather than a
+    /// preview. Set means both sides came off disk and the bytes are real.
+    written: Option<PathBuf>,
 }
 
 enum LocalAiJobState {
@@ -1039,6 +1045,7 @@ pub(crate) fn build_audit(
             settings_save_pending: false,
             cached: None,
             results: HashMap::new(),
+            result_paths: HashMap::new(),
             completed_outputs: HashSet::new(),
             converted_totals: (0, 0),
             converting: false,

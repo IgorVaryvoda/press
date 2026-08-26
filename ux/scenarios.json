@@ -588,12 +588,12 @@
     ]
   },
   "conversion-result": {
-    "name": "Understand a completed conversion",
-    "goal": "Confirm what completed, judge the actual size result, locate the output, and know whether another conversion would replace it.",
+    "name": "Look at what a run produced",
+    "goal": "See the files a finished run wrote — against the originals they came from, at the bytes they actually weigh — and get to them in the folder.",
     "success": [
-      "Completion is distinguishable from an estimate and names files, before/after bytes, and savings or growth.",
-      "The output-folder action is easy to find.",
-      "The original folder remains clearly untouched and the next conversion action is unambiguous."
+      "A finished run leads straight to its output rather than reporting a number and stopping.",
+      "Both sides are the files on disk, and nothing suggests the converted side is a preview.",
+      "Every output the run wrote is reachable without going back to the list."
     ],
     "launch": {
       "kind": "folder",
@@ -618,9 +618,9 @@
       "Show the output folder or adjust settings and convert again."
     ],
     "review_focus": [
-      "Estimate versus actual result",
-      "Completion and failure reporting",
-      "Output discovery and repeat-conversion intent"
+      "Result versus estimate",
+      "Getting from a finished run to the files",
+      "Stepping through outputs"
     ],
     "sizes": [
       {

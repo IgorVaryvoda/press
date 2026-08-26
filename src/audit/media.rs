@@ -52,6 +52,57 @@ impl Audit {
     }
 
     /// Open the side-by-side view for a row and start building both sides.
+    /// Open a finished output beside the file it came from. Unlike the preview,
+    /// nothing is encoded here: both sides are read off disk, so the bytes on
+    /// screen are the bytes in the folder.
+    pub(super) fn open_result(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(source) = self.entries.get(index).map(|entry| entry.path.clone()) else {
+            return;
+        };
+        let Some(written) = self.result_paths.get(&index).cloned() else {
+            return;
+        };
+        let dataset_generation = self.dataset_generation;
+        let key = compare::Key::new(&written, self.format, self.quality, self.max_edge);
+        self.compare = Some(Comparison {
+            index,
+            dataset_generation,
+            focused: false,
+            key: key.clone(),
+            pair: None,
+            failed: false,
+            split: 0.5,
+            pan: (0., 0.),
+            zoom: None,
+            drag: None,
+            written: Some(written.clone()),
+        });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let built = cx
+                .background_executor()
+                .spawn(async move { compare::build_written(&source, &written) })
+                .await
+                .map(Arc::new);
+            let _ = this.update(cx, |audit, cx| {
+                if !comparison_landing_applies(
+                    audit.compare.as_ref(),
+                    index,
+                    dataset_generation,
+                    &key,
+                ) {
+                    return;
+                }
+                let comparison = audit.compare.as_mut().unwrap();
+                comparison.failed = built.is_none();
+                comparison.pair = built;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn open_compare(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
@@ -70,6 +121,7 @@ impl Audit {
             // Open fitted: you cannot judge a crop of an image you have not seen.
             zoom: None,
             drag: None,
+            written: None,
         });
         cx.notify();
 

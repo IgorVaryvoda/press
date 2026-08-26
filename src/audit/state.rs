@@ -109,11 +109,30 @@ impl Audit {
 
     pub(super) fn clear_results(&mut self) {
         self.results.clear();
+        self.result_paths.clear();
         self.converted_totals = (0, 0);
     }
 
-    pub(super) fn record_result(&mut self, index: usize, format: Format, bytes: u64) {
+    /// The finished outputs, in the order the list is showing their sources.
+    /// The results view steps through them in this order, so it matches what
+    /// you were looking at when the run started.
+    pub(super) fn result_rows(&self) -> Vec<usize> {
+        self.visible
+            .iter()
+            .copied()
+            .filter(|index| self.result_paths.contains_key(index))
+            .collect()
+    }
+
+    pub(super) fn record_result(
+        &mut self,
+        index: usize,
+        format: Format,
+        bytes: u64,
+        written: PathBuf,
+    ) {
         self.completed_outputs.insert((index, format));
+        self.result_paths.insert(index, written);
         let source = self.entries.get(index).map_or(0, |entry| entry.bytes);
         match self.results.insert(index, bytes) {
             Some(previous) => self.converted_totals.1 = self.converted_totals.1 - previous + bytes,
@@ -513,10 +532,39 @@ impl Audit {
     }
 
     /// Step to the next or previous image while the comparison is open.
+    /// Where this output sits among the run's outputs, if it is one.
+    pub(super) fn result_position(&self, index: usize) -> Option<(usize, usize)> {
+        let rows = self.result_rows();
+        let at = rows.iter().position(|row| *row == index)?;
+        Some((at + 1, rows.len()))
+    }
+
     pub(super) fn step_compare(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(entry) = self.compare.as_ref().map(|comparison| comparison.index) else {
             return;
         };
+        // Looking at a result steps through the run's outputs, not through every
+        // file in the folder: the other files are not what you came to check.
+        if self
+            .compare
+            .as_ref()
+            .is_some_and(|comparison| comparison.written.is_some())
+        {
+            let rows = self.result_rows();
+            let Some(at) = rows.iter().position(|row| *row == entry) else {
+                return;
+            };
+            let next = at as isize + delta;
+            if next < 0 || next as usize >= rows.len() {
+                return;
+            }
+            let target = rows[next as usize];
+            if let Some(row) = self.row_of(target) {
+                self.cursor = row;
+            }
+            self.open_result(target, cx);
+            return;
+        }
         // Step through what is on screen, not through the underlying scan order.
         let Some((row, entry)) = self.compare_target_from(entry, delta) else {
             return;

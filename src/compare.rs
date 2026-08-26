@@ -80,6 +80,38 @@ pub fn build(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -
     })
 }
 
+/// The same pair, but the converted side is a file that already exists rather
+/// than an encode done for the preview. This is what a finished run produced,
+/// read back off disk — bytes and pixels both — so nothing here is a promise
+/// about what conversion would do.
+///
+/// The original is brought down to the output's dimensions when a resize was
+/// part of the job, for the same reason `build` does it: otherwise the divider
+/// measures the resize instead of the compression.
+pub fn build_written(source: &Path, written: &Path) -> Option<Pair> {
+    let converted = crate::scan::decode(written)?;
+    let (width, height) = (converted.width(), converted.height());
+    let original = crate::scan::decode(source)?;
+    let original = if original.width() == width && original.height() == height {
+        original
+    } else {
+        original.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+    };
+    let converted_bytes = std::fs::metadata(written).map(|meta| meta.len()).ok()?;
+
+    Some(Pair {
+        original: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(
+            original.into_rgba8(),
+        ))])),
+        converted: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(
+            converted.into_rgba8(),
+        ))])),
+        converted_bytes,
+        width,
+        height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

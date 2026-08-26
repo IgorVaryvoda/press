@@ -35,9 +35,14 @@ impl Audit {
         let name = entry.map(|entry| entry.name()).unwrap_or_default();
         // Where this image sits in the folder, so stepping through it has a
         // sense of distance rather than just a pair of arrows.
-        let position = match self.row_of(comparison.index) {
-            Some(row) => format!("{} of {}", row + 1, self.visible.len()),
-            None => String::new(),
+        let position = match (
+            comparison.written.is_some(),
+            self.result_position(comparison.index),
+            self.row_of(comparison.index),
+        ) {
+            (true, Some((at, total)), _) => format!("{at} of {total} outputs"),
+            (_, _, Some(row)) => format!("{} of {}", row + 1, self.visible.len()),
+            _ => String::new(),
         };
         let can_previous = self.compare_target_from(comparison.index, -1).is_some();
         let can_next = self.compare_target_from(comparison.index, 1).is_some();
@@ -166,73 +171,88 @@ impl Audit {
                     .child(img(image.clone()).w(px(image_w)).h(px(image_h)))
             };
 
-            stage =
-                stage
-                    .child(placed(&pair.converted))
-                    .child(
-                        // The original, clipped to everything left of the divider. Its
-                        // child keeps full width so both sides stay in register.
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top_0()
-                            .h_full()
-                            .w(px(divider))
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_0()
-                                    .w(px(view_w))
-                                    .h(px(view_h))
-                                    .child(placed(&pair.original)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "compare-divider-handle".into())
-                            .absolute()
-                            .top_0()
-                            .left(px(divider - 1.))
-                            .w(px(2.))
-                            .h_full()
-                            .bg(rgba(0xffffffcc)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(view_h / 2. - 18.))
-                            .left(px(divider - 16.))
-                            .w(px(32.))
-                            .h(px(36.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .border_1()
-                            .border_color(rgba(0xffffffcc))
-                            .bg(rgba(0x000000cc))
-                            .text_size(px(16.))
-                            .text_color(gpui::white())
-                            .cursor_ew_resize()
-                            .child("↔"),
-                    )
-                    .child(
-                        // Which side is which, pinned to the divider rather than to the
-                        // window, so it stays true as the divider moves.
-                        div()
-                            .absolute()
-                            .top(px(48.))
-                            .left(px(divider - 76.))
-                            .w(px(64.))
-                            .flex()
-                            .justify_end()
-                            .child(compare_chip("original", cx.theme().foreground, cx)),
-                    )
-                    .child(div().absolute().top(px(48.)).left(px(divider + 12.)).child(
-                        compare_chip(self.format.label().to_uppercase(), cx.theme().green, cx),
-                    ));
+            stage = stage
+                .child(placed(&pair.converted))
+                .child(
+                    // The original, clipped to everything left of the divider. Its
+                    // child keeps full width so both sides stay in register.
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .h_full()
+                        .w(px(divider))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .w(px(view_w))
+                                .h(px(view_h))
+                                .child(placed(&pair.original)),
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "compare-divider-handle".into())
+                        .absolute()
+                        .top_0()
+                        .left(px(divider - 1.))
+                        .w(px(2.))
+                        .h_full()
+                        .bg(rgba(0xffffffcc)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(view_h / 2. - 18.))
+                        .left(px(divider - 16.))
+                        .w(px(32.))
+                        .h(px(36.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgba(0xffffffcc))
+                        .bg(rgba(0x000000cc))
+                        .text_size(px(16.))
+                        .text_color(gpui::white())
+                        .cursor_ew_resize()
+                        .child("↔"),
+                )
+                .child(
+                    // Which side is which, pinned to the divider rather than to the
+                    // window, so it stays true as the divider moves.
+                    div()
+                        .absolute()
+                        .top(px(48.))
+                        .left(px(divider - 76.))
+                        .w(px(64.))
+                        .flex()
+                        .justify_end()
+                        .child(compare_chip("original", cx.theme().foreground, cx)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(48.))
+                        .left(px(divider + 12.))
+                        .child(compare_chip(
+                            match comparison.written.as_ref() {
+                                // The file, not the format: in result mode this
+                                // side is a thing on disk with a name.
+                                Some(written) => written
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| self.format.label().to_uppercase()),
+                                None => self.format.label().to_uppercase(),
+                            },
+                            cx.theme().green,
+                            cx,
+                        )),
+                );
         }
 
         if comparison.failed {
@@ -352,13 +372,14 @@ impl Audit {
                             })),
                     ),
             )
-            // Zoom, in its own cluster out of the way. It changes how you look
-            // at the image and nothing about the file.
+            // Zoom, in its own cluster out of the way — top right, under the
+            // header, because the bar's width changes with what it is offering
+            // and the two used to collide at the minimum width.
             .child(
                 div()
                     .absolute()
-                    .right(px(16.))
-                    .bottom(px(16.))
+                    .right(px(12.))
+                    .top(px(48.))
                     .flex()
                     .items_center()
                     .gap_1()
@@ -397,8 +418,124 @@ impl Audit {
                             })),
                     ),
             )
-            .child(self.compare_bar(comparison, entry, cx))
+            .children(
+                comparison
+                    .written
+                    .is_some()
+                    .then(|| self.result_strip(comparison, cx)),
+            )
+            .child(self.compare_bar(comparison, entry, view_w, cx))
             .into_any_element()
+    }
+
+    /// Every output the run wrote, along the foot. This is the part the app
+    /// never had: a finished run reported a number and left you to go and find
+    /// the files it was talking about.
+    fn result_strip(&self, comparison: &Comparison, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.result_rows();
+        let current = comparison.index;
+        div()
+            .debug_selector(|| "result-strip".into())
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(74.))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("result-strip-scroll")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .max_w(px(980.))
+                    .px_2()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(cx.theme().secondary.opacity(0.92))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .overflow_x_scroll()
+                    .children(rows.into_iter().map(|index| {
+                        let selected = index == current;
+                        let name = self
+                            .entries
+                            .get(index)
+                            .map(|entry| entry.name())
+                            .unwrap_or_default();
+                        let saving = match (
+                            self.entries.get(index).map(|entry| entry.bytes),
+                            self.results.get(&index),
+                        ) {
+                            (Some(before), Some(after)) if before > 0 => {
+                                let delta = before as f32 - *after as f32;
+                                Some(delta / before as f32 * 100.)
+                            }
+                            _ => None,
+                        };
+                        div()
+                            .id(("result-tile", index))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .w(px(86.))
+                            .flex_shrink_0()
+                            .p_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(selected, |tile| {
+                                tile.bg(cx.theme().list_active)
+                                    .border_1()
+                                    .border_color(cx.theme().list_active_border)
+                            })
+                            .when(!selected, |tile| {
+                                tile.border_1()
+                                    .border_color(gpui::transparent_black())
+                                    .hover(|tile| tile.bg(cx.theme().list_hover))
+                            })
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(48.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .bg(cx.theme().background)
+                                    .overflow_hidden()
+                                    .when_some(self.thumbs.get(&index).cloned(), |slot, image| {
+                                        slot.child(img(image).max_w_full().max_h(px(48.)))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(name),
+                            )
+                            .children(saving.map(|percent| {
+                                div()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(px(10.))
+                                    .text_color(if percent >= 0. {
+                                        cx.theme().green
+                                    } else {
+                                        cx.theme().yellow
+                                    })
+                                    .child(if percent >= 0. {
+                                        format!("−{percent:.0}%")
+                                    } else {
+                                        format!("+{:.0}%", -percent)
+                                    })
+                            }))
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                audit.open_result(index, cx);
+                            }))
+                    })),
+            )
     }
 
     /// The comparison's action bar: what this image costs now and converted,
@@ -408,11 +545,16 @@ impl Audit {
         &self,
         comparison: &Comparison,
         entry: Option<&Entry>,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // The same thresholds the audit's bar uses: the bar has to fit the
+        // window it floats over, and at the minimum width it does not.
+        let labelled = width >= 900.;
         let index = comparison.index;
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let busy = self.local_ai_busy() || self.converting;
+        let showing_result = comparison.written.is_some();
         let studio = entry.map_or_else(
             || Err("This image is no longer in the audit".to_string()),
             |entry| self.studio_url_for(entry),
@@ -471,7 +613,7 @@ impl Audit {
                     .border_1()
                     .border_color(cx.theme().border)
                     .shadow_lg()
-                    .child(
+                    .children((width >= 700.).then(|| {
                         div()
                             .pl_2()
                             .pr_1()
@@ -480,15 +622,34 @@ impl Audit {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colour)
                             .whitespace_nowrap()
-                            .child(text),
+                            .child(text)
+                    }))
+                    .children(
+                        (width >= 700.).then(|| div().w(px(1.)).h(px(20.)).bg(cx.theme().border)),
                     )
-                    .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border))
+                    // A file that already exists wants opening, not converting
+                    // again — and the folder is the thing you actually go to.
+                    .children(showing_result.then(|| {
+                        Button::new("result-show")
+                            .small()
+                            .primary()
+                            .icon(IconName::FolderOpen)
+                            .when(labelled, |button| button.label("Show in folder"))
+                            .tooltip("Open the output folder in the file manager")
+                            .on_click(cx.listener(|audit, _, _, _| audit.reveal_output()))
+                    }))
                     .child(
                         Button::new("compare-convert")
                             .small()
                             .outline()
                             .icon(IconName::Replace)
-                            .label("Convert this")
+                            .when(labelled, |button| {
+                                button.label(if showing_result {
+                                    "Convert again"
+                                } else {
+                                    "Convert this"
+                                })
+                            })
                             .tooltip("Convert this image with the current settings")
                             .disabled(busy || entry.is_none())
                             .on_click(cx.listener(move |audit, _, _, cx| {
@@ -515,6 +676,7 @@ impl Audit {
                             index,
                             entry.is_none(),
                             busy,
+                            labelled,
                             cx,
                         )
                     }))
@@ -527,6 +689,7 @@ impl Audit {
                             index,
                             entry.is_none() || upscale_error.is_some(),
                             busy,
+                            labelled,
                             cx,
                         )
                     }))
@@ -536,7 +699,7 @@ impl Audit {
                             .small()
                             .outline()
                             .icon(IconName::ExternalLink)
-                            .label("Edit in Studio")
+                            .when(labelled, |button| button.label("Edit in Studio"))
                             .tooltip(match &studio {
                                 Ok(_) => "Open this synced image in Sirv AI Studio".to_string(),
                                 Err(reason) => reason.clone(),
@@ -563,6 +726,7 @@ impl Audit {
         index: usize,
         blocked: bool,
         busy: bool,
+        labelled: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let running = self
@@ -581,7 +745,7 @@ impl Audit {
             .small()
             .outline()
             .icon(icon)
-            .label(label)
+            .when(labelled, |button| button.label(label))
             .tooltip(tooltip)
             .loading(running)
             .disabled(blocked || (busy && !running))

@@ -324,6 +324,7 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
         pan: (0., 0.),
         zoom: None,
         drag: None,
+        written: None,
     };
 
     assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
@@ -942,18 +943,18 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
         audit.converting = false;
         assert_eq!(audit.target_bytes(), 101_000);
 
-        audit.record_result(0, Format::WebP, 50_000);
+        audit.record_result(0, Format::WebP, 50_000, PathBuf::from("/tmp/out.webp"));
         assert_eq!(
             audit.conversion_action_label(),
             "Convert 2 selected to WEBP"
         );
-        audit.record_result(2, Format::WebP, 500);
+        audit.record_result(2, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
         assert_eq!(audit.converted_totals(), (101_000, 50_500));
         assert_eq!(
             audit.conversion_action_label(),
             "Replace 2 selected WEBP outputs"
         );
-        audit.record_result(0, Format::WebP, 40_000);
+        audit.record_result(0, Format::WebP, 40_000, PathBuf::from("/tmp/out.webp"));
         assert_eq!(audit.converted_totals(), (101_000, 40_500));
         audit.clear_results();
         assert_eq!(audit.converted_totals(), (0, 0));
