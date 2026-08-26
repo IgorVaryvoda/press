@@ -51,6 +51,7 @@
 - For pre-alpha UI work, reshape the design freely and make real app screenshots yourself; do not wait for an in-repo headless capture test.
 
 ## Patterns That Work
+- The bundled macOS vision.cpp CLI links its libraries as `@rpath/*`, but the pinned upstream build installs no run path unless its CI/dev mode is enabled. Set `CMAKE_INSTALL_RPATH=@loader_path/../lib` in Press's package build and smoke-test the installed CLI with both `DYLD_LIBRARY_PATH` variables unset.
 - Selection bugs need a pointer, not the keyboard: `keyboard-selection` rendered the ticked row correctly while the same row clicked with the mouse went blank, because only the pointer path sets the component table's own `selected_row` and its overlay. The `pointer-selection` scenario exists to catch that class.
 - Moving a control invalidates every fixed click in `ux/scenarios.json`: the two conversion scenarios still aimed at the old inspector's Convert button and were clicking empty rail. Anchor a rail click to the right and bottom edges (negative x and y) so one coordinate pair holds at all three sizes; the floating bar has no stable anchor, so scenarios that click it take one size.
 - The component table paints rows from `theme.tokens.*`, not the matching `theme.*` colours: `tokens.table`, `tokens.table_head`, `tokens.table_even`, `tokens.table_hover` and `tokens.table_active` all have to be set, or the list keeps the stock near-black under a restyled zebra.
