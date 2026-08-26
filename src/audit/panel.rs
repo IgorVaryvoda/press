@@ -1,15 +1,29 @@
-//! The output inspector: the whole conversion story in one right-hand column —
-//! presets on top, the fine-tune knobs under them, and at the foot the
-//! projected result next to the button that commits it. Settings, feedback and
-//! action share one surface instead of being smeared across a toolbar and a
-//! status bar that never faced each other.
+//! The action bar and its rails.
+//!
+//! The bar floats over the list and holds verbs only: Convert, the two local
+//! models, and the handoff to Sirv Studio. Choosing one opens its rail on the
+//! right, carrying that operation's settings and the button that commits it.
+//! No operation borrows another's controls, and the bar never has to explain
+//! itself — which is what the old right-hand inspector column was doing for
+//! conversion alone.
 
 use super::*;
 
-/// Width of the inspector. The table and the gallery lay themselves out
-/// against the viewport minus this, so the panel never silently squeezes
-/// their column math.
-pub(super) const OUTPUT_PANEL_WIDTH: f32 = 264.;
+/// Width of an open rail. The table and the gallery lay themselves out against
+/// the viewport minus this, so a rail never silently squeezes their column
+/// math. A closed rail takes nothing.
+pub(super) const RAIL_WIDTH: f32 = 300.;
+
+/// Room the list leaves under itself for the floating bar. Without it the bar
+/// covers the last row and no amount of scrolling reveals it.
+pub(super) const BAR_CLEARANCE: f32 = 64.;
+
+/// Below this much room, the three secondary verbs drop to icons. The bar has
+/// to fit the list it floats over, and at the minimum window with a rail open
+/// there are 460px to fit into.
+const BAR_LABELS_WIDTH: f32 = 720.;
+/// Below this, the readout goes too: the verbs are what the bar is for.
+const BAR_READOUT_WIDTH: f32 = 560.;
 
 /// The named outputs most runs want. Listed once; the rows and the settings
 /// they apply cannot disagree.
@@ -54,27 +68,312 @@ pub(super) fn sampling_note(sampled: usize, total: usize) -> String {
 }
 
 impl Audit {
-    pub(super) fn output_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The bar itself: what the folder stands to save, then the verbs. It floats
+    /// over the list rather than reserving a column, because it is four words
+    /// wide and the list is the thing you came to read.
+    pub(super) fn action_bar(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let labelled = width >= BAR_LABELS_WIDTH;
+        let target_count = self.target_count();
+        let single = self.single_target();
+        let busy = self.converting || self.local_ai_busy();
+        let studio = single
+            .and_then(|index| self.entries.get(index))
+            .map_or_else(
+                || Err("Select one image to open it in Sirv AI Studio".to_string()),
+                |entry| self.studio_url_for(entry),
+            );
+
         div()
-            .w(px(OUTPUT_PANEL_WIDTH))
-            .flex_shrink_0()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(18.))
             .flex()
-            .flex_col()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+            .justify_center()
             .child(
                 div()
-                    .id("output-settings")
+                    .debug_selector(|| "action-bar".into())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(46.))
+                    .px_2()
+                    .rounded_lg()
+                    .bg(cx.theme().secondary)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .shadow_lg()
+                    .children((width >= BAR_READOUT_WIDTH).then(|| self.bar_readout(cx)))
+                    .children(
+                        (width >= BAR_READOUT_WIDTH)
+                            .then(|| div().w(px(1.)).h(px(20.)).bg(cx.theme().border)),
+                    )
+                    .child(
+                        Button::new("rail-convert")
+                            .small()
+                            .icon(IconName::Replace)
+                            .label("Convert")
+                            .tooltip("Choose a format and quality, then convert")
+                            .outline()
+                            .selected(self.rail == Rail::Convert)
+                            .disabled(self.converting || target_count == 0)
+                            .on_click(
+                                cx.listener(|audit, _, _, cx| audit.open_rail(Rail::Convert, cx)),
+                            ),
+                    )
+                    .child(self.local_ai_action(
+                        "rail-remove-background",
+                        Rail::RemoveBackground,
+                        IconName::Frame,
+                        "Remove background",
+                        local_ai::Tool::RemoveBackground,
+                        single,
+                        busy,
+                        labelled,
+                        cx,
+                    ))
+                    .child(self.local_ai_action(
+                        "rail-upscale",
+                        Rail::Upscale,
+                        IconName::Maximize,
+                        "Upscale 4×",
+                        local_ai::Tool::Upscale,
+                        single,
+                        busy,
+                        labelled,
+                        cx,
+                    ))
+                    .child(
+                        Button::new("studio")
+                            .small()
+                            .outline()
+                            .icon(IconName::ExternalLink)
+                            .when(labelled, |button| button.label("Edit in Studio"))
+                            .tooltip(match &studio {
+                                Ok(_) => "Open this synced image in Sirv AI Studio".to_string(),
+                                Err(reason) => reason.clone(),
+                            })
+                            .disabled(studio.is_err() || busy)
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                let Some(entry) =
+                                    audit.single_target().and_then(|ix| audit.entries.get(ix))
+                                else {
+                                    return;
+                                };
+                                if let Ok(url) = audit.studio_url_for(entry) {
+                                    cx.open_url(&url);
+                                }
+                            })),
+                    ),
+            )
+    }
+
+    /// Left of the divider: the projected saving, or the selection once there is
+    /// one. Both are facts about what the verbs beside them would act on.
+    fn bar_readout(&self, cx: &Context<Self>) -> impl IntoElement {
+        let row = div().flex().items_center().gap_2().pl_2().pr_1();
+        if self.selected.is_empty() {
+            let (headline, detail, tone) = match self.estimate {
+                Some((projected, _)) => {
+                    let source = self.target_bytes();
+                    let growth = projected > source;
+                    let delta = source.abs_diff(projected);
+                    let percent = delta as f32 / source.max(1) as f32 * 100.;
+                    (
+                        format!("\u{2248}{}", format_bytes(delta)),
+                        format!(
+                            "to {} · {}{percent:.0}%",
+                            if growth { "grow" } else { "save" },
+                            if growth { "+" } else { "\u{2212}" }
+                        ),
+                        if growth {
+                            cx.theme().yellow
+                        } else {
+                            cx.theme().green
+                        },
+                    )
+                }
+                None => (
+                    format_bytes(self.target_bytes()),
+                    "on disk".to_string(),
+                    cx.theme().muted_foreground,
+                ),
+            };
+            return row
+                .child(
+                    div()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(tone)
+                        .whitespace_nowrap()
+                        .child(headline),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .child(detail),
+                );
+        }
+        row.child(
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().foreground)
+                .whitespace_nowrap()
+                .child(format!(
+                    "{} of {}",
+                    self.selected_target_count,
+                    self.visible.len()
+                )),
+        )
+        .child(
+            Button::new("bar-select-all")
+                .small()
+                .ghost()
+                .label(if self.selection_state() == table::SelectionState::All {
+                    "Clear"
+                } else {
+                    "Select all"
+                })
+                .disabled(self.converting)
+                .on_click(cx.listener(|audit, _, _, cx| audit.toggle_select_all(cx))),
+        )
+    }
+
+    /// One local model as a verb. Both need exactly one image, and both say why
+    /// when they cannot run rather than sitting there grey and mute.
+    #[allow(clippy::too_many_arguments)]
+    fn local_ai_action(
+        &self,
+        id: &'static str,
+        rail: Rail,
+        icon: IconName,
+        label: &'static str,
+        tool: local_ai::Tool,
+        single: Option<usize>,
+        busy: bool,
+        labelled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let blocked = match single {
+            None => Some("Select one image to run this on".to_string()),
+            Some(index) => {
+                let entry = self.entries.get(index);
+                match (tool, entry) {
+                    (local_ai::Tool::Upscale, Some(entry)) => {
+                        local_ai::upscale_dimensions(entry.width, entry.height)
+                            .err()
+                            .map(|message| format!("{message}; use Sirv Studio for this image"))
+                    }
+                    _ => None,
+                }
+            }
+        };
+        let running = self
+            .local_ai_job
+            .as_ref()
+            .is_some_and(|job| job.busy() && job.tool == tool);
+        let tooltip = match (&blocked, busy) {
+            (Some(reason), _) => reason.clone(),
+            (None, true) => self
+                .local_ai_job
+                .as_ref()
+                .map(|job| job.message(&self.root))
+                .unwrap_or_else(|| "Local AI is running…".into()),
+            (None, false) => format!("{label} on this computer; the first run downloads the model"),
+        };
+        Button::new(id)
+            .small()
+            .outline()
+            .icon(icon)
+            .when(labelled, |button| button.label(label))
+            .tooltip(tooltip)
+            .selected(self.rail == rail)
+            .loading(running)
+            .disabled(blocked.is_some() || busy)
+            .on_click(cx.listener(move |audit, _, _, cx| audit.open_rail(rail, cx)))
+    }
+
+    /// The open rail. Header, the operation's own settings, and its commit at
+    /// the foot — the same shape whichever operation it belongs to.
+    pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.rail == Rail::None {
+            return None;
+        }
+        let title = self.rail.title();
+        let body = match self.rail {
+            Rail::Convert => self.convert_rail(cx).into_any_element(),
+            Rail::RemoveBackground | Rail::Upscale => self.local_ai_rail(self.rail, cx),
+            Rail::None => return None,
+        };
+        Some(
+            div()
+                .debug_selector(|| "rail".into())
+                .w(px(RAIL_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .flex_shrink_0()
+                        .h(px(42.))
+                        .pl_3()
+                        .pr_1()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .font_family("SF Pro Display")
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child(title),
+                        )
+                        .child(
+                            Button::new("close-rail")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .tooltip("Close")
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    audit.rail = Rail::None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    fn convert_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("rail-settings")
                     .flex()
                     .flex_col()
-                    .max_h(px(440.))
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
-                    .gap_2()
-                    .child(self.panel_heading("Output", cx))
+                    .gap_3()
+                    .px_3()
+                    .py_3()
+                    // Where the output lands, said once and always. Every other
+                    // number in this rail is about size; this one is about the
+                    // question people actually ask before pressing Convert.
                     .child(
                         div()
                             .debug_selector(|| "output-destination".into())
@@ -95,22 +394,31 @@ impl Audit {
                             .child(self.preset_row(1, cx))
                             .child(self.preset_row(2, cx)),
                     )
+                    .child(div().h(px(1.)).bg(cx.theme().border))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(self.panel_heading("Fine-tune", cx))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("FINE-TUNE"),
+                            )
+                            // No preset is lit because the settings are yours.
+                            // Without this the three unlit rows read as a bug.
                             .when(
                                 active_preset(self.format, self.quality, self.max_edge).is_none(),
                                 |heading| {
                                     heading.child(
                                         div()
                                             .debug_selector(|| "custom-settings-active".into())
-                                            .text_size(px(11.))
+                                            .text_size(px(10.5))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(cx.theme().blue)
-                                            .child("CUSTOM ACTIVE"),
+                                            .child("CUSTOM"),
                                     )
                                 },
                             ),
@@ -133,18 +441,197 @@ impl Audit {
                             )),
                     ),
             )
-            // The decision and commit stay visible while the settings above them
-            // scroll at short window heights.
-            .child(self.output_summary(cx))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(self.output_summary(cx)),
+            )
     }
 
-    /// A section word, quiet and spaced like an instrument label.
-    fn panel_heading(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
+    /// Both local models take no settings: what the rail owes you is what it is
+    /// about to do, to which file, and the download the first run costs.
+    fn local_ai_rail(&self, rail: Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let tool = match rail {
+            Rail::Upscale => local_ai::Tool::Upscale,
+            _ => local_ai::Tool::RemoveBackground,
+        };
+        let entry = self
+            .single_target()
+            .and_then(|index| self.entries.get(index));
+        let installed = local_ai::installed(tool);
+        let detail = match (tool, entry) {
+            (local_ai::Tool::Upscale, Some(entry)) => {
+                match local_ai::upscale_dimensions(entry.width, entry.height) {
+                    Ok((width, height)) => {
+                        format!("{}×{} → {width}×{height}", entry.width, entry.height)
+                    }
+                    Err(message) => message,
+                }
+            }
+            (local_ai::Tool::RemoveBackground, Some(_)) => {
+                "Writes a transparent PNG; the original is untouched".to_string()
+            }
+            (_, None) => "Select one image first".to_string(),
+        };
+        let note = match (tool, installed) {
+            (_, true) => "Runs on this computer. Nothing is uploaded.".to_string(),
+            (local_ai::Tool::RemoveBackground, false) => {
+                "Runs on this computer. The first run downloads BiRefNet, up to 104 MB.".to_string()
+            }
+            (local_ai::Tool::Upscale, false) => {
+                "Runs on this computer. The first run downloads Remacri ESRGAN, up to 49 MB."
+                    .to_string()
+            }
+        };
+
         div()
-            .text_size(px(11.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(cx.theme().muted_foreground)
-            .child(text.to_uppercase())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_2()
+                    .px_3()
+                    .py_3()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().foreground)
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(
+                                entry.map_or_else(|| "No image selected".to_string(), Entry::name),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .bg(cx.theme().background)
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(note),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .children(
+                        self.local_ai_job
+                            .as_ref()
+                            .map(|job| job.message(&self.root))
+                            .map(|message| {
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(message)
+                            }),
+                    )
+                    .child(
+                        Button::new("run-local-ai")
+                            .primary()
+                            .w_full()
+                            .label(rail.title())
+                            .disabled(entry.is_none() || self.local_ai_busy() || self.converting)
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                if let Some(index) = audit.single_target() {
+                                    audit.start_local_ai(tool, index, cx);
+                                }
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The gutter's header control: which optional columns are on. Sirv and
+    /// Result are not listed — they appear when a pairing or a conversion
+    /// exists, which is not a preference to hold an opinion about.
+    pub(super) fn column_picker(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let audit = cx.entity();
+        let prefs = self.column_prefs;
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(
+                Popover::new("column-picker")
+                    .anchor(gpui::Anchor::TopRight)
+                    .trigger(
+                        Button::new("column-picker-trigger")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Settings2)
+                            .tooltip("Choose columns"),
+                    )
+                    .content(move |_, _, _| {
+                        let audit = audit.clone();
+                        let reset = audit.clone();
+                        div()
+                            .debug_selector(|| "column-picker".into())
+                            .w(px(200.))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .p_1()
+                            .children(table::OPTIONAL_COLUMNS.iter().enumerate().map(
+                                |(index, (label, shown, _))| {
+                                    let audit = audit.clone();
+                                    div().px_1p5().py_1().child(
+                                        Checkbox::new(("column", index))
+                                            .label(*label)
+                                            .checked(shown(&prefs))
+                                            .on_click(move |_: &bool, _, cx| {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.toggle_column(index, cx)
+                                                });
+                                            }),
+                                    )
+                                },
+                            ))
+                            .child(
+                                Button::new("columns-reset")
+                                    .small()
+                                    .ghost()
+                                    .w_full()
+                                    .justify_start()
+                                    .label("Reset to defaults")
+                                    .on_click(move |_, _, cx| {
+                                        reset.update(cx, |audit, cx| audit.reset_columns(cx));
+                                    }),
+                            )
+                    }),
+            )
+            .into_any_element()
     }
 
     /// A label over its control, each on its own line: the column is narrow on
@@ -456,30 +943,6 @@ impl Audit {
                             .text_color(cx.theme().muted_foreground)
                             .child(detail),
                     )
-            })
-            .when(!self.selected.is_empty() && !self.converting, |block| {
-                block.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{} selected", self.selected.len())),
-                        )
-                        .child(
-                            Button::new("select-none")
-                                .ghost()
-                                .small()
-                                .label("Clear")
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.selected.clear();
-                                    audit.selection_changed(cx);
-                                })),
-                        ),
-                )
             })
             .when(
                 (!self.results.is_empty()

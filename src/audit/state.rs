@@ -135,6 +135,30 @@ impl Audit {
             });
     }
 
+    /// The one image an operation would act on, if the selection names exactly
+    /// one. The local models and the Studio handoff work on a single file, and
+    /// guessing which of five ticked files was meant is worse than saying no.
+    pub(super) fn single_target(&self) -> Option<usize> {
+        let mut ticked = self.visible.iter().filter(|ix| self.selected.contains(ix));
+        let first = *ticked.next()?;
+        ticked.next().is_none().then_some(first)
+    }
+
+    /// Open a rail, or close it when its own verb is clicked again.
+    pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
+        self.rail = if self.rail == rail { Rail::None } else { rail };
+        cx.notify();
+    }
+
+    /// What an open rail takes from the list. Zero when none is open.
+    pub(super) fn rail_width(&self) -> f32 {
+        if self.rail == Rail::None {
+            0.
+        } else {
+            panel::RAIL_WIDTH
+        }
+    }
+
     pub(super) fn selection_changed(&mut self, cx: &mut Context<Self>) {
         self.refresh_target_summary();
         self.schedule_estimate(cx);

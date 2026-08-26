@@ -370,27 +370,32 @@ impl Render for Audit {
             width: Some(f32::from(viewport.width)),
             height: Some(f32::from(viewport.height)),
             folder: self.root.is_dir().then(|| self.root.clone()),
+            columns: self.column_prefs,
         };
         if current != self.settings {
             self.remember_settings(current, cx);
         }
 
         if let Some(table) = self.table.clone() {
-            // The table lives left of the output panel; handing it the full
-            // viewport would make every column calculation 264px too wide.
+            // The table lives left of any open rail; handing it the full viewport
+            // would make every column calculation 300px too wide. A closed rail
+            // takes nothing, and the list gets the whole window.
             let (root_left, root_right) = root_horizontal_chrome(window);
-            let width =
-                f32::from(viewport.width) - panel::OUTPUT_PANEL_WIDTH - root_left - root_right;
+            let width = f32::from(viewport.width) - self.rail_width() - root_left - root_right;
+            let prefs = self.column_prefs;
             let show_result = !self.results.is_empty();
             let show_sync = self.sirv_counts.is_some();
-            let signature = (width.round().max(0.) as u32, show_result, show_sync);
+            let signature = (width.round().max(0.) as u32, prefs, show_result, show_sync);
             if self.table_signature != Some(signature) {
                 self.table_signature = Some(signature);
                 cx.defer(move |cx| {
                     table.update(cx, |table, cx| {
-                        table
-                            .delegate_mut()
-                            .set_viewport_width(width, show_result, show_sync);
+                        table.delegate_mut().set_viewport_width(
+                            width,
+                            prefs,
+                            show_result,
+                            show_sync,
+                        );
                         table.refresh(cx);
                         cx.notify();
                     });
@@ -732,6 +737,11 @@ impl Audit {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // What the list has to itself. The floating bar has to fit inside it,
+        // and at the minimum window with a rail open that is 460px.
+        let (root_left, root_right) = root_horizontal_chrome(window);
+        let list_width =
+            f32::from(window.viewport_size().width) - self.rail_width() - root_left - root_right;
         div()
             .size_full()
             .flex()
@@ -820,18 +830,22 @@ impl Audit {
                     .flex_1()
                     .overflow_hidden()
                     .child(
+                        // The list, with the action bar floating over its foot.
+                        // The bar is four words wide; reserving a column for it
+                        // would cost the list a fifth of the window.
                         div()
+                            .relative()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .child(self.controls(cx))
                             .children(self.notices(cx))
                             .children(self.local_ai_notice(cx))
-                            .child(self.audit_content(count, window, cx)),
+                            .child(self.audit_content(count, window, cx))
+                            .child(self.action_bar(list_width, cx)),
                     )
-                    .child(self.output_panel(cx)),
+                    .children(self.rail_view(cx)),
             )
             .into_any_element()
     }
@@ -851,13 +865,16 @@ impl Audit {
             .flex_1()
             .overflow_hidden()
             .bg(cx.theme().table)
+            // The action bar floats over this strip rather than over the last
+            // row, so every file can be scrolled into the clear.
+            .pb(px(panel::BAR_CLEARANCE))
             // Columns take a width, not a share, so the remainder after the
             // fixed ones has to be handed to the name column by hand.
             .child(if self.grid {
                 // One virtualised band is one row of fixed-size tiles.
                 let (root_left, root_right) = root_horizontal_chrome(window);
                 let layout = gallery_layout(
-                    f32::from(window.viewport_size().width) - panel::OUTPUT_PANEL_WIDTH,
+                    f32::from(window.viewport_size().width) - self.rail_width(),
                     root_left,
                     root_right,
                     count,
@@ -882,8 +899,7 @@ impl Audit {
                                 let mut tiles = Vec::new();
                                 let (root_left, root_right) = root_horizontal_chrome(_window);
                                 let layout = gallery_layout(
-                                    f32::from(_window.viewport_size().width)
-                                        - panel::OUTPUT_PANEL_WIDTH,
+                                    f32::from(_window.viewport_size().width) - audit.rail_width(),
                                     root_left,
                                     root_right,
                                     audit.visible.len(),
@@ -934,7 +950,7 @@ impl Audit {
                     .into_any_element()
             } else if let Some(table) = self.table.as_ref() {
                 DataTable::new(table)
-                    .stripe(false)
+                    .stripe(true)
                     .bordered(false)
                     .into_any_element()
             } else {

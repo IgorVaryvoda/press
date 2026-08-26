@@ -3,7 +3,9 @@
 use super::*;
 
 impl Audit {
-    /// Which folder this is, and how to get to another one.
+    /// Which folder this is, how to get to another one, and the two controls
+    /// that narrow the list. One row: the second strip was carrying a filter box
+    /// and two chips across the whole window, and cost the list forty pixels.
     pub(super) fn header(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let folder = self
             .root
@@ -59,29 +61,30 @@ impl Audit {
             .items_center()
             .gap_2()
             .px_3()
-            .py_2()
+            .py_1p5()
+            .bg(cx.theme().table_head)
             .border_b_1()
             .border_color(cx.theme().border)
-            // Identity and its two actions share the top-left corner: the name,
-            // then the openers that replace it. The path and the count sit
-            // underneath as metadata.
+            // Identity and its openers hold the left; the path and the counts
+            // run beside them as metadata, on the same line.
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .gap_2()
                     .flex_1()
                     .min_w_0()
-                    .min_w(px(220.))
+                    .min_w(px(260.))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .min_w_0()
+                            .gap_1()
+                            .flex_shrink_0()
                             .child(
                                 div()
                                     .font_family("SF Pro Display")
-                                    .text_size(px(15.))
+                                    .text_size(px(14.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(cx.theme().foreground)
                                     .whitespace_nowrap()
@@ -94,7 +97,6 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .icon(IconName::Folder)
-                                    .label("Folder")
                                     .tooltip("Open a folder")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| audit.pick(true, cx))),
@@ -104,7 +106,6 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .icon(IconName::File)
-                                    .label("Image")
                                     .tooltip("Open a single image")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| audit.pick(false, cx))),
@@ -112,44 +113,97 @@ impl Audit {
                             .child(
                                 // The sync entry point: opens the remote-folder
                                 // browser, which is also where a pairing is undone.
-                                Button::new("sirv-browser")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Globe)
-                                    .label("Sirv")
-                                    .tooltip("Sync with a Sirv folder")
-                                    .disabled(self.converting)
-                                    .on_click(
-                                        cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
-                                    ),
+                                {
+                                    // A live pairing keeps its name on the
+                                    // button: the name IS the state.
+                                    let button = Button::new("sirv-browser")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::Globe)
+                                        .tooltip("Sync with a Sirv folder")
+                                        .disabled(self.converting)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            audit.open_sirv_browser(cx)
+                                        }));
+                                    match &self.sirv_pairing {
+                                        Some(pairing) => button.label(pairing.dir.clone()),
+                                        None => button,
+                                    }
+                                },
                             ),
                     )
                     .child(
                         div()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(self.root.display().to_string()),
-                            )
-                            .child(
-                                div()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_nowrap()
-                                    .flex_shrink_0()
-                                    .child(stats),
-                            ),
+                            .child(format!("{} · {stats}", self.root.display())),
                     ),
             )
+            // The two controls that narrow the list, in the same row as the
+            // counts they narrow.
+            .child(
+                div()
+                    .w(px(190.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.filter_input)
+                                .small()
+                                .disabled(self.converting)
+                                .prefix(IconName::Search),
+                        ),
+                    )
+                    .when(!self.filter.is_empty(), |row| {
+                        row.child(
+                            div().debug_selector(|| "clear-filter".into()).child(
+                                Button::new("clear-filter")
+                                    .small()
+                                    .ghost()
+                                    .label("Clear")
+                                    .disabled(self.converting)
+                                    .on_click(cx.listener(|audit, _, window, cx| {
+                                        let input = audit.filter_input.clone();
+                                        input.update(cx, |input, cx| {
+                                            input.set_value("", window, cx)
+                                        });
+                                        audit.set_filter(String::new(), cx);
+                                        window.focus(&input.read(cx).focus_handle(cx), cx);
+                                    })),
+                            ),
+                        )
+                    }),
+            )
+            // The audit reads bytes per pixel for every row and then asks you to
+            // find the heavy ones yourself. These are that answer, as the control
+            // that narrows the list to them.
+            .children((self.heavy > 0).then(|| {
+                self.finding_button(
+                    Finding::Heavy,
+                    IconName::TriangleAlert,
+                    format!("{} heavy", self.heavy),
+                    "Files carrying more bytes per pixel than a photograph \
+                     needs. Click to show only them.",
+                    cx,
+                )
+            }))
+            .children((self.mislabelled > 0).then(|| {
+                self.finding_button(
+                    Finding::Mislabelled,
+                    IconName::TriangleAlert,
+                    format!("{} mislabelled", self.mislabelled),
+                    "Files whose bytes are not the format their extension \
+                     claims. Click to show only them.",
+                    cx,
+                )
+            }))
             // The view toggle sits at the far end of the window: it changes how
             // the list below is drawn and nothing else.
             .child(
@@ -189,79 +243,5 @@ impl Audit {
                     .tooltip("Settings")
                     .on_click(cx.listener(|audit, _, window, cx| audit.open_settings(window, cx))),
             )
-    }
-
-    /// The audit's working row: the filter and the findings you can act on.
-    /// Conversion settings live in the output panel on the right, next to the
-    /// estimate and the button they drive.
-    pub(super) fn controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .w(px(220.))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .flex_shrink_0()
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&self.filter_input)
-                                .small()
-                                .disabled(self.converting)
-                                .prefix(IconName::Search),
-                        ),
-                    )
-                    .when(!self.filter.is_empty(), |row| {
-                        row.child(
-                            div().debug_selector(|| "clear-filter".into()).child(
-                                Button::new("clear-filter")
-                                    .small()
-                                    .ghost()
-                                    .label("Clear")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, window, cx| {
-                                        let input = audit.filter_input.clone();
-                                        input.update(cx, |input, cx| {
-                                            input.set_value("", window, cx)
-                                        });
-                                        audit.set_filter(String::new(), cx);
-                                        window.focus(&input.read(cx).focus_handle(cx), cx);
-                                    })),
-                            ),
-                        )
-                    }),
-            )
-            // The audit colours every row by weight per pixel and then asks
-            // you to find the heavy ones yourself.
-            .children((self.heavy > 0).then(|| {
-                self.finding_button(
-                    Finding::Heavy,
-                    IconName::TriangleAlert,
-                    format!("{} heavy", self.heavy),
-                    "Files carrying more bytes per pixel than a photograph \
-                     needs. Click to show only them.",
-                    cx,
-                )
-            }))
-            // Same chip family as heavy: a finding you can act on, not a
-            // banner shouting a sentence across the window.
-            .children((self.mislabelled > 0).then(|| {
-                self.finding_button(
-                    Finding::Mislabelled,
-                    IconName::TriangleAlert,
-                    format!("{} mislabelled", self.mislabelled),
-                    "Files whose bytes are not the format their extension \
-                     claims. Click to show only them.",
-                    cx,
-                )
-            }))
     }
 }

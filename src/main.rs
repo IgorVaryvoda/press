@@ -260,6 +260,7 @@ fn main() {
                 quality: args.quality,
                 max_edge: args.max_edge,
                 grid: args.grid,
+                columns: remembered.columns,
             },
             None,
         );
@@ -287,6 +288,7 @@ fn main() {
                 quality: args.quality,
                 max_edge: args.max_edge,
                 grid: args.grid,
+                columns: remembered.columns,
             },
             Some(target),
         );
@@ -356,12 +358,16 @@ fn init_theme(cx: &mut App) {
     let theme = gpui_component::Theme::global_mut(cx);
     // One neutral ramp, barely blue, so the imagery in the table carries the
     // colour and the chrome reads as an instrument panel rather than a website.
-    let background = gpui::Hsla::from(gpui::rgb(0x0a0d12));
-    let surface = gpui::Hsla::from(gpui::rgb(0x10151d));
-    let table = gpui::Hsla::from(gpui::rgb(0x0d1118));
-    let border = gpui::Hsla::from(gpui::rgb(0x232d3b));
-    let foreground = gpui::Hsla::from(gpui::rgb(0xe8eef6));
-    let muted = gpui::Hsla::from(gpui::rgb(0x8fa0b5));
+    // Flat and hairline-precise: surfaces are separated by a line or a stripe,
+    // never by a gradient or a shadow, which is what a pro Mac app looks like.
+    let background = gpui::Hsla::from(gpui::rgb(0x0b0e14));
+    let surface = gpui::Hsla::from(gpui::rgb(0x121926));
+    let table = gpui::Hsla::from(gpui::rgb(0x0b0e14));
+    // Every other row. The zebra does the work the row hairlines used to.
+    let stripe = gpui::Hsla::from(gpui::rgb(0x0d111a));
+    let border = gpui::Hsla::from(gpui::rgb(0x1b2331));
+    let foreground = gpui::Hsla::from(gpui::rgb(0xe6ecf4));
+    let muted = gpui::Hsla::from(gpui::rgb(0x8b98ab));
     let base = gpui::Hsla::from(gpui::rgb(0x4c8dff));
     let hover = gpui::Hsla::from(gpui::rgb(0x65a0ff));
     let active = gpui::Hsla::from(gpui::rgb(0x3b79e6));
@@ -376,14 +382,27 @@ fn init_theme(cx: &mut App) {
     theme.muted_foreground = muted;
     theme.group_box = surface;
     theme.group_box_foreground = foreground;
-    theme.list_hover = gpui::Hsla::from(gpui::rgb(0x161d28));
-    theme.list_active = gpui::Hsla::from(gpui::rgb(0x1a2740));
+    theme.list_hover = gpui::Hsla::from(gpui::rgb(0x141c28));
+    theme.list_active = gpui::Hsla::from(gpui::rgb(0x16233a));
     theme.list_active_border = base;
-    theme.table_head = background;
+    theme.table_head = gpui::Hsla::from(gpui::rgb(0x10151d));
     theme.table_head_foreground = muted;
-    theme.table_hover = gpui::Hsla::from(gpui::rgb(0x141b26));
-    theme.table_row_border = gpui::Hsla::from(gpui::rgb(0x1a222e));
+    theme.table_hover = gpui::Hsla::from(gpui::rgb(0x131a25));
+    // The stripe separates the rows, so a hairline under every one of them was
+    // the same edge drawn twice.
+    theme.table_row_border = gpui::transparent_black();
+    theme.table_even = stripe;
     theme.ring = focus;
+
+    // The table draws itself from the token set, not the colour set, so the
+    // list stayed near-black under a blue-grey zebra until these were told too.
+    theme.tokens.table = table.into();
+    theme.tokens.table_head = gpui::Hsla::from(gpui::rgb(0x10151d)).into();
+    theme.tokens.table_even = stripe.into();
+    theme.tokens.table_hover = gpui::Hsla::from(gpui::rgb(0x131a25)).into();
+    theme.tokens.table_active = gpui::Hsla::from(gpui::rgb(0x16233a)).into();
+    theme.tokens.table_active_border = base.into();
+    theme.tokens.table_row_border = gpui::transparent_black().into();
 
     theme.primary = base;
     theme.primary_hover = hover;
@@ -398,6 +417,10 @@ fn init_theme(cx: &mut App) {
     theme.tokens.button_primary_hover = hover.into();
     theme.tokens.button_primary_active = active.into();
     theme.tokens.button_primary_foreground = gpui::white().into();
+
+    // The two findings share one amber, and saved bytes are the one green.
+    theme.yellow = gpui::Hsla::from(gpui::rgb(0xe0b054));
+    theme.green = gpui::Hsla::from(gpui::rgb(0x4ade80));
 
     // SF Pro Text for words, Fira Code for every measured number. A column of
     // byte counts in a proportional face will not align down its right edge,
@@ -422,6 +445,7 @@ struct Launch {
     quality: Quality,
     max_edge: MaxEdge,
     grid: bool,
+    columns: settings::ColumnPrefs,
 }
 
 fn run_window(launch: Launch, startup_path: Option<PathBuf>) {

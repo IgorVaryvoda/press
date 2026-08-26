@@ -12,6 +12,74 @@ pub struct Settings {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub folder: Option<PathBuf>,
+    pub columns: ColumnPrefs,
+}
+
+/// Which optional table columns are on. Sirv and Result are not here: they
+/// appear only when a pairing or a conversion exists, which is a fact about the
+/// folder rather than a preference.
+///
+/// B/px is off by default. It is the audit's sharpest number and its least
+/// legible one; a file carrying too many bytes per pixel says `heavy` in its own
+/// row instead, and anyone who wants the figure ticks it back on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnPrefs {
+    pub thumb: bool,
+    pub format: bool,
+    pub pixels: bool,
+    pub density: bool,
+    pub weight: bool,
+}
+
+impl Default for ColumnPrefs {
+    fn default() -> Self {
+        Self {
+            thumb: true,
+            format: true,
+            pixels: true,
+            density: false,
+            weight: true,
+        }
+    }
+}
+
+impl ColumnPrefs {
+    /// Written and read as the list of columns that are ON, so a settings file
+    /// from an older build has no `columns` line and gets the defaults.
+    fn render(&self) -> String {
+        [
+            ("thumb", self.thumb),
+            ("format", self.format),
+            ("pixels", self.pixels),
+            ("density", self.density),
+            ("weight", self.weight),
+        ]
+        .into_iter()
+        .filter_map(|(key, on)| on.then_some(key))
+        .collect::<Vec<_>>()
+        .join(",")
+    }
+
+    fn parse(text: &str) -> Self {
+        let mut prefs = Self {
+            thumb: false,
+            format: false,
+            pixels: false,
+            density: false,
+            weight: false,
+        };
+        for key in text.split(',') {
+            match key.trim() {
+                "thumb" => prefs.thumb = true,
+                "format" => prefs.format = true,
+                "pixels" => prefs.pixels = true,
+                "density" => prefs.density = true,
+                "weight" => prefs.weight = true,
+                _ => {}
+            }
+        }
+        prefs
+    }
 }
 
 /// Where the file lives on each platform. `None` when the environment gives us
@@ -98,6 +166,7 @@ fn parse(text: &str) -> Settings {
             "width" => settings.width = value.trim().parse().ok(),
             "height" => settings.height = value.trim().parse().ok(),
             "folder" => settings.folder = Some(PathBuf::from(value.trim())),
+            "columns" => settings.columns = ColumnPrefs::parse(value),
             _ => {}
         }
     }
@@ -115,6 +184,9 @@ fn render(settings: &Settings) -> String {
     if let Some(folder) = settings.folder.as_ref() {
         out.push_str(&format!("folder={}\n", folder.display()));
     }
+    // Always written, including when every column is off: an empty value is a
+    // choice, and leaving the line out would restore the defaults next launch.
+    out.push_str(&format!("columns={}\n", settings.columns.render()));
     out
 }
 
@@ -128,6 +200,7 @@ mod tests {
             width: Some(1280.),
             height: Some(720.5),
             folder: Some(PathBuf::from("/photos/library")),
+            columns: ColumnPrefs::default(),
         };
         assert_eq!(parse(&render(&settings)), settings);
     }
@@ -168,7 +241,10 @@ mod tests {
         };
         save_to(&path, &settings).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "width=900\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "width=900\ncolumns=thumb,format,pixels,weight\n"
+        );
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }

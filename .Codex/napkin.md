@@ -3,6 +3,19 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-26 | self | Edited six files in place while another session committed and fast-forwarded the same tree, so a hard reset discarded the half-finished change | On a shared checkout, land each file's change and check it before starting the next, and re-read `git status` after any long tool run |
+| 2026-08-26 | self | Removed the displayed comparison scale but left `scale` bound in the match arm, producing an unused-variable warning | When deleting displayed data, remove its pattern binding in the same patch and run warning-clean checks immediately |
+| 2026-08-26 | self | Inserted a chained GPUI `.child(...)` after a comma while moving the output summary into its scroll owner, producing invalid Rust syntax | Inspect the edited builder chain immediately and keep the comma only after the final child expression |
+| 2026-08-26 | self | Assumed a UX comparison run writes `verdict.json`; comparison results are surfaced through `report.md` and their actual artifact inventory | Inspect the run manifest or list the directory before naming evaluator output files |
+| 2026-08-26 | self | Used `docs/comparison.webp` as a comparison-view fixture, so the evidence contained a second set of fake Press controls inside the live UI | Use a neutral image fixture for comparison scenarios; never let screenshot content masquerade as the interface under review |
+| 2026-08-26 | self | Put JSON Schema `uniqueItems` in the Codex judge contract, but the response-format subset rejects that keyword | Keep uniqueness as a prompt rule and use only response-schema keywords accepted by the installed Codex path |
+| 2026-08-26 | self | Kept UX reviewer outputs and failed judge logs only in a temporary isolation directory, so a structured-output failure erased the useful panel work and its diagnosis | Persist all reviewer results after the independent phase, reuse them on judge retry, and include the final stderr/stdout tail in agent-run errors |
+| 2026-08-26 | self | Treated the Gamescope canvas dimensions as the Press window dimensions, but the app was centered at its own default size inside larger captures | Pass `--force-windows-fullscreen` and inspect the first minimum/default/wide captures before sending them to reviewers |
+| 2026-08-26 | self | Started local inspection before the OpenAI docs-first check required for Codex automation work | For Codex runner changes, fetch the exact official CLI topic before inspecting the local contract, then verify installed flags |
+| 2026-08-25 | self | Tried to prove the AppImage locally on Arch, but cargo-packager's cached linuxdeploy strip cannot read Arch libraries with `.relr.dyn` | Treat this as a host packaging limitation; verify bundling in the Ubuntu release job, which is the actual AppImage builder |
+| 2026-08-26 | self | Deleted a temporary directory while the shell was still inside it, so later inspection commands failed with `Unable to read current working directory` | Run temporary-directory inspection in a subshell or return to the repo before deleting the directory |
+| 2026-08-25 | self | Proved updates with an isolated v0.2.1 AppImage but did not inspect the user's installed launcher, which remained on v0.2.0 and cannot cross the broken key handoff | Before claiming the installed app will update, inspect its desktop `Exec` target/version; v0.2.0 needs one manual in-place upgrade |
+| 2026-08-25 | self | Checked only Gamescope's direct child for `press`, but `gamescopereaper` sits between them | For nested Gamescope launch proof, use the WSI `Executable name: press` line or walk all descendants |
 | 2026-08-23 | self | Used `rm -f` to clean isolated visual-proof files, then tried `gio trash`, which `/tmp` does not support | For exact `/tmp` proof targets, use `unlink` for files and `find <validated-dir> -depth -delete` for trees |
 | 2026-08-26 | self | Verified the update payload and feed but left the installed old process running, so the app looked unchanged until a manual restart | Updater proof must include the installed launch target, payload digest, and relaunch into the new process; an AppImage keeps its old filename when replaced |
 | 2026-08-26 | self | Treated `Entity::update` with `AsyncApp` as fallible even though this GPUI API returns the callback value directly | Check the context-specific `Entity::update` return type before adding `unwrap_or` |
@@ -20,6 +33,8 @@
 | 2026-08-25 | self | Put Markdown backticks inside a double-quoted shell search, so Bash tried to execute the text between them | Use single quotes for shell patterns that contain backticks |
 | 2026-08-25 | self | Linux Clippy did not compile the non-Linux runtime fallback, where a fixed string used `format!` | Treat the macOS CI Clippy job as a release gate for target-gated branches |
 | 2026-08-25 | self | A TCP test server read a POST once and closed with body bytes still pending, which makes macOS reset the socket and `ureq` fail with `EINVAL` | Drain each test request through its declared `Content-Length` before replying |
+| 2026-08-25 | self | Left an `Audit` helper private inside `audit/state.rs`, so sibling `audit/tests.rs` could not call it | Use `pub(super)` for helpers intentionally shared across audit submodules |
+| 2026-08-25 | self | Used a uniform list's base scroll handle as its item range, so delayed gallery thumbnails only loaded the first band | Store the exact range passed to the `uniform_list` processor and test the real gallery after the debounce |
 | 2026-08-23 | self | Passed several test-name filters to one `cargo test` invocation, but Cargo accepts only one positional filter | Use one shared substring filter or run focused filters as separate commands |
 | 2026-08-22 | self | Treated `webp::WebPConfig::new()` as `Option` in an `Option`-returning encoder | It returns `Result`; use `.ok()?` at this deliberately lossy error boundary |
 | 2026-08-22 | self | Timed a long conversion through an `exec` wrapper that hid the yielded `exec_command` session id, then accidentally started a second conversion beside it | Print the full `exec_command` result as JSON and resume its `session_id` with `write_stdin`; never trust timing while another benchmark process exists |
@@ -33,16 +48,27 @@
 - For pre-alpha UI work, reshape the design freely and make real app screenshots yourself; do not wait for an in-repo headless capture test.
 
 ## Patterns That Work
+- The component table paints rows from `theme.tokens.*`, not the matching `theme.*` colours: `tokens.table`, `tokens.table_head`, `tokens.table_even`, `tokens.table_hover` and `tokens.table_active` all have to be set, or the list keeps the stock near-black under a restyled zebra.
+- A floating action bar needs two things the mock does not show: bottom padding on the list equal to its height, or it covers the last row forever; and label thresholds on the secondary verbs, or it overflows the 460px the minimum window leaves beside an open rail.
+- Treat the blind comparison as the landing gate, not the standalone critique: a consensus request for stronger active-sort styling produced a blind tie, so revert it and record the rejected experiment instead of accumulating unproven chrome.
+- Use center-relative evaluator clicks for centered overlays; fixed and edge-relative coordinates cannot hit the same modal control across minimum, default, and wide windows.
+- Keep successful output identity separate from transient result measurements: quality changes clear the old estimate/result numbers, but replacement wording and Show output must survive.
+- Close an accepted UX finding with paired real-window states: record the decision, capture unchecked and keyboard-selected states at the same widths, blind-compare the change, then stop when the targeted state review returns hold without consensus.
+- In a blind comparison of byte-identical Press captures, one visual reviewer invented a column difference while the other three reviewers and the judge returned tie; compare screenshot hashes before model calls and keep independent adjudication for non-identical evidence.
+- JPEG XL support stays small with jxl-oxide for header-only probing and safe input decoding plus the system libjxl encoder behind the existing C bridge pattern; reject animated input before a still conversion.
+- Three output formats fit the native `Select`; when a preset changes the format, update `SelectState` too so the dropdown never contradicts the active encoder.
 - At the 760px comparison minimum, hide duplicate conversion metadata before truncating the filename, and shorten secondary action labels below 900px.
 - Two local AI actions fit as direct keyboard-native buttons; a dropdown adds a click and inherits the popover trigger's keyboard gaps. Put the active action in loading state and keep the full job message in the one-line footer.
 - vision.cpp 0.3.0's Linux package needs both `lib/` and `bin/` on `LD_LIBRARY_PATH`; its auto backend used Vulkan successfully, BiRefNet `--composite` produced RGBA, and tiled ESRGAN produced the expected 4x dimensions.
 - `TableState::refresh` rebuilds cached column groups but does not notify its entity; after changing a delegate for resize, call `cx.notify()` in the same deferred table update or the old columns stay visible until another input event.
+- Put dynamic column visibility in the table signature handed to the deferred `TableState::refresh`; otherwise a data-state change can leave a cached header behind.
 - In the audit toolbar, group filtering separately from conversion settings and stack those groups at the default/minimum widths; this keeps Resize, Format, and Quality together instead of letting one long flex row orphan Quality.
 - The in-process system libavif 1.4.2 + libaom 3.14.1 + libyuv path took 9.070s versus rav1e speed 8's 21.503s on the same 64-file / 134.1MB sample (57.8% faster); output fell 8.7%, and PSNR was higher on four of five spot checks. A tiny C bridge avoids stale Rust wrappers and subprocess overhead.
 - On the 5,739-image corpus, bundled libwebp 1.6.0 with zero-copy RGB/RGBA input took 28.512s versus 29.569s for the 1.3.1 wrapper (3.6% faster) and encoded five formats the wrapper rejected; converting every image to a fresh RGB buffer first regressed to 33.119s.
 - Rav1e speed 8 took 20.628s versus 23.373s at speed 6 on a 64-file size-stratified real sample (11.7% faster), while output grew only 0.6%.
 - For lossy WebP, libwebp method 1 with eight file workers cut the current 5,739-image / 3.0GB q80 full-size run from 69.505s to 29.608s (57.4%); output grew from 423.2MB to 480.3MB but still saved 84%. Keep method 4 for lossless/transparent images. Threaded libwebp was worse: 71.2s at eight file workers and 125.3s at four.
 - A `VecDeque<Task<_>>` awaited from the front is not a sliding conversion window: one slow first file leaves completed worker slots idle. `select_all` cut a 64-file uneven WebP workload from a 2.121s median to 1.812s (14.6%) by refilling on any completion.
+- On a cold 9,374-image folder, thirteen simultaneous thumbnail jobs produced 16.10ms mean / 24.60ms p95 / 67.07ms max frames. Four jobs cut that to 7.44ms / 8.83ms / 9.43ms; two reached 7.01ms / 7.95ms / 9.60ms and filled all thirteen cache entries across 2.10s. Use two for the strict frame budget.
 - When the settings overlay has only one section, name that task in the title and keep status plus secondary/primary actions in one footer; the old section label and separate Close row made the small form look oversized.
 - `git pull --ff-only` followed by `cargo run --release` updates and launches the GPUI app; Cargo may fetch newly locked crates first.
 - For real UI proof on Hyprland: launch `target/release/imageguide <folder>`, use `hyprctl` to focus/float/resize/move the `imageguide` window, interact with `hyprctl dispatch movecursor` plus `ydotool`/`wtype`, capture exact window geometry with `grim -g`, then inspect the PNG.
@@ -65,6 +91,10 @@
 - Comparison `pair == None` can mean either loading or a completed decode/encode failure; keep an explicit failed bit so the error panel and footer do not say `decoding…` forever.
 
 ## Patterns That Don't Work
+- Do not assume the UX evaluator schemas are separate JSON files; they are constants inside `scripts/ux-eval`, and `self-test` validates them.
+- gpui-component exposes mask state through `InputState::presentation().is_masked()`, not `InputState::is_masked()`; the similarly named method belongs to the presentation snapshot.
+- A `pub(super)` helper inside one Rust child module is not imported into sibling modules by `use super::*`; put shared helpers in the parent module or import the child path explicitly.
+- Do not patch a freshly `cargo fmt`-rewritten builder from the pre-format shape; inspect the exact hunk first or `apply_patch` will miss harmless layout changes.
 - The vendored `libaom-sys 0.17.2` build fails this repo's current NASM with `multipass optimization not supported`. A system-linked libaom benchmark was promising, but do not add host-specific linkage; retry when the crate's vendored build supports the pinned toolchain.
 - This Arch host has no `/usr/bin/time`; use Bash `TIMEFORMAT` and the shell `time` keyword for wall-clock benchmarks.
 - Removing a settings input must also update the overlay's `FIELDS` count and focus-handle array; the Studio removal left `studio_email` there and broke the build.

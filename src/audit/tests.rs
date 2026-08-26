@@ -73,6 +73,7 @@ fn screenshot() {
                     quality: Quality::lossy(80.),
                     max_edge: MaxEdge::FULL,
                     grid: mode == "grid",
+                    columns: ColumnPrefs::default(),
                 },
                 window,
                 cx,
@@ -371,31 +372,66 @@ fn a_local_ai_result_belongs_to_its_exact_file_and_dataset() {
 
 #[test]
 fn table_layout_keeps_decision_columns_at_compact_width() {
-    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::OUTPUT_PANEL_WIDTH - 44.;
-    let (compact, compact_name, compact_columns) =
-        AuditTable::layout(minimum_left_pane, true, false);
-    assert!(compact);
-    assert!(compact_name >= W_NAME_MIN);
-    assert!(compact_columns.contains(&TableColumn::Result));
-    assert!(compact_columns.contains(&TableColumn::Density));
-    assert!(!compact_columns.contains(&TableColumn::Weight));
-    assert!(!compact_columns.contains(&TableColumn::Pixels));
+    let prefs = ColumnPrefs::default();
+    // The narrowest the list ever gets: the minimum window with a rail open.
+    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::RAIL_WIDTH - 44.;
+    let (_, narrow_name, narrow_columns) =
+        AuditTable::layout(minimum_left_pane, prefs, true, false);
+    assert!(narrow_name >= W_NAME_MIN);
+    // What survives is the file and what happened to it.
+    assert!(narrow_columns.contains(&TableColumn::Name));
+    assert!(narrow_columns.contains(&TableColumn::Result));
+    assert!(!narrow_columns.contains(&TableColumn::Pixels));
+    assert!(!narrow_columns.contains(&TableColumn::Weight));
 
-    let (_, _, before_columns) = AuditTable::layout(minimum_left_pane, false, false);
-    assert!(before_columns.contains(&TableColumn::Density));
+    let (_, _, before_columns) = AuditTable::layout(minimum_left_pane, prefs, false, false);
     assert!(before_columns.contains(&TableColumn::Weight));
     assert!(!before_columns.contains(&TableColumn::Result));
 
-    let (wide, wide_name, wide_columns) = AuditTable::layout(1100., true, false);
+    let (wide, wide_name, wide_columns) = AuditTable::layout(1100., prefs, true, false);
     assert!(!wide);
-    assert!(wide_name > compact_name);
-    assert!(wide_columns.contains(&TableColumn::Density));
+    assert!(wide_name > narrow_name);
+    assert!(wide_columns.contains(&TableColumn::Format));
     assert!(wide_columns.contains(&TableColumn::Weight));
     assert!(wide_columns.contains(&TableColumn::Result));
     assert!(!wide_columns.contains(&TableColumn::Sync));
 
-    let (_, _, synced_columns) = AuditTable::layout(1100., false, true);
+    let (_, _, synced_columns) = AuditTable::layout(1100., prefs, false, true);
     assert!(synced_columns.contains(&TableColumn::Sync));
+}
+
+/// The picker is the only thing that decides an optional column, and B/px is
+/// the one that starts off. Every layout ends with the gutter that opens it.
+#[test]
+fn column_preferences_decide_the_optional_columns() {
+    let prefs = ColumnPrefs::default();
+    let (_, _, default_columns) = AuditTable::layout(1100., prefs, false, false);
+    assert!(!default_columns.contains(&TableColumn::Density));
+    assert_eq!(default_columns.last(), Some(&TableColumn::Options));
+
+    let with_density = ColumnPrefs {
+        density: true,
+        ..prefs
+    };
+    let (_, _, dense_columns) = AuditTable::layout(1100., with_density, false, false);
+    assert!(dense_columns.contains(&TableColumn::Density));
+
+    // Every optional column off leaves the tick, the name and the gutter, and
+    // the name takes the room the others gave up.
+    let bare = ColumnPrefs {
+        thumb: false,
+        format: false,
+        pixels: false,
+        density: false,
+        weight: false,
+    };
+    let (_, bare_name, bare_columns) = AuditTable::layout(1100., bare, false, false);
+    assert_eq!(
+        bare_columns,
+        vec![TableColumn::Tick, TableColumn::Name, TableColumn::Options]
+    );
+    let (_, default_name, _) = AuditTable::layout(1100., prefs, false, false);
+    assert!(bare_name > default_name);
 }
 
 #[gpui::test]
@@ -857,6 +893,7 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
         quality: Quality::lossy(80.),
         max_edge: MaxEdge::FULL,
         grid: false,
+        columns: ColumnPrefs::default(),
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -1158,6 +1195,7 @@ fn pointer_checkbox_audit(
         quality: Quality::lossy(80.),
         max_edge: MaxEdge::FULL,
         grid,
+        columns: ColumnPrefs::default(),
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| {
         let built = build_audit(launch, window, cx);
@@ -1214,6 +1252,61 @@ fn comparison_tools_disclose_without_competing_with_convert(cx: &mut TestAppCont
         );
     });
     assert!(cx.debug_bounds("compare-tools-panel").is_some());
+}
+
+/// The picker's toggle has to reach the table, not only the state: the delegate
+/// caches its column list against a signature, and a preference left out of that
+/// signature changes nothing on screen.
+#[gpui::test]
+fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let columns = |cx: &mut gpui::VisualTestContext| {
+        audit.read_with(cx, |audit, cx| {
+            audit
+                .table
+                .as_ref()
+                .map(|table| table.read(cx).delegate().columns_for_test().to_vec())
+                .unwrap_or_default()
+        })
+    };
+    assert!(!columns(cx).contains(&TableColumn::Density));
+
+    // Index 3 is B/px, the one column that starts off.
+    audit.update(cx, |audit, cx| audit.toggle_column(3, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(columns(cx).contains(&TableColumn::Density));
+
+    audit.update(cx, |audit, cx| audit.reset_columns(cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(!columns(cx).contains(&TableColumn::Density));
+}
+
+/// The two local models and the Studio handoff act on one file, so they only
+/// light up when the ticked set names exactly one.
+#[gpui::test]
+fn one_ticked_file_is_what_the_local_models_act_on(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.read_with(cx, |audit, _| assert_eq!(audit.single_target(), None));
+
+    let first = audit.read_with(cx, |audit, _| audit.visible[0]);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(first);
+        audit.selection_changed(cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.single_target(), Some(first));
+    });
+
+    let second = audit.read_with(cx, |audit, _| audit.visible[1]);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(second);
+        audit.selection_changed(cx);
+    });
+    audit.read_with(cx, |audit, _| assert_eq!(audit.single_target(), None));
 }
 
 #[gpui::test]
@@ -1477,6 +1570,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: true,
+                columns: ColumnPrefs::default(),
             },
             window,
             cx,
@@ -1584,6 +1678,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: true,
+                columns: ColumnPrefs::default(),
             },
             window,
             cx,
@@ -1659,6 +1754,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: false,
+                columns: ColumnPrefs::default(),
             },
             window,
             cx,

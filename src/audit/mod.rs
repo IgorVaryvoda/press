@@ -17,6 +17,7 @@ mod tests;
 mod toolbar;
 mod view;
 
+use crate::settings::ColumnPrefs;
 use table::AuditTable;
 #[cfg(test)]
 use table::{TableColumn, W_NAME_MIN};
@@ -41,6 +42,7 @@ use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
+use gpui_component::popover::Popover;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
@@ -104,6 +106,28 @@ const THUMB_SETTLE: Duration = Duration::from_millis(300);
 /// Cold thumbnail work runs beside the eight-file WebP estimator. Two decodes keep
 /// enough CPU free for the window while still filling a viewport in one short wave.
 const THUMB_WORKERS: usize = 2;
+
+/// The open rail. Every operation with settings owns one, so the action bar
+/// can hold verbs alone and no operation borrows another's controls.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum Rail {
+    #[default]
+    None,
+    Convert,
+    RemoveBackground,
+    Upscale,
+}
+
+impl Rail {
+    fn title(self) -> &'static str {
+        match self {
+            Rail::None => "",
+            Rail::Convert => "Convert",
+            Rail::RemoveBackground => "Remove background",
+            Rail::Upscale => "Upscale 4×",
+        }
+    }
+}
 
 struct ThumbRequest {
     index: usize,
@@ -353,8 +377,13 @@ pub(crate) struct Audit {
     /// audit is a live entity: `TableState::new` asks the delegate for its row and
     /// column counts straight away, and answering that means reading the audit.
     table: Option<gpui::Entity<TableState<AuditTable>>>,
-    /// Width/result/Sirv signature last handed to the component table.
-    table_signature: Option<(u32, bool, bool)>,
+    /// Width/preferences/result/Sirv signature last handed to the component table.
+    table_signature: Option<(u32, ColumnPrefs, bool, bool)>,
+    /// Which optional columns the picker has on.
+    column_prefs: ColumnPrefs,
+    /// The open rail, if any. A folder opens on Convert: it is the app's job,
+    /// and an empty right-hand edge on launch would hide it.
+    rail: Rail,
 }
 
 /// List order. Every column is sortable, and clicking the active one reverses it.
@@ -870,6 +899,7 @@ pub(crate) fn build_audit(
         quality,
         max_edge,
         grid,
+        columns: column_prefs,
     } = launch;
 
     let audit = cx.new(|cx| {
@@ -994,6 +1024,8 @@ pub(crate) fn build_audit(
             settings_panel: None,
             compare: None,
             local_ai_job: None,
+            column_prefs,
+            rail: Rail::Convert,
         };
         audit.refresh_visible();
         audit.schedule_estimate(cx);

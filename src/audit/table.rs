@@ -1,9 +1,12 @@
 use super::*;
+use crate::settings::ColumnPrefs;
 
 /// Rows are for scanning a folder of thousands, so they are sized to fit as many
-/// as possible while still showing a thumbnail you can recognise.
-const ROW_HEIGHT: f32 = 40.;
-const THUMB_SLOT: f32 = 34.;
+/// as possible while still showing a thumbnail you can recognise. Denser than
+/// they were: the zebra separates them now, so they no longer need the room a
+/// hairline and its padding took.
+const ROW_HEIGHT: f32 = 36.;
+const THUMB_SLOT: f32 = 26.;
 
 // ── Column widths ───────────────────────────────────────────────────────────
 // One constant per column, shared by the header and every row. They used to be
@@ -19,6 +22,8 @@ const W_RESULT_NARROW: f32 = 152.;
 /// The Sirv diff column. Wide windows only: below 900px the name needs the
 /// room more than the status does.
 const W_SYNC: f32 = 86.;
+/// The gutter at the right edge whose header opens the column picker.
+const W_OPTIONS: f32 = 30.;
 const W_FORMAT_COMPACT: f32 = 70.;
 const W_PIXELS_COMPACT: f32 = 88.;
 const W_DENSITY_COMPACT: f32 = 60.;
@@ -52,7 +57,7 @@ pub(super) struct AuditTable {
 
 /// The columns, in display order. `Column` is what the audit sorts by; this adds the
 /// ones that carry no sortable value of their own.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TableColumn {
     Tick,
     Thumb,
@@ -63,7 +68,23 @@ pub(super) enum TableColumn {
     Weight,
     Sync,
     Result,
+    Options,
 }
+
+/// The optional columns, in display order, with the name the picker shows and
+/// the preference each one reads. Listed once, so the picker and the table
+/// cannot drift apart.
+/// One optional column: the name the picker shows, whether it is on, and the
+/// toggle. A tuple of two function pointers reads worse than it works.
+pub(super) type OptionalColumn = (&'static str, fn(&ColumnPrefs) -> bool, fn(&mut ColumnPrefs));
+
+pub(super) const OPTIONAL_COLUMNS: [OptionalColumn; 5] = [
+    ("Thumbnail", |p| p.thumb, |p| p.thumb = !p.thumb),
+    ("Format", |p| p.format, |p| p.format = !p.format),
+    ("Size", |p| p.pixels, |p| p.pixels = !p.pixels),
+    ("B/px", |p| p.density, |p| p.density = !p.density),
+    ("File size", |p| p.weight, |p| p.weight = !p.weight),
+];
 
 impl TableColumn {
     /// The audit column this sorts by, if it sorts.
@@ -109,6 +130,7 @@ impl TableColumn {
                 .text_right()
                 .sortable(),
             TableColumn::Sync => TableCol::new("sirv", "Sirv").width(px(W_SYNC)),
+            TableColumn::Options => TableCol::new("options", "").width(px(W_OPTIONS)).p_0(),
             TableColumn::Result => {
                 TableCol::new("result", if narrow { "Before → after" } else { "Result" })
                     .width(px(if narrow { W_RESULT_NARROW } else { W_RESULT }))
@@ -122,72 +144,81 @@ impl AuditTable {
     /// Chrome the table spends on gaps, cell padding and its own border.
     const CHROME: f32 = 30.;
 
-    fn fixed_width(compact: bool, show_result: bool, show_sync: bool) -> f32 {
-        W_TICK
-            + THUMB_SLOT
-            + 12.
-            + if compact { W_FORMAT_COMPACT } else { W_FORMAT }
-            + if compact { W_PIXELS_COMPACT } else { W_PIXELS }
-            + if compact {
-                W_DENSITY_COMPACT
+    fn fixed_width(compact: bool, prefs: ColumnPrefs, show_result: bool, show_sync: bool) -> f32 {
+        let pick = |on: bool, wide: f32, tight: f32| {
+            if !on {
+                0.
+            } else if compact {
+                tight
             } else {
-                W_DENSITY
+                wide
             }
-            + if compact { W_WEIGHT_COMPACT } else { W_WEIGHT }
+        };
+        W_TICK
+            + W_OPTIONS
+            + if prefs.thumb { THUMB_SLOT + 12. } else { 0. }
+            + pick(prefs.format, W_FORMAT, W_FORMAT_COMPACT)
+            + pick(prefs.pixels, W_PIXELS, W_PIXELS_COMPACT)
+            + pick(prefs.density, W_DENSITY, W_DENSITY_COMPACT)
+            + pick(prefs.weight, W_WEIGHT, W_WEIGHT_COMPACT)
             + if compact || !show_sync { 0. } else { W_SYNC }
             + if show_result { W_RESULT } else { 0. }
     }
 
     pub(super) fn layout(
         width: f32,
+        prefs: ColumnPrefs,
         show_result: bool,
         show_sync: bool,
     ) -> (bool, f32, Vec<TableColumn>) {
         let compact = width < 900.;
-        let narrow =
-            width < Self::fixed_width(compact, show_result, show_sync) + Self::CHROME + W_NAME_MIN;
-        let mut columns = if narrow {
-            let mut columns = vec![
-                TableColumn::Tick,
-                TableColumn::Thumb,
-                TableColumn::Name,
-                TableColumn::Density,
-            ];
+        let narrow = width
+            < Self::fixed_width(compact, prefs, show_result, show_sync) + Self::CHROME + W_NAME_MIN;
+        // Too narrow for the chosen set: the name and the outcome, and nothing
+        // else. A preference cannot conjure room that is not there.
+        let mut columns = vec![TableColumn::Tick];
+        if prefs.thumb {
+            columns.push(TableColumn::Thumb);
+        }
+        columns.push(TableColumn::Name);
+        if narrow {
             columns.push(if show_result {
                 TableColumn::Result
             } else {
                 TableColumn::Weight
             });
-            columns
         } else {
-            vec![
-                TableColumn::Tick,
-                TableColumn::Thumb,
-                TableColumn::Name,
-                TableColumn::Format,
-                TableColumn::Pixels,
-                TableColumn::Density,
-                TableColumn::Weight,
-            ]
-        };
-        if show_sync && !compact && !narrow {
-            columns.push(TableColumn::Sync);
+            if prefs.format {
+                columns.push(TableColumn::Format);
+            }
+            if prefs.pixels {
+                columns.push(TableColumn::Pixels);
+            }
+            if prefs.density {
+                columns.push(TableColumn::Density);
+            }
+            if prefs.weight {
+                columns.push(TableColumn::Weight);
+            }
+            if show_sync && !compact {
+                columns.push(TableColumn::Sync);
+            }
+            if show_result {
+                columns.push(TableColumn::Result);
+            }
         }
-        if show_result && !narrow {
-            columns.push(TableColumn::Result);
-        }
+        columns.push(TableColumn::Options);
         let fixed_width = if narrow {
             W_TICK
-                + THUMB_SLOT
-                + 12.
-                + W_DENSITY_COMPACT
+                + W_OPTIONS
+                + if prefs.thumb { THUMB_SLOT + 12. } else { 0. }
                 + if show_result {
                     W_RESULT_NARROW
                 } else {
                     W_WEIGHT_COMPACT
                 }
         } else {
-            Self::fixed_width(compact, show_result, show_sync)
+            Self::fixed_width(compact, prefs, show_result, show_sync)
         };
         let name_width = (width - fixed_width - Self::CHROME).max(W_NAME_MIN);
         (compact, name_width, columns)
@@ -200,12 +231,29 @@ impl AuditTable {
             compact: false,
             columns: Vec::new(),
         };
-        table.set_viewport_width(f32::from(window.viewport_size().width), false, false);
+        table.set_viewport_width(
+            f32::from(window.viewport_size().width),
+            ColumnPrefs::default(),
+            false,
+            false,
+        );
         table
     }
 
-    pub(super) fn set_viewport_width(&mut self, width: f32, show_result: bool, show_sync: bool) {
-        (self.compact, self.name_width, self.columns) = Self::layout(width, show_result, show_sync);
+    #[cfg(test)]
+    pub(super) fn columns_for_test(&self) -> &[TableColumn] {
+        &self.columns
+    }
+
+    pub(super) fn set_viewport_width(
+        &mut self,
+        width: f32,
+        prefs: ColumnPrefs,
+        show_result: bool,
+        show_sync: bool,
+    ) {
+        (self.compact, self.name_width, self.columns) =
+            Self::layout(width, prefs, show_result, show_sync);
     }
 }
 
@@ -271,6 +319,9 @@ impl TableDelegate for AuditTable {
             return div().into_any_element();
         };
         match column {
+            Some(TableColumn::Options) => audit
+                .update(cx, |audit, cx| audit.column_picker(cx))
+                .into_any_element(),
             Some(TableColumn::Tick) => {
                 let state = audit.read(cx).selection_state();
                 div()
@@ -515,6 +566,7 @@ impl TableDelegate for AuditTable {
                     .child(label)
                     .into_any_element()
             }
+            TableColumn::Options => div().into_any_element(),
             TableColumn::Result => div()
                 .flex()
                 .when(narrow_result, |result| {
@@ -604,6 +656,21 @@ pub(super) enum SelectionState {
 }
 
 impl Audit {
+    /// One column on or off. The delegate caches its column list against a
+    /// signature, so the change has to reach the table, not only the state.
+    pub(super) fn toggle_column(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((_, _, toggle)) = OPTIONAL_COLUMNS.get(index) else {
+            return;
+        };
+        toggle(&mut self.column_prefs);
+        cx.notify();
+    }
+
+    pub(super) fn reset_columns(&mut self, cx: &mut Context<Self>) {
+        self.column_prefs = ColumnPrefs::default();
+        cx.notify();
+    }
+
     pub(super) fn selection_state(&self) -> SelectionState {
         let selected = self
             .visible
