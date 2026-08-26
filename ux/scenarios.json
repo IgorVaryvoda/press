@@ -609,6 +609,15 @@
       {
         "type": "wait",
         "seconds": 3
+      },
+      {
+        "type": "click",
+        "x": 500,
+        "y": 20
+      },
+      {
+        "type": "wait",
+        "seconds": 1
       }
     ],
     "interaction_trace": [
@@ -671,6 +680,15 @@
       {
         "type": "wait",
         "seconds": 2
+      },
+      {
+        "type": "click",
+        "x": 500,
+        "y": 20
+      },
+      {
+        "type": "wait",
+        "seconds": 1
       }
     ],
     "interaction_trace": [
@@ -771,6 +789,15 @@
         "type": "click",
         "x": -153,
         "y": -30
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      },
+      {
+        "type": "click",
+        "x": 500,
+        "y": 20
       },
       {
         "type": "wait",
@@ -881,6 +908,15 @@
         "type": "click",
         "x": 250,
         "y": 161
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      },
+      {
+        "type": "click",
+        "x": 500,
+        "y": 20
       },
       {
         "type": "wait",

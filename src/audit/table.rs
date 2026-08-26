@@ -473,7 +473,7 @@ impl TableDelegate for AuditTable {
                 // The finding, in the row that has it. `heavy` used to be a number
                 // in a column you had to know how to read; a file can be both
                 // heavy and mislabelled, and both are worth saying.
-                let heavy = entry.bytes_per_pixel() > DENSITY_HEAVY;
+                let heavy = Finding::Heavy.holds(entry);
                 let lies = entry.extension_lies();
                 div()
                     .w_full()

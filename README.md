@@ -8,7 +8,7 @@ shoot. This does the same job on your computer: auditing, comparing, and convert
 do not upload files, and the folder size is bounded by the disk rather than by a
 browser tab. Files leave the machine only when you explicitly use Sirv sync.
 
-![Press auditing a mixed folder of PNG and JPEG images](docs/audit.webp)
+![Press auditing a folder of PNG exports, with the Convert rail open beside the list](docs/audit.webp)
 
 Press is the desktop companion to the site and the
 [Chrome extension](https://chromewebstore.google.com/detail/hinifcidioledficgenmdncpkifnngap).
@@ -55,18 +55,25 @@ found — heaviest first, because that is where the work is.
 
 | Column | Meaning |
 |---|---|
-| Thumb | Decoded off the main thread, only for rows the viewport asked for |
+| Thumbnail | Decoded off the main thread, only for rows the viewport asked for |
 | Format | The real format, read from the file's magic bytes, not its extension |
 | Size | Pixel dimensions |
-| B/px | Bytes on disk per output pixel |
-| Weight | Bytes on disk |
+| File size | Bytes on disk |
+| B/px | Bytes on disk per output pixel — off by default |
+
+Columns are chosen from the icon at the right end of the header, and the choice is
+remembered.
 
 **Format is read from the content.** That column disagreeing with the file extension
 is a finding, not a display bug. The first folder this was pointed at —
 `imageguide/public` — held 169 files named `.webp`, and 59 of them were PNG.
 
 `B/px` is the quick read on whether a file is carrying weight it does not need. A
-photographic JPEG sits near 0.2. A screenshot saved as PNG can be ten times that.
+photographic JPEG sits near 0.2. A screenshot saved as PNG can be ten times that. It
+is the sharpest number here and the least legible one, so it starts switched off and
+a file carrying too much says `heavy` in its own row instead. That word needs a file
+worth converting behind it: a 44-byte sliver has an enormous ratio and nothing to
+give back, so the finding ignores anything under 32 KB or 64x64 px.
 
 **Camera raw is counted, not listed.** `.nef`, `.cr2`, `.arw` and friends are TIFF
 containers, so a header read returns the embedded preview — a 6000x4000 NEF reports
@@ -101,8 +108,9 @@ The comparison has two local actions that never upload the source:
 **Remove background** uses BiRefNet Lite and **Upscale 4×** uses tiled Real-ESRGAN.
 Packaged macOS builds include the pinned vision.cpp runtime. Linux x64 downloads a
 checksum-verified copy on first use. Both download only the selected model (up to
-104 MB total for background removal or 49 MB for upscaling). Results are lossless
-PNGs under `optimized/`; an existing result is never replaced. Other builds can
+104 MB total for background removal or 49 MB for upscaling). A finished model run
+opens its result for you to **Keep** or **Discard**. Results are lossless PNGs in the
+output folder; an existing result is never replaced. Other builds can
 point `PRESS_VISION_CLI` at a local vision.cpp build.
 
 Sirv credentials stay in the platform config directory. The credentials
@@ -112,11 +120,23 @@ part of a normal audit, comparison, or conversion.
 
 ## Converting
 
-Pick a format and quality in the output panel and press **Convert**, or use `--convert`
-to do the same work without a window. Files are written to `optimized/` inside the
-folder, mirroring its subfolder layout. Sources are never touched, and that output
-folder is excluded from later scans so a second run does not offer to convert its own
-output.
+The bar along the foot of the window holds the verbs: **Convert**, the two local
+models, and the handoff to Sirv Studio. Choosing one opens a rail on the right with
+that operation's own settings and the button that commits it — for Convert, the
+presets, format, quality and size limit, with the projected saving above the button.
+`--convert` does the same work without a window.
+
+Files are written to `optimized/` inside the folder, mirroring its subfolder layout.
+**Change** in the rail picks a different destination — a staging folder, a share, a
+build tree — and the choice is remembered and follows you to the next folder. Sources
+are never touched either way, and the output folder is excluded from later scans so a
+second run does not offer to convert its own output.
+
+A finished run opens on what it produced: each output beside the file it came from,
+read off disk rather than encoded again for the preview, with a strip of every file
+the run wrote and what each one saved.
+
+![The results of a finished run, with every output in a strip along the foot](docs/results.webp)
 
 WebP encodes up to eight files at once and AVIF encodes two. JPEG XL encodes one file
 at a time because jixel uses the machine's cores inside each encode. Each in-flight
@@ -243,6 +263,10 @@ pan** — both sides move together, so they never fall out of register.
 At q40 on a 12 MB photo the sky goes from grainy to smooth and the file goes to
 262 KB. Whether that is a good trade is a judgement, which is why this shows you
 rather than tells you.
+
+The bar carries the same verbs as the audit, acting on the image in front of you:
+convert it, run either local model on it, or open it in Studio. Arrows step through
+the folder without leaving the view.
 
 ## Planned
 

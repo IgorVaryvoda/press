@@ -72,8 +72,6 @@ impl Audit {
         let thumb = self.thumbs.get(&index).cloned();
         let ticked = self.selected.contains(&index);
 
-        let density = entry.bytes_per_pixel();
-
         div()
             .id(("tile", row))
             .w(px(tile_size))
@@ -247,7 +245,11 @@ impl Audit {
                     // The same word the list uses. A tile showing `0.14 B/px`
                     // asked you to know the bands by heart, and it was taking
                     // the room the file size needed to print in full.
-                    .children((density > DENSITY_HEAVY).then(|| finding_chip("heavy", cx)))
+                    .children(
+                        Finding::Heavy
+                            .holds(entry)
+                            .then(|| finding_chip("heavy", cx)),
+                    )
                     .children(
                         entry
                             .extension_lies()

@@ -1234,6 +1234,28 @@ fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext
     });
 }
 
+/// Bytes per pixel is a ratio, and a ratio on a 44-byte sliver is arithmetic
+/// rather than a finding. The claim is that converting would win something.
+#[test]
+fn heavy_needs_a_file_worth_converting() {
+    // A 300 KB screenshot at 30 bytes per pixel: the finding it was built for.
+    let bloated = entry("screenshot.png", 100, 100, 300_000, ImageFormat::Png);
+    assert!(Finding::Heavy.holds(&bloated));
+
+    // The same ratio on something too small to give anything back.
+    let sliver = entry("sliver.png", 1, 2, 44, ImageFormat::Png);
+    assert!(sliver.bytes_per_pixel() > 1.5);
+    assert!(!Finding::Heavy.holds(&sliver));
+
+    // Big enough on disk, but a handful of pixels: still nothing to win.
+    let tiny = entry("icon.png", 8, 8, 100_000, ImageFormat::Png);
+    assert!(!Finding::Heavy.holds(&tiny));
+
+    // A photograph is never heavy however large the file is.
+    let photo = entry("photo.jpg", 4000, 3000, 2_000_000, ImageFormat::Jpeg);
+    assert!(!Finding::Heavy.holds(&photo));
+}
+
 /// The picker's toggle has to reach the table, not only the state: the delegate
 /// caches its column list against a signature, and a preference left out of that
 /// signature changes nothing on screen.

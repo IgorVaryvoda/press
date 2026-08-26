@@ -62,6 +62,12 @@ use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable};
 /// diagnostic something you had to read rather than see.
 const DENSITY_GOOD: f32 = 0.5;
 const DENSITY_HEAVY: f32 = 1.5;
+/// Below these, bytes per pixel stops meaning anything. A 44-byte 1×2 sliver
+/// carries an enormous ratio and has nothing to give back: the finding is a
+/// claim that converting would win something, so it needs a file big enough for
+/// that to be true.
+const HEAVY_MIN_BYTES: u64 = 32_768;
+const HEAVY_MIN_PIXELS: u64 = 64 * 64;
 /// Gallery rows stay uniform for virtualisation, but the tile itself grows to use the
 /// available surface instead of leaving a dead strip beside three tiny cards.
 const TILE_MIN: f32 = 168.;
@@ -837,10 +843,16 @@ enum Finding {
 }
 
 impl Finding {
-    fn holds(self, entry: &Entry) -> bool {
+    /// The one place either finding is decided, so the count in the toolbar,
+    /// the filter it applies, and the chip in the row can never disagree.
+    pub(super) fn holds(self, entry: &Entry) -> bool {
         match self {
             Finding::Mislabelled => entry.extension_lies(),
-            Finding::Heavy => entry.bytes_per_pixel() > DENSITY_HEAVY,
+            Finding::Heavy => {
+                entry.bytes >= HEAVY_MIN_BYTES
+                    && u64::from(entry.width) * u64::from(entry.height) >= HEAVY_MIN_PIXELS
+                    && entry.bytes_per_pixel() > DENSITY_HEAVY
+            }
         }
     }
 }
