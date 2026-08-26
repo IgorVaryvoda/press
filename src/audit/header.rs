@@ -53,6 +53,7 @@ impl Audit {
         }
 
         div()
+            .debug_selector(|| "audit-header".into())
             .flex()
             .flex_wrap()
             .items_center()
@@ -88,14 +89,12 @@ impl Audit {
                                     .text_ellipsis()
                                     .child(folder),
                             )
-                            // Icon-only: three ellipsised text buttons crowding the
-                            // title read as clutter, and the tooltips say the same
-                            // words on demand.
                             .child(
                                 Button::new("open-folder")
                                     .small()
                                     .ghost()
                                     .icon(IconName::Folder)
+                                    .label("Folder")
                                     .tooltip("Open a folder")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| audit.pick(true, cx))),
@@ -105,6 +104,7 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .icon(IconName::File)
+                                    .label("Image")
                                     .tooltip("Open a single image")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| audit.pick(false, cx))),
@@ -112,23 +112,16 @@ impl Audit {
                             .child(
                                 // The sync entry point: opens the remote-folder
                                 // browser, which is also where a pairing is undone.
-                                // A live pairing keeps its name on the button; the
-                                // name IS the state.
-                                {
-                                    let button = Button::new("sirv-browser")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::Globe)
-                                        .tooltip("Sync with a Sirv folder")
-                                        .disabled(self.converting)
-                                        .on_click(cx.listener(|audit, _, _, cx| {
-                                            audit.open_sirv_browser(cx)
-                                        }));
-                                    match &self.sirv_pairing {
-                                        Some(pairing) => button.label(pairing.dir.clone()),
-                                        None => button,
-                                    }
-                                },
+                                Button::new("sirv-browser")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Globe)
+                                    .label("Sirv")
+                                    .tooltip("Sync with a Sirv folder")
+                                    .disabled(self.converting)
+                                    .on_click(
+                                        cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
+                                    ),
                             ),
                     )
                     .child(
@@ -212,13 +205,39 @@ impl Audit {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                div().w(px(220.)).flex_shrink_0().child(
-                    Input::new(&self.filter_input)
-                        .small()
-                        .cleanable(true)
-                        .disabled(self.converting)
-                        .prefix(IconName::Search),
-                ),
+                div()
+                    .w(px(220.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.filter_input)
+                                .small()
+                                .disabled(self.converting)
+                                .prefix(IconName::Search),
+                        ),
+                    )
+                    .when(!self.filter.is_empty(), |row| {
+                        row.child(
+                            div().debug_selector(|| "clear-filter".into()).child(
+                                Button::new("clear-filter")
+                                    .small()
+                                    .ghost()
+                                    .label("Clear")
+                                    .disabled(self.converting)
+                                    .on_click(cx.listener(|audit, _, window, cx| {
+                                        let input = audit.filter_input.clone();
+                                        input.update(cx, |input, cx| {
+                                            input.set_value("", window, cx)
+                                        });
+                                        audit.set_filter(String::new(), cx);
+                                        window.focus(&input.read(cx).focus_handle(cx), cx);
+                                    })),
+                            ),
+                        )
+                    }),
             )
             // The audit colours every row by weight per pixel and then asks
             // you to find the heavy ones yourself.

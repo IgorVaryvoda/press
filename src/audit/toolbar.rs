@@ -25,7 +25,7 @@ impl Audit {
                 // no-limit is the source itself.
                 let display = match edge.0 {
                     None => "Original".to_string(),
-                    Some(_) => edge.label(),
+                    Some(value) => value.to_string(),
                 };
                 segment(
                     gpui::SharedString::from(edge.label()),
@@ -48,11 +48,26 @@ impl Audit {
             }))
     }
 
-    pub(super) fn format_picker(&self) -> Select<Vec<Format>> {
-        Select::new(&self.format_select)
-            .small()
-            .w_full()
-            .disabled(self.converting)
+    pub(super) fn format_group(&self, cx: &mut Context<Self>) -> ButtonGroup {
+        let options = [Format::WebP, Format::Avif, Format::JpegXl];
+        ButtonGroup::new("format")
+            .children(options.iter().map(|format| {
+                segment(
+                    format.label(),
+                    format.label().to_uppercase(),
+                    self.format == *format,
+                )
+                .disabled(self.converting)
+            }))
+            .on_click(cx.listener(move |audit, clicked: &Vec<usize>, _, cx| {
+                if audit.converting {
+                    return;
+                }
+                let Some(format) = clicked.first().and_then(|index| options.get(*index)) else {
+                    return;
+                };
+                audit.apply_format(*format, cx);
+            }))
     }
 
     pub(super) fn apply_format(&mut self, format: Format, cx: &mut Context<Self>) {

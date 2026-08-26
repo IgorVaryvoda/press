@@ -37,6 +37,22 @@ const PRESETS: [(&str, &str, Format, Quality, MaxEdge); 3] = [
     ),
 ];
 
+pub(super) fn active_preset(format: Format, quality: Quality, edge: MaxEdge) -> Option<usize> {
+    PRESETS
+        .iter()
+        .position(|(_, _, preset_format, preset_quality, preset_edge)| {
+            format == *preset_format && quality == *preset_quality && edge == *preset_edge
+        })
+}
+
+pub(super) fn sampling_note(sampled: usize, total: usize) -> String {
+    if sampled < total {
+        format!(" · {sampled}\u{a0}of\u{a0}{total}\u{a0}sampled")
+    } else {
+        String::new()
+    }
+}
+
 impl Audit {
     pub(super) fn output_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -44,9 +60,9 @@ impl Audit {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .px_3()
-            .py_3()
+            .py_2()
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
@@ -55,11 +71,21 @@ impl Audit {
                     .id("output-settings")
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_h_0()
+                    .max_h(px(440.))
                     .overflow_y_scroll()
-                    .gap_3()
+                    .gap_2()
                     .child(self.panel_heading("Output", cx))
+                    .child(
+                        div()
+                            .debug_selector(|| "output-destination".into())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().foreground)
+                            .child(IconName::FolderOpen)
+                            .child("optimized/ · originals unchanged"),
+                    )
                     .child(
                         div()
                             .flex()
@@ -69,13 +95,36 @@ impl Audit {
                             .child(self.preset_row(1, cx))
                             .child(self.preset_row(2, cx)),
                     )
-                    .child(self.panel_heading("Fine-tune", cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(self.panel_heading("Fine-tune", cx))
+                            .when(
+                                active_preset(self.format, self.quality, self.max_edge).is_none(),
+                                |heading| {
+                                    heading.child(
+                                        div()
+                                            .debug_selector(|| "custom-settings-active".into())
+                                            .text_size(px(11.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().blue)
+                                            .child("CUSTOM ACTIVE"),
+                                    )
+                                },
+                            ),
+                    )
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(self.panel_setting("Format", self.format_picker(), cx))
+                            .child(self.panel_setting(
+                                "Format",
+                                self.format_group(cx).small().compact(),
+                                cx,
+                            ))
                             .child(self.panel_quality(cx))
                             .child(self.panel_setting(
                                 "Max size",
@@ -84,6 +133,8 @@ impl Audit {
                             )),
                     ),
             )
+            // The decision and commit stay visible while the settings above them
+            // scroll at short window heights.
             .child(self.output_summary(cx))
     }
 
@@ -121,8 +172,8 @@ impl Audit {
     /// exact settings it applies — no memory required. Lit only while the live
     /// settings are exactly what it names, so a hand-tuned output lights none.
     fn preset_row(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let (name, summary, format, quality, edge) = PRESETS[index];
-        let selected = self.format == format && self.quality == quality && self.max_edge == edge;
+        let (name, summary, _, _, _) = PRESETS[index];
+        let selected = active_preset(self.format, self.quality, self.max_edge) == Some(index);
         div()
             .id(("preset", index))
             .flex()
@@ -158,9 +209,6 @@ impl Audit {
                     return;
                 }
                 let (_, _, format, quality, edge) = PRESETS[index];
-                audit.format_select.update(cx, |select, cx| {
-                    select.set_selected_value(&format, window, cx)
-                });
                 audit.format = format;
                 audit.quality = quality;
                 audit.max_edge = edge;
@@ -255,7 +303,7 @@ impl Audit {
             }))
     }
 
-    /// The payoff and the commit, at the foot of the column the knobs live in:
+    /// The payoff and the commit, immediately after the knobs that determine it:
     /// what the folder costs now, what it would cost converted, and the button.
     fn output_summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let target_count = self.target_count();
@@ -269,10 +317,11 @@ impl Audit {
 
         // Four states, one shape: a headline, its tone, a sentence of detail,
         // the share remaining, and the percent tag.
-        let (headline, tone, detail, bar, tag) = if self.converting {
+        let (state, headline, tone, detail, bar, tag) = if self.converting {
             let done = self.results.len() + self.failures.len();
             let total = self.active_target_count.unwrap_or(target_count);
             (
+                Some(("CONVERTING", cx.theme().foreground)),
                 format!("{done} of {total}"),
                 cx.theme().foreground,
                 format!(
@@ -289,6 +338,7 @@ impl Audit {
             let delta = before.abs_diff(after);
             let percent = delta as f32 / before.max(1) as f32 * 100.;
             (
+                Some(("COMPLETED · ACTUAL RESULT", cx.theme().green)),
                 format!(
                     "{} {}",
                     format_bytes(delta),
@@ -300,7 +350,7 @@ impl Audit {
                     cx.theme().green
                 },
                 format!(
-                    "{} converted · {} → {}",
+                    "{} files · {} → {}",
                     self.results.len(),
                     format_bytes(before),
                     format_bytes(after)
@@ -320,21 +370,17 @@ impl Audit {
             let delta = source.abs_diff(projected);
             let percent = delta as f32 / source.max(1) as f32 * 100.;
             (
-                // A projection from a few dozen encodes, said as one.
-                format!(
-                    "≈{} to {}",
-                    format_bytes(delta),
-                    if growth { "grow" } else { "save" }
-                ),
+                Some(("ESTIMATE", cx.theme().muted_foreground)),
+                format!("≈{} output", format_bytes(projected)),
                 if growth {
                     cx.theme().yellow
                 } else {
                     cx.theme().green
                 },
                 format!(
-                    "{} now → ≈{} · sampled {sampled}",
+                    "from {}{}",
                     format_bytes(source),
-                    format_bytes(projected),
+                    sampling_note(sampled, target_count),
                 ),
                 Some((
                     projected as f32 / source.max(1) as f32,
@@ -348,6 +394,7 @@ impl Audit {
             )
         } else {
             (
+                None,
                 "Sizing it up…".to_string(),
                 cx.theme().muted_foreground,
                 format!("{} on disk", format_bytes(source)),
@@ -364,41 +411,52 @@ impl Audit {
             .flex()
             .flex_col()
             .gap_1()
-            .child(meter("saving", fraction, colour, 3.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+            .when(target_count > 0, |summary| {
+                summary
+                    .children(state.map(|(label, colour)| {
+                        div()
+                            .debug_selector(|| "output-state".into())
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colour)
+                            .child(label)
+                    }))
+                    .child(meter("saving", fraction, colour, 3.))
                     .child(
                         div()
-                            .font_family("SF Pro Display")
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(tone)
-                            .whitespace_nowrap()
-                            .child(headline),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_family("SF Pro Display")
+                                    .text_size(px(16.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(tone)
+                                    .whitespace_nowrap()
+                                    .child(headline),
+                            )
+                            .children(tag.map(|(growth, percent)| {
+                                let tag = if growth {
+                                    Tag::warning()
+                                } else {
+                                    Tag::success()
+                                };
+                                tag.small().child(if growth {
+                                    format!("+{percent:.0}%")
+                                } else {
+                                    format!("−{percent:.0}%")
+                                })
+                            })),
                     )
-                    .children(tag.map(|(growth, percent)| {
-                        let tag = if growth {
-                            Tag::warning()
-                        } else {
-                            Tag::success()
-                        };
-                        tag.small().child(if growth {
-                            format!("+{percent:.0}%")
-                        } else {
-                            format!("−{percent:.0}%")
-                        })
-                    })),
-            )
-            .child(
-                div()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(detail),
-            )
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail),
+                    )
+            })
             .when(!self.selected.is_empty() && !self.converting, |block| {
                 block.child(
                     div()
@@ -424,7 +482,10 @@ impl Audit {
                 )
             })
             .when(
-                (!self.results.is_empty() || self.existing_output > 0) && !self.converting,
+                (!self.results.is_empty()
+                    || !self.completed_outputs.is_empty()
+                    || self.existing_output > 0)
+                    && !self.converting,
                 |block| {
                     block.child(
                         Button::new("reveal")
@@ -444,17 +505,7 @@ impl Audit {
                     .when(self.converting || target_count == 0, |button| {
                         button.ghost()
                     })
-                    .label(if self.converting {
-                        "Converting…".to_string()
-                    } else if self.selected.is_empty() {
-                        format!("Convert all to {}", self.format.label().to_uppercase())
-                    } else {
-                        format!(
-                            "Convert {} to {}",
-                            target_count,
-                            self.format.label().to_uppercase()
-                        )
-                    })
+                    .label(self.conversion_action_label())
                     .disabled(self.converting || self.scanning.is_some() || target_count == 0)
                     .on_click(cx.listener(|audit, _, _, cx| audit.start_conversion(cx))),
             )

@@ -38,7 +38,7 @@ pub(super) fn browser_landing_applies(
 
 impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
-    /// missing store opens the browser on an error that names the file to fix.
+    /// missing store routes directly to the existing settings form.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
         self.sirv_confirm = None;
         self.sirv_browser_generation = self.sirv_browser_generation.wrapping_add(1);
@@ -53,12 +53,6 @@ impl Audit {
             Some(client) => client,
             None => {
                 let Some(credentials) = sirv::load_credentials() else {
-                    let message = format!(
-                        "No Sirv credentials. Add client_id and client_secret to {}",
-                        sirv::credentials_path()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "the Press config file".into())
-                    );
                     self.sirv_browser = Some(SirvBrowser {
                         // Never used on this path: the listing is already an error.
                         client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
@@ -68,7 +62,8 @@ impl Audit {
                             },
                         ))),
                         path: "/".into(),
-                        nodes: Some(Err(message)),
+                        needs_credentials: true,
+                        nodes: Some(Err("No Sirv credentials are saved.".into())),
                         generation: 0,
                         session,
                         focused: false,
@@ -83,6 +78,7 @@ impl Audit {
         let mut browser = SirvBrowser {
             client,
             path: "/".into(),
+            needs_credentials: false,
             nodes: None,
             generation: 0,
             session,
@@ -383,18 +379,28 @@ impl Audit {
     /// Open settings, prefilled with whatever is stored.
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let stored = sirv::load_credentials();
-        let mut make_input = |value: Option<String>| {
+        let mut make_input = |value: Option<String>, masked| {
             cx.new(|cx| {
-                let mut state = InputState::new(window, cx);
+                let mut state = InputState::new(window, cx).masked(masked);
                 if let Some(value) = value {
                     state.set_value(value, window, cx);
                 }
                 state
             })
         };
+        let client_id = make_input(stored.as_ref().map(|c| c.client_id.clone()), false);
+        let client_secret = make_input(stored.as_ref().map(|c| c.client_secret.clone()), true);
+        for input in [&client_id, &client_secret] {
+            cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         self.settings_panel = Some(SettingsPanel {
-            client_id: make_input(stored.as_ref().map(|c| c.client_id.clone())),
-            client_secret: make_input(stored.as_ref().map(|c| c.client_secret.clone())),
+            client_id,
+            client_secret,
             cdn_status: None,
             focus_ix: 0,
             focused: false,
@@ -413,7 +419,7 @@ impl Audit {
                 panel.client_secret.read(cx).value().trim().to_string(),
             )
         };
-        if client_id.is_empty() || client_secret.is_empty() {
+        if !credentials_complete(&client_id, &client_secret) {
             let panel = self.settings_panel.as_mut().unwrap();
             panel.cdn_status = Some((false, "Both fields are required.".into()));
             cx.notify();

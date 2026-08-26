@@ -161,6 +161,37 @@ fn nothing_encoded_is_no_estimate() {
 }
 
 #[test]
+fn sampling_metadata_only_names_partial_estimates() {
+    assert_eq!(panel::sampling_note(2, 2), "");
+    assert_eq!(
+        panel::sampling_note(2, 20),
+        " · 2\u{a0}of\u{a0}20\u{a0}sampled"
+    );
+}
+
+#[test]
+fn fine_tuning_has_one_named_owner() {
+    assert_eq!(
+        panel::active_preset(Format::WebP, Quality::lossy(80.), MaxEdge::FULL),
+        Some(0)
+    );
+    assert_eq!(
+        panel::active_preset(Format::WebP, Quality::lossy(57.), MaxEdge::FULL),
+        None,
+        "a manual change is a custom configuration, not Recommended"
+    );
+}
+
+#[test]
+fn compact_results_keep_both_byte_values() {
+    assert_eq!(
+        table::result_size_text(159_100, 128_500, true),
+        "155.4 KB → 125.5 KB"
+    );
+    assert_eq!(table::result_size_text(159_100, 128_500, false), "125.5 KB");
+}
+
+#[test]
 fn conversion_targets_follow_visible_order() {
     let visible = [2, 0, 1];
     assert_eq!(conversion_targets(&visible, &HashSet::new()), vec![2, 0, 1]);
@@ -170,6 +201,22 @@ fn conversion_targets_follow_visible_order() {
 
     let hidden = HashSet::from([3]);
     assert!(conversion_targets(&visible, &hidden).is_empty());
+}
+
+#[gpui::test]
+fn comparison_navigation_stops_at_visible_edges(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.read_with(cx, |audit, _| {
+        let first = audit.visible[0];
+        let middle = audit.visible[1];
+        let last = audit.visible[2];
+
+        assert_eq!(audit.compare_target_from(first, -1), None);
+        assert_eq!(audit.compare_target_from(first, 1), Some((1, middle)));
+        assert_eq!(audit.compare_target_from(middle, -1), Some((0, first)));
+        assert_eq!(audit.compare_target_from(middle, 1), Some((2, last)));
+        assert_eq!(audit.compare_target_from(last, 1), None);
+    });
 }
 
 #[test]
@@ -275,6 +322,7 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
         pan: (0., 0.),
         zoom: None,
         drag: None,
+        tools_open: false,
     };
 
     assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
@@ -324,7 +372,8 @@ fn a_local_ai_result_belongs_to_its_exact_file_and_dataset() {
 #[test]
 fn table_layout_keeps_decision_columns_at_compact_width() {
     let minimum_left_pane = WINDOW_MIN_WIDTH - panel::OUTPUT_PANEL_WIDTH - 44.;
-    let (compact, compact_name, compact_columns) = AuditTable::layout(minimum_left_pane, true);
+    let (compact, compact_name, compact_columns) =
+        AuditTable::layout(minimum_left_pane, true, false);
     assert!(compact);
     assert!(compact_name >= W_NAME_MIN);
     assert!(compact_columns.contains(&TableColumn::Result));
@@ -332,17 +381,49 @@ fn table_layout_keeps_decision_columns_at_compact_width() {
     assert!(!compact_columns.contains(&TableColumn::Weight));
     assert!(!compact_columns.contains(&TableColumn::Pixels));
 
-    let (_, _, before_columns) = AuditTable::layout(minimum_left_pane, false);
+    let (_, _, before_columns) = AuditTable::layout(minimum_left_pane, false, false);
     assert!(before_columns.contains(&TableColumn::Density));
     assert!(before_columns.contains(&TableColumn::Weight));
     assert!(!before_columns.contains(&TableColumn::Result));
 
-    let (wide, wide_name, wide_columns) = AuditTable::layout(1100., true);
+    let (wide, wide_name, wide_columns) = AuditTable::layout(1100., true, false);
     assert!(!wide);
     assert!(wide_name > compact_name);
     assert!(wide_columns.contains(&TableColumn::Density));
     assert!(wide_columns.contains(&TableColumn::Weight));
     assert!(wide_columns.contains(&TableColumn::Result));
+    assert!(!wide_columns.contains(&TableColumn::Sync));
+
+    let (_, _, synced_columns) = AuditTable::layout(1100., false, true);
+    assert!(synced_columns.contains(&TableColumn::Sync));
+}
+
+#[gpui::test]
+fn table_select_all_follows_the_visible_rows(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.visible = vec![2, 0];
+        assert!(matches!(
+            audit.selection_state(),
+            table::SelectionState::None
+        ));
+
+        audit.toggle_select_all(cx);
+        assert_eq!(audit.selected, HashSet::from([0, 2]));
+        assert!(matches!(
+            audit.selection_state(),
+            table::SelectionState::All
+        ));
+
+        audit.selected.remove(&2);
+        assert!(matches!(
+            audit.selection_state(),
+            table::SelectionState::Some
+        ));
+        audit.selected.insert(2);
+        audit.toggle_select_all(cx);
+        assert!(audit.selected.is_empty());
+    });
 }
 
 /// The app sorts indices into an unmoved `entries`; these tests sort the data
@@ -470,6 +551,7 @@ fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
                 },
             ))),
             path: "/photos".into(),
+            needs_credentials: false,
             nodes: None,
             generation: 0,
             session: 1,
@@ -803,6 +885,7 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
         assert_eq!(audit.heavy, 1);
         assert_eq!(audit.mislabelled, 1);
         assert_eq!(audit.target_count(), 3);
+        assert_eq!(audit.conversion_action_label(), "Convert all 3 to WEBP");
         assert_eq!(audit.target_bytes(), 401_000);
 
         audit.selected.extend([0, 2, 99]);
@@ -812,15 +895,35 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
             2,
             "a hidden or stale index is not a target"
         );
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Convert 2 selected to WEBP"
+        );
+        audit.converting = true;
+        assert_eq!(audit.conversion_action_label(), "Converting…");
+        audit.converting = false;
         assert_eq!(audit.target_bytes(), 101_000);
 
-        audit.record_result(0, 50_000);
-        audit.record_result(2, 500);
+        audit.record_result(0, Format::WebP, 50_000);
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Convert 2 selected to WEBP"
+        );
+        audit.record_result(2, Format::WebP, 500);
         assert_eq!(audit.converted_totals(), (101_000, 50_500));
-        audit.record_result(0, 40_000);
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Replace 2 selected WEBP outputs"
+        );
+        audit.record_result(0, Format::WebP, 40_000);
         assert_eq!(audit.converted_totals(), (101_000, 40_500));
         audit.clear_results();
         assert_eq!(audit.converted_totals(), (0, 0));
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Replace 2 selected WEBP outputs",
+            "changing settings clears old measurements, not known output files"
+        );
     });
 }
 
@@ -862,6 +965,41 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             LocalAiJobState::Done(PathBuf::from("optimized/photo-4x.png"));
         assert!(audit.automatic_update_can_restart());
     });
+}
+
+#[gpui::test]
+fn named_filter_clear_restores_the_audit(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update_in(cx, |audit, window, cx| {
+        audit
+            .filter_input
+            .update(cx, |input, cx| input.set_value("no-match", window, cx));
+        audit.set_filter("no-match".into(), cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("filter-empty-result").is_some(),
+        "the empty filter result is rendered as a named recovery state"
+    );
+
+    let clear = cx
+        .debug_bounds("clear-filter")
+        .expect("a populated filter has a named clear action");
+    cx.simulate_click(clear.center(), gpui::Modifiers::none());
+
+    audit.read_with(cx, |audit, cx| {
+        assert!(audit.filter.is_empty());
+        assert!(audit.filter_input.read(cx).value().is_empty());
+        assert_eq!(audit.visible.len(), 3);
+    });
+}
+
+#[test]
+fn sirv_credentials_require_both_nonblank_fields() {
+    assert!(!credentials_complete("", "secret"));
+    assert!(!credentials_complete("client", "  "));
+    assert!(credentials_complete(" client ", " secret "));
 }
 
 #[gpui::test]
@@ -933,6 +1071,17 @@ fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
 
     audit.update_in(cx, |audit, window, cx| {
         audit.open_settings(window, cx);
+        assert!(
+            audit
+                .settings_panel
+                .as_ref()
+                .unwrap()
+                .client_secret
+                .read(cx)
+                .presentation()
+                .is_masked(),
+            "a client secret is masked before any text is entered"
+        );
         let field = audit
             .settings_panel
             .as_ref()
@@ -958,6 +1107,7 @@ fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
                 },
             ))),
             path: "/".into(),
+            needs_credentials: false,
             nodes: None,
             generation: 0,
             session: 1,
@@ -1021,6 +1171,72 @@ fn pointer_checkbox_audit(
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     (audit, cx)
+}
+
+#[gpui::test]
+fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(true, cx);
+    assert!(cx.debug_bounds("gallery-sort").is_some());
+
+    let compare = cx
+        .debug_bounds("grid-compare-0")
+        .expect("each gallery image has a named comparison action");
+    cx.simulate_click(compare.center(), gpui::Modifiers::none());
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.compare.as_ref().map(|comparison| comparison.index),
+            Some(0)
+        );
+        assert_eq!(audit.selected, [0, 1].into_iter().collect());
+    });
+}
+
+#[gpui::test]
+fn comparison_tools_disclose_without_competing_with_convert(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let index = audit.read_with(cx, |audit, _| audit.visible[0]);
+    audit.update(cx, |audit, cx| audit.open_compare(index, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tools = cx
+        .debug_bounds("compare-tools")
+        .expect("the comparison header exposes one Tools action");
+    cx.simulate_click(tools.center(), gpui::Modifiers::none());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit
+                .compare
+                .as_ref()
+                .is_some_and(|comparison| comparison.tools_open)
+        );
+    });
+    assert!(cx.debug_bounds("compare-tools-panel").is_some());
+}
+
+#[gpui::test]
+fn custom_output_and_destination_are_named_in_the_panel(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| audit.quality = Quality::lossy(57.));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("output-destination").is_some());
+    assert!(cx.debug_bounds("custom-settings-active").is_some());
+}
+
+#[gpui::test]
+fn settings_overlay_keeps_the_audit_visible_under_its_scrim(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update_in(cx, |audit, window, cx| audit.open_settings(window, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("settings-scrim").is_some());
+    assert!(
+        cx.debug_bounds("audit-header").is_some(),
+        "the overlay does not replace the user's audit with a blank canvas"
+    );
 }
 
 fn assert_pointer_checkbox_toggle(

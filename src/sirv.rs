@@ -832,11 +832,6 @@ fn sirv_error(stage: &'static str) -> impl Fn(ureq::Error) -> Error {
 
 // ── Credential store ────────────────────────────────────────────────────────
 
-/// The file a user edits to add credentials, named in errors.
-pub fn credentials_path() -> Option<PathBuf> {
-    store_path()
-}
-
 /// Where the Sirv credentials live, resolved like the window settings file.
 /// `IMAGEGUIDE_CONFIG_DIR` overrides the platform base, which is how tests
 /// keep their hands off a real credentials file.
@@ -1498,7 +1493,7 @@ mod tests {
             "saved credentials must come back; they were landing one folder deeper"
         );
         assert!(
-            credentials_path().is_some_and(|path| path.is_file()),
+            store_path().is_some_and(|path| path.is_file()),
             "the path the window reports is the file that exists"
         );
 

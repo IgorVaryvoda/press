@@ -15,6 +15,7 @@ const W_PIXELS: f32 = 96.;
 const W_DENSITY: f32 = 74.;
 const W_WEIGHT: f32 = 100.;
 const W_RESULT: f32 = 112.;
+const W_RESULT_NARROW: f32 = 152.;
 /// The Sirv diff column. Wide windows only: below 900px the name needs the
 /// room more than the status does.
 const W_SYNC: f32 = 86.;
@@ -23,6 +24,14 @@ const W_PIXELS_COMPACT: f32 = 88.;
 const W_DENSITY_COMPACT: f32 = 60.;
 const W_WEIGHT_COMPACT: f32 = 86.;
 pub(super) const W_NAME_MIN: f32 = 140.;
+
+pub(super) fn result_size_text(before: u64, after: u64, narrow: bool) -> String {
+    if narrow {
+        format!("{} → {}", format_bytes(before), format_bytes(after))
+    } else {
+        format_bytes(after)
+    }
+}
 
 /// The audit list, as the component library's virtualised table.
 ///
@@ -69,7 +78,7 @@ impl TableColumn {
         }
     }
 
-    fn spec(&self, name_width: f32, compact: bool) -> TableCol {
+    fn spec(&self, name_width: f32, compact: bool, narrow: bool) -> TableCol {
         match self {
             TableColumn::Tick => TableCol::new("tick", "").width(px(W_TICK)),
             TableColumn::Thumb => TableCol::new("thumb", "").width(px(THUMB_SLOT + 12.)).p_0(),
@@ -95,14 +104,16 @@ impl TableColumn {
                 }))
                 .text_right()
                 .sortable(),
-            TableColumn::Weight => TableCol::new("weight", "Weight")
+            TableColumn::Weight => TableCol::new("weight", "File size")
                 .width(px(if compact { W_WEIGHT_COMPACT } else { W_WEIGHT }))
                 .text_right()
                 .sortable(),
             TableColumn::Sync => TableCol::new("sirv", "Sirv").width(px(W_SYNC)),
-            TableColumn::Result => TableCol::new("result", "Result")
-                .width(px(W_RESULT))
-                .text_right(),
+            TableColumn::Result => {
+                TableCol::new("result", if narrow { "Before → after" } else { "Result" })
+                    .width(px(if narrow { W_RESULT_NARROW } else { W_RESULT }))
+                    .text_right()
+            }
         }
     }
 }
@@ -111,7 +122,7 @@ impl AuditTable {
     /// Chrome the table spends on gaps, cell padding and its own border.
     const CHROME: f32 = 30.;
 
-    fn fixed_width(compact: bool, show_result: bool) -> f32 {
+    fn fixed_width(compact: bool, show_result: bool, show_sync: bool) -> f32 {
         W_TICK
             + THUMB_SLOT
             + 12.
@@ -123,14 +134,19 @@ impl AuditTable {
                 W_DENSITY
             }
             + if compact { W_WEIGHT_COMPACT } else { W_WEIGHT }
-            + if compact { 0. } else { W_SYNC }
+            + if compact || !show_sync { 0. } else { W_SYNC }
             + if show_result { W_RESULT } else { 0. }
     }
 
-    pub(super) fn layout(width: f32, show_result: bool) -> (bool, f32, Vec<TableColumn>) {
+    pub(super) fn layout(
+        width: f32,
+        show_result: bool,
+        show_sync: bool,
+    ) -> (bool, f32, Vec<TableColumn>) {
         let compact = width < 900.;
-        let narrow = width < Self::fixed_width(compact, show_result) + Self::CHROME + W_NAME_MIN;
-        let columns = if narrow {
+        let narrow =
+            width < Self::fixed_width(compact, show_result, show_sync) + Self::CHROME + W_NAME_MIN;
+        let mut columns = if narrow {
             let mut columns = vec![
                 TableColumn::Tick,
                 TableColumn::Thumb,
@@ -143,16 +159,6 @@ impl AuditTable {
                 TableColumn::Weight
             });
             columns
-        } else if compact {
-            vec![
-                TableColumn::Tick,
-                TableColumn::Thumb,
-                TableColumn::Name,
-                TableColumn::Format,
-                TableColumn::Pixels,
-                TableColumn::Density,
-                TableColumn::Weight,
-            ]
         } else {
             vec![
                 TableColumn::Tick,
@@ -162,10 +168,11 @@ impl AuditTable {
                 TableColumn::Pixels,
                 TableColumn::Density,
                 TableColumn::Weight,
-                TableColumn::Sync,
             ]
         };
-        let mut columns = columns;
+        if show_sync && !compact && !narrow {
+            columns.push(TableColumn::Sync);
+        }
         if show_result && !narrow {
             columns.push(TableColumn::Result);
         }
@@ -175,12 +182,12 @@ impl AuditTable {
                 + 12.
                 + W_DENSITY_COMPACT
                 + if show_result {
-                    W_RESULT
+                    W_RESULT_NARROW
                 } else {
                     W_WEIGHT_COMPACT
                 }
         } else {
-            Self::fixed_width(compact, show_result)
+            Self::fixed_width(compact, show_result, show_sync)
         };
         let name_width = (width - fixed_width - Self::CHROME).max(W_NAME_MIN);
         (compact, name_width, columns)
@@ -193,12 +200,12 @@ impl AuditTable {
             compact: false,
             columns: Vec::new(),
         };
-        table.set_viewport_width(f32::from(window.viewport_size().width), false);
+        table.set_viewport_width(f32::from(window.viewport_size().width), false, false);
         table
     }
 
-    pub(super) fn set_viewport_width(&mut self, width: f32, show_result: bool) {
-        (self.compact, self.name_width, self.columns) = Self::layout(width, show_result);
+    pub(super) fn set_viewport_width(&mut self, width: f32, show_result: bool, show_sync: bool) {
+        (self.compact, self.name_width, self.columns) = Self::layout(width, show_result, show_sync);
     }
 }
 
@@ -217,7 +224,8 @@ impl TableDelegate for AuditTable {
         let Some(column) = self.columns.get(col_ix) else {
             return TableCol::new("none", "");
         };
-        let mut spec = column.spec(self.name_width, self.compact);
+        let narrow = !self.columns.contains(&TableColumn::Format);
+        let mut spec = column.spec(self.name_width, self.compact, narrow);
         // Show the arrow on whichever column the audit is actually ordered by.
         if let Some(sort) = column.sorts_by()
             && let Some(audit) = self.audit.upgrade()
@@ -250,6 +258,52 @@ impl TableDelegate for AuditTable {
         audit.update(cx, |audit, cx| audit.set_sort(column, cx));
     }
 
+    /// The tick header selects everything the filter is showing. Everything else
+    /// is its column's name.
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let column = self.columns.get(col_ix).copied();
+        let Some(audit) = self.audit.upgrade() else {
+            return div().into_any_element();
+        };
+        match column {
+            Some(TableColumn::Tick) => {
+                let state = audit.read(cx).selection_state();
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .debug_selector(|| "table-select-all".to_string())
+                    .on_key_down(cx.listener(|_, event, _, cx| {
+                        if is_checkbox_activation_key(event) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        Checkbox::new("select-all")
+                            .checked(state == SelectionState::All)
+                            .tooltip("Select every image the filter is showing")
+                            .on_click(cx.listener(|table, _: &bool, _, cx| {
+                                cx.stop_propagation();
+                                let Some(audit) = table.delegate().audit.upgrade() else {
+                                    return;
+                                };
+                                audit.update(cx, |audit, cx| audit.toggle_select_all(cx));
+                            })),
+                    )
+                    .into_any_element()
+            }
+            _ => div()
+                .size_full()
+                .child(self.column(col_ix, cx).name.clone())
+                .into_any_element(),
+        }
+    }
+
     fn render_tr(
         &mut self,
         row_ix: usize,
@@ -266,29 +320,14 @@ impl TableDelegate for AuditTable {
             .is_some_and(|entry| audit_state.selected.contains(&entry));
         let cursor = audit_state.cursor;
 
-        // The audit's finding, carried on the row's left edge: a tick in the
-        // density band colour, so the shape of the folder is visible while
-        // scrolling and not only in the B/px column.
-        let rail = audit_state
-            .entry_at(row_ix)
-            .and_then(|index| audit_state.entries.get(index))
-            .map(|entry| density_colour(entry.bytes_per_pixel(), cx));
         row.h(px(ROW_HEIGHT))
             .relative()
             .border_1()
             .border_color(gpui::transparent_black())
             .when(ticked, |row| row.bg(cx.theme().list_active))
-            .when(row_ix == cursor, |row| row.border_color(cx.theme().ring))
-            .children(rail.map(|colour| {
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(5.))
-                    .bottom(px(5.))
-                    .w(px(2.))
-                    .rounded_full()
-                    .bg(colour.opacity(0.9))
-            }))
+            .when(row_ix == cursor, |row| {
+                row.border_color(cx.theme().muted_foreground)
+            })
             .on_click(cx.listener(move |table, event: &gpui::ClickEvent, _, cx| {
                 let Some(audit) = table.delegate().audit.upgrade() else {
                     return;
@@ -307,6 +346,8 @@ impl TableDelegate for AuditTable {
         let Some(column) = self.columns.get(col_ix).copied() else {
             return div().into_any_element();
         };
+        let narrow_result =
+            column == TableColumn::Result && !self.columns.contains(&TableColumn::Weight);
         let Some(handle) = self.audit.upgrade() else {
             return div().into_any_element();
         };
@@ -377,14 +418,31 @@ impl TableDelegate for AuditTable {
                     slot.child(img(image).max_w(px(THUMB_SLOT)).max_h(px(THUMB_SLOT)))
                 })
                 .into_any_element(),
-            TableColumn::Name => div()
-                .w_full()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .text_color(cx.theme().foreground)
-                .child(entry.name())
-                .into_any_element(),
+            TableColumn::Name => {
+                // The finding, in the row that has it. `heavy` used to be a number
+                // in a column you had to know how to read; a file can be both
+                // heavy and mislabelled, and both are worth saying.
+                let heavy = entry.bytes_per_pixel() > DENSITY_HEAVY;
+                let lies = entry.extension_lies();
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_shrink(1.)
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(cx.theme().foreground)
+                            .child(entry.name()),
+                    )
+                    .children(heavy.then(|| finding_chip("heavy", cx)))
+                    .children(lies.then(|| finding_chip("mislabelled", cx)))
+                    .into_any_element()
+            }
             TableColumn::Format => {
                 let lies = entry.extension_lies();
                 div()
@@ -424,38 +482,24 @@ impl TableDelegate for AuditTable {
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .whitespace_nowrap()
-                    .text_color(density_colour(density, cx))
+                    .text_color(cx.theme().muted_foreground)
                     .child(format!("{density:.2}"))
                     .into_any_element()
             }
-            // The bar lives under its own number now: one cell, so a bar can
-            // never drift away from the figure it measures.
-            TableColumn::Weight => {
-                let fraction = entry.bytes as f32 / audit.heaviest.max(1) as f32;
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .justify_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .whitespace_nowrap()
-                            .text_color(cx.theme().foreground)
-                            .child(format_bytes(entry.bytes)),
-                    )
-                    .child(div().w_full().child(meter(
-                        ("weight", index),
-                        fraction,
-                        cx.theme().primary,
-                        3.,
-                    )))
-                    .into_any_element()
-            }
+            // Just the number. The list is ordered by this column, so a bar
+            // under every figure drew the sort order a second time.
+            TableColumn::Weight => div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .items_center()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .whitespace_nowrap()
+                .text_color(cx.theme().foreground)
+                .child(format_bytes(entry.bytes))
+                .into_any_element(),
             TableColumn::Sync => {
                 // The row's file against the paired Sirv folder. No pairing,
                 // no status: the column exists only when it can know.
@@ -473,9 +517,11 @@ impl TableDelegate for AuditTable {
             }
             TableColumn::Result => div()
                 .flex()
-                .items_center()
+                .when(narrow_result, |result| {
+                    result.flex_col().items_end().gap_0p5()
+                })
+                .when(!narrow_result, |result| result.items_center().gap_2())
                 .justify_end()
-                .gap_2()
                 .whitespace_nowrap()
                 .when_some(audit.results.get(&index), |slot, converted| {
                     let saved = entry.bytes.saturating_sub(*converted);
@@ -490,9 +536,9 @@ impl TableDelegate for AuditTable {
                     slot.child(
                         div()
                             .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(12.))
+                            .text_size(px(if narrow_result { 11. } else { 12. }))
                             .text_color(cx.theme().muted_foreground)
-                            .child(format_bytes(*converted)),
+                            .child(result_size_text(entry.bytes, *converted, narrow_result)),
                     )
                     .child(if grew {
                         Tag::warning().small().child("larger")
@@ -509,13 +555,87 @@ impl TableDelegate for AuditTable {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let (filter, total) = self.audit.upgrade().map_or_else(
+            || (String::new(), 0),
+            |audit| {
+                let audit = audit.read(cx);
+                (audit.filter.clone(), audit.entries.len())
+            },
+        );
         div()
-            .p_4()
+            .debug_selector(|| "filter-empty-result".into())
+            .py_8()
+            .px_4()
             .w_full()
             .flex()
+            .flex_col()
+            .items_center()
             .justify_center()
-            .text_size(px(12.))
-            .text_color(cx.theme().muted_foreground)
-            .child("Nothing matches that filter")
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(if filter.is_empty() {
+                        "No images to show".to_string()
+                    } else {
+                        format!("No images match “{filter}”")
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if filter.is_empty() {
+                        String::new()
+                    } else {
+                        format!("Clear the filter to show all {total} images.")
+                    }),
+            )
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SelectionState {
+    None,
+    Some,
+    All,
+}
+
+impl Audit {
+    pub(super) fn selection_state(&self) -> SelectionState {
+        let selected = self
+            .visible
+            .iter()
+            .filter(|index| self.selected.contains(index))
+            .count();
+        match selected {
+            0 => SelectionState::None,
+            count if count == self.visible.len() => SelectionState::All,
+            _ => SelectionState::Some,
+        }
+    }
+
+    pub(super) fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
+        if self.converting {
+            return;
+        }
+        if self.selection_state() == SelectionState::All {
+            for index in &self.visible {
+                self.selected.remove(index);
+            }
+        } else {
+            self.selected.extend(self.visible.iter().copied());
+        }
+        self.selection_changed(cx);
+    }
+}
+
+fn finding_chip(label: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .text_size(px(10.))
+        .text_color(cx.theme().yellow)
+        .child(label)
 }

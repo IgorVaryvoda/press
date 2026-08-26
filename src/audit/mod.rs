@@ -40,15 +40,14 @@ use gpui::{
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
 use gpui_component::progress::Progress;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Disableable, IconName, IndexPath, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable};
 
 // Colours come from `cx.theme()` rather than a private palette. The window is
 // built out of this library's buttons, inputs and tags, and a hand-picked set of
@@ -72,24 +71,6 @@ const ROOT_PADDING: f32 = 12.;
 const ROOT_BORDER: f32 = 2.;
 const GALLERY_PADDING: f32 = 8.;
 const GALLERY_BORDER: f32 = 1.;
-const FORMAT_OPTIONS: [Format; 3] = [Format::WebP, Format::Avif, Format::JpegXl];
-
-impl SelectItem for Format {
-    type Value = Self;
-
-    fn title(&self) -> gpui::SharedString {
-        match self {
-            Self::WebP => "WebP",
-            Self::Avif => "AVIF",
-            Self::JpegXl => "JPEG XL",
-        }
-        .into()
-    }
-
-    fn value(&self) -> &Self::Value {
-        self
-    }
-}
 /// Files encoded to project a total.
 ///
 /// Measured against a real 3.0GB folder that converts to 422.9MB, sweeping which file
@@ -228,7 +209,6 @@ pub(crate) struct Audit {
     /// when the cache reaches `THUMB_CACHE`.
     thumb_order: VecDeque<usize>,
     format: Format,
-    format_select: gpui::Entity<SelectState<Vec<Format>>>,
     quality: Quality,
     max_edge: MaxEdge,
     /// Drives the quality slider. Its own entity, because that is how the component
@@ -238,6 +218,9 @@ pub(crate) struct Audit {
     selected: HashSet<usize>,
     /// Encoded size per row, filled in as conversion progresses.
     results: HashMap<usize, u64>,
+    /// Outputs successfully written in this session, retained when settings change
+    /// so the next action can say that it will replace them.
+    completed_outputs: HashSet<(usize, Format)>,
     /// Source and output bytes for `results`. Conversion progress redraws often,
     /// so rebuilding these totals from every completed row would get slower as
     /// the job advances.
@@ -370,8 +353,8 @@ pub(crate) struct Audit {
     /// audit is a live entity: `TableState::new` asks the delegate for its row and
     /// column counts straight away, and answering that means reading the audit.
     table: Option<gpui::Entity<TableState<AuditTable>>>,
-    /// Width/result signature last handed to the component table.
-    table_signature: Option<(u32, bool)>,
+    /// Width/result/Sirv signature last handed to the component table.
+    table_signature: Option<(u32, bool, bool)>,
 }
 
 /// List order. Every column is sortable, and clicking the active one reverses it.
@@ -481,6 +464,8 @@ struct SirvJob {
 struct SirvBrowser {
     client: Arc<parking_lot::Mutex<sirv::Client>>,
     path: String,
+    /// This browser is the credential setup route, not a remote listing.
+    needs_credentials: bool,
     /// `None` while the listing is in flight.
     nodes: Option<Result<Vec<sirv::Node>, String>>,
     /// Bumped per request, so a listing for a folder the user has already left
@@ -508,6 +493,10 @@ struct SettingsPanel {
     focused: bool,
 }
 
+fn credentials_complete(client_id: &str, client_secret: &str) -> bool {
+    !client_id.trim().is_empty() && !client_secret.trim().is_empty()
+}
+
 struct Comparison {
     index: usize,
     dataset_generation: u64,
@@ -528,6 +517,9 @@ struct Comparison {
     zoom: Option<f32>,
     /// Pointer position when the current drag began, and the pan it started from.
     drag: Option<((f32, f32), (f32, f32))>,
+    /// Auxiliary editing actions stay behind one named control so they do not
+    /// compete with the conversion decision in the comparison header.
+    tools_open: bool,
 }
 
 enum LocalAiJobState {
@@ -610,6 +602,7 @@ impl Audit {
         self.thumb_queue.clear();
         self.selected.clear();
         self.clear_results();
+        self.completed_outputs.clear();
         self.failures.clear();
         self.compare = None;
         self.cached = None;
@@ -895,23 +888,6 @@ pub(crate) fn build_audit(
         )
         .detach();
 
-        let selected_format = FORMAT_OPTIONS
-            .iter()
-            .position(|option| *option == format)
-            .map(|row| IndexPath::default().row(row));
-        let format_select =
-            cx.new(|cx| SelectState::new(FORMAT_OPTIONS.to_vec(), selected_format, window, cx));
-        cx.subscribe(
-            &format_select,
-            |audit: &mut Audit, _, event: &SelectEvent<Vec<Format>>, cx| {
-                let SelectEvent::Confirm(Some(format)) = event else {
-                    return;
-                };
-                audit.apply_format(*format, cx);
-            },
-        )
-        .detach();
-
         let quality_slider = cx.new(|_| {
             SliderState::new()
                 .min(1.)
@@ -965,7 +941,6 @@ pub(crate) fn build_audit(
             thumb_inflight: 0,
             thumb_order: VecDeque::new(),
             format,
-            format_select,
             quality,
             max_edge,
             quality_slider,
@@ -997,6 +972,7 @@ pub(crate) fn build_audit(
             settings_save_pending: false,
             cached: None,
             results: HashMap::new(),
+            completed_outputs: HashSet::new(),
             converted_totals: (0, 0),
             converting: false,
             active_target_count: None,

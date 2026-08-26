@@ -5,6 +5,7 @@ use super::*;
 impl Audit {
     /// An update may replace the installed package while background reads continue,
     /// but Press must not restart in the middle of a file-writing job.
+    #[cfg(any(test, feature = "updater"))]
     pub(crate) fn automatic_update_can_restart(&self) -> bool {
         !self.converting
             && !self.local_ai_busy()
@@ -60,6 +61,38 @@ impl Audit {
         }
     }
 
+    pub(super) fn conversion_action_label(&self) -> String {
+        if self.converting {
+            return "Converting…".into();
+        }
+        let target_count = self.target_count();
+        let scope = if self.selected.is_empty() {
+            format!("all {target_count}")
+        } else {
+            format!("{target_count} selected")
+        };
+        // `write_output` atomically replaces an existing target on the supported
+        // Unix builds; std's Windows rename does not.
+        if !cfg!(windows)
+            && target_count > 0
+            && self
+                .targets()
+                .iter()
+                .all(|index| self.completed_outputs.contains(&(*index, self.format)))
+        {
+            let output = if target_count == 1 {
+                "output"
+            } else {
+                "outputs"
+            };
+            return format!(
+                "Replace {scope} {} {output}",
+                self.format.label().to_uppercase()
+            );
+        }
+        format!("Convert {scope} to {}", self.format.label().to_uppercase())
+    }
+
     pub(super) fn target_bytes(&self) -> u64 {
         if self.selected.is_empty() {
             self.visible_bytes
@@ -79,7 +112,8 @@ impl Audit {
         self.converted_totals = (0, 0);
     }
 
-    pub(super) fn record_result(&mut self, index: usize, bytes: u64) {
+    pub(super) fn record_result(&mut self, index: usize, format: Format, bytes: u64) {
+        self.completed_outputs.insert((index, format));
         let source = self.entries.get(index).map_or(0, |entry| entry.bytes);
         match self.results.insert(index, bytes) {
             Some(previous) => self.converted_totals.1 = self.converted_totals.1 - previous + bytes,
@@ -444,21 +478,26 @@ impl Audit {
         self.visible.iter().position(|index| *index == entry)
     }
 
+    pub(super) fn compare_target_from(&self, entry: usize, delta: isize) -> Option<(usize, usize)> {
+        let row = self.row_of(entry)?;
+        let next = row as isize + delta;
+        if next < 0 {
+            return None;
+        }
+        let next = next as usize;
+        Some((next, self.entry_at(next)?))
+    }
+
     /// Step to the next or previous image while the comparison is open.
     pub(super) fn step_compare(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(entry) = self.compare.as_ref().map(|comparison| comparison.index) else {
             return;
         };
         // Step through what is on screen, not through the underlying scan order.
-        let Some(row) = self.row_of(entry) else {
+        let Some((row, entry)) = self.compare_target_from(entry, delta) else {
             return;
         };
-        let next = row as isize + delta;
-        if next >= 0
-            && let Some(entry) = self.entry_at(next as usize)
-        {
-            self.cursor = next as usize;
-            self.open_compare(entry, cx);
-        }
+        self.cursor = row;
+        self.open_compare(entry, cx);
     }
 }

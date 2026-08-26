@@ -125,16 +125,18 @@ impl Audit {
                             .text_color(cx.theme().foreground)
                             .child("Sync with Sirv"),
                     )
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(browser.path.clone()),
-                    ),
+                    .when(!browser.needs_credentials, |header| {
+                        header.child(
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(browser.path.clone()),
+                        )
+                    }),
             )
             .child(body)
             .when_some(self.sirv_job.as_ref(), |panel, job| {
@@ -305,21 +307,35 @@ impl Audit {
                                 audit.close_sirv_browser(window, cx);
                             })),
                     )
-                    .child(
-                        Button::new("sirv-pair")
-                            .primary()
-                            .small()
-                            .label(if at_root {
-                                "Open a folder to pair it"
-                            } else {
-                                "Pair this folder"
-                            })
-                            .disabled(at_root || !matches!(browser.nodes, Some(Ok(_))))
-                            .on_click(cx.listener(|audit, _, window, cx| {
-                                audit.pair_sirv(cx);
-                                Self::restore_audit_focus(window, cx);
-                            })),
-                    ),
+                    .when(browser.needs_credentials, |row| {
+                        row.child(
+                            Button::new("sirv-setup")
+                                .primary()
+                                .small()
+                                .label("Set up Sirv…")
+                                .on_click(cx.listener(|audit, _, window, cx| {
+                                    audit.sirv_browser = None;
+                                    audit.open_settings(window, cx);
+                                })),
+                        )
+                    })
+                    .when(!browser.needs_credentials, |row| {
+                        row.child(
+                            Button::new("sirv-pair")
+                                .primary()
+                                .small()
+                                .label(if at_root {
+                                    "Open a folder to pair it"
+                                } else {
+                                    "Pair this folder"
+                                })
+                                .disabled(at_root || !matches!(browser.nodes, Some(Ok(_))))
+                                .on_click(cx.listener(|audit, _, window, cx| {
+                                    audit.pair_sirv(cx);
+                                    Self::restore_audit_focus(window, cx);
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -366,12 +382,15 @@ impl Render for Audit {
             let width =
                 f32::from(viewport.width) - panel::OUTPUT_PANEL_WIDTH - root_left - root_right;
             let show_result = !self.results.is_empty();
-            let signature = (width.round().max(0.) as u32, show_result);
+            let show_sync = self.sirv_counts.is_some();
+            let signature = (width.round().max(0.) as u32, show_result, show_sync);
             if self.table_signature != Some(signature) {
                 self.table_signature = Some(signature);
                 cx.defer(move |cx| {
                     table.update(cx, |table, cx| {
-                        table.delegate_mut().set_viewport_width(width, show_result);
+                        table
+                            .delegate_mut()
+                            .set_viewport_width(width, show_result, show_sync);
                         table.refresh(cx);
                         cx.notify();
                     });
@@ -428,6 +447,18 @@ impl Render for Audit {
 
         if self.entries.is_empty() {
             let empty_folder = self.root.is_dir();
+            let folder_name = self
+                .root
+                .file_name()
+                .unwrap_or(self.root.as_os_str())
+                .to_string_lossy()
+                .to_string();
+            let description = if empty_folder {
+                format!("The “{folder_name}” folder has no supported images.")
+            } else {
+                "Nothing is uploaded. Press audits first; Convert writes optimized copies and leaves originals unchanged."
+                    .into()
+            };
             return div()
                 .size_full()
                 .flex()
@@ -435,9 +466,13 @@ impl Render for Audit {
                 .justify_center()
                 .p_4()
                 .bg(cx.theme().background)
+                .border_2()
+                .border_color(if self.drag_over {
+                    cx.theme().drag_border
+                } else {
+                    gpui::transparent_black()
+                })
                 .child(
-                    // A panel rather than loose text, so the window has something in
-                    // it and the drop target has an edge you can see.
                     div()
                         .flex()
                         .flex_col()
@@ -446,13 +481,6 @@ impl Render for Audit {
                         .w(px(400.))
                         .px_4()
                         .py_6()
-                        .border_dashed()
-                        .border_1()
-                        .border_color(if self.drag_over {
-                            cx.theme().drag_border
-                        } else {
-                            cx.theme().border
-                        })
                         .child(
                             div()
                                 .font_family("SF Pro Display")
@@ -462,7 +490,7 @@ impl Render for Audit {
                                 .child(if empty_folder {
                                     "No supported images found"
                                 } else {
-                                    "Audit a folder of images"
+                                    "Audit images"
                                 }),
                         )
                         .child(
@@ -470,13 +498,7 @@ impl Render for Audit {
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
                                 .text_center()
-                                .child(if empty_folder {
-                                    "This folder has no supported images. Choose another folder \
-                                     or drop an image here."
-                                } else {
-                                    "Nothing is uploaded. Every file is read, resized and \
-                                     re-encoded on this machine."
-                                }),
+                                .child(description),
                         )
                         .child(
                             div()
@@ -506,8 +528,8 @@ impl Render for Audit {
                             div()
                                 .pt_2()
                                 .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground.opacity(0.7))
-                                .child("or drop one anywhere in this window"),
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Drop a folder or image anywhere in this window"),
                         ),
                 )
                 .on_drag_move(cx.listener(
@@ -543,40 +565,62 @@ impl Render for Audit {
                     window.focus(&handle, cx);
                 }
             });
+            let workspace = self.audit_workspace(count, window, cx);
             return div()
                 .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(cx.theme().background)
-                .on_key_down(
-                    cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
-                        match event.keystroke.key.as_str() {
-                            "escape" => {
-                                audit.close_settings(window, cx);
-                            }
-                            "tab" => {
-                                const FIELDS: usize = 2;
-                                let direction = if event.keystroke.modifiers.shift {
-                                    FIELDS - 1
-                                } else {
-                                    1
-                                };
-                                if let Some(panel) = audit.settings_panel.as_mut() {
-                                    panel.focus_ix = (panel.focus_ix + direction) % FIELDS;
-                                    let handle = [
-                                        panel.client_id.read(cx).focus_handle(cx),
-                                        panel.client_secret.read(cx).focus_handle(cx),
-                                    ][panel.focus_ix]
-                                        .clone();
-                                    window.focus(&handle, cx);
+                .relative()
+                .child(workspace)
+                .child(
+                    div()
+                        .debug_selector(|| "settings-scrim".into())
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(cx.theme().background.opacity(0.82))
+                        .on_key_down(cx.listener(
+                            |audit, event: &gpui::KeyDownEvent, window, cx| {
+                                match event.keystroke.key.as_str() {
+                                    "escape" => {
+                                        audit.close_settings(window, cx);
+                                    }
+                                    "enter" if !event.keystroke.modifiers.modified() => {
+                                        let can_save =
+                                            audit.settings_panel.as_ref().is_some_and(|panel| {
+                                                credentials_complete(
+                                                    &panel.client_id.read(cx).value(),
+                                                    &panel.client_secret.read(cx).value(),
+                                                )
+                                            });
+                                        if can_save {
+                                            cx.stop_propagation();
+                                            audit.save_sirv_settings(cx);
+                                        }
+                                    }
+                                    "tab" => {
+                                        const FIELDS: usize = 2;
+                                        let direction = if event.keystroke.modifiers.shift {
+                                            FIELDS - 1
+                                        } else {
+                                            1
+                                        };
+                                        if let Some(panel) = audit.settings_panel.as_mut() {
+                                            panel.focus_ix = (panel.focus_ix + direction) % FIELDS;
+                                            let handle = [
+                                                panel.client_id.read(cx).focus_handle(cx),
+                                                panel.client_secret.read(cx).focus_handle(cx),
+                                            ][panel.focus_ix]
+                                                .clone();
+                                            window.focus(&handle, cx);
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                            }
-                            _ => {}
-                        }
-                    }),
+                            },
+                        ))
+                        .child(view),
                 )
-                .child(view)
                 .into_any_element();
         }
 
@@ -594,21 +638,31 @@ impl Render for Audit {
                     window.focus(&browser.focus, cx);
                 }
             });
+            let focus = self.sirv_browser.as_ref().unwrap().focus.clone();
+            let workspace = self.audit_workspace(count, window, cx);
             return div()
                 .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(cx.theme().background)
-                .track_focus(&self.sirv_browser.as_ref().unwrap().focus)
-                .on_key_down(
-                    cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" {
-                            audit.close_sirv_browser(window, cx);
-                        }
-                    }),
+                .relative()
+                .child(workspace)
+                .child(
+                    div()
+                        .debug_selector(|| "sirv-scrim".into())
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(cx.theme().background.opacity(0.82))
+                        .track_focus(&focus)
+                        .on_key_down(cx.listener(
+                            |audit, event: &gpui::KeyDownEvent, window, cx| {
+                                if event.keystroke.key == "escape" {
+                                    audit.close_sirv_browser(window, cx);
+                                }
+                            },
+                        ))
+                        .child(view),
                 )
-                .child(view)
                 .into_any_element();
         }
 
@@ -635,7 +689,13 @@ impl Render for Audit {
                 .on_key_down(cx.listener(|audit, event: &gpui::KeyDownEvent, _, cx| {
                     match event.keystroke.key.as_str() {
                         "escape" => {
-                            audit.compare = None;
+                            if let Some(comparison) = audit.compare.as_mut()
+                                && comparison.tools_open
+                            {
+                                comparison.tools_open = false;
+                            } else {
+                                audit.compare = None;
+                            }
                             cx.notify();
                         }
                         "right" | "down" => audit.step_compare(1, cx),
@@ -661,6 +721,17 @@ impl Render for Audit {
                 .into_any_element();
         }
 
+        self.audit_workspace(count, window, cx)
+    }
+}
+
+impl Audit {
+    fn audit_workspace(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         div()
             .size_full()
             .flex()
@@ -764,9 +835,7 @@ impl Render for Audit {
             )
             .into_any_element()
     }
-}
 
-impl Audit {
     /// The list or the gallery, filling the space left of the panel.
     fn audit_content(
         &mut self,
@@ -835,23 +904,31 @@ impl Audit {
                 .size_full()
                 .p_2();
                 div()
-                    .relative()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .overflow_hidden()
-                    .child(gallery)
+                    .child(self.gallery_sort_bar(cx))
                     .child(
                         div()
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .bottom_0()
-                            .w(Scrollbar::width())
-                            .debug_selector(|| "gallery-scrollbar".into())
+                            .relative()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(gallery)
                             .child(
-                                Scrollbar::vertical(&self.gallery_scroll)
-                                    .id("gallery-scrollbar")
-                                    .mode(ScrollbarMode::Always)
-                                    .viewport_from_layout(),
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(Scrollbar::width())
+                                    .debug_selector(|| "gallery-scrollbar".into())
+                                    .child(
+                                        Scrollbar::vertical(&self.gallery_scroll)
+                                            .id("gallery-scrollbar")
+                                            .mode(ScrollbarMode::Always)
+                                            .viewport_from_layout(),
+                                    ),
                             ),
                     )
                     .into_any_element()

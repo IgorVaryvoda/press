@@ -92,7 +92,7 @@ impl Audit {
                         for (index, result) in batch {
                             match result {
                                 Ok(converted) => {
-                                    audit.record_result(index, converted.bytes);
+                                    audit.record_result(index, format, converted.bytes);
                                 }
                                 Err(error) => {
                                     let name = audit

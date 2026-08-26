@@ -36,6 +36,8 @@ impl Audit {
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let name = entry.map(|entry| entry.name()).unwrap_or_default();
         let local_ai_available = local_ai::available();
+        let can_previous = self.compare_target_from(comparison.index, -1).is_some();
+        let can_next = self.compare_target_from(comparison.index, 1).is_some();
         let local_status = self.local_ai_job.as_ref().filter(|job| {
             job.index == comparison.index && job.dataset_generation == comparison.dataset_generation
         });
@@ -189,12 +191,32 @@ impl Audit {
                     )
                     .child(
                         div()
+                            .debug_selector(|| "compare-divider-handle".into())
                             .absolute()
                             .top_0()
                             .left(px(divider - 1.))
                             .w(px(2.))
                             .h_full()
                             .bg(rgba(0xffffffcc)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(view_h / 2. - 18.))
+                            .left(px(divider - 16.))
+                            .w(px(32.))
+                            .h(px(36.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgba(0xffffffcc))
+                            .bg(rgba(0x000000cc))
+                            .text_size(px(16.))
+                            .text_color(gpui::white())
+                            .cursor_ew_resize()
+                            .child("↔"),
                     )
                     .child(
                         // Which side is which, pinned to the divider rather than to the
@@ -316,7 +338,7 @@ impl Audit {
                                     self.quality.label(),
                                     format_bytes(pair.converted_bytes)
                                 ))
-                                .child(compare_chip(saving_text, saving_colour, cx))
+                                .child(compare_chip(saving_text.clone(), saving_colour, cx))
                         }))
                     })
                     .child({
@@ -327,17 +349,7 @@ impl Audit {
                         Button::new("compare-convert")
                             .primary()
                             .small()
-                            .label(if self.converting {
-                                "Converting…".to_string()
-                            } else if self.selected.is_empty() {
-                                format!("Convert all to {}", self.format.label().to_uppercase())
-                            } else {
-                                format!(
-                                    "Convert {} to {}",
-                                    target_count,
-                                    self.format.label().to_uppercase()
-                                )
-                            })
+                            .label(self.conversion_action_label())
                             .disabled(self.converting || target_count == 0)
                             .on_click(cx.listener(|audit, _, _, cx| {
                                 // Back to the list, where the run's progress lives.
@@ -435,6 +447,23 @@ impl Audit {
                             }))
                     })
                     .child(
+                        div().debug_selector(|| "compare-tools".into()).child(
+                            Button::new("compare-tools")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Ellipsis)
+                                .label("Tools")
+                                .tooltip("Background removal, upscaling, and Sirv Studio")
+                                .selected(comparison.tools_open)
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    if let Some(comparison) = audit.compare.as_mut() {
+                                        comparison.tools_open = !comparison.tools_open;
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                    )
+                    .child(
                         Button::new("compare-close")
                             .small()
                             .icon(IconName::Close)
@@ -445,6 +474,9 @@ impl Audit {
                             })),
                     ),
             )
+            .when(comparison.tools_open, |stage| {
+                stage.child(self.compare_tools_panel(comparison.index, entry, cx))
+            })
             .child(
                 div()
                     .absolute()
@@ -472,11 +504,15 @@ impl Audit {
                             }
                             None => (
                                 match (comparison.pair.as_ref(), scale) {
-                                    (Some(pair), Some(scale)) => format!(
-                                        "{}×{} · {:.0}%",
-                                        pair.width,
-                                        pair.height,
-                                        scale * 100.
+                                    (Some(pair), _) if compact => format!(
+                                        "{} → {} · {}",
+                                        format_bytes(source_bytes),
+                                        format_bytes(pair.converted_bytes),
+                                        saving_text
+                                    ),
+                                    (Some(pair), Some(_)) => format!(
+                                        "{}×{} px",
+                                        pair.width, pair.height
                                     ),
                                     (None, _) if comparison.failed => {
                                         "Preview unavailable".to_string()
@@ -551,6 +587,7 @@ impl Audit {
                                     .ghost()
                                     .small()
                                     .label("Fit")
+                                    .selected(comparison.zoom.is_none())
                                     .on_click(cx.listener(|audit, _, _, cx| {
                                         if let Some(comparison) = audit.compare.as_mut() {
                                             comparison.zoom = None;
@@ -564,6 +601,7 @@ impl Audit {
                                     .ghost()
                                     .small()
                                     .label("100%")
+                                    .selected(comparison.zoom == Some(1.))
                                     .on_click(cx.listener(|audit, _, _, cx| {
                                         if let Some(comparison) = audit.compare.as_mut() {
                                             comparison.zoom = Some(1.);
@@ -578,6 +616,7 @@ impl Audit {
                                     .small()
                                     .icon(IconName::ArrowLeft)
                                     .label("Prev")
+                                    .disabled(!can_previous)
                                     .on_click(cx.listener(|audit, _, _, cx| {
                                         audit.step_compare(-1, cx);
                                     })),
@@ -588,6 +627,7 @@ impl Audit {
                                     .small()
                                     .icon(IconName::ArrowRight)
                                     .label("Next")
+                                    .disabled(!can_next)
                                     .on_click(cx.listener(|audit, _, _, cx| {
                                         audit.step_compare(1, cx);
                                     })),
@@ -598,11 +638,139 @@ impl Audit {
                                         .ml_1()
                                         .text_color(rgba(0xffffffcc))
                                         .whitespace_nowrap()
-                                        .child("Scroll to zoom · drag to pan"),
+                                        .child("Move divider to compare · scroll to zoom · drag to pan"),
                                 )
                             }),
                     ),
             )
             .into_any_element()
+    }
+
+    fn compare_tools_panel(
+        &self,
+        index: usize,
+        entry: Option<&Entry>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let busy = self.local_ai_busy();
+        let remove_running = self
+            .local_ai_job
+            .as_ref()
+            .is_some_and(|job| job.busy() && job.tool == local_ai::Tool::RemoveBackground);
+        let remove_tooltip = if busy {
+            self.local_ai_job
+                .as_ref()
+                .map(|job| job.message(&self.root))
+                .unwrap_or_else(|| "Local AI is running…".into())
+        } else {
+            "Remove the background locally with BiRefNet Lite; first use downloads the engine and model".into()
+        };
+
+        let upscale_running = self
+            .local_ai_job
+            .as_ref()
+            .is_some_and(|job| job.busy() && job.tool == local_ai::Tool::Upscale);
+        let upscale_error =
+            entry.and_then(|entry| local_ai::upscale_dimensions(entry.width, entry.height).err());
+        let upscale_tooltip = if busy {
+            self.local_ai_job
+                .as_ref()
+                .map(|job| job.message(&self.root))
+                .unwrap_or_else(|| "Local AI is running…".into())
+        } else if let Some(message) = upscale_error.as_ref() {
+            format!("{message}; use Sirv Studio for this image")
+        } else {
+            "Upscale 4× locally with Remacri ESRGAN; first use downloads the engine and model"
+                .into()
+        };
+
+        let studio = entry.map_or_else(
+            || Err("This image is no longer in the audit".to_string()),
+            |entry| self.studio_url_for(entry),
+        );
+        let (studio_url, studio_tooltip) = match studio {
+            Ok(url) => (
+                Some(url),
+                "Open this synced image in Sirv AI Studio".to_string(),
+            ),
+            Err(reason) => (None, reason),
+        };
+        let studio_disabled = studio_url.is_none();
+
+        div()
+            .id("compare-tools-panel")
+            .debug_selector(|| "compare-tools-panel".into())
+            .absolute()
+            .top(px(44.))
+            .right(px(44.))
+            .w(px(240.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(
+                div()
+                    .px_1()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("IMAGE TOOLS"),
+            )
+            .child(
+                Button::new("compare-remove-background")
+                    .small()
+                    .w_full()
+                    .label("Remove background")
+                    .tooltip(remove_tooltip)
+                    .disabled(entry.is_none() || (busy && !remove_running))
+                    .when(remove_running, |button| button.icon(IconName::Loader))
+                    .loading(remove_running)
+                    .on_click(cx.listener(move |audit, _, _, cx| {
+                        if let Some(comparison) = audit.compare.as_mut() {
+                            comparison.tools_open = false;
+                        }
+                        audit.start_local_ai(local_ai::Tool::RemoveBackground, index, cx);
+                    })),
+            )
+            .child(
+                Button::new("compare-upscale")
+                    .small()
+                    .w_full()
+                    .label("Upscale 4×")
+                    .tooltip(upscale_tooltip)
+                    .disabled(
+                        entry.is_none() || upscale_error.is_some() || (busy && !upscale_running),
+                    )
+                    .when(upscale_running, |button| button.icon(IconName::Loader))
+                    .loading(upscale_running)
+                    .on_click(cx.listener(move |audit, _, _, cx| {
+                        if let Some(comparison) = audit.compare.as_mut() {
+                            comparison.tools_open = false;
+                        }
+                        audit.start_local_ai(local_ai::Tool::Upscale, index, cx);
+                    })),
+            )
+            .child(
+                Button::new("compare-edit-studio")
+                    .small()
+                    .w_full()
+                    .icon(IconName::ExternalLink)
+                    .label("Edit in Sirv Studio")
+                    .tooltip(studio_tooltip)
+                    .disabled(studio_disabled)
+                    .on_click(cx.listener(move |audit, _, _, cx| {
+                        if let Some(comparison) = audit.compare.as_mut() {
+                            comparison.tools_open = false;
+                        }
+                        if let Some(url) = &studio_url {
+                            cx.open_url(url);
+                        }
+                    })),
+            )
     }
 }

@@ -1,0 +1,1331 @@
+#!/usr/bin/env python3
+"""Capture Press, run independent UI reviewers, and remember decisions."""
+
+# ruff: noqa: E501 -- reviewer prompts read better as prose than manual string shards.
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+UX_DIR = ROOT / "ux"
+SCENARIOS_PATH = UX_DIR / "scenarios.json"
+PRINCIPLES_PATH = UX_DIR / "principles.md"
+DECISIONS_PATH = UX_DIR / "decisions.jsonl"
+RUNS_DIR = UX_DIR / "runs"
+
+ROLES = {
+    "workflow": (
+        "Judge information architecture and task flow. Determine whether the visible object, "
+        "current scope, next action, and result are predictable without prior product knowledge."
+    ),
+    "interaction": (
+        "Judge selection, filtering, keyboard ownership, focus, loading, failure recovery, and "
+        "whether controls keep their promises across the stated interaction trace."
+    ),
+    "visual": (
+        "Judge hierarchy, density, alignment, typography, emphasis, and responsive-window "
+        "behavior. Treat visual polish as support for the task, not decoration."
+    ),
+    "simplifier": (
+        "Find competing controls, duplicated concepts, needless containers, and labels that make "
+        "the workflow harder. Prefer removal or one shared owner over added UI."
+    ),
+}
+
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "role": {"type": "string", "enum": list(ROLES)},
+        "scenario": {"type": "string"},
+        "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["blocker", "high", "medium", "low"],
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "state": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "user_cost": {"type": "string"},
+                    "minimal_fix": {"type": "string"},
+                    "acceptance_check": {"type": "string"},
+                },
+                "required": [
+                    "id",
+                    "severity",
+                    "confidence",
+                    "state",
+                    "evidence",
+                    "user_cost",
+                    "minimal_fix",
+                    "acceptance_check",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "strengths": {"type": "array", "items": {"type": "string"}},
+        "unknowns": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["role", "scenario", "summary", "findings", "strengths", "unknowns"],
+    "additionalProperties": False,
+}
+
+JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scenario": {"type": "string"},
+        "decision": {"type": "string", "enum": ["change", "hold", "blocked"]},
+        "top_problem": {"type": "string"},
+        "supporting_reviewers": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(ROLES)},
+        },
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": "string"},
+        "minimal_change": {"type": "string"},
+        "acceptance_checks": {"type": "array", "items": {"type": "string"}},
+        "rejected_findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "finding": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["finding", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [
+        "scenario",
+        "decision",
+        "top_problem",
+        "supporting_reviewers",
+        "evidence",
+        "rationale",
+        "minimal_change",
+        "acceptance_checks",
+        "rejected_findings",
+    ],
+    "additionalProperties": False,
+}
+
+PAIR_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "role": {"type": "string", "enum": list(ROLES)},
+        "scenario": {"type": "string"},
+        "preference": {"type": "string", "enum": ["A", "B", "tie"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "task_outcome": {"type": "string"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "regressions": {"type": "array", "items": {"type": "string"}},
+        "acceptance_failures": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "role",
+        "scenario",
+        "preference",
+        "confidence",
+        "task_outcome",
+        "reasons",
+        "regressions",
+        "acceptance_failures",
+    ],
+    "additionalProperties": False,
+}
+
+PAIR_JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scenario": {"type": "string"},
+        "preference": {"type": "string", "enum": ["A", "B", "tie", "blocked"]},
+        "supporting_reviewers": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(ROLES)},
+        },
+        "rationale": {"type": "string"},
+        "improvements": {"type": "array", "items": {"type": "string"}},
+        "regressions": {"type": "array", "items": {"type": "string"}},
+        "required_follow_up": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "scenario",
+        "preference",
+        "supporting_reviewers",
+        "rationale",
+        "improvements",
+        "regressions",
+        "required_follow_up",
+    ],
+    "additionalProperties": False,
+}
+
+
+class EvalError(RuntimeError):
+    pass
+
+
+def read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise EvalError(f"could not read {path}: {error}") from error
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def output(args: list[str], *, cwd: Path = ROOT) -> str:
+    try:
+        return subprocess.check_output(
+            args, cwd=cwd, text=True, stderr=subprocess.STDOUT
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "output", "")
+        raise EvalError(f"command failed: {' '.join(args)}\n{detail}") from error
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def png_dimensions(path: Path) -> tuple[int, int]:
+    data = path.read_bytes()[:24]
+    if len(data) != 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise EvalError(f"capture is not a PNG: {path}")
+    return struct.unpack(">II", data[16:24])
+
+
+def load_scenarios() -> dict[str, dict[str, Any]]:
+    raw = read_json(SCENARIOS_PATH)
+    if not isinstance(raw, dict) or not raw:
+        raise EvalError("ux/scenarios.json must contain at least one scenario")
+    for scenario_id, scenario in raw.items():
+        missing = {
+            "name",
+            "goal",
+            "success",
+            "launch",
+            "interaction_trace",
+            "sizes",
+        } - set(scenario)
+        if missing:
+            raise EvalError(
+                f"scenario {scenario_id} is missing: {', '.join(sorted(missing))}"
+            )
+        launch = scenario["launch"]
+        if launch.get("kind") not in {"none", "folder", "file"}:
+            raise EvalError(f"scenario {scenario_id} has an invalid launch kind")
+        if not isinstance(launch.get("args", []), list) or not all(
+            isinstance(argument, str) for argument in launch.get("args", [])
+        ):
+            raise EvalError(f"scenario {scenario_id} launch args must be strings")
+        if not isinstance(launch.get("copy", False), bool):
+            raise EvalError(f"scenario {scenario_id} launch copy must be true or false")
+        for action in scenario.get("actions", []):
+            if not isinstance(action, dict) or action.get("type") not in {
+                "key",
+                "click",
+                "type",
+                "wait",
+            }:
+                raise EvalError(f"scenario {scenario_id} has an invalid action")
+            kind = action["type"]
+            if kind in {"key", "type"} and not isinstance(action.get("value"), str):
+                raise EvalError(f"scenario {scenario_id} {kind} needs a string value")
+            if kind == "click" and not all(
+                isinstance(action.get(axis), int) for axis in ("x", "y")
+            ):
+                raise EvalError(f"scenario {scenario_id} click needs integer x and y")
+            if kind == "click" and action.get("relative_to", "window") not in {
+                "window",
+                "center",
+            }:
+                raise EvalError(
+                    f"scenario {scenario_id} click relative_to must be window or center"
+                )
+            if kind == "wait" and (
+                not isinstance(action.get("seconds"), (int, float))
+                or isinstance(action.get("seconds"), bool)
+                or not 0 <= action["seconds"] <= 30
+            ):
+                raise EvalError(f"scenario {scenario_id} wait needs 0 to 30 seconds")
+        if not scenario["sizes"]:
+            raise EvalError(f"scenario {scenario_id} has no capture sizes")
+    return raw
+
+
+def command_exists(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def doctor() -> None:
+    required = ["cargo", "codex", "gamescope", "gst-launch-1.0", "xdotool", "git"]
+    missing = [name for name in required if not command_exists(name)]
+    if sys.platform != "linux":
+        missing.append("Linux (the real-window capture backend is Gamescope/PipeWire)")
+    help_text = output(["codex", "exec", "--help"]) if "codex" not in missing else ""
+    flags = [
+        "--image",
+        "--sandbox",
+        "--output-schema",
+        "--output-last-message",
+        "--ephemeral",
+    ]
+    missing.extend(f"codex exec {flag}" for flag in flags if flag not in help_text)
+    load_scenarios()
+    if missing:
+        raise EvalError("missing requirements:\n- " + "\n- ".join(missing))
+    print("ux-eval doctor: ready")
+
+
+def repo_state() -> dict[str, Any]:
+    status = output(["git", "status", "--short"])
+    return {
+        "head": output(["git", "rev-parse", "HEAD"]),
+        "branch": output(["git", "branch", "--show-current"]),
+        "status": status.splitlines(),
+        "status_sha256": hashlib.sha256(status.encode()).hexdigest(),
+    }
+
+
+def within_repo(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(ROOT)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_fixture(
+    scenario: dict[str, Any], override: str | None, allow_external: bool
+) -> Path | None:
+    launch = scenario["launch"]
+    if launch["kind"] == "none" and override is None:
+        return None
+    raw = override or launch.get("path")
+    if not raw:
+        raise EvalError("this scenario requires a fixture path")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    path = path.resolve()
+    if not path.exists():
+        raise EvalError(f"fixture does not exist: {path}")
+    if launch["kind"] == "folder" and not path.is_dir():
+        raise EvalError(f"folder scenario needs a directory: {path}")
+    if launch["kind"] == "file" and not path.is_file():
+        raise EvalError(f"file scenario needs a file: {path}")
+    if not within_repo(path) and not allow_external:
+        raise EvalError(
+            "external fixtures may expose client imagery in screenshots sent to reviewers; "
+            "pass --allow-external-fixture after checking the folder"
+        )
+    return path
+
+
+def build_binary(binary: Path, skip_build: bool, build_log: Path) -> None:
+    if not skip_build:
+        result = subprocess.run(
+            ["cargo", "build", "--release", "--locked"],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        build_log.parent.mkdir(parents=True, exist_ok=True)
+        build_log.write_text(result.stdout, encoding="utf-8")
+        if result.returncode:
+            raise EvalError(f"release build failed; see {build_log}")
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise EvalError(f"Press binary is not executable: {binary}")
+
+
+def stop_process_group(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+
+def capture_frame(
+    binary: Path,
+    fixture: Path | None,
+    width: int,
+    height: int,
+    launch_args: list[str],
+    actions: list[dict[str, Any]],
+    copy_fixture: bool,
+    settle_seconds: float,
+    image_path: Path,
+    log_path: Path,
+) -> dict[str, Any]:
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="press-ux-config-") as config_dir:
+        launch_fixture = fixture
+        if fixture is not None and copy_fixture:
+            copied = Path(config_dir) / fixture.name
+            if fixture.is_dir():
+                shutil.copytree(fixture, copied)
+            else:
+                shutil.copy2(fixture, copied)
+            launch_fixture = copied
+        command = [
+            "gamescope",
+            "--backend",
+            "headless",
+            "-W",
+            str(width),
+            "-H",
+            str(height),
+            "--force-windows-fullscreen",
+            "--",
+            str(binary),
+            *launch_args,
+        ]
+        if launch_fixture is not None:
+            command.append(str(launch_fixture))
+        environment = os.environ.copy()
+        environment["XDG_CONFIG_HOME"] = config_dir
+        with log_path.open("w", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                env=environment,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+            )
+        try:
+            deadline = time.monotonic() + 20
+            node_id = display = window_id = None
+            while time.monotonic() < deadline:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                node = re.findall(r"node ID: (\d+)", text)
+                xdisplay = re.findall(r"Starting Xwayland on :(\d+)", text)
+                xid = re.findall(r"window xid:\s+(0x[0-9a-fA-F]+)", text)
+                if node:
+                    node_id = node[-1]
+                if xdisplay:
+                    display = xdisplay[-1]
+                if xid:
+                    window_id = xid[-1]
+                if (
+                    node_id
+                    and display
+                    and window_id
+                    and "Executable name: press" in text
+                ):
+                    break
+                if process.poll() is not None:
+                    raise EvalError(f"Press exited before capture; see {log_path}")
+                time.sleep(0.1)
+            else:
+                raise EvalError(f"timed out waiting for Press; see {log_path}")
+
+            time.sleep(settle_seconds)
+            display_environment = {**environment, "DISPLAY": f":{display}"}
+            for step in actions:
+                kind = step["type"]
+                if kind == "wait":
+                    time.sleep(float(step["seconds"]))
+                    continue
+                if kind == "key":
+                    command = [
+                        "xdotool",
+                        "key",
+                        "--window",
+                        window_id,
+                        step["value"],
+                    ]
+                    description = f"key {step['value']}"
+                elif kind == "type":
+                    command = [
+                        "xdotool",
+                        "type",
+                        "--window",
+                        window_id,
+                        "--delay",
+                        "20",
+                        "--",
+                        step["value"],
+                    ]
+                    description = "typed text"
+                else:
+                    if step.get("relative_to") == "center":
+                        x, y = width // 2 + step["x"], height // 2 + step["y"]
+                    else:
+                        x = step["x"] if step["x"] >= 0 else width + step["x"]
+                        y = step["y"] if step["y"] >= 0 else height + step["y"]
+                    if not 0 <= x < width or not 0 <= y < height:
+                        raise EvalError(
+                            f"click ({step['x']}, {step['y']}) is outside {width}x{height}"
+                        )
+                    command = [
+                        "xdotool",
+                        "mousemove",
+                        "--window",
+                        window_id,
+                        str(x),
+                        str(y),
+                        "click",
+                        "1",
+                    ]
+                    description = f"click ({step['x']}, {step['y']})"
+                action = subprocess.run(
+                    command,
+                    cwd=ROOT,
+                    env=display_environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+                if action.returncode:
+                    raise EvalError(
+                        f"xdotool could not perform {description}: {action.stdout.strip()}"
+                    )
+                time.sleep(0.25)
+            if actions:
+                time.sleep(0.75)
+
+            capture = subprocess.run(
+                [
+                    "gst-launch-1.0",
+                    "-q",
+                    "pipewiresrc",
+                    f"path={node_id}",
+                    "num-buffers=1",
+                    "!",
+                    "videoconvert",
+                    "!",
+                    "pngenc",
+                    "snapshot=true",
+                    "!",
+                    "filesink",
+                    f"location={image_path}",
+                ],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=15,
+                check=False,
+            )
+            if capture.returncode:
+                raise EvalError(f"PipeWire capture failed: {capture.stdout.strip()}")
+        finally:
+            stop_process_group(process)
+
+    actual_width, actual_height = png_dimensions(image_path)
+    if (actual_width, actual_height) != (width, height):
+        raise EvalError(
+            f"capture size mismatch: requested {width}x{height}, got "
+            f"{actual_width}x{actual_height}"
+        )
+    return {
+        "width": width,
+        "height": height,
+        "actions": actions,
+        "sha256": sha256(image_path),
+        "path": f"screenshots/{image_path.name}",
+    }
+
+
+def run_name(scenario_id: str) -> str:
+    timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    head = output(["git", "rev-parse", "--short=8", "HEAD"])
+    return f"{timestamp}-{head}-{scenario_id}"
+
+
+def scenario_context(manifest: dict[str, Any]) -> str:
+    scenario = manifest["scenario"]
+    sizes = "\n".join(
+        f"- {shot['label']}: {shot['width']}x{shot['height']}"
+        + (
+            " after "
+            + ", ".join(
+                (
+                    f"key {action['value']}"
+                    if action["type"] == "key"
+                    else f"click ({action['x']}, {action['y']})"
+                    if action["type"] == "click"
+                    else "typed text"
+                    if action["type"] == "type"
+                    else f"waited {action['seconds']}s"
+                )
+                for action in shot.get("actions", [])
+            )
+            if shot.get("actions")
+            else ""
+        )
+        for shot in manifest["screenshots"]
+    )
+    return f"""# {scenario['name']}
+
+Goal: {scenario['goal']}
+
+Success:
+{chr(10).join(f'- {item}' for item in scenario['success'])}
+
+Intended interaction trace:
+{chr(10).join(f'{index}. {item}' for index, item in enumerate(scenario['interaction_trace'], 1))}
+
+Captured states:
+{sizes}
+
+Review focus:
+{chr(10).join(f'- {item}' for item in scenario.get('review_focus', []))}
+"""
+
+
+def capture_scenario(args: argparse.Namespace) -> Path:
+    doctor()
+    scenarios = load_scenarios()
+    if args.scenario not in scenarios:
+        raise EvalError(
+            f"unknown scenario {args.scenario!r}; choose: {', '.join(sorted(scenarios))}"
+        )
+    scenario = scenarios[args.scenario]
+    fixture = resolve_fixture(scenario, args.fixture, args.allow_external_fixture)
+    binary = (
+        Path(args.binary).expanduser().resolve()
+        if args.binary
+        else ROOT / "target/release/press"
+    )
+    output_root = (
+        Path(args.output_root).expanduser().resolve() if args.output_root else RUNS_DIR
+    )
+    run_dir = output_root / run_name(args.scenario)
+    run_dir.mkdir(parents=True)
+    build_binary(binary, args.skip_build, run_dir / "logs/build.log")
+
+    screenshots = []
+    actions = [
+        {"type": "key", "value": str(key)} for key in scenario.get("keys", [])
+    ] + scenario.get("actions", [])
+    launch = scenario["launch"]
+    settle_seconds = float(scenario.get("settle_seconds", 2))
+    for size in scenario["sizes"]:
+        label = size["label"]
+        image_path = run_dir / "screenshots" / f"{label}.png"
+        captured = capture_frame(
+            binary,
+            fixture,
+            int(size["width"]),
+            int(size["height"]),
+            launch.get("args", []),
+            actions,
+            launch.get("copy", False),
+            settle_seconds,
+            image_path,
+            run_dir / "logs" / f"{label}.gamescope.log",
+        )
+        screenshots.append({"label": label, **captured})
+
+    state = repo_state()
+    manifest = {
+        "schema_version": 1,
+        "run_id": run_dir.name,
+        "created_at": dt.datetime.now(dt.UTC).isoformat(),
+        "scenario_id": args.scenario,
+        "scenario": scenario,
+        "fixture": str(fixture) if fixture else None,
+        "fixture_is_external": bool(fixture and not within_repo(fixture)),
+        "binary": {"path": str(binary), "sha256": sha256(binary)},
+        "repository": state,
+        "capture_backend": "gamescope-headless-pipewire",
+        "screenshots": screenshots,
+    }
+    write_json(run_dir / "manifest.json", manifest)
+    (run_dir / "context.md").write_text(scenario_context(manifest), encoding="utf-8")
+    print(run_dir)
+    return run_dir
+
+
+def decisions_context() -> list[dict[str, Any]]:
+    if not DECISIONS_PATH.exists():
+        return []
+    decisions = []
+    for number, line in enumerate(
+        DECISIONS_PATH.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if not line.strip():
+            continue
+        try:
+            decisions.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            raise EvalError(
+                f"invalid decision at {DECISIONS_PATH}:{number}: {error}"
+            ) from error
+    # ponytail: recent decisions are enough prompt context; summarize only if this ceiling is hit.
+    return decisions[-20:]
+
+
+def evidence_images(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
+    images = [run_dir / shot["path"] for shot in manifest["screenshots"]]
+    missing = [str(path) for path in images if not path.is_file()]
+    if missing:
+        raise EvalError("missing screenshots:\n- " + "\n- ".join(missing))
+    return images
+
+
+def reviewer_prompt(
+    role: str,
+    manifest: dict[str, Any],
+    principles: str,
+    decisions: list[dict[str, Any]],
+) -> str:
+    return f"""You are the {role} reviewer in an independent UI/UX evaluation panel.
+
+Your remit: {ROLES[role]}
+
+This is read-only. Do not edit files, browse the web, or inspect other reviewer outputs under
+ux/runs.
+Review the user task, not pixels in isolation. Source inspection may explain an observed issue,
+but a source-only suspicion is not evidence. Reject generic taste such as "make it modern".
+Return no more than five findings, ordered by user impact. Every finding must identify the exact
+visible state, observable evidence, user cost, smallest correction, and a runnable acceptance check.
+
+Product: Press audits and converts local image folders. Normal audit and conversion do not upload
+source files. The attached images are real Gamescope captures from the binary described below.
+
+Scenario and capture manifest:
+{json.dumps(manifest, indent=2, ensure_ascii=False)}
+
+Repository UI principles:
+{principles}
+
+Recent maintainer decisions, newest last:
+{json.dumps(decisions, indent=2, ensure_ascii=False)}
+
+The attached screenshots follow manifest.screenshots order. Evaluate minimum, default, and wide
+layouts together. If evidence is absent, name it under unknowns instead of inventing a defect.
+Set role to {role!r} and scenario to {manifest['scenario_id']!r}.
+"""
+
+
+def codex_run(
+    name: str,
+    prompt: str,
+    images: list[Path],
+    schema: dict[str, Any],
+    model: str | None,
+    work_dir: Path,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    schema_path = work_dir / f"{name}.schema.json"
+    result_path = work_dir / f"{name}.json"
+    write_json(schema_path, schema)
+    base = [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--sandbox",
+        "read-only",
+        "-C",
+        str(ROOT),
+        "--output-schema",
+        str(schema_path),
+        "--output-last-message",
+        str(result_path),
+    ]
+    if model:
+        base.extend(["--model", model])
+    for image in images:
+        base.extend(["--image", str(image)])
+    base.append("-")
+
+    logs: dict[str, str] = {}
+    for attempt in (1, 2):
+        result_path.unlink(missing_ok=True)
+        try:
+            result = subprocess.run(
+                base,
+                cwd=ROOT,
+                input=prompt,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=900,
+                check=False,
+            )
+            logs[f"attempt-{attempt}.stdout"] = result.stdout
+            logs[f"attempt-{attempt}.stderr"] = result.stderr
+            if result.returncode == 0 and result_path.is_file():
+                value = read_json(result_path)
+                return value, logs
+        except subprocess.TimeoutExpired as error:
+            logs[f"attempt-{attempt}.stdout"] = error.stdout or ""
+            logs[f"attempt-{attempt}.stderr"] = error.stderr or "timed out"
+    detail = logs.get("attempt-2.stderr", "") or logs.get("attempt-2.stdout", "")
+    raise EvalError(f"{name} failed twice\n{detail[-4000:].strip()}")
+
+
+def judge_prompt(
+    manifest: dict[str, Any], reviews: list[dict[str, Any]], principles: str
+) -> str:
+    return f"""You are the adjudicator for four independent Press UI/UX reviews.
+
+This is read-only. Do not edit files or browse the web. Select at most one underlying problem. A change verdict
+requires at least two reviewers to independently identify the same user problem with screenshot
+or interaction evidence. Do not count repeated aesthetic wording as consensus. Use hold when the
+current evidence does not justify work, and blocked when material reviewer conflict needs another
+state captured. Prefer deletion or one shared structural owner over added UI.
+
+Scenario:
+{json.dumps(manifest['scenario'], indent=2, ensure_ascii=False)}
+
+Reviews:
+{json.dumps(reviews, indent=2, ensure_ascii=False)}
+
+Repository UI principles:
+{principles}
+
+Set scenario to {manifest['scenario_id']!r}. For hold or blocked, use empty strings or arrays for
+fields that do not apply. Acceptance checks must include the real window sizes/states needed to
+prove the result and must not claim evidence that was not captured.
+"""
+
+
+def render_report(
+    manifest: dict[str, Any], reviews: list[dict[str, Any]], verdict: dict[str, Any]
+) -> str:
+    lines = [
+        f"# UX evaluation: {manifest['scenario']['name']}",
+        "",
+        f"Run: `{manifest['run_id']}`  ",
+        f"Revision: `{manifest['repository']['head']}`  ",
+        f"Decision: **{verdict['decision']}**",
+        "",
+        "## Adjudicated result",
+        "",
+        verdict["top_problem"] or "No change justified by the current evidence.",
+        "",
+        verdict["rationale"],
+    ]
+    if verdict["minimal_change"]:
+        lines.extend(["", "Proposed minimum change:", "", verdict["minimal_change"]])
+    if verdict["acceptance_checks"]:
+        lines.extend(
+            ["", "Acceptance checks:", ""]
+            + [f"- {check}" for check in verdict["acceptance_checks"]]
+        )
+    lines.extend(["", "## Independent reviews", ""])
+    for review in reviews:
+        lines.extend([f"### {review['role'].title()}", "", review["summary"], ""])
+        for finding in review["findings"]:
+            lines.append(
+                f"- **{finding['severity']} · {finding['id']}** — {finding['user_cost']} "
+                f"Evidence: {finding['evidence']}"
+            )
+        if not review["findings"]:
+            lines.append("- No evidence-backed finding")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def review_run(
+    run_dir: Path, review_model: str | None, judge_model: str | None
+) -> Path:
+    run_dir = run_dir.resolve()
+    manifest = read_json(run_dir / "manifest.json")
+    images = evidence_images(run_dir, manifest)
+    principles = PRINCIPLES_PATH.read_text(encoding="utf-8")
+    decisions = decisions_context()
+
+    with tempfile.TemporaryDirectory(prefix="press-ux-review-") as temporary:
+        isolated = Path(temporary)
+        completed: dict[str, tuple[dict[str, Any], dict[str, str]]] = {}
+        saved_reviews = {role: run_dir / "reviews" / f"{role}.json" for role in ROLES}
+        if all(path.is_file() for path in saved_reviews.values()):
+            reviews = [read_json(saved_reviews[role]) for role in ROLES]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(ROLES)
+            ) as executor:
+                pending = {
+                    executor.submit(
+                        codex_run,
+                        role,
+                        reviewer_prompt(role, manifest, principles, decisions),
+                        images,
+                        REVIEW_SCHEMA,
+                        review_model,
+                        isolated,
+                    ): role
+                    for role in ROLES
+                }
+                for future in concurrent.futures.as_completed(pending):
+                    role = pending[future]
+                    review, logs = future.result()
+                    if review.get("role") != role:
+                        raise EvalError(
+                            f"{role} reviewer returned role {review.get('role')!r}"
+                        )
+                    completed[role] = (review, logs)
+            reviews = [completed[role][0] for role in ROLES]
+            for role, (review, logs) in completed.items():
+                write_json(saved_reviews[role], review)
+                for name, text in logs.items():
+                    path = run_dir / "logs" / f"{role}.{name}"
+                    path.write_text(text, encoding="utf-8")
+
+        verdict, judge_logs = codex_run(
+            "judge",
+            judge_prompt(manifest, reviews, principles),
+            images,
+            JUDGE_SCHEMA,
+            judge_model,
+            isolated,
+        )
+
+    write_json(run_dir / "verdict.json", verdict)
+    for name, text in judge_logs.items():
+        (run_dir / "logs" / f"judge.{name}").write_text(text, encoding="utf-8")
+    (run_dir / "report.md").write_text(
+        render_report(manifest, reviews, verdict), encoding="utf-8"
+    )
+    print(run_dir / "report.md")
+    return run_dir
+
+
+def pair_reviewer_prompt(
+    role: str,
+    scenario_id: str,
+    scenario: dict[str, Any],
+    labels: list[str],
+    principles: str,
+    decisions: list[dict[str, Any]],
+) -> str:
+    return f"""You are the {role} reviewer in a blind Press UI/UX comparison.
+
+Your remit: {ROLES[role]}
+
+This is read-only. Do not edit files, browse the web, inspect ux/runs, or try to determine chronology. The images
+are attached as A/{', A/'.join(labels)}, then B/{', B/'.join(labels)}. Judge which version better
+supports the stated task across all matching sizes. Prefer tie when evidence is immaterial. Name
+regressions explicitly; visual novelty is not improvement.
+
+Scenario ID: {scenario_id}
+Scenario:
+{json.dumps(scenario, indent=2, ensure_ascii=False)}
+
+Repository UI principles:
+{principles}
+
+Recent maintainer decisions:
+{json.dumps(decisions, indent=2, ensure_ascii=False)}
+
+Set role to {role!r} and scenario to {scenario_id!r}.
+"""
+
+
+def pair_judge_prompt(
+    scenario_id: str,
+    scenario: dict[str, Any],
+    reviews: list[dict[str, Any]],
+    principles: str,
+) -> str:
+    return f"""Adjudicate four blind Press UI/UX comparisons. This is read-only. Do not browse the web.
+
+Prefer A or B only when at least two independent reviewers support it with task evidence and no
+unresolved high-impact regression defeats the gain. Use tie for no material improvement and
+blocked when the captured states cannot decide. Do not infer which version is newer.
+
+Scenario:
+{json.dumps(scenario, indent=2, ensure_ascii=False)}
+
+Reviews:
+{json.dumps(reviews, indent=2, ensure_ascii=False)}
+
+Repository UI principles:
+{principles}
+
+Set scenario to {scenario_id!r}.
+"""
+
+
+def save_comparison(
+    comparison_dir: Path, scenario: dict[str, Any], result: dict[str, Any]
+) -> Path:
+    write_json(comparison_dir / "comparison.json", result)
+    verdict = result["verdict"]
+    report = [
+        f"# Blind UX comparison: {scenario['name']}",
+        "",
+        f"Result: **{result['winner']}**",
+        "",
+        verdict["rationale"],
+        "",
+        "Improvements:",
+        *([f"- {item}" for item in verdict["improvements"]] or ["- None found"]),
+        "",
+        "Regressions:",
+        *([f"- {item}" for item in verdict["regressions"]] or ["- None found"]),
+        "",
+    ]
+    report_path = comparison_dir / "report.md"
+    report_path.write_text("\n".join(report), encoding="utf-8")
+    print(report_path)
+    return comparison_dir
+
+
+def compare_runs(
+    before_dir: Path,
+    after_dir: Path,
+    review_model: str | None,
+    judge_model: str | None,
+) -> Path:
+    before_dir, after_dir = before_dir.resolve(), after_dir.resolve()
+    before = read_json(before_dir / "manifest.json")
+    after = read_json(after_dir / "manifest.json")
+    if before["scenario_id"] != after["scenario_id"]:
+        raise EvalError("comparison runs must use the same scenario")
+    before_shots = {
+        shot["label"]: before_dir / shot["path"] for shot in before["screenshots"]
+    }
+    after_shots = {
+        shot["label"]: after_dir / shot["path"] for shot in after["screenshots"]
+    }
+    if before_shots.keys() != after_shots.keys():
+        raise EvalError("comparison runs must have matching capture labels")
+    labels = list(before_shots)
+    comparison_dir = RUNS_DIR / run_name(f"compare-{before['scenario_id']}")
+    comparison_dir.mkdir(parents=True)
+    if all(
+        sha256(before_shots[label]) == sha256(after_shots[label]) for label in labels
+    ):
+        verdict = {
+            "scenario": before["scenario_id"],
+            "preference": "tie",
+            "supporting_reviewers": [],
+            "rationale": "Every paired screenshot is byte-identical; no model judgment is needed.",
+            "improvements": [],
+            "regressions": [],
+            "required_follow_up": [],
+        }
+        return save_comparison(
+            comparison_dir,
+            before["scenario"],
+            {
+                "schema_version": 1,
+                "created_at": dt.datetime.now(dt.UTC).isoformat(),
+                "scenario_id": before["scenario_id"],
+                "before_run": before["run_id"],
+                "after_run": after["run_id"],
+                "blind_mapping": {"A": "before", "B": "after"},
+                "winner": "tie",
+                "verdict": verdict,
+                "reviews": [],
+            },
+        )
+    swapped = bool(secrets.randbits(1))
+    a_shots, b_shots = (
+        (after_shots, before_shots) if swapped else (before_shots, after_shots)
+    )
+    principles = PRINCIPLES_PATH.read_text(encoding="utf-8")
+
+    with tempfile.TemporaryDirectory(prefix="press-ux-pair-") as temporary:
+        isolated = Path(temporary)
+        images = []
+        for side, shots in (("A", a_shots), ("B", b_shots)):
+            for label in labels:
+                generic = isolated / f"{side}-{label}.png"
+                shutil.copy2(shots[label], generic)
+                images.append(generic)
+        completed: dict[str, tuple[dict[str, Any], dict[str, str]]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(ROLES)) as executor:
+            pending = {
+                executor.submit(
+                    codex_run,
+                    f"pair-{role}",
+                    pair_reviewer_prompt(
+                        role,
+                        before["scenario_id"],
+                        before["scenario"],
+                        labels,
+                        principles,
+                        decisions_context(),
+                    ),
+                    images,
+                    PAIR_REVIEW_SCHEMA,
+                    review_model,
+                    isolated,
+                ): role
+                for role in ROLES
+            }
+            for future in concurrent.futures.as_completed(pending):
+                role = pending[future]
+                review, logs = future.result()
+                if review.get("role") != role:
+                    raise EvalError(
+                        f"{role} pair reviewer returned role {review.get('role')!r}"
+                    )
+                completed[role] = (review, logs)
+        reviews = [completed[role][0] for role in ROLES]
+        verdict, judge_logs = codex_run(
+            "pair-judge",
+            pair_judge_prompt(
+                before["scenario_id"], before["scenario"], reviews, principles
+            ),
+            images,
+            PAIR_JUDGE_SCHEMA,
+            judge_model,
+            isolated,
+        )
+
+    preference = verdict["preference"]
+    if preference in {"tie", "blocked"}:
+        winner = preference
+    elif (preference == "A") != swapped:
+        winner = "before"
+    else:
+        winner = "after"
+    result = {
+        "schema_version": 1,
+        "created_at": dt.datetime.now(dt.UTC).isoformat(),
+        "scenario_id": before["scenario_id"],
+        "before_run": before["run_id"],
+        "after_run": after["run_id"],
+        "blind_mapping": {
+            "A": "after" if swapped else "before",
+            "B": "before" if swapped else "after",
+        },
+        "winner": winner,
+        "verdict": verdict,
+        "reviews": reviews,
+    }
+    for role, (_, logs) in completed.items():
+        for name, text in logs.items():
+            (comparison_dir / "logs" / f"{role}.{name}").parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            (comparison_dir / "logs" / f"{role}.{name}").write_text(
+                text, encoding="utf-8"
+            )
+    for name, text in judge_logs.items():
+        (comparison_dir / "logs" / f"judge.{name}").write_text(text, encoding="utf-8")
+    return save_comparison(comparison_dir, before["scenario"], result)
+
+
+def append_decision(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = (
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode()
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        os.write(descriptor, line)
+        os.fsync(descriptor)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def decide(artifact: Path, disposition: str, reason: str) -> None:
+    artifact = artifact.resolve()
+    verdict_path = artifact / "verdict.json"
+    comparison_path = artifact / "comparison.json"
+    if verdict_path.is_file():
+        value = read_json(verdict_path)
+        summary = {
+            "kind": "baseline",
+            "scenario": value["scenario"],
+            "agent_verdict": value["decision"],
+            "top_problem": value["top_problem"],
+            "minimal_change": value["minimal_change"],
+        }
+    elif comparison_path.is_file():
+        value = read_json(comparison_path)
+        summary = {
+            "kind": "comparison",
+            "scenario": value["scenario_id"],
+            "agent_verdict": value["winner"],
+            "rationale": value["verdict"]["rationale"],
+        }
+    else:
+        raise EvalError("artifact must contain verdict.json or comparison.json")
+    try:
+        artifact_name = str(artifact.relative_to(ROOT))
+    except ValueError:
+        artifact_name = str(artifact)
+    append_decision(
+        DECISIONS_PATH,
+        {
+            "recorded_at": dt.datetime.now(dt.UTC).isoformat(),
+            "artifact": artifact_name,
+            "disposition": disposition,
+            "reason": reason,
+            **summary,
+        },
+    )
+    print(DECISIONS_PATH)
+
+
+def self_test() -> None:
+    scenarios = load_scenarios()
+    assert {
+        "empty-start",
+        "audit-core",
+        "comparison-core",
+        "gallery-core",
+        "filter-no-results",
+        "filter-clear-keyboard",
+        "sirv-settings",
+        "sirv-settings-complete",
+        "sirv-settings-save-keyboard",
+        "sirv-missing-credentials",
+        "sirv-setup-from-error",
+        "conversion-result",
+        "conversion-retune",
+    } <= set(scenarios)
+    with tempfile.TemporaryDirectory(prefix="press-ux-self-test-") as temporary:
+        temp = Path(temporary)
+        png = temp / "frame.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + struct.pack(">II", 10, 20)
+        )
+        assert png_dimensions(png) == (10, 20)
+        ledger = temp / "decisions.jsonl"
+        append_decision(ledger, {"disposition": "accept", "reason": "test"})
+        assert json.loads(ledger.read_text()) == {
+            "disposition": "accept",
+            "reason": "test",
+        }
+        for schema in (
+            REVIEW_SCHEMA,
+            JUDGE_SCHEMA,
+            PAIR_REVIEW_SCHEMA,
+            PAIR_JUDGE_SCHEMA,
+        ):
+            assert schema["additionalProperties"] is False
+    print("ux-eval self-test: passed")
+
+
+def add_capture_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("scenario")
+    parser.add_argument("--fixture", help="override the scenario fixture")
+    parser.add_argument("--allow-external-fixture", action="store_true")
+    parser.add_argument(
+        "--binary", help="Press binary; defaults to target/release/press"
+    )
+    parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument(
+        "--output-root", help="capture destination; defaults to ux/runs"
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("doctor", help="check capture and reviewer requirements")
+    subparsers.add_parser("self-test", help="run the dependency-free contract check")
+
+    capture_parser = subparsers.add_parser("capture", help="capture one scenario")
+    add_capture_arguments(capture_parser)
+    run_parser = subparsers.add_parser(
+        "run", help="capture, review, and adjudicate one scenario"
+    )
+    add_capture_arguments(run_parser)
+    run_parser.add_argument(
+        "--review-model", default=os.getenv("PRESS_UX_REVIEW_MODEL")
+    )
+    run_parser.add_argument("--judge-model", default=os.getenv("PRESS_UX_JUDGE_MODEL"))
+
+    review_parser = subparsers.add_parser("review", help="review an existing capture")
+    review_parser.add_argument("run_dir", type=Path)
+    review_parser.add_argument(
+        "--review-model", default=os.getenv("PRESS_UX_REVIEW_MODEL")
+    )
+    review_parser.add_argument(
+        "--judge-model", default=os.getenv("PRESS_UX_JUDGE_MODEL")
+    )
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="blindly compare two scenario runs"
+    )
+    compare_parser.add_argument("before_dir", type=Path)
+    compare_parser.add_argument("after_dir", type=Path)
+    compare_parser.add_argument(
+        "--review-model", default=os.getenv("PRESS_UX_REVIEW_MODEL")
+    )
+    compare_parser.add_argument(
+        "--judge-model", default=os.getenv("PRESS_UX_JUDGE_MODEL")
+    )
+
+    decide_parser = subparsers.add_parser("decide", help="append a maintainer decision")
+    decide_parser.add_argument("artifact", type=Path)
+    decide_parser.add_argument("disposition", choices=["accept", "reject"])
+    decide_parser.add_argument("--reason", required=True)
+
+    args = parser.parse_args()
+    if args.command == "doctor":
+        doctor()
+    elif args.command == "self-test":
+        self_test()
+    elif args.command == "capture":
+        capture_scenario(args)
+    elif args.command == "run":
+        run_dir = capture_scenario(args)
+        review_run(run_dir, args.review_model, args.judge_model)
+    elif args.command == "review":
+        review_run(args.run_dir, args.review_model, args.judge_model)
+    elif args.command == "compare":
+        compare_runs(
+            args.before_dir, args.after_dir, args.review_model, args.judge_model
+        )
+    elif args.command == "decide":
+        decide(args.artifact, args.disposition, args.reason)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (EvalError, OSError, subprocess.SubprocessError) as error:
+        print(f"ux-eval: error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

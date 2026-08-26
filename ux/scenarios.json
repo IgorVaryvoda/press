@@ -1,0 +1,459 @@
+{
+  "empty-start": {
+    "name": "Start a local audit",
+    "goal": "Understand what Press does and begin with either a folder or one image without wondering whether files will be uploaded.",
+    "success": [
+      "The primary starting action is obvious.",
+      "The local-only privacy promise is clear before choosing a file.",
+      "Keyboard and pointer users can reach both supported starting paths."
+    ],
+    "launch": { "kind": "none" },
+    "interaction_trace": [
+      "Launch Press with no path.",
+      "Choose Open folder, Open image, or drop a supported path."
+    ],
+    "review_focus": [
+      "Primary versus secondary start action",
+      "Drop-target clarity",
+      "Minimum-window behavior"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "empty-folder": {
+    "name": "Recover from an empty folder",
+    "goal": "Understand why the chosen folder produced no audit and continue with another folder or one image.",
+    "success": [
+      "The state is clearly different from first launch and scan failure.",
+      "The reason and next actions are visible without opening documentation.",
+      "Folder, image, and drop recovery paths remain available."
+    ],
+    "launch": { "kind": "folder", "path": "ux/fixtures/empty" },
+    "interaction_trace": [
+      "Open a folder containing no supported images.",
+      "Read the reason.",
+      "Choose another folder, one image, or drop a supported path."
+    ],
+    "review_focus": [
+      "First launch versus empty-folder distinction",
+      "Recovery action hierarchy",
+      "Minimum-window behavior"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "audit-core": {
+    "name": "Find and prepare costly images",
+    "goal": "Identify which images deserve optimization, understand the conversion target, and commit the correct visible or selected scope.",
+    "success": [
+      "The worst optimization candidates are recognizable without reading documentation.",
+      "Filter and selection scope cannot contradict the Convert action.",
+      "Output presets, fine tuning, projected result, and commitment read as one decision.",
+      "The primary image list remains usable at the minimum supported width."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "interaction_trace": [
+      "Open a folder and inspect the default ordering.",
+      "Identify an expensive image and optionally filter or select it.",
+      "Choose an output preset or fine-tune format, quality, and maximum size.",
+      "Read the estimate and convert the visible or selected target."
+    ],
+    "review_focus": [
+      "Relationship between findings, list, output settings, estimate, and commit action",
+      "Truthful all-versus-selected scope",
+      "Hierarchy and density across window sizes"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "keyboard-selection": {
+    "name": "Select an audit row by keyboard",
+    "goal": "Move through the audit, select one image, and understand that conversion now targets the selection.",
+    "success": [
+      "The focused row and selected row are distinguishable.",
+      "The output panel immediately names the selected scope.",
+      "The conversion command promises the same scope."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "keys": ["Down", "space"],
+    "interaction_trace": [
+      "Open a folder.",
+      "Press Down to move the cursor.",
+      "Press Space to select the row.",
+      "Read the updated output scope."
+    ],
+    "review_focus": [
+      "Cursor versus selection state",
+      "Keyboard feedback",
+      "Selected conversion scope"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "gallery-core": {
+    "name": "Scan audit candidates in the gallery",
+    "goal": "Recognize image candidates visually, compare their optimization cost, and retain the same selection and conversion model as the list.",
+    "success": [
+      "Images remain scannable without hiding filenames, dimensions, size, or findings.",
+      "The gallery and output panel read as one workflow.",
+      "Selection, focus, and conversion scope stay predictable across widths."
+    ],
+    "launch": { "kind": "folder", "path": "docs", "args": ["--grid"] },
+    "interaction_trace": [
+      "Open a folder in gallery view.",
+      "Scan thumbnails and file facts for costly candidates.",
+      "Select candidates or open one for comparison.",
+      "Read and commit the matching output scope."
+    ],
+    "review_focus": [
+      "Thumbnail and metadata hierarchy",
+      "Gallery density across window sizes",
+      "Selection and output-panel relationship"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "filter-no-results": {
+    "name": "Recover from a filter with no matches",
+    "goal": "Understand that the folder is intact, clear the active filter, and return to the audit without accidentally converting hidden files.",
+    "success": [
+      "The empty list is attributed to the active filter.",
+      "Clearing the filter is obvious and keyboard-accessible.",
+      "The output scope does not imply that hidden folder contents will be converted."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "click", "x": 120, "y": 80 },
+      { "type": "type", "value": "no-such-image" }
+    ],
+    "interaction_trace": [
+      "Open a folder.",
+      "Type a filename filter that matches nothing.",
+      "Read the empty result and conversion scope.",
+      "Clear the filter to restore the audit."
+    ],
+    "review_focus": [
+      "Cause and recovery for zero results",
+      "Filter ownership and focus",
+      "Truthful zero-target conversion state"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "filter-clear-keyboard": {
+    "name": "Clear a filter by keyboard",
+    "goal": "Reach the named filter recovery action by keyboard, activate it, and return to the unchanged audit.",
+    "success": [
+      "Tab moves from the populated filter to its Clear action.",
+      "Enter activates Clear and restores every matching row.",
+      "Output settings remain unchanged and conversion returns to the full visible scope."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "click", "x": 100, "y": 80 },
+      { "type": "type", "value": "no-such-image" },
+      { "type": "key", "value": "Tab" },
+      { "type": "key", "value": "Return" }
+    ],
+    "interaction_trace": [
+      "Focus the filename filter and type a query with no matches.",
+      "Press Tab to focus Clear.",
+      "Press Enter to clear the query.",
+      "Verify the audit and full conversion scope return."
+    ],
+    "review_focus": [
+      "Keyboard recovery result",
+      "Restored rows and scope",
+      "Unchanged output settings"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "sirv-settings": {
+    "name": "Configure Sirv credentials",
+    "goal": "Understand which credentials are required, where they remain, how to save them, and how to leave safely.",
+    "success": [
+      "The form names the account context and both required fields.",
+      "The local-storage promise and secret-field behavior are clear.",
+      "Save, close, Tab, Shift-Tab, and Escape have predictable ownership."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "key", "value": "ctrl+comma" }
+    ],
+    "interaction_trace": [
+      "Open Settings from the audit or press Control-comma.",
+      "Enter a Client ID and Client secret.",
+      "Save credentials or close without saving."
+    ],
+    "review_focus": [
+      "Credential purpose and privacy",
+      "Form hierarchy and focus",
+      "Save and exit actions"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "sirv-settings-complete": {
+    "name": "Complete the Sirv credential form",
+    "goal": "Enter both required credentials by keyboard and make Save available without submitting test values.",
+    "success": [
+      "Typing begins in Client ID after the panel opens.",
+      "Tab moves to Client secret and both values remain visible or safely masked.",
+      "Save credentials becomes enabled only after both fields contain values."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "key", "value": "ctrl+comma" },
+      { "type": "type", "value": "test-client" },
+      { "type": "key", "value": "Tab" },
+      { "type": "type", "value": "test-secret" }
+    ],
+    "interaction_trace": [
+      "Open Settings by keyboard.",
+      "Type a Client ID.",
+      "Press Tab and type a Client secret.",
+      "Verify Save credentials becomes available without activating it."
+    ],
+    "review_focus": [
+      "Field focus order",
+      "Secret masking",
+      "Save availability after complete input"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "sirv-settings-save-keyboard": {
+    "name": "Save Sirv credentials by keyboard",
+    "goal": "Complete the credential form and submit it without leaving the keyboard.",
+    "success": [
+      "Enter submits a complete form from the Client secret field.",
+      "A visible Saved confirmation appears without exposing the secret.",
+      "Focus and the safe Escape route remain predictable after saving."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "key", "value": "ctrl+comma" },
+      { "type": "type", "value": "test-client" },
+      { "type": "key", "value": "Tab" },
+      { "type": "type", "value": "test-secret" },
+      { "type": "key", "value": "Return" }
+    ],
+    "interaction_trace": [
+      "Open Settings and type both credentials.",
+      "Press Enter from Client secret.",
+      "Verify the in-place save result without revealing the secret."
+    ],
+    "review_focus": [
+      "Keyboard form submission",
+      "Saved-state feedback",
+      "Secret masking and focus"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "sirv-missing-credentials": {
+    "name": "Recover from missing Sirv credentials",
+    "goal": "Understand why Sirv browsing cannot start and reach the credential setup without editing files by hand.",
+    "success": [
+      "The failure clearly names missing credentials rather than a remote outage.",
+      "A visible action leads to the in-app credential form.",
+      "Closing or pressing Escape returns to the unchanged local audit."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "click", "x": 250, "y": 23 }
+    ],
+    "interaction_trace": [
+      "Open Sync with Sirv without saved credentials.",
+      "Read the cause.",
+      "Open credential settings or close and return to the audit."
+    ],
+    "review_focus": [
+      "Failure specificity",
+      "In-app recovery path",
+      "Safe return to the local workflow"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "sirv-setup-from-error": {
+    "name": "Open Sirv setup from its error",
+    "goal": "Move from the missing-credentials explanation into the in-app credential form without leaving the workflow.",
+    "success": [
+      "The setup action opens the existing Sirv account form.",
+      "Initial focus lands in Client ID and Save remains disabled while fields are empty.",
+      "The form keeps its purpose, required-field, privacy, and secret-masking guidance."
+    ],
+    "launch": { "kind": "folder", "path": "docs" },
+    "actions": [
+      { "type": "click", "x": 250, "y": 23 },
+      { "type": "click", "relative_to": "center", "x": -92, "y": 40 }
+    ],
+    "interaction_trace": [
+      "Open Sync with Sirv without saved credentials.",
+      "Activate Set up Sirv.",
+      "Verify the credential form opens ready for input."
+    ],
+    "review_focus": [
+      "Recovery action result",
+      "Focus continuity",
+      "Credential form state"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "conversion-result": {
+    "name": "Understand a completed conversion",
+    "goal": "Confirm what completed, judge the actual size result, locate the output, and know whether another conversion would replace it.",
+    "success": [
+      "Completion is distinguishable from an estimate and names files, before/after bytes, and savings or growth.",
+      "The output-folder action is easy to find.",
+      "The original folder remains clearly untouched and the next conversion action is unambiguous."
+    ],
+    "launch": { "kind": "folder", "path": "docs", "copy": true },
+    "actions": [
+      { "type": "click", "x": -132, "y": 594 },
+      { "type": "wait", "seconds": 3 }
+    ],
+    "interaction_trace": [
+      "Open a folder and accept the current output settings.",
+      "Convert all visible files.",
+      "Read the completed result and inspect per-file outcomes.",
+      "Show the output folder or adjust settings and convert again."
+    ],
+    "review_focus": [
+      "Estimate versus actual result",
+      "Completion and failure reporting",
+      "Output discovery and repeat-conversion intent"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "conversion-retune": {
+    "name": "Retune after a completed conversion",
+    "goal": "Change quality after conversion and understand that the next run replaces the matching generated outputs with the new setting.",
+    "success": [
+      "Changing quality returns the summary to an estimate without forgetting that outputs exist.",
+      "The primary action still predicts replacement and names the affected output count and format.",
+      "The output-folder action stays available while considering the new estimate."
+    ],
+    "launch": { "kind": "folder", "path": "docs", "copy": true },
+    "actions": [
+      { "type": "click", "x": -132, "y": 594 },
+      { "type": "wait", "seconds": 3 },
+      { "type": "click", "x": -120, "y": 400 },
+      { "type": "wait", "seconds": 2 }
+    ],
+    "interaction_trace": [
+      "Convert all visible files.",
+      "Change the quality after completion.",
+      "Read the new estimate and the repeat-conversion action."
+    ],
+    "review_focus": [
+      "Estimated versus completed-result transition",
+      "Repeat action truthfulness after settings change",
+      "Output discovery"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "comparison-core": {
+    "name": "Judge one conversion preview",
+    "goal": "Compare real original and encoded pixels, understand the size tradeoff, navigate adjacent images, and return to the audit.",
+    "success": [
+      "Original and output sides are identifiable without covering important pixels.",
+      "Fit, 100 percent, divider, pan, and navigation controls are discoverable but secondary.",
+      "The current output format and size result remain clear.",
+      "Failure and loading states cannot be confused with a finished preview."
+    ],
+    "launch": { "kind": "file", "path": "assets/app-icon.png" },
+    "interaction_trace": [
+      "Open an image or press Enter on an audit row.",
+      "Inspect the fitted split view and drag the divider.",
+      "Use 100 percent or zoom and pan when needed.",
+      "Move to the previous or next image, then close the comparison."
+    ],
+    "review_focus": [
+      "Image-first hierarchy",
+      "Original/output identity and conversion result",
+      "Navigation and close affordances",
+      "Minimum-window control survival"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  },
+  "comparison-tools": {
+    "name": "Choose an auxiliary image tool",
+    "goal": "Find background removal, local upscaling, or Sirv Studio without confusing those actions with conversion.",
+    "success": [
+      "Convert remains the only primary action in the comparison header.",
+      "One clearly named Tools action reveals all auxiliary image actions.",
+      "The disclosed actions remain readable and unclipped at every supported width."
+    ],
+    "launch": { "kind": "file", "path": "assets/app-icon.png" },
+    "actions": [
+      { "type": "click", "x": -78, "y": 20 }
+    ],
+    "interaction_trace": [
+      "Open an image comparison.",
+      "Activate Tools.",
+      "Choose a local image action or Sirv Studio, or dismiss the disclosure."
+    ],
+    "review_focus": [
+      "Primary conversion hierarchy",
+      "Auxiliary action discoverability",
+      "Minimum-window disclosure layout"
+    ],
+    "sizes": [
+      { "label": "minimum", "width": 760, "height": 640 },
+      { "label": "default", "width": 1100, "height": 720 },
+      { "label": "wide", "width": 1440, "height": 900 }
+    ]
+  }
+}

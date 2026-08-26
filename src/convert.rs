@@ -102,7 +102,7 @@ impl MaxEdge {
 }
 
 /// The container to write.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Format {
     WebP,
     Avif,

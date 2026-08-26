@@ -22,11 +22,9 @@ impl Audit {
                     .text_color(cx.theme().muted_foreground)
                     .child(label),
             )
-            .child(
-                Input::new(&input)
-                    .small()
-                    .when(secret, |field| field.mask_toggle()),
-            )
+            .child(Input::new(&input).small().when(secret, |field| {
+                field.content_type(InputContentType::Password).mask_toggle()
+            }))
     }
 
     /// A section heading plus its status line, if one has anything to say.
@@ -45,6 +43,10 @@ impl Audit {
         let Some(panel) = self.settings_panel.as_ref() else {
             return div().into_any_element();
         };
+        let can_save = credentials_complete(
+            &panel.client_id.read(cx).value(),
+            &panel.client_secret.read(cx).value(),
+        );
 
         div()
             .w(px(480.))
@@ -71,9 +73,12 @@ impl Audit {
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Credentials stay on this computer."),
+                            .text_size(px(12.))
+                            .text_color(cx.theme().foreground)
+                            .child(
+                                "Used only for Sirv sync. Both fields are required. Credentials \
+                                 stay on this computer.",
+                            ),
                     ),
             )
             .child(Self::settings_row(
@@ -112,6 +117,7 @@ impl Audit {
                                     .primary()
                                     .small()
                                     .label("Save credentials")
+                                    .disabled(!can_save)
                                     .on_click(
                                         cx.listener(|audit, _, _, cx| audit.save_sirv_settings(cx)),
                                     ),

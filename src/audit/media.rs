@@ -70,6 +70,7 @@ impl Audit {
             // Open fitted: you cannot judge a crop of an image you have not seen.
             zoom: None,
             drag: None,
+            tools_open: false,
         });
         cx.notify();
 
