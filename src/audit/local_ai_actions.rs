@@ -173,7 +173,12 @@ impl Audit {
                 match result {
                     Ok(path) => {
                         audit.existing_output = audit.existing_output.saturating_add(1);
-                        audit.local_ai_job.as_mut().unwrap().state = LocalAiJobState::Done(path);
+                        audit.local_ai_job.as_mut().unwrap().state =
+                            LocalAiJobState::Done(path.clone());
+                        // A model that ran for thirty seconds and answered with a
+                        // line of green text was asking you to go and find its
+                        // work. Open it instead.
+                        audit.open_written(index, path, Some(tool), cx);
                     }
                     Err(message) => {
                         audit.local_ai_job.as_mut().unwrap().state =

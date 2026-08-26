@@ -532,6 +532,45 @@ impl Audit {
     }
 
     /// Step to the next or previous image while the comparison is open.
+    /// Throw away a local model's output. It is one file this app wrote in its
+    /// own output folder, named by it, and the view that offers this is showing
+    /// you the file — so the delete is the answer to a question you just asked,
+    /// not a background sweep.
+    pub(super) fn discard_written(&mut self, cx: &mut Context<Self>) {
+        let Some(written) = self
+            .compare
+            .as_ref()
+            .filter(|comparison| comparison.produced_by.is_some())
+            .and_then(|comparison| comparison.written.clone())
+        else {
+            return;
+        };
+        // Only ever inside the destination this audit writes to.
+        if !written.starts_with(self.output.root(&self.root)) {
+            return;
+        }
+        if std::fs::remove_file(&written).is_ok() {
+            self.existing_output = self.existing_output.saturating_sub(1);
+        }
+        self.local_ai_job = None;
+        self.compare = None;
+        cx.notify();
+    }
+
+    /// The outputs the strip actually offers: a window around the one on
+    /// screen. A run of two thousand files has a strip nobody can scroll and a
+    /// thumbnail cache smaller than the strip, so it shows the neighbourhood.
+    pub(super) fn strip_rows(&self, current: usize) -> Vec<usize> {
+        const REACH: usize = 20;
+        let rows = self.result_rows();
+        let Some(at) = rows.iter().position(|row| *row == current) else {
+            return rows.into_iter().take(REACH * 2).collect();
+        };
+        let from = at.saturating_sub(REACH);
+        let to = (at + REACH + 1).min(rows.len());
+        rows[from..to].to_vec()
+    }
+
     /// Where this output sits among the run's outputs, if it is one.
     pub(super) fn result_position(&self, index: usize) -> Option<(usize, usize)> {
         let rows = self.result_rows();

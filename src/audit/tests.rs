@@ -325,6 +325,7 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
         zoom: None,
         drag: None,
         written: None,
+        produced_by: None,
     };
 
     assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
@@ -1492,12 +1493,16 @@ fn gallery_geometry_accounts_for_root_chrome_and_supported_widths() {
     assert_eq!(gallery_layout(873., 22., 22., 100).columns, 4);
     assert_eq!(gallery_layout(900., 22., 22., 100).columns, 4);
     assert_eq!(gallery_layout(1100., 22., 22., 100).columns, 5);
+    // A wide window keeps filling: the tile size is the only constraint, so a
+    // 1920px display shows eight rather than five and a third of empty desk.
+    assert_eq!(gallery_layout(1920., 22., 22., 100).columns, 10);
+    assert_eq!(gallery_layout(3440., 22., 22., 100).columns, 19);
 }
 
 #[test]
 fn gallery_changes_column_only_at_each_reachable_threshold() {
     let root = 22.;
-    for columns in 2..=GALLERY_MAX_COLUMNS {
+    for columns in 2..=12 {
         let threshold = 2. * root
             + 2. * (ROOT_PADDING + ROOT_BORDER + GALLERY_PADDING + GALLERY_BORDER)
             + columns as f32 * TILE_MIN

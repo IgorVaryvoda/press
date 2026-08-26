@@ -595,11 +595,27 @@ impl TableDelegate for AuditTable {
                             .text_color(cx.theme().muted_foreground)
                             .child(result_size_text(entry.bytes, *converted, narrow_result)),
                     )
-                    .child(if grew {
-                        Tag::warning().small().child("larger")
-                    } else {
-                        Tag::success().small().child(format!("−{percent:.0}%"))
-                    })
+                    // Plain coloured text, not a filled tag. Two hundred rows of
+                    // saturated green block shouted over every number beside them,
+                    // and the figure inside the block was the hardest thing in the
+                    // row to read.
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(if narrow_result { 11. } else { 12. }))
+                            .font_weight(FontWeight::MEDIUM)
+                            .whitespace_nowrap()
+                            .text_color(if grew {
+                                cx.theme().yellow
+                            } else {
+                                cx.theme().green
+                            })
+                            .child(if grew {
+                                "larger".to_string()
+                            } else {
+                                format!("−{percent:.0}%")
+                            }),
+                    )
                 })
                 .into_any_element(),
         }

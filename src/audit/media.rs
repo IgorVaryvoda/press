@@ -29,6 +29,17 @@ impl Audit {
     }
 
     pub(super) fn thumb_is_visible(&self, index: usize, cx: &App) -> bool {
+        // The results strip is a viewport too. Without this every thumbnail it
+        // asked for was dropped on arrival for not being in the list, and the
+        // strip stayed a row of empty boxes.
+        if self
+            .compare
+            .as_ref()
+            .is_some_and(|comparison| comparison.written.is_some())
+            && self.result_paths.contains_key(&index)
+        {
+            return true;
+        }
         let Some(row) = self.row_of(index) else {
             return false;
         };
@@ -56,10 +67,23 @@ impl Audit {
     /// nothing is encoded here: both sides are read off disk, so the bytes on
     /// screen are the bytes in the folder.
     pub(super) fn open_result(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(source) = self.entries.get(index).map(|entry| entry.path.clone()) else {
+        let Some(written) = self.result_paths.get(&index).cloned() else {
             return;
         };
-        let Some(written) = self.result_paths.get(&index).cloned() else {
+        self.open_written(index, written, None, cx);
+    }
+
+    /// The same view for any file this app has written next to a source —
+    /// a conversion, a cutout, an upscale. Whatever produced it, the thing to
+    /// do next is look at it.
+    pub(super) fn open_written(
+        &mut self,
+        index: usize,
+        written: PathBuf,
+        produced_by: Option<local_ai::Tool>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
         };
         let dataset_generation = self.dataset_generation;
@@ -76,7 +100,13 @@ impl Audit {
             zoom: None,
             drag: None,
             written: Some(written.clone()),
+            produced_by,
         });
+        // The strip is about to show these; ask for their thumbnails now rather
+        // than when each tile paints, which is too late to be useful.
+        for row in self.strip_rows(index) {
+            self.request_thumb(row, cx);
+        }
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -122,6 +152,7 @@ impl Audit {
             zoom: None,
             drag: None,
             written: None,
+            produced_by: None,
         });
         cx.notify();
 

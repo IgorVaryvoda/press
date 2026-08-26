@@ -18,6 +18,66 @@ impl Audit {
         Some(alert.py_1().into_any_element())
     }
 
+    /// A finished run, still said after its results view is closed. A fast
+    /// conversion can be over before you have looked up, and "it worked" plus
+    /// the way to the files is what you want to find when you look back.
+    pub(super) fn conversion_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.converting || self.results.is_empty() {
+            return None;
+        }
+        let (before, after) = self.converted_totals();
+        let grew = after > before;
+        let delta = before.abs_diff(after);
+        let message = format!(
+            "Converted {} {} to {} · {} {} · in {}",
+            self.results.len(),
+            if self.results.len() == 1 {
+                "image"
+            } else {
+                "images"
+            },
+            self.format.label().to_uppercase(),
+            format_bytes(delta),
+            if grew { "larger" } else { "saved" },
+            self.output.label(),
+        );
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .child(div().flex_1().min_w_0().child(if grew {
+                    Alert::warning("conversion-done", message)
+                } else {
+                    Alert::success("conversion-done", message)
+                }))
+                .child(
+                    Button::new("conversion-done-reveal")
+                        .small()
+                        .ghost()
+                        .icon(IconName::FolderOpen)
+                        .label("Show output")
+                        .tooltip("Open the output folder in the file manager")
+                        .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
+                )
+                .child(
+                    Button::new("conversion-done-results")
+                        .small()
+                        .outline()
+                        .label("See results")
+                        .tooltip("Look at what the run produced")
+                        .on_click(cx.listener(|audit, _, _, cx| {
+                            if let Some(first) = audit.result_rows().first().copied() {
+                                audit.open_result(first, cx);
+                            }
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Everything the scan could not take at face value, in one line rather than
     /// three scattered ones. The mislabelled count is a button: it is the audit's best
     /// finding, and a number you cannot act on is a dead end.

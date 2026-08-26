@@ -243,10 +243,16 @@ impl Audit {
                             match comparison.written.as_ref() {
                                 // The file, not the format: in result mode this
                                 // side is a thing on disk with a name.
-                                Some(written) => written
-                                    .file_name()
-                                    .map(|name| name.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| self.format.label().to_uppercase()),
+                                Some(written) => match comparison.produced_by {
+                                    Some(local_ai::Tool::RemoveBackground) => {
+                                        "background removed".to_string()
+                                    }
+                                    Some(local_ai::Tool::Upscale) => "upscaled 4×".to_string(),
+                                    None => written
+                                        .file_name()
+                                        .map(|name| name.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| self.format.label().to_uppercase()),
+                                },
                                 None => self.format.label().to_uppercase(),
                             },
                             cx.theme().green,
@@ -432,8 +438,8 @@ impl Audit {
     /// never had: a finished run reported a number and left you to go and find
     /// the files it was talking about.
     fn result_strip(&self, comparison: &Comparison, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.result_rows();
         let current = comparison.index;
+        let rows = self.strip_rows(current);
         div()
             .debug_selector(|| "result-strip".into())
             .absolute()
@@ -629,16 +635,39 @@ impl Audit {
                     )
                     // A file that already exists wants opening, not converting
                     // again — and the folder is the thing you actually go to.
-                    .children(showing_result.then(|| {
-                        Button::new("result-show")
+                    .children(comparison.produced_by.map(|_| {
+                        Button::new("result-keep")
                             .small()
                             .primary()
-                            .icon(IconName::FolderOpen)
-                            .when(labelled, |button| button.label("Show in folder"))
-                            .tooltip("Open the output folder in the file manager")
-                            .on_click(cx.listener(|audit, _, _, _| audit.reveal_output()))
+                            .icon(IconName::Check)
+                            .when(labelled, |button| button.label("Keep"))
+                            .tooltip("Keep this file and go back to the audit")
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.compare = None;
+                                cx.notify();
+                            }))
                     }))
-                    .child(
+                    .children(comparison.produced_by.map(|_| {
+                        Button::new("result-discard")
+                            .small()
+                            .outline()
+                            .icon(IconName::Close)
+                            .when(labelled, |button| button.label("Discard"))
+                            .tooltip("Delete this file and go back to the audit")
+                            .on_click(cx.listener(|audit, _, _, cx| audit.discard_written(cx)))
+                    }))
+                    .children(
+                        (showing_result && comparison.produced_by.is_none()).then(|| {
+                            Button::new("result-show")
+                                .small()
+                                .primary()
+                                .icon(IconName::FolderOpen)
+                                .when(labelled, |button| button.label("Show in folder"))
+                                .tooltip("Open the output folder in the file manager")
+                                .on_click(cx.listener(|audit, _, _, _| audit.reveal_output()))
+                        }),
+                    )
+                    .children(comparison.produced_by.is_none().then(|| {
                         Button::new("compare-convert")
                             .small()
                             .outline()
@@ -662,38 +691,42 @@ impl Audit {
                                 }
                                 audit.selection_changed(cx);
                                 audit.start_conversion(cx);
-                            })),
-                    )
+                            }))
+                    }))
                     // Not every platform ships the local models. A verb that
                     // cannot run anywhere on this machine is not disabled, it
                     // is absent.
-                    .children(local_ai::available().then(|| {
-                        self.compare_local_ai(
-                            "compare-remove-background",
-                            IconName::Frame,
-                            "Remove background",
-                            local_ai::Tool::RemoveBackground,
-                            index,
-                            entry.is_none(),
-                            busy,
-                            labelled,
-                            cx,
-                        )
-                    }))
-                    .children(local_ai::available().then(|| {
-                        self.compare_local_ai(
-                            "compare-upscale",
-                            IconName::Maximize,
-                            "Upscale 4×",
-                            local_ai::Tool::Upscale,
-                            index,
-                            entry.is_none() || upscale_error.is_some(),
-                            busy,
-                            labelled,
-                            cx,
-                        )
-                    }))
-                    .child({
+                    .children(
+                        (local_ai::available() && comparison.produced_by.is_none()).then(|| {
+                            self.compare_local_ai(
+                                "compare-remove-background",
+                                IconName::Frame,
+                                "Remove background",
+                                local_ai::Tool::RemoveBackground,
+                                index,
+                                entry.is_none(),
+                                busy,
+                                labelled,
+                                cx,
+                            )
+                        }),
+                    )
+                    .children(
+                        (local_ai::available() && comparison.produced_by.is_none()).then(|| {
+                            self.compare_local_ai(
+                                "compare-upscale",
+                                IconName::Maximize,
+                                "Upscale 4×",
+                                local_ai::Tool::Upscale,
+                                index,
+                                entry.is_none() || upscale_error.is_some(),
+                                busy,
+                                labelled,
+                                cx,
+                            )
+                        }),
+                    )
+                    .children(comparison.produced_by.is_none().then(|| {
                         let url = studio.as_ref().ok().cloned();
                         Button::new("compare-edit-studio")
                             .small()
@@ -710,7 +743,7 @@ impl Audit {
                                     cx.open_url(url);
                                 }
                             }))
-                    }),
+                    })),
             )
     }
 

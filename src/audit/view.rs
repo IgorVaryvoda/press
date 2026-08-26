@@ -835,6 +835,7 @@ impl Audit {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
+                            .children(self.conversion_notice(cx))
                             .children(self.notices(cx))
                             .children(self.local_ai_notice(cx))
                             .child(self.audit_content(count, window, cx))

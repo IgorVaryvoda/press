@@ -68,7 +68,6 @@ const TILE_MIN: f32 = 168.;
 const TILE_MAX: f32 = 224.;
 const TILE_GAP: f32 = 8.;
 const GALLERY_MIN_COLUMNS: usize = 1;
-const GALLERY_MAX_COLUMNS: usize = 5;
 const ROOT_PADDING: f32 = 12.;
 const ROOT_BORDER: f32 = 2.;
 const GALLERY_PADDING: f32 = 8.;
@@ -174,8 +173,10 @@ fn gallery_layout(
         + root_right
         + 2. * (ROOT_PADDING + ROOT_BORDER + GALLERY_PADDING + GALLERY_BORDER);
     let available = (viewport_width - chrome).max(0.);
+    // No column cap: the tile size is the constraint, and a hard maximum of
+    // five left a third of a wide window empty while the tiles stayed small.
     let columns = ((available + TILE_GAP) / (TILE_MIN + TILE_GAP)) as usize;
-    let columns = columns.clamp(GALLERY_MIN_COLUMNS, GALLERY_MAX_COLUMNS);
+    let columns = columns.max(GALLERY_MIN_COLUMNS);
     let tile = ((available - (columns.saturating_sub(1) as f32 * TILE_GAP)) / columns as f32)
         .clamp(TILE_MIN, TILE_MAX);
     GalleryLayout {
@@ -554,6 +555,10 @@ struct Comparison {
     /// The output being examined, when this is a finished result rather than a
     /// preview. Set means both sides came off disk and the bytes are real.
     written: Option<PathBuf>,
+    /// The model that produced it, when a local run did. Its output is one file
+    /// made on purpose, so it is offered for keeping or throwing away rather
+    /// than filed silently and reported in a line of green text.
+    produced_by: Option<local_ai::Tool>,
 }
 
 enum LocalAiJobState {
