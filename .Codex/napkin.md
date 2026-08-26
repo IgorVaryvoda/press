@@ -3,6 +3,7 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-26 | user | Painted `tokens.table_active` an opaque colour; the table draws its selected row as an absolutely-positioned overlay ON TOP of the cells, so clicking a row hid its tick, thumbnail and every column | Keep any token the library paints as an overlay translucent, and click a row in the real window before calling a theme change done |
 | 2026-08-26 | self | Edited six files in place while another session committed and fast-forwarded the same tree, so a hard reset discarded the half-finished change | On a shared checkout, land each file's change and check it before starting the next, and re-read `git status` after any long tool run |
 | 2026-08-26 | self | Removed the displayed comparison scale but left `scale` bound in the match arm, producing an unused-variable warning | When deleting displayed data, remove its pattern binding in the same patch and run warning-clean checks immediately |
 | 2026-08-26 | self | Inserted a chained GPUI `.child(...)` after a comma while moving the output summary into its scroll owner, producing invalid Rust syntax | Inspect the edited builder chain immediately and keep the comma only after the final child expression |
@@ -48,6 +49,7 @@
 - For pre-alpha UI work, reshape the design freely and make real app screenshots yourself; do not wait for an in-repo headless capture test.
 
 ## Patterns That Work
+- Selection bugs need a pointer, not the keyboard: `keyboard-selection` rendered the ticked row correctly while the same row clicked with the mouse went blank, because only the pointer path sets the component table's own `selected_row` and its overlay. The `pointer-selection` scenario exists to catch that class.
 - Moving a control invalidates every fixed click in `ux/scenarios.json`: the two conversion scenarios still aimed at the old inspector's Convert button and were clicking empty rail. Anchor a rail click to the right and bottom edges (negative x and y) so one coordinate pair holds at all three sizes; the floating bar has no stable anchor, so scenarios that click it take one size.
 - The component table paints rows from `theme.tokens.*`, not the matching `theme.*` colours: `tokens.table`, `tokens.table_head`, `tokens.table_even`, `tokens.table_hover` and `tokens.table_active` all have to be set, or the list keeps the stock near-black under a restyled zebra.
 - A floating action bar needs two things the mock does not show: bottom padding on the list equal to its height, or it covers the last row forever; and label thresholds on the secondary verbs, or it overflows the 460px the minimum window leaves beside an open rail.

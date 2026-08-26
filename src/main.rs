@@ -400,7 +400,10 @@ fn init_theme(cx: &mut App) {
     theme.tokens.table_head = gpui::Hsla::from(gpui::rgb(0x10151d)).into();
     theme.tokens.table_even = stripe.into();
     theme.tokens.table_hover = gpui::Hsla::from(gpui::rgb(0x131a25)).into();
-    theme.tokens.table_active = gpui::Hsla::from(gpui::rgb(0x16233a)).into();
+    // Translucent on purpose: the table paints its selected row as an overlay
+    // ON TOP of that row's cells, so an opaque colour here does not tint the
+    // row, it hides it — tick, thumbnail, name and all.
+    theme.tokens.table_active = gpui::Hsla::from(gpui::rgba(0x4c8dff1f)).into();
     theme.tokens.table_active_border = base.into();
     theme.tokens.table_row_border = gpui::transparent_black().into();
 

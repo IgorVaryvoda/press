@@ -901,5 +901,55 @@
         "height": 720
       }
     ]
+  },
+  "pointer-selection": {
+    "name": "Sort by name, then pick a row with the pointer",
+    "goal": "Re-order the list and select a row by clicking it, and have the row you clicked stay legible.",
+    "success": [
+      "The clicked row shows its tick, thumbnail and every column it had before the click.",
+      "Sorting re-orders the list without disturbing what each row says.",
+      "The action bar and the row agree about what is selected."
+    ],
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
+    "actions": [
+      {
+        "type": "click",
+        "x": 104,
+        "y": 56
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      },
+      {
+        "type": "click",
+        "x": 250,
+        "y": 161
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      }
+    ],
+    "interaction_trace": [
+      "Open a folder and sort by name.",
+      "Click a row to select it.",
+      "Read what the row and the bar say."
+    ],
+    "review_focus": [
+      "Row legibility after a pointer click",
+      "Sort and selection interaction",
+      "Bar and row agreement"
+    ],
+    "sizes": [
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      }
+    ]
   }
 }
