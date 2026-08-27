@@ -127,4 +127,5 @@
 - `ravif`'s `asm` and `threading` features are on by default and `nasm` is installed, so the rav1e assembly is already built. The old `convert.rs` module comment claiming otherwise was wrong.
 - `/tmp` is on a different filesystem from `/home/igor/Pictures` here; put hard-link benchmark fixtures under `/home/igor/.cache`, or `ln` emits one cross-device error per file.
 - Gamescope PipeWire is damage-driven: `videorate` plus `num-buffers` does not produce a fixed-rate frame run when the app is idle. Bound continuous captures with `timeout`; do not wait for a frame count.
+- Studio `/api/zapier/me` reports legacy user credits and tier, but bearer-key writes are gated first by fresh org `api_mcp_full` entitlements. HTTP 402 is not necessarily a credit failure; trust the structured `code`, especially `INSUFFICIENT_CREDITS`.
 - A 6,000-image GPUI conversion stress run took 2.557s before progress batching and 2.481s after it (3% wall-time gain); do not market that as a 70% conversion speedup. The honest UI metric is progress invalidations: 6,000 to 750 for WebP (87.5% fewer), plus cached visible bytes remove the remaining O(folder size) header scan from each redraw.

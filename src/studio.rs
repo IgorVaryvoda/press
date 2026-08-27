@@ -350,25 +350,37 @@ fn studio_error(stage: &'static str) -> impl Fn(ureq::Error) -> String {
                 .map(|body| String::from_utf8_lossy(&body).trim().to_string())
                 .filter(|body| !body.is_empty())
                 .unwrap_or_else(|| stage.to_string());
-            let detail = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|body| {
-                    body.get("error")
-                        .or_else(|| body.get("message"))
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or(body);
-            match status {
-                401 => format!("Studio rejected the API key: {detail}"),
-                402 => format!("Studio has no credits available: {detail}"),
-                403 => format!("Studio API access is not enabled for this workspace: {detail}"),
-                413 => format!("Studio rejected the image as too large: {detail}"),
-                429 => format!("Studio is rate limiting this account: {detail}"),
-                _ => format!("Studio {stage} failed ({status}): {detail}"),
-            }
+            studio_status_error(stage, status, &body)
         }
         ureq::Error::Transport(error) => format!("Studio {stage} failed: {error}"),
+    }
+}
+
+fn studio_status_error(stage: &str, status: u16, body: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let detail = parsed
+        .as_ref()
+        .and_then(|body| {
+            body.get("error")
+                .or_else(|| body.get("message"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.to_string());
+    let code = parsed
+        .as_ref()
+        .and_then(|body| body.get("code"))
+        .and_then(|value| value.as_str());
+    match status {
+        401 => format!("Studio rejected the API key: {detail}"),
+        402 if code == Some("INSUFFICIENT_CREDITS") => {
+            format!("Studio has no credits available: {detail}")
+        }
+        402 => format!("Studio API access failed: {detail}"),
+        403 => format!("Studio API access is not enabled for this workspace: {detail}"),
+        413 => format!("Studio rejected the image as too large: {detail}"),
+        429 => format!("Studio is rate limiting this account: {detail}"),
+        _ => format!("Studio {stage} failed ({status}): {detail}"),
     }
 }
 
@@ -597,5 +609,25 @@ mod tests {
             assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_an_insufficient_credit_code_says_no_credits() {
+        let entitlement = studio_status_error(
+            "upload image",
+            402,
+            r#"{"error":"Full API and MCP access is not enabled for this workspace.","code":"API_MCP_FULL_ENTITLEMENT_REQUIRED"}"#,
+        );
+        assert_eq!(
+            entitlement,
+            "Studio API access failed: Full API and MCP access is not enabled for this workspace."
+        );
+
+        let credits = studio_status_error(
+            "Background Removal",
+            402,
+            r#"{"error":"Insufficient credits. Required: 10, Available: 0","code":"INSUFFICIENT_CREDITS"}"#,
+        );
+        assert!(credits.starts_with("Studio has no credits available:"));
     }
 }
