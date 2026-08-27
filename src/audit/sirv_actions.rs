@@ -214,6 +214,8 @@ impl Audit {
             client,
         });
         self.sirv_counts = None;
+        self.sirv_scope = None;
+        self.sirv_remote_only.clear();
         self.sirv_browser = None;
         cx.notify();
         self.walk_sirv_pairing(cx);
@@ -222,11 +224,15 @@ impl Audit {
     /// List the paired folder end to end and rebuild its diff. Also the
     /// refresh a push finishes with, so pushed files stop reading as new.
     pub(super) fn walk_sirv_pairing(&mut self, cx: &mut Context<Self>) {
-        let Some(pairing) = &self.sirv_pairing else {
+        let Some(pairing) = self.sirv_pairing.as_mut() else {
             return;
         };
         let client = pairing.client.clone();
         let dir = pairing.dir.clone();
+        pairing.files = Listing::Walking;
+        self.sirv_counts = None;
+        self.sirv_remote_only.clear();
+        self.refresh_visible();
         let walked_dir = dir.clone();
         let root = self.root.clone();
         let generation = self.dataset_generation;
@@ -236,6 +242,7 @@ impl Audit {
         }
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.sirv_walk_cancel = Some(cancelled.clone());
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let walked = cx
                 .background_executor()
@@ -305,6 +312,8 @@ impl Audit {
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
         self.sirv_counts = None;
+        self.sirv_scope = None;
+        self.sirv_remote_only.clear();
         self.sirv_local_presence.clear();
         self.sirv_browser = None;
         if let Some(cancelled) = self.sirv_walk_cancel.take() {
@@ -314,6 +323,7 @@ impl Audit {
         // The detached loop may finish one file, but has no pairing to update.
         self.sirv_job = None;
         self.sirv_confirm = None;
+        self.refresh_visible();
         cx.notify();
     }
 
@@ -436,6 +446,8 @@ impl Audit {
         self.cancel_sirv_transfer();
         self.sirv_local_presence.clear();
         self.sirv_counts = None;
+        self.sirv_remote_only.clear();
+        self.refresh_visible();
         self.walk_sirv_pairing(cx);
     }
 
@@ -519,6 +531,7 @@ impl Audit {
                         total,
                         failed: 0,
                         failures: Vec::new(),
+                        current: None,
                         finished: false,
                         stopping: false,
                         generation,
@@ -555,6 +568,15 @@ impl Audit {
                     .ok();
                     return;
                 }
+                this.update(cx, |audit, cx| {
+                    if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                    {
+                        job.current = Some(key.clone());
+                        cx.notify();
+                    }
+                })
+                .ok();
                 let outcome = cx
                     .background_executor()
                     .spawn({
@@ -600,6 +622,7 @@ impl Audit {
                         && job.generation == generation
                     {
                         job.done = ix + 1;
+                        job.current = None;
                         job.failed = failed;
                         job.failures = failures.clone();
                         if succeeded {
@@ -618,6 +641,7 @@ impl Audit {
                     && job.generation == generation
                 {
                     job.finished = true;
+                    job.current = None;
                     true
                 } else {
                     false
@@ -693,6 +717,7 @@ impl Audit {
             total,
             failed: 0,
             failures: Vec::new(),
+            current: None,
             finished: false,
             stopping: false,
             generation,
@@ -805,6 +830,15 @@ impl Audit {
                     .ok();
                     return;
                 }
+                this.update(cx, |audit, cx| {
+                    if let Some(job) = audit.sirv_job.as_mut()
+                        && job.generation == generation
+                    {
+                        job.current = Some(key.clone());
+                        cx.notify();
+                    }
+                })
+                .ok();
                 let outcome = cx
                     .background_executor()
                     .spawn({
@@ -859,6 +893,7 @@ impl Audit {
                         && job.generation == generation
                     {
                         job.done = ix + 1;
+                        job.current = None;
                         job.failed = failed;
                         job.failures = failures.clone();
                         cx.notify();
@@ -874,6 +909,7 @@ impl Audit {
                     && job.generation == generation
                 {
                     job.finished = true;
+                    job.current = None;
                     true
                 } else {
                     false
@@ -902,6 +938,7 @@ impl Audit {
     /// Count push / differs / pull across the whole dataset, not just the
     /// visible rows, so the header numbers do not move with the filter.
     pub(super) fn refresh_sirv_counts(&mut self) {
+        self.sirv_remote_only.clear();
         self.sirv_counts = match self.sirv_pairing.as_ref().map(|pairing| &pairing.files) {
             None | Some(Listing::Walking) | Some(Listing::Failed(_)) => None,
             Some(Listing::Ready(files)) => {
@@ -921,8 +958,31 @@ impl Audit {
                     .keys()
                     .filter(|key| !self.sirv_local_presence.contains(*key))
                     .count();
+                self.sirv_remote_only.extend(
+                    files
+                        .keys()
+                        .filter(|key| !self.sirv_local_presence.contains(*key))
+                        .cloned(),
+                );
+                self.sirv_remote_only.sort();
                 Some((to_push, changed, to_pull))
             }
         };
+        self.refresh_visible();
+    }
+
+    pub(super) fn set_sirv_scope(&mut self, scope: SirvScope, cx: &mut Context<Self>) {
+        if self.converting {
+            return;
+        }
+        self.sirv_scope = (self.sirv_scope != Some(scope)).then_some(scope);
+        if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+            self.rail = Rail::None;
+        }
+        self.selected.clear();
+        self.sirv_confirm = None;
+        self.refresh_visible();
+        self.schedule_estimate(cx);
+        cx.notify();
     }
 }

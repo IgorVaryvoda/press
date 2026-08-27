@@ -429,6 +429,8 @@ fn a_studio_result_belongs_to_its_exact_file_and_dataset() {
         index: 2,
         dataset_generation: 7,
         source_name: "photo.jpg".into(),
+        output_source: PathBuf::from("photo.jpg"),
+        prompt: "white background".into(),
         state: StudioJobState::Running,
         cancelled: cancelled.clone(),
     };
@@ -637,6 +639,7 @@ fn unpairing_discards_the_job_and_stops_the_loop(cx: &mut TestAppContext) {
             total: 100,
             failed: 0,
             failures: Vec::new(),
+            current: None,
             finished: false,
             stopping: false,
             generation: audit.sirv_generation,
@@ -665,6 +668,7 @@ fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             total: 100,
             failed: 0,
             failures: Vec::new(),
+            current: None,
             finished: false,
             stopping: false,
             generation: audit.sirv_generation,
@@ -728,6 +732,7 @@ fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
             total: 1,
             failed: 0,
             failures: Vec::new(),
+            current: None,
             finished: true,
             stopping: false,
             generation: audit.sirv_generation,
@@ -747,6 +752,70 @@ fn an_armed_overwrite_is_withdrawn_by_unpair(cx: &mut TestAppContext) {
         audit.sirv_confirm = Some(SirvJobKind::PushChanged);
         audit.unpair_sirv(cx);
         assert!(audit.sirv_confirm.is_none());
+    });
+}
+
+#[gpui::test]
+fn sirv_difference_filters_match_their_category_counts(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        let files = HashMap::from([
+            (
+                "photo.jpg".to_string(),
+                sirv::Node {
+                    filename: "/photos/photo.jpg".into(),
+                    size: 100_000,
+                    is_directory: false,
+                    kind: None,
+                },
+            ),
+            (
+                "screenshot.png".to_string(),
+                sirv::Node {
+                    filename: "/photos/screenshot.png".into(),
+                    size: 200_000,
+                    is_directory: false,
+                    kind: None,
+                },
+            ),
+            (
+                "remote.jpg".to_string(),
+                sirv::Node {
+                    filename: "/photos/remote.jpg".into(),
+                    size: 50_000,
+                    is_directory: false,
+                    kind: None,
+                },
+            ),
+        ]);
+        audit.sirv_pairing = Some(SirvPairing {
+            dir: "/photos".into(),
+            files: Listing::Ready(files),
+            cdn_host: CdnHost::Ready("test.sirv.com".into()),
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+        });
+        audit.sirv_local_presence =
+            HashSet::from(["photo.jpg".to_string(), "screenshot.png".to_string()]);
+        audit.refresh_sirv_counts();
+
+        assert_eq!(audit.sirv_counts, Some((1, 1, 1)));
+        assert_eq!(audit.sirv_remote_only, ["remote.jpg"]);
+
+        audit.set_sirv_scope(SirvScope::OnlyLocal, cx);
+        assert_eq!(audit.entries[audit.visible[0]].name_lossy(), "liar.webp");
+        audit.set_sirv_scope(SirvScope::Changed, cx);
+        assert_eq!(
+            audit.entries[audit.visible[0]].name_lossy(),
+            "screenshot.png"
+        );
+        audit.set_sirv_scope(SirvScope::OnlyRemote, cx);
+        assert!(audit.visible.is_empty());
+        assert_eq!(audit.sirv_remote_only, ["remote.jpg"]);
     });
 }
 
@@ -774,6 +843,7 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
             total: 100,
             failed: 0,
             failures: Vec::new(),
+            current: None,
             finished: false,
             stopping: false,
             generation: audit.sirv_generation,
@@ -1014,6 +1084,7 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             total: 1,
             failed: 0,
             failures: Vec::new(),
+            current: None,
             finished: false,
             stopping: false,
             generation: audit.sirv_generation,
@@ -1041,6 +1112,8 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             index: 0,
             dataset_generation: audit.dataset_generation,
             source_name: "photo.jpg".to_string(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
             state: StudioJobState::Running,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
@@ -1408,11 +1481,33 @@ fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
         audit.selected.extend([0, 1]);
         audit.rail = Rail::Studio;
 
-        audit.open_ai_operations(2, cx);
+        audit.open_ai_operations(2, None, cx);
 
         assert_eq!(audit.selected, HashSet::from([2]));
         assert_eq!(audit.cursor, audit.row_of(2).unwrap());
         assert_eq!(audit.rail, Rail::Studio);
+    });
+}
+
+#[gpui::test]
+fn studio_prompt_typing_does_not_toggle_the_audit_selection(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(0);
+        audit.rail = Rail::Studio;
+        audit.selection_changed(cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let input = cx
+        .debug_bounds("studio-prompt-input")
+        .expect("the Studio prompt is visible");
+    cx.simulate_click(input.center(), gpui::Modifiers::none());
+    cx.update(|window, cx| assert!(audit.read(cx).studio_input_focused(window, cx)));
+    cx.simulate_keystrokes("space");
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, HashSet::from([0]));
     });
 }
 
@@ -1447,7 +1542,6 @@ fn source_preview_has_ai_actions_but_compare_mode_does_not(cx: &mut TestAppConte
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("compare-bar").is_some());
     assert!(cx.debug_bounds("preview-ai-actions").is_some());
-
     audit.update(cx, |audit, cx| {
         audit.compare.as_mut().unwrap().mode = MediaMode::Compare;
         cx.notify();

@@ -13,7 +13,9 @@ impl Audit {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.root.display().to_string());
 
-        let mut stats = if count == self.entries.len() {
+        let mut stats = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+            format!("{count} files only on Sirv")
+        } else if count == self.entries.len() {
             format!("{count} images · {}", format_bytes(self.visible_bytes()))
         } else {
             format!(
@@ -40,20 +42,6 @@ impl Audit {
                 many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
             });
         }
-        // Three states, three sentences. A pairing whose walk is still running used to
-        // read exactly like one whose walk failed: no Sirv text at all.
-        match (&self.sirv_pairing, self.sirv_counts) {
-            (Some(_), Some((to_push, changed, to_pull))) => stats.push_str(&format!(
-                " · Sirv: {to_push} to push · {changed} differ · {to_pull} to pull"
-            )),
-            (Some(pairing), None) => stats.push_str(match pairing.files {
-                Listing::Walking => " · Sirv: listing…",
-                Listing::Failed(_) => " · Sirv: listing failed",
-                Listing::Ready(_) => "",
-            }),
-            (None, _) => {}
-        }
-
         div()
             .debug_selector(|| "audit-header".into())
             .flex()

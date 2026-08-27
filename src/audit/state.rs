@@ -172,7 +172,12 @@ impl Audit {
         cx.notify();
     }
 
-    pub(super) fn open_ai_operations(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn open_ai_operations(
+        &mut self,
+        index: usize,
+        written: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.entries.len() {
             return;
         }
@@ -181,6 +186,8 @@ impl Audit {
         if let Some(row) = self.row_of(index) {
             self.cursor = row;
         }
+        self.studio_source = written.map(|path| (index, path));
+        self.compare = None;
         self.rail = Rail::Studio;
         self.selection_changed(cx);
     }
@@ -204,6 +211,15 @@ impl Audit {
     pub(super) fn refresh_visible(&mut self) {
         let needle = self.filter.to_lowercase();
         let finding = self.finding;
+        let sirv_scope = self.sirv_scope;
+        let remote_files = self
+            .sirv_pairing
+            .as_ref()
+            .and_then(|pairing| match &pairing.files {
+                Listing::Ready(files) => Some(files),
+                Listing::Walking | Listing::Failed(_) => None,
+            });
+        let root = &self.root;
         let mut visible: Vec<usize> = self
             .entries
             .iter()
@@ -212,6 +228,24 @@ impl Audit {
                 needle.is_empty() || entry.name_lossy().to_lowercase().contains(&needle)
             })
             .filter(|(_, entry)| finding.is_none_or(|finding| finding.holds(entry)))
+            .filter(|(_, entry)| match sirv_scope {
+                None => true,
+                Some(SirvScope::OnlyRemote) => false,
+                Some(SirvScope::OnlyLocal | SirvScope::Changed) => {
+                    let Some(files) = remote_files else {
+                        return false;
+                    };
+                    let Some(key) = sirv::relative_key(root, &entry.path) else {
+                        return false;
+                    };
+                    let state = sirv::classify(entry.bytes, files.get(&key));
+                    matches!(
+                        (sirv_scope, state),
+                        (Some(SirvScope::OnlyLocal), sirv::SyncState::OnlyLocal)
+                            | (Some(SirvScope::Changed), sirv::SyncState::Changed)
+                    )
+                }
+            })
             .map(|(index, _)| index)
             .collect();
 

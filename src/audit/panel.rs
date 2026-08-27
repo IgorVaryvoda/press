@@ -141,27 +141,7 @@ impl Audit {
                             labelled,
                             cx,
                         )
-                    }))
-                    // A verb that opens its rail, like the others. The rail
-                    // carries the tool list and the state, so the bar stays a
-                    // row of verbs and a stranger can open it to find out how
-                    // to connect.
-                    .child(
-                        Button::new("rail-studio")
-                            .small()
-                            .when_some(
-                                crate::assets::studio_icon(self.studio_tool.slug()),
-                                |button, path| button.icon(Icon::default().path(path)),
-                            )
-                            .when(labelled, |button| button.label("AI operations"))
-                            .tooltip("Run an image with hosted AI operations")
-                            .outline()
-                            .selected(self.rail == Rail::Studio)
-                            .disabled(busy)
-                            .on_click(
-                                cx.listener(|audit, _, _, cx| audit.open_rail(Rail::Studio, cx)),
-                            ),
-                    ),
+                    })),
             )
     }
 

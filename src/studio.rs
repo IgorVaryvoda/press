@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::{convert, scan, settings, sirv};
 
 const API: &str = "https://dev.sirv.studio";
-pub const API_KEYS_URL: &str = "https://dev.sirv.studio/settings/api";
+pub const API_KEYS_URL: &str = "https://dev.sirv.studio/settings/api?utm_source=press&utm_medium=desktop&utm_campaign=studio-api-key";
 const MAX_UPLOAD: u64 = 20 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(360);
@@ -129,6 +129,21 @@ struct Processed {
     image_url: String,
 }
 
+/// The bytes Studio will receive. A prepared copy exists only in memory and is
+/// never written beside either the source or the user's output.
+pub struct PreparedUpload {
+    bytes: Vec<u8>,
+    mime: &'static str,
+    extension: &'static str,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub enum Preflight {
+    Ready(PreparedUpload),
+    NeedsConfirmation(PreparedUpload),
+}
+
 struct Client {
     api: String,
     key: String,
@@ -158,19 +173,10 @@ impl Client {
             .map_err(studio_error("verify key"))
     }
 
-    fn upload(&self, source: &Path) -> Result<String, String> {
-        let metadata = source
-            .metadata()
-            .map_err(|error| format!("could not read the source image: {error}"))?;
-        if metadata.len() > MAX_UPLOAD {
-            return Err(format!(
-                "the source is larger than Studio's {} MB upload limit",
-                MAX_UPLOAD / 1024 / 1024
-            ));
-        }
-        let bytes = std::fs::read(source)
-            .map_err(|error| format!("could not read the source image: {error}"))?;
-        let (mime, extension) = upload_format(&bytes)?;
+    fn upload(&self, upload: &PreparedUpload) -> Result<String, String> {
+        let bytes = &upload.bytes;
+        let mime = upload.mime;
+        let extension = upload.extension;
         let boundary = format!(
             "press-{}-{}",
             std::process::id(),
@@ -182,7 +188,7 @@ impl Client {
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.{extension}\"\r\nContent-Type: {mime}\r\n\r\n"
         )
         .map_err(|error| format!("could not prepare the Studio upload: {error}"))?;
-        body.extend_from_slice(&bytes);
+        body.extend_from_slice(bytes);
         write!(body, "\r\n--{boundary}--\r\n")
             .map_err(|error| format!("could not prepare the Studio upload: {error}"))?;
 
@@ -243,30 +249,7 @@ pub fn verify_key(key: &str) -> Result<(), String> {
     Client::new(API, key)?.verify()
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn process(
-    key: &str,
-    root: &Path,
-    out_dir: &Path,
-    source: &Path,
-    output_source: &Path,
-    tool: Tool,
-    prompt: &str,
-    cancelled: &AtomicBool,
-) -> Result<PathBuf, String> {
-    process_with_api(
-        API,
-        key,
-        root,
-        out_dir,
-        source,
-        output_source,
-        tool,
-        prompt,
-        cancelled,
-    )
-}
-
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn process_with_api(
     api: &str,
@@ -279,12 +262,65 @@ fn process_with_api(
     prompt: &str,
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
+    let upload = match prepare_upload(source, cancelled)? {
+        Preflight::Ready(upload) => upload,
+        Preflight::NeedsConfirmation(upload) => upload,
+    };
+    process_prepared_with_api(
+        api,
+        key,
+        root,
+        out_dir,
+        &upload,
+        output_source,
+        tool,
+        prompt,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn process_prepared(
+    key: &str,
+    root: &Path,
+    out_dir: &Path,
+    upload: &PreparedUpload,
+    output_source: &Path,
+    tool: Tool,
+    prompt: &str,
+    cancelled: &AtomicBool,
+) -> Result<PathBuf, String> {
+    process_prepared_with_api(
+        API,
+        key,
+        root,
+        out_dir,
+        upload,
+        output_source,
+        tool,
+        prompt,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_prepared_with_api(
+    api: &str,
+    key: &str,
+    root: &Path,
+    out_dir: &Path,
+    upload: &PreparedUpload,
+    output_source: &Path,
+    tool: Tool,
+    prompt: &str,
+    cancelled: &AtomicBool,
+) -> Result<PathBuf, String> {
     check_cancelled(cancelled)?;
     if tool.needs_prompt() && prompt.trim().is_empty() {
         return Err(format!("{} needs a prompt", tool.label()));
     }
     let client = Client::new(api, key)?;
-    let uploaded = client.upload(source)?;
+    let uploaded = client.upload(upload)?;
     check_cancelled(cancelled)?;
     let result_url = client.process(tool, &uploaded, prompt.trim())?;
     check_cancelled(cancelled)?;
@@ -303,6 +339,90 @@ fn process_with_api(
     Ok(written)
 }
 
+/// Build the smallest truthful upload path: accepted bytes pass through unchanged;
+/// anything else first gets a pixel-preserving WebP copy. Only a lossy or resized
+/// copy asks the user before it leaves this computer.
+pub fn prepare_upload(source: &Path, cancelled: &AtomicBool) -> Result<Preflight, String> {
+    prepare_upload_using(source, cancelled, MAX_UPLOAD)
+}
+
+fn prepare_upload_using(
+    source: &Path,
+    cancelled: &AtomicBool,
+    max_upload: u64,
+) -> Result<Preflight, String> {
+    check_cancelled(cancelled)?;
+    let source_bytes = std::fs::metadata(source)
+        .map_err(|error| format!("could not read the source image: {error}"))?
+        .len();
+    if source_bytes <= max_upload {
+        let bytes = std::fs::read(source)
+            .map_err(|error| format!("could not read the source image: {error}"))?;
+        if let Ok((mime, extension)) = upload_format(&bytes) {
+            return Ok(Preflight::Ready(PreparedUpload {
+                bytes,
+                mime,
+                extension,
+                width: 0,
+                height: 0,
+            }));
+        }
+    }
+
+    check_cancelled(cancelled)?;
+    let mut image = scan::decode_for_conversion(source).map_err(|error| match error {
+        scan::ConversionDecodeError::AnimatedGif => {
+            "this animated GIF is too large for Studio without dropping its animation".to_string()
+        }
+        scan::ConversionDecodeError::AnimatedJpegXl => {
+            "this animated JPEG XL is too large for Studio without dropping its animation"
+                .to_string()
+        }
+        scan::ConversionDecodeError::Failed => {
+            "Press could not decode this image to prepare it for Studio".to_string()
+        }
+    })?;
+    check_cancelled(cancelled)?;
+
+    let lossless = convert::encode(&image, convert::Format::WebP, convert::Quality::LOSSLESS)
+        .ok_or_else(|| "Press could not prepare a lossless Studio upload copy".to_string())?;
+    if lossless.len() as u64 <= max_upload {
+        return Ok(Preflight::Ready(PreparedUpload {
+            bytes: lossless,
+            mime: "image/webp",
+            extension: "webp",
+            width: image.width(),
+            height: image.height(),
+        }));
+    }
+
+    check_cancelled(cancelled)?;
+    let mut encoded = convert::encode(&image, convert::Format::WebP, convert::Quality::lossy(90.))
+        .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
+    for _ in 0..8 {
+        if encoded.len() as u64 <= max_upload {
+            return Ok(Preflight::NeedsConfirmation(PreparedUpload {
+                bytes: encoded,
+                mime: "image/webp",
+                extension: "webp",
+                width: image.width(),
+                height: image.height(),
+            }));
+        }
+        check_cancelled(cancelled)?;
+        let edge = image.width().max(image.height());
+        if edge <= 1 {
+            break;
+        }
+        let ratio = (max_upload as f64 / encoded.len() as f64).sqrt() * 0.95;
+        let next = ((edge as f64 * ratio.min(0.9)).floor() as u32).max(1);
+        image = convert::MaxEdge(Some(next)).apply(image);
+        encoded = convert::encode(&image, convert::Format::WebP, convert::Quality::lossy(90.))
+            .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
+    }
+    Err("Press could not prepare this image under Studio's 20 MB upload limit".into())
+}
+
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
     if cancelled.load(Ordering::Relaxed) {
         Err("Studio run stopped".into())
@@ -318,7 +438,15 @@ fn upload_format(bytes: &[u8]) -> Result<(&'static str, &'static str), String> {
         Ok(image::ImageFormat::Gif) => Ok(("image/gif", "gif")),
         Ok(image::ImageFormat::WebP) => Ok(("image/webp", "webp")),
         Ok(image::ImageFormat::Avif) => Ok(("image/avif", "avif")),
-        _ => Err("Studio upload supports JPEG, PNG, GIF, WebP, and AVIF images".into()),
+        Ok(image::ImageFormat::Bmp) => Ok(("image/bmp", "bmp")),
+        Ok(image::ImageFormat::Tiff) => Ok(("image/tiff", "tiff")),
+        Ok(image::ImageFormat::Ico) => Ok(("image/x-icon", "ico")),
+        _ if bytes.starts_with(&[0xff, 0x0a])
+            || bytes.starts_with(&[0, 0, 0, 12, b'J', b'X', b'L', b' ']) =>
+        {
+            Ok(("image/jxl", "jxl"))
+        }
+        _ => Err("Studio does not accept this image container".into()),
     }
 }
 
@@ -525,6 +653,14 @@ mod tests {
         bytes
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "press-studio-{name}-{}-{}",
+            std::process::id(),
+            BOUNDARY_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     #[test]
     fn one_direct_run_uploads_processes_and_writes_a_real_result() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -609,6 +745,57 @@ mod tests {
             assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unsupported_container_is_prepared_losslessly_without_confirmation() {
+        let path = scratch("unsupported.qoi");
+        let image = RgbaImage::from_pixel(2, 2, Rgba([1, 2, 3, 127]));
+        DynamicImage::ImageRgba8(image.clone())
+            .save_with_format(&path, ImageFormat::Qoi)
+            .unwrap();
+
+        let Preflight::Ready(upload) = prepare_upload(&path, &AtomicBool::new(false)).unwrap()
+        else {
+            panic!("a pixel-preserving copy must not ask for confirmation");
+        };
+        assert_eq!((upload.width, upload.height), (2, 2));
+        assert_eq!(scan::decode_bytes(&upload.bytes).unwrap().to_rgba8(), image);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_lossy_or_resized_upload_copy_needs_confirmation() {
+        let path = scratch("large.qoi");
+        let image = RgbaImage::from_fn(256, 256, |x, y| {
+            let seed = x.wrapping_mul(73) ^ y.wrapping_mul(151);
+            Rgba([seed as u8, (seed >> 3) as u8, (x ^ y) as u8, 255])
+        });
+        DynamicImage::ImageRgba8(image)
+            .save_with_format(&path, ImageFormat::Qoi)
+            .unwrap();
+
+        let Preflight::NeedsConfirmation(upload) =
+            prepare_upload_using(&path, &AtomicBool::new(false), 8 * 1024).unwrap()
+        else {
+            panic!("a visibly changed upload copy must ask first");
+        };
+        assert!(upload.bytes.len() <= 8 * 1024);
+        assert!(upload.width <= 256 && upload.height <= 256);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn upload_format_matches_the_current_studio_server_contract() {
+        assert_eq!(
+            upload_format(&[0xff, 0x0a, 0, 0]).unwrap(),
+            ("image/jxl", "jxl")
+        );
+        let mut bmp = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])))
+            .write_to(&mut Cursor::new(&mut bmp), ImageFormat::Bmp)
+            .unwrap();
+        assert_eq!(upload_format(&bmp).unwrap(), ("image/bmp", "bmp"));
     }
 
     #[test]

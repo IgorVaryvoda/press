@@ -23,13 +23,303 @@ pub(super) fn meter(
 }
 
 impl Audit {
-    /// The remote-folder browser: a small panel over the window. Walk folders
-    /// down, pair the folder you land on, or undo a pairing.
+    fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let pairing = self.sirv_pairing.as_ref()?;
+        let busy = self.sirv_busy();
+        let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
+        let ready = matches!(pairing.files, Listing::Ready(_));
+        let (to_push, changed, to_pull) = self.sirv_counts.unwrap_or((0, 0, 0));
+        let push_changed_confirmed = self.sirv_confirm == Some(SirvJobKind::PushChanged);
+        let pull_changed_confirmed = self.sirv_confirm == Some(SirvJobKind::PullChanged);
+
+        let job_line = self.sirv_job.as_ref().map(|job| {
+            let verb = match job.kind {
+                SirvJobKind::Pull => "Pulling",
+                SirvJobKind::PullChanged => "Taking from Sirv",
+                SirvJobKind::Push => "Pushing",
+                SirvJobKind::PushChanged => "Overwriting on Sirv",
+                SirvJobKind::Publish => "Publishing",
+                SirvJobKind::Spin => "Publishing spin frames",
+            };
+            let current = job
+                .current
+                .as_deref()
+                .map(|name| format!(" · {name}"))
+                .unwrap_or_default();
+            let failures = if job.failed == 0 {
+                String::new()
+            } else {
+                let rest = job.failed.saturating_sub(job.failures.len());
+                format!(
+                    " · {} failed: {}{}",
+                    job.failed,
+                    job.failures.join(", "),
+                    if rest == 0 {
+                        String::new()
+                    } else {
+                        format!(" and {rest} more")
+                    }
+                )
+            };
+            if job.finished {
+                format!("{verb}: {} of {} complete{failures}", job.done, job.total)
+            } else if job.stopping {
+                format!(
+                    "Stopping {verb}: {} of {} complete{current}{failures}",
+                    job.done, job.total
+                )
+            } else {
+                format!(
+                    "{verb}: {} of {} complete{current}{failures}",
+                    job.done, job.total
+                )
+            }
+        });
+
+        Some(
+            div()
+                .debug_selector(|| "sirv-reconciliation".into())
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .bg(cx.theme().secondary)
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_family("SF Pro Display")
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13.))
+                                .child("Paired with Sirv"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(220.))
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(format!("{}  ↔  Sirv:{}", self.root.display(), pairing.dir)),
+                        )
+                        .child(
+                            Button::new("sirv-refresh-pair")
+                                .small()
+                                .ghost()
+                                .label(if ready { "Refresh" } else { "Listing…" })
+                                .disabled(busy || !ready)
+                                .on_click(
+                                    cx.listener(|audit, _, _, cx| audit.walk_sirv_pairing(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("sirv-change-pair")
+                                .small()
+                                .ghost()
+                                .label("Change folder")
+                                .disabled(busy)
+                                .on_click(
+                                    cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("sirv-unpair-audit")
+                                .small()
+                                .ghost()
+                                .label("Unpair")
+                                .disabled(busy)
+                                .on_click(cx.listener(|audit, _, _, cx| audit.unpair_sirv(cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("sirv-filter-local")
+                                .small()
+                                .ghost()
+                                .selected(self.sirv_scope == Some(SirvScope::OnlyLocal))
+                                .label(format!("Local only {to_push}"))
+                                .disabled(!ready)
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    audit.set_sirv_scope(SirvScope::OnlyLocal, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("sirv-filter-changed")
+                                .small()
+                                .ghost()
+                                .selected(self.sirv_scope == Some(SirvScope::Changed))
+                                .label(format!("Differing {changed}"))
+                                .disabled(!ready)
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    audit.set_sirv_scope(SirvScope::Changed, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("sirv-filter-remote")
+                                .small()
+                                .ghost()
+                                .selected(self.sirv_scope == Some(SirvScope::OnlyRemote))
+                                .label(format!("Sirv only {to_pull}"))
+                                .disabled(!ready)
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    audit.set_sirv_scope(SirvScope::OnlyRemote, cx)
+                                })),
+                        )
+                        .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border))
+                        .child(
+                            Button::new("sirv-push-audit")
+                                .small()
+                                .outline()
+                                .icon(IconName::ArrowUp)
+                                .label(format!("Push {to_push}"))
+                                .disabled(busy || to_push == 0)
+                                .on_click(cx.listener(|audit, _, _, cx| audit.start_push(cx))),
+                        )
+                        .child(
+                            Button::new("sirv-pull-audit")
+                                .small()
+                                .outline()
+                                .icon(IconName::ArrowDown)
+                                .label(format!("Pull {to_pull}"))
+                                .disabled(busy || to_pull == 0)
+                                .on_click(cx.listener(|audit, _, _, cx| audit.start_pull(cx))),
+                        )
+                        .when(changed > 0, |row| {
+                            row.child(
+                                Button::new("sirv-push-changed-audit")
+                                    .small()
+                                    .when(push_changed_confirmed, |button| button.primary())
+                                    .when(!push_changed_confirmed, |button| button.ghost())
+                                    .label(if push_changed_confirmed {
+                                        format!("Really overwrite {changed} on Sirv?")
+                                    } else {
+                                        format!("Overwrite {changed} on Sirv")
+                                    })
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                        if audit.sirv_confirm == Some(SirvJobKind::PushChanged) {
+                                            audit.sirv_confirm = None;
+                                            audit.start_push_changed(cx);
+                                        } else {
+                                            audit.sirv_confirm = Some(SirvJobKind::PushChanged);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new("sirv-pull-changed-audit")
+                                    .small()
+                                    .when(pull_changed_confirmed, |button| button.primary())
+                                    .when(!pull_changed_confirmed, |button| button.ghost())
+                                    .label(if pull_changed_confirmed {
+                                        format!("Really replace {changed} local files?")
+                                    } else {
+                                        format!("Take {changed} from Sirv")
+                                    })
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                        if audit.sirv_confirm == Some(SirvJobKind::PullChanged) {
+                                            audit.sirv_confirm = None;
+                                            audit.start_pull_changed(cx);
+                                        } else {
+                                            audit.sirv_confirm = Some(SirvJobKind::PullChanged);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        })
+                        .when(busy, |row| {
+                            row.child(
+                                Button::new("sirv-stop-audit")
+                                    .small()
+                                    .outline()
+                                    .label(if stopping { "Stopping…" } else { "Stop" })
+                                    .disabled(stopping)
+                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                        audit.cancel_sirv_transfer();
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
+                .when_some(job_line, |bar, line| {
+                    bar.child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(
+                                if self.sirv_job.as_ref().is_some_and(|job| job.failed > 0) {
+                                    cx.theme().yellow
+                                } else {
+                                    cx.theme().muted_foreground
+                                },
+                            )
+                            .child(line),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn sirv_remote_only_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        uniform_list(
+            "sirv-remote-only-list",
+            self.sirv_remote_only.len(),
+            cx.processor(|audit, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .filter_map(|row| audit.sirv_remote_only.get(row))
+                    .map(|key| {
+                        div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .h(px(36.))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                Icon::new(IconName::Globe).text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .child(key.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("only on Sirv"),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .size_full()
+        .into_any_element()
+    }
+
+    /// The remote-folder browser: credentials and choosing one remote folder.
+    /// Reconciliation belongs to the audit after the folder is paired.
     fn sirv_browser_view(&self, browser: &SirvBrowser, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let paired = self
-            .sirv_pairing
-            .as_ref()
-            .map(|pairing| pairing.dir.clone());
         let at_root = browser.path.trim_end_matches('/').is_empty();
 
         let body: gpui::AnyElement = match browser.nodes.as_ref() {
@@ -139,169 +429,6 @@ impl Audit {
                     }),
             )
             .child(body)
-            .when_some(self.sirv_job.as_ref(), |panel, job| {
-                panel.child(
-                    div()
-                        .text_size(px(11.))
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(if job.failed == 0 {
-                            cx.theme().muted_foreground
-                        } else {
-                            cx.theme().yellow
-                        })
-                        .child(match (job.finished, job.kind) {
-                            (false, SirvJobKind::Pull) => {
-                                format!("Pulling {} of {}…", job.done, job.total)
-                            }
-                            (false, SirvJobKind::PullChanged) => {
-                                format!("Taking from Sirv {} of {}…", job.done, job.total)
-                            }
-                            (false, SirvJobKind::Push) => {
-                                format!("Pushing {} of {}…", job.done, job.total)
-                            }
-                            (false, SirvJobKind::PushChanged) => {
-                                format!("Overwriting on Sirv {} of {}…", job.done, job.total)
-                            }
-                            (false, SirvJobKind::Publish) => {
-                                format!("Publishing {} of {}…", job.done, job.total)
-                            }
-                            (false, SirvJobKind::Spin) => {
-                                format!("Publishing spin frames {} of {}…", job.done, job.total)
-                            }
-                            (true, kind) => {
-                                let verb = match kind {
-                                    SirvJobKind::Pull => "Pulled",
-                                    SirvJobKind::PullChanged => "Took from Sirv",
-                                    SirvJobKind::Push => "Pushed",
-                                    SirvJobKind::PushChanged => "Overwrote on Sirv",
-                                    SirvJobKind::Publish => "Published",
-                                    SirvJobKind::Spin => "Published spin frames",
-                                };
-                                let failures = if job.failed == 0 {
-                                    String::new()
-                                } else {
-                                    let rest = job.failed.saturating_sub(job.failures.len());
-                                    format!(
-                                        ", {} failed: {}{}",
-                                        job.failed,
-                                        job.failures.join(", "),
-                                        if rest == 0 {
-                                            String::new()
-                                        } else {
-                                            format!(" and {rest} more")
-                                        },
-                                    )
-                                };
-                                format!("{verb} {} of {}{failures}", job.done, job.total)
-                            }
-                        }),
-                )
-            })
-            .child(
-                div().flex().items_center().justify_between().child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .when_some(paired, |row, dir| {
-                            let busy = self.sirv_busy();
-                            let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
-                            let push_changed_confirmed =
-                                self.sirv_confirm == Some(SirvJobKind::PushChanged);
-                            let pull_changed_confirmed =
-                                self.sirv_confirm == Some(SirvJobKind::PullChanged);
-                            let (to_push, changed, to_pull) = self.sirv_counts.unwrap_or((0, 0, 0));
-                            row.when(busy, |row| {
-                                row.child(
-                                    Button::new("sirv-stop")
-                                        .outline()
-                                        .small()
-                                        .label(if stopping { "Stopping…" } else { "Stop" })
-                                        .disabled(stopping)
-                                        .on_click(cx.listener(|audit, _, _, cx| {
-                                            audit.cancel_sirv_transfer();
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("sirv-pull")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::ArrowDown)
-                                    .label(format!("Pull {to_pull} missing"))
-                                    .disabled(busy || to_pull == 0)
-                                    .on_click(cx.listener(|audit, _, _, cx| audit.start_pull(cx))),
-                            )
-                            .child(
-                                Button::new("sirv-push")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::ArrowUp)
-                                    .label(format!("Push {to_push} new"))
-                                    .disabled(busy || to_push == 0)
-                                    .on_click(cx.listener(|audit, _, _, cx| audit.start_push(cx))),
-                            )
-                            .when(changed > 0, |row| {
-                                row.child(
-                                    Button::new("sirv-push-changed")
-                                        .when(push_changed_confirmed, |button| button.primary())
-                                        .when(!push_changed_confirmed, |button| button.ghost())
-                                        .small()
-                                        .label(if push_changed_confirmed {
-                                            format!("Really overwrite {changed} on Sirv?")
-                                        } else {
-                                            format!("Overwrite {changed} on Sirv")
-                                        })
-                                        .disabled(busy)
-                                        .on_click(cx.listener(|audit, _, _, cx| {
-                                            if audit.sirv_confirm == Some(SirvJobKind::PushChanged)
-                                            {
-                                                audit.sirv_confirm = None;
-                                                audit.start_push_changed(cx);
-                                            } else {
-                                                audit.sirv_confirm = Some(SirvJobKind::PushChanged);
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                                .child(
-                                    Button::new("sirv-pull-changed")
-                                        .when(pull_changed_confirmed, |button| button.primary())
-                                        .when(!pull_changed_confirmed, |button| button.ghost())
-                                        .small()
-                                        .label(if pull_changed_confirmed {
-                                            format!("Really replace {changed} local files?")
-                                        } else {
-                                            format!("Take {changed} from Sirv")
-                                        })
-                                        .disabled(busy)
-                                        .on_click(cx.listener(|audit, _, _, cx| {
-                                            if audit.sirv_confirm == Some(SirvJobKind::PullChanged)
-                                            {
-                                                audit.sirv_confirm = None;
-                                                audit.start_pull_changed(cx);
-                                            } else {
-                                                audit.sirv_confirm = Some(SirvJobKind::PullChanged);
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("sirv-unpair")
-                                    .ghost()
-                                    .small()
-                                    .label(format!("Unpair {dir}"))
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|audit, _, window, cx| {
-                                        audit.unpair_sirv(cx);
-                                        Self::restore_audit_focus(window, cx);
-                                    })),
-                            )
-                        }),
-                ),
-            )
             .child(
                 div()
                     .flex()
@@ -360,7 +487,11 @@ impl Render for Audit {
     // erases to one type rather than making the caller's `impl Trait` pick a winner.
     #[allow(refining_impl_trait)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let count = self.visible.len();
+        let count = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+            self.sirv_remote_only.len()
+        } else {
+            self.visible.len()
+        };
 
         let title = match self.root.file_name() {
             Some(name) => format!("{} — Press", name.to_string_lossy()),
@@ -778,6 +909,9 @@ impl Audit {
             ))
             .on_key_down(
                 cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
+                    if audit.studio_input_focused(window, cx) {
+                        return;
+                    }
                     // The filter box swallows its own keys, so these only fire when the
                     // list itself has focus. Shift turns any move into a selection
                     // drag from the anchor.
@@ -852,6 +986,7 @@ impl Audit {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
+                            .children(self.sirv_reconciliation(cx))
                             .children(self.conversion_notice(cx))
                             .when(acquisition::SHOW_ACQUISITION_EXTRAS, |view| {
                                 view.children(self.spin_notice(cx))
@@ -860,7 +995,10 @@ impl Audit {
                             .children(self.local_ai_notice(cx))
                             .children(self.studio_notice(cx))
                             .child(self.audit_content(count, window, cx))
-                            .child(self.action_bar(list_width, cx)),
+                            .children(
+                                (self.sirv_scope != Some(SirvScope::OnlyRemote))
+                                    .then(|| self.action_bar(list_width, cx)),
+                            ),
                     )
                     .children(self.rail_view(cx)),
             )
@@ -894,6 +1032,16 @@ impl Audit {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         self.selection_bounds.borrow_mut().clear();
+        if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_hidden()
+                .bg(cx.theme().table)
+                .child(self.sirv_remote_only_view(cx))
+                .into_any_element();
+        }
         // The list runs to the window edge; hairlines above it, not a
         // card floating in padding.
         div()
@@ -954,7 +1102,7 @@ impl Audit {
                                     audit.request_thumb(entry, cx);
                                     tiles.push(audit.tile(row, entry, layout.tile, cx));
                                 }
-                                div().flex().gap_2().children(tiles)
+                                div().flex().gap_2().pb_2().children(tiles)
                             })
                             .collect::<Vec<_>>()
                     }),

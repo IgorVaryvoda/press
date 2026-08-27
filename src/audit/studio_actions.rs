@@ -18,11 +18,21 @@ pub(super) fn studio_landing_applies(
 
 impl StudioJob {
     pub(super) fn busy(&self) -> bool {
-        matches!(self.state, StudioJobState::Running)
+        matches!(
+            self.state,
+            StudioJobState::Preparing | StudioJobState::Running
+        )
     }
 
     pub(super) fn message(&self, root: &Path) -> String {
         match &self.state {
+            StudioJobState::Preparing => {
+                format!("Preparing {} for Studio…", self.source_name)
+            }
+            StudioJobState::AwaitingConfirmation(upload) => format!(
+                "Press will make a temporary {}×{} WebP upload copy of {}. It may reduce visible quality; the original stays untouched.",
+                upload.width, upload.height, self.source_name
+            ),
             StudioJobState::Running => {
                 format!(
                     "Running {} on {} with AI operations…",
@@ -52,6 +62,18 @@ impl Audit {
 
     fn studio_prompt_text(&self, cx: &App) -> String {
         self.studio_prompt.read(cx).value().trim().to_string()
+    }
+
+    pub(super) fn studio_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.studio_prompt
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+            || self
+                .studio_key_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
     }
 
     pub(super) fn save_studio_key(&mut self, cx: &mut Context<Self>) {
@@ -118,11 +140,11 @@ impl Audit {
         if self.studio_busy() || self.local_ai_busy() || self.converting {
             return;
         }
-        let Some(key) = self.studio_key.clone() else {
+        if self.studio_key.is_none() {
             self.studio_status = Some((false, "Save an AI API key first".into()));
             cx.notify();
             return;
-        };
+        }
         let Some(entry) = self.entries.get(index) else {
             return;
         };
@@ -140,8 +162,6 @@ impl Audit {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| entry.name());
-        let root = self.root.clone();
-        let out_dir = self.output.root(&self.root);
         let dataset_generation = self.dataset_generation;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.studio_job = Some(StudioJob {
@@ -149,26 +169,94 @@ impl Audit {
             index,
             dataset_generation,
             source_name,
-            state: StudioJobState::Running,
+            output_source,
+            prompt,
+            state: StudioJobState::Preparing,
             cancelled: cancelled.clone(),
         });
         self.studio_status = None;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let process_cancelled = cancelled.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { studio::prepare_upload(&source, &cancelled) })
+                .await;
+            let _ = this.update(cx, |audit, cx| {
+                if !studio_landing_applies(
+                    audit.studio_job.as_ref(),
+                    index,
+                    dataset_generation,
+                    tool,
+                ) {
+                    return;
+                }
+                match result {
+                    Ok(studio::Preflight::Ready(upload)) => {
+                        audit.run_prepared_studio(upload, cx);
+                    }
+                    Ok(studio::Preflight::NeedsConfirmation(upload)) => {
+                        audit.studio_job.as_mut().unwrap().state =
+                            StudioJobState::AwaitingConfirmation(upload);
+                        audit.rail = Rail::Studio;
+                    }
+                    Err(message) => {
+                        audit.studio_job.as_mut().unwrap().state = StudioJobState::Failed(message);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn confirm_studio(&mut self, cx: &mut Context<Self>) {
+        let upload = {
+            let Some(job) = self.studio_job.as_mut() else {
+                return;
+            };
+            match std::mem::replace(&mut job.state, StudioJobState::Preparing) {
+                StudioJobState::AwaitingConfirmation(upload) => upload,
+                state => {
+                    job.state = state;
+                    return;
+                }
+            }
+        };
+        self.run_prepared_studio(upload, cx);
+    }
+
+    fn run_prepared_studio(&mut self, upload: studio::PreparedUpload, cx: &mut Context<Self>) {
+        let Some(key) = self.studio_key.clone() else {
+            return;
+        };
+        let Some(job) = self.studio_job.as_mut() else {
+            return;
+        };
+        job.state = StudioJobState::Running;
+        let index = job.index;
+        let dataset_generation = job.dataset_generation;
+        let tool = job.tool;
+        let prompt = job.prompt.clone();
+        let output_source = job.output_source.clone();
+        let cancelled = job.cancelled.clone();
+        let root = self.root.clone();
+        let out_dir = self.output.root(&self.root);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    studio::process(
+                    studio::process_prepared(
                         &key,
                         &root,
                         &out_dir,
-                        &source,
+                        &upload,
                         &output_source,
                         tool,
                         &prompt,
-                        &process_cancelled,
+                        &cancelled,
                     )
                 })
                 .await;
@@ -209,6 +297,16 @@ impl Audit {
         let prompt_missing = chosen.needs_prompt() && prompt.is_empty();
         let has_key = self.studio_key.is_some();
         let busy = self.converting || self.local_ai_busy() || self.studio_busy();
+        let awaiting_confirmation = self.studio_job.as_ref().is_some_and(|job| {
+            job.index == index.unwrap_or(usize::MAX)
+                && job.tool == chosen
+                && matches!(job.state, StudioJobState::AwaitingConfirmation(_))
+        });
+        let written = self
+            .studio_source
+            .as_ref()
+            .filter(|(source_index, _)| Some(*source_index) == index)
+            .map(|(_, path)| path.clone());
 
         div()
             .flex()
@@ -262,7 +360,11 @@ impl Audit {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(chosen.prompt_placeholder()),
                             )
-                            .child(Input::new(&self.studio_prompt).small())
+                            .child(
+                                div()
+                                    .debug_selector(|| "studio-prompt-input".into())
+                                    .child(Input::new(&self.studio_prompt).small()),
+                            )
                     })
                     .child(div().h(px(8.)))
                     .child(
@@ -293,10 +395,12 @@ impl Audit {
                     .when(!has_key, |panel| {
                         panel
                             .child(
-                                Input::new(&self.studio_key_input)
-                                    .small()
-                                    .content_type(InputContentType::Password)
-                                    .mask_toggle(),
+                                div().debug_selector(|| "studio-key-input".into()).child(
+                                    Input::new(&self.studio_key_input)
+                                        .small()
+                                        .content_type(InputContentType::Password)
+                                        .mask_toggle(),
+                                ),
                             )
                             .child(
                                 div()
@@ -372,16 +476,26 @@ impl Audit {
                         Button::new("studio-commit")
                             .primary()
                             .w_full()
-                            .label(format!("Run {}", chosen.label()))
+                            .label(if awaiting_confirmation {
+                                "Prepare upload copy & run".to_string()
+                            } else {
+                                format!("Run {}", chosen.label())
+                            })
                             .loading(
                                 self.studio_job
                                     .as_ref()
                                     .is_some_and(|job| job.busy() && job.tool == chosen),
                             )
-                            .disabled(index.is_none() || !has_key || prompt_missing || busy)
+                            .disabled(
+                                index.is_none()
+                                    || !has_key
+                                    || !awaiting_confirmation && (prompt_missing || busy),
+                            )
                             .on_click(cx.listener(move |audit, _, _, cx| {
-                                if let Some(index) = index {
-                                    audit.start_studio(index, None, cx);
+                                if awaiting_confirmation {
+                                    audit.confirm_studio(cx);
+                                } else if let Some(index) = index {
+                                    audit.start_studio(index, written.clone(), cx);
                                 }
                             })),
                     ),
@@ -399,20 +513,6 @@ impl Audit {
         cx: &mut Context<Self>,
     ) -> Button {
         let tool = self.studio_tool;
-        let prompt_missing = tool.needs_prompt() && self.studio_prompt_text(cx).is_empty();
-        let reason = if self.studio_key.is_none() {
-            "Open AI operations and save an API key".to_string()
-        } else if index.is_none() {
-            "Select one image to run with AI operations".to_string()
-        } else if prompt_missing {
-            format!("Open AI operations and add a prompt for {}", tool.label())
-        } else {
-            format!("Run {} with hosted AI operations", tool.label())
-        };
-        let running = self
-            .studio_job
-            .as_ref()
-            .is_some_and(|job| job.busy() && job.tool == tool && Some(job.index) == index);
         Button::new(id)
             .small()
             .outline()
@@ -420,18 +520,11 @@ impl Audit {
                 button.icon(Icon::default().path(path))
             })
             .when(labelled, |button| button.label("AI operations"))
-            .tooltip(reason)
-            .loading(running)
-            .disabled(
-                self.studio_key.is_none()
-                    || index.is_none()
-                    || prompt_missing
-                    || busy
-                    || self.studio_busy(),
-            )
+            .tooltip("Open hosted AI operations for this image")
+            .disabled(index.is_none() || busy || self.studio_busy())
             .on_click(cx.listener(move |audit, _, _, cx| {
                 if let Some(index) = index {
-                    audit.start_studio(index, written.clone(), cx);
+                    audit.open_ai_operations(index, written.clone(), cx);
                 }
             }))
     }

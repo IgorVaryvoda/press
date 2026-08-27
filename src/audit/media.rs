@@ -66,7 +66,7 @@ pub(super) fn image_context_menu(
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     if let Some(audit) = ai_operations.upgrade() {
-                        audit.update(cx, |audit, cx| audit.open_ai_operations(index, cx));
+                        audit.update(cx, |audit, cx| audit.open_ai_operations(index, None, cx));
                     }
                 }),
         )

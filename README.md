@@ -2,7 +2,7 @@
 
 Audit and optimise a folder of images locally.
 
-The conversion tools on [imageguide.dev](https://www.imageguide.dev) post your files
+The conversion tools on [imageguide.dev](https://www.imageguide.dev/?utm_source=github&utm_medium=readme&utm_campaign=press) post your files
 to a worker to do the work. That is fine for one screenshot and wrong for a client
 shoot. This does the same job on your computer: auditing, comparing, and converting
 do not upload files, and the folder size is bounded by the disk rather than by a
@@ -99,13 +99,17 @@ thousands of them.
 Image, Background Removal, Background Replace, Image Upscale 2×, and Product
 Lifestyle. The prompt field appears only for tools that need one.
 
-Create a key in [Studio API settings](https://dev.sirv.studio/settings/api), paste
-it into the Studio rail, then choose one image and run the tool. Press verifies and
-saves the key owner-only on Unix. It uploads that image to Studio (JPEG, PNG, GIF,
-WebP, or AVIF; 20 MB maximum), calls the authenticated REST endpoint, downloads the
-result, and opens the real file beside the original. **Keep** retains it in the
-output folder; **Discard** removes it. No Sirv folder pairing or browser handoff is
-involved.
+Choose **AI operations** while previewing an image or a completed local result, then
+create a key in [Studio API settings](https://dev.sirv.studio/settings/api?utm_source=github&utm_medium=readme&utm_campaign=press-studio), paste it into the rail, and run the tool. Press verifies and
+saves the key owner-only on Unix. It uploads accepted images unchanged. If Studio
+does not accept the container, Press prepares an in-memory lossless WebP copy. If
+meeting Studio's 20 MB limit needs lossy compression or smaller dimensions, Press
+names the proposed size and asks once before uploading. The source is never changed
+and the temporary upload copy is never kept as output.
+
+Press calls the authenticated REST endpoint, downloads the result, and opens the
+real file beside the original. **Keep** retains it in the output folder; **Discard**
+removes it. No Sirv folder pairing or browser handoff is involved.
 
 A normal audit, comparison, or conversion makes no Studio request. Only pressing
 the Studio run button uploads an image.
@@ -113,10 +117,12 @@ the Studio run button uploads an image.
 ## Optional Sirv sync
 
 Open the Sirv folder browser, choose a remote folder, and pair it with the current
-local folder. Press then shows files that exist on only one side or have a
-different byte size. **Push** uploads missing local originals. **Pull** downloads
-missing remote files. Replacing a different file requires a second confirming click,
-and **Stop** prevents the next file in the transfer from starting.
+local folder. The audit then stays visibly paired, with filters for files that are
+local-only, different, or Sirv-only. **Push** uploads all missing local originals.
+**Pull** downloads all missing remote files. Replacing different files requires a
+second confirming click. Transfer progress names the current file and retains named
+failures; **Stop** prevents the next file from starting. Refresh, change-folder, and
+unpair controls stay in the audit instead of hiding inside the folder browser.
 
 A completed conversion can publish its outputs to `optimized/` in the paired Sirv
 folder and copy responsive image markup. Press also detects numbered image sequences:
@@ -145,10 +151,12 @@ part of a normal audit, comparison, or conversion.
 
 ## Converting
 
-The bar along the foot of the window holds the verbs: **Convert**, the two local
-models, and Sirv Studio. Choosing one opens a rail on the right with
-that operation's own settings and the button that commits it — for Convert, the
+The bar along the foot of the window holds the local verbs: **Convert** and the two
+local models. Choosing one opens a rail on the right with that operation's own
+settings and the button that commits it — for Convert, the
 presets, format, quality and size limit, with the projected saving above the button.
+Hosted Studio operations appear in the preview where one exact image or completed
+local result supplies their context.
 `--convert` does the same work without a window.
 
 Files are written to `optimized/` inside the folder, mirroring its subfolder layout.

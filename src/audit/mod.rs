@@ -321,6 +321,9 @@ pub(crate) struct Audit {
     studio_prompt: gpui::Entity<InputState>,
     studio_key_checking: bool,
     studio_status: Option<(bool, String)>,
+    /// A local result that opened the Studio rail. Kept with its source row so key
+    /// setup or prompt editing does not silently switch the job back to the original.
+    studio_source: Option<(usize, PathBuf)>,
     /// The paired Sirv folder, if any: the client, the remote path, and its
     /// listing keyed by the same relative keys the local rows use.
     sirv_pairing: Option<SirvPairing>,
@@ -328,6 +331,12 @@ pub(crate) struct Audit {
     /// differ, files to pull. Recomputed when the dataset or the listing
     /// changes, never per frame.
     sirv_counts: Option<(usize, usize, usize)>,
+    /// The selected reconciliation category. Conversion ticks still mean conversion;
+    /// this only narrows which difference the audit is showing.
+    sirv_scope: Option<SirvScope>,
+    /// Names in the paired listing that have no local file. They cannot use `visible`,
+    /// whose indices deliberately refer only to immutable local entries.
+    sirv_remote_only: Vec<String>,
     /// A snapshot from the last walk, patched by completed pulls. A file made
     /// by hand between walks stays stale until the next walk, like the listing.
     sirv_local_presence: HashSet<String>,
@@ -537,6 +546,13 @@ enum SirvJobKind {
     Spin,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SirvScope {
+    OnlyLocal,
+    Changed,
+    OnlyRemote,
+}
+
 #[derive(Clone)]
 enum UploadCompletion {
     None,
@@ -551,6 +567,8 @@ struct SirvJob {
     /// Total failures. Only the first few messages are retained below.
     failed: usize,
     failures: Vec<String>,
+    /// The file currently crossing the network. `done` counts completed files.
+    current: Option<String>,
     finished: bool,
     /// A stop has been requested; the in-flight file still has to acknowledge it.
     stopping: bool,
@@ -683,6 +701,8 @@ struct LocalAiJob {
 }
 
 enum StudioJobState {
+    Preparing,
+    AwaitingConfirmation(studio::PreparedUpload),
     Running,
     Done(PathBuf),
     Failed(String),
@@ -693,6 +713,8 @@ struct StudioJob {
     index: usize,
     dataset_generation: u64,
     source_name: String,
+    output_source: PathBuf,
+    prompt: String,
     state: StudioJobState,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -731,6 +753,7 @@ impl Audit {
             job.cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.studio_source = None;
         self.root = root;
         self.mislabelled = scanned
             .entries
@@ -798,6 +821,8 @@ impl Audit {
                 self.sirv_local_presence.clear();
                 pairing.files = Listing::Walking;
                 self.sirv_counts = None;
+                self.sirv_remote_only.clear();
+                self.refresh_visible();
                 self.walk_sirv_pairing(cx);
             } else {
                 self.refresh_sirv_counts();
@@ -1187,6 +1212,7 @@ pub(crate) fn build_audit(
             studio_prompt,
             studio_key_checking: false,
             studio_status: None,
+            studio_source: None,
             selected_target_count: 0,
             selected_target_bytes: 0,
             thumbs: HashMap::new(),
@@ -1241,6 +1267,8 @@ pub(crate) fn build_audit(
             drag_over: false,
             sirv_pairing: None,
             sirv_counts: None,
+            sirv_scope: None,
+            sirv_remote_only: Vec::new(),
             sirv_local_presence: HashSet::new(),
             sirv_job: None,
             sirv_confirm: None,

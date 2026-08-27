@@ -22,7 +22,10 @@ impl Audit {
         let job = self.studio_job.as_ref()?;
         let message = job.message(&self.root);
         let alert = match job.state {
-            StudioJobState::Running => Alert::info("studio-status", message),
+            StudioJobState::Preparing | StudioJobState::Running => {
+                Alert::info("studio-status", message)
+            }
+            StudioJobState::AwaitingConfirmation(_) => Alert::warning("studio-status", message),
             StudioJobState::Done(_) => Alert::success("studio-status", message),
             StudioJobState::Failed(_) => Alert::error("studio-status", message),
         };
@@ -151,34 +154,6 @@ impl Audit {
             && let Listing::Failed(reason) = &pairing.files
         {
             parts.push(format!("could not list {}: {reason}", pairing.dir));
-        }
-        if let Some(job) = &self.sirv_job
-            && (!job.finished || job.failed > 0)
-        {
-            let verb = match job.kind {
-                SirvJobKind::Pull => "Sirv pull",
-                SirvJobKind::PullChanged => "Sirv pull (overwrite)",
-                SirvJobKind::Push => "Sirv push",
-                SirvJobKind::PushChanged => "Sirv push (overwrite)",
-                SirvJobKind::Publish => "Sirv publish",
-                SirvJobKind::Spin => "Spin publish",
-            };
-            let failures = if job.failed == 0 {
-                String::new()
-            } else {
-                let rest = job.failed.saturating_sub(job.failures.len());
-                format!(
-                    ", {} failed: {}{}",
-                    job.failed,
-                    job.failures.join(", "),
-                    if rest == 0 {
-                        String::new()
-                    } else {
-                        format!(" and {rest} more")
-                    },
-                )
-            };
-            parts.push(format!("{verb}: {} of {}{failures}", job.done, job.total));
         }
         if parts.is_empty() {
             return None;
