@@ -62,7 +62,8 @@ impl Pair {
 }
 
 pub fn preview(path: &Path) -> Option<Preview> {
-    let image = crate::scan::decode(path)?.into_rgba8();
+    let image = crate::thumbs::decode_native(path, None)
+        .or_else(|| Some(crate::scan::decode(path)?.into_rgba8()))?;
     let (width, height) = image.dimensions();
     Some(Preview {
         image: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(image))])),

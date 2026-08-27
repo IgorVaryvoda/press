@@ -112,10 +112,11 @@ const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// is about 150KB of texture at that size against 25KB before, so 512 of them would be
 /// 75MB of video memory for rows nobody is looking at.
 const THUMB_CACHE: usize = 192;
-const THUMB_SETTLE: Duration = Duration::from_millis(300);
-/// Cold thumbnail work runs beside the eight-file WebP estimator. Two decodes keep
-/// enough CPU free for the window while still filling a viewport in one short wave.
-const THUMB_WORKERS: usize = 2;
+/// Native JPEG/WebP scaling avoids full-image allocations, so four jobs fill a
+/// viewport quickly without recreating the old full-decode CPU spike.
+const THUMB_WORKERS: usize = 4;
+const THUMB_SLOW_WORKERS: usize = 2;
+const THUMB_SLOW_SETTLE: Duration = Duration::from_millis(300);
 
 /// The open rail. Every operation with settings owns one, so the action bar
 /// can hold verbs alone and no operation borrows another's controls.
@@ -146,6 +147,7 @@ struct ThumbRequest {
     dataset_generation: u64,
     edge: u32,
     path: PathBuf,
+    native_scaled: bool,
 }
 
 struct Marquee {
@@ -263,6 +265,7 @@ pub(crate) struct Audit {
     /// Settled, still-visible rows waiting for a bounded decode slot.
     thumb_queue: VecDeque<ThumbRequest>,
     thumb_inflight: usize,
+    thumb_slow_inflight: usize,
     /// The order `thumbs` filled up in, so the oldest decode is the one that leaves
     /// when the cache reaches `THUMB_CACHE`.
     thumb_order: VecDeque<usize>,
@@ -1219,6 +1222,7 @@ pub(crate) fn build_audit(
             requested: HashSet::new(),
             thumb_queue: VecDeque::new(),
             thumb_inflight: 0,
+            thumb_slow_inflight: 0,
             thumb_order: VecDeque::new(),
             format,
             quality,

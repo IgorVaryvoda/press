@@ -194,9 +194,17 @@ impl Audit {
     }
 
     pub(super) fn open_preview(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
+        let Some(entry) = self.entries.get(index) else {
             return;
         };
+        let path = entry.path.clone();
+        let preview = self.thumbs.get(&index).cloned().map(|image| {
+            Arc::new(Preview {
+                image,
+                width: entry.width,
+                height: entry.height,
+            })
+        });
         let dataset_generation = self.dataset_generation;
         let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
         self.compare = Some(Comparison {
@@ -205,7 +213,7 @@ impl Audit {
             mode: MediaMode::Preview,
             focused: false,
             key: key.clone(),
-            preview: None,
+            preview,
             pair: None,
             failed: false,
             split: 0.5,
@@ -348,24 +356,27 @@ impl Audit {
         if self.thumbs.contains_key(&index) || !self.requested.insert(index) {
             return;
         }
-        let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
+        let Some(entry) = self.entries.get(index) else {
             return;
         };
         let request = ThumbRequest {
             index,
             dataset_generation: self.dataset_generation,
             edge: self.thumb_edge(),
-            path,
+            path: entry.path.clone(),
+            native_scaled: matches!(
+                entry.format,
+                scan::FileFormat::Image(image::ImageFormat::Jpeg | image::ImageFormat::WebP)
+            ),
         };
 
         cx.spawn(async move |this, cx| {
-            // Rows crossed during a fast scroll are never seen long enough to
-            // justify a decode or a texture upload. Once the list settles, only
-            // the rows still in the viewport continue.
-            cx.background_executor().timer(THUMB_SETTLE).await;
+            // Native scaling is cheap enough to start next turn. Full decodes get a
+            // short scroll debounce and do not contend with the opening frame.
+            if !request.native_scaled {
+                cx.background_executor().timer(THUMB_SLOW_SETTLE).await;
+            }
             let _ = this.update(cx, |audit, cx| {
-                // A folder or view-mode change already cleared `requested`; do not
-                // remove a new request for the same row when this old timer wakes.
                 if !audit.thumb_request_is_current(&request) {
                     return;
                 }
@@ -381,10 +392,16 @@ impl Audit {
     }
 
     pub(super) fn start_thumb_jobs(&mut self, cx: &mut Context<Self>) {
-        while self.thumb_inflight < THUMB_WORKERS {
-            let Some(request) = self.thumb_queue.pop_front() else {
-                return;
+        while let Some(request) = self.thumb_queue.front() {
+            let workers = if self.thumb_slow_inflight > 0 || !request.native_scaled {
+                THUMB_SLOW_WORKERS
+            } else {
+                THUMB_WORKERS
             };
+            if self.thumb_inflight >= workers {
+                return;
+            }
+            let request = self.thumb_queue.pop_front().unwrap();
             if !self.thumb_request_is_current(&request) {
                 continue;
             }
@@ -397,11 +414,13 @@ impl Audit {
             }
 
             self.thumb_inflight += 1;
+            self.thumb_slow_inflight += usize::from(!request.native_scaled);
             let ThumbRequest {
                 index,
                 dataset_generation,
                 edge,
                 path,
+                native_scaled,
             } = request;
             cx.spawn(async move |this, cx| {
                 let loaded = cx
@@ -411,6 +430,9 @@ impl Audit {
 
                 let _ = this.update(cx, |audit, cx| {
                     audit.thumb_inflight = audit.thumb_inflight.saturating_sub(1);
+                    audit.thumb_slow_inflight = audit
+                        .thumb_slow_inflight
+                        .saturating_sub(usize::from(!native_scaled));
                     if audit.dataset_generation == dataset_generation
                         && audit.thumb_edge() == edge
                         && let Some(image) = loaded

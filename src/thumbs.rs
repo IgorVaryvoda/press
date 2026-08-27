@@ -1,23 +1,23 @@
 //! Turn a file on disk into something the GPU can draw.
 //!
-//! A thumbnail is almost entirely its decode. Measured here, a 5442px JPEG spends
-//! 205ms decoding and 22ms scaling; a 11424px PNG spends 924ms and 115ms. Two ways
-//! out of that were tried and rejected. Decoding a JPEG at an eighth of its size ran
-//! *slower*, because the only decoder that offers it has no SIMD and the saving is in
-//! the inverse transform, not in the Huffman pass that dominates. Reading the
-//! thumbnail a camera embeds in its EXIF is fast but can show the picture as it was
-//! before an edit, which is the one thing this app must not do.
-//!
-//! So the decode happens off the main thread, only for rows on screen, and only once
-//! per file ever: the result is kept on disk and read back in about a fifth of a
-//! millisecond. Measured over the 37 largest images in a real folder, 3.59s of
-//! decoding becomes 7.0ms the next time that folder opens.
+//! JPEG and WebP dominate normal photo folders, so their native decoders scale while
+//! decoding instead of allocating every source pixel just to throw most of them away.
+//! Other formats retain the general decoder. Work stays off the main thread and the
+//! scaled result is cached on disk for later opens.
 
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::RenderImage;
-use image::{DynamicImage, Frame, RgbaImage};
+use image::{
+    DynamicImage, Frame, ImageDecoder as _, ImageFormat, ImageReader, RgbaImage,
+    metadata::Orientation,
+};
+use libwebp_sys::{
+    VP8StatusCode, WEBP_CSP_MODE, WebPDecode, WebPDecoderConfig, WebPFreeDecBuffer,
+    WebPGetFeatures, WebPRGBABuffer,
+};
 
 /// Longest edge of a generated thumbnail, in pixels.
 ///
@@ -36,8 +36,8 @@ use image::{DynamicImage, Frame, RgbaImage};
 pub const THUMB_EDGE: u32 = 224;
 pub const TABLE_THUMB_EDGE: u32 = 96;
 
-/// Thumbnails kept on disk. Measured at 38KB of lossless WebP each at `THUMB_EDGE` on
-/// real photographs, so this bounds the cache near 110MB.
+/// Thumbnails kept on disk. Even at the old 38KB lossless size this bounds the cache
+/// near 110MB; normal lossy entries are smaller.
 const CACHE_FILES: usize = 3_000;
 
 /// Decode `path`, scale it to fit `edge`, and hand back something `img()` can draw.
@@ -57,15 +57,136 @@ pub fn load_using(cache: Option<&Path>, path: &Path, edge: u32) -> Option<Arc<Re
 
     // `thumbnail` preserves the aspect ratio and fits inside the box. RGBA, not RGB:
     // lossless WebP carries the alpha, and a cut-out drawn opaque is a wrong thumbnail.
-    let scaled = DynamicImage::ImageRgba8(
-        crate::scan::decode(path)?
-            .thumbnail(edge, edge)
-            .into_rgba8(),
-    );
+    let scaled = DynamicImage::ImageRgba8(decode_native(path, Some(edge)).or_else(|| {
+        Some(
+            crate::scan::decode(path)?
+                .thumbnail(edge, edge)
+                .into_rgba8(),
+        )
+    })?);
     if let Some(file) = cached {
         write_cached(&file, &scaled);
     }
     Some(drawable(scaled.into_rgba8()))
+}
+
+pub(crate) fn decode_native(path: &Path, edge: Option<u32>) -> Option<RgbaImage> {
+    let bytes = std::fs::read(path).ok()?;
+    let format = image::guess_format(&bytes[..bytes.len().min(16)]).ok()?;
+    if !matches!(format, ImageFormat::Jpeg | ImageFormat::WebP) {
+        return None;
+    }
+    match format {
+        ImageFormat::Jpeg => decode_jpeg(&bytes, edge),
+        ImageFormat::WebP => decode_webp(&bytes, edge),
+        _ => None,
+    }
+}
+
+fn decode_webp(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
+    let mut config = WebPDecoderConfig::new().ok()?;
+    if unsafe { WebPGetFeatures(bytes.as_ptr(), bytes.len(), &mut config.input) }
+        != VP8StatusCode::VP8_STATUS_OK
+        || config.input.has_animation != 0
+    {
+        return None;
+    }
+    let source = (
+        u32::try_from(config.input.width).ok()?,
+        u32::try_from(config.input.height).ok()?,
+    );
+    let (width, height) = edge.map_or(source, |edge| fit(source.0, source.1, edge));
+    let stride = width.checked_mul(4)?;
+    let mut pixels = vec![0; usize::try_from(stride.checked_mul(height)?).ok()?];
+    config.output.colorspace = WEBP_CSP_MODE::MODE_RGBA;
+    config.output.is_external_memory = 1;
+    config.output.u.RGBA = WebPRGBABuffer {
+        rgba: pixels.as_mut_ptr(),
+        stride: i32::try_from(stride).ok()?,
+        size: pixels.len(),
+    };
+    config.options.use_scaling = i32::from((width, height) != source);
+    config.options.scaled_width = i32::try_from(width).ok()?;
+    config.options.scaled_height = i32::try_from(height).ok()?;
+    config.options.use_threads = 1;
+    // SAFETY: libwebp writes into the external buffer above while `pixels` is live.
+    // Freeing the decoder buffer does not free caller-owned external memory.
+    let status = unsafe { WebPDecode(bytes.as_ptr(), bytes.len(), &mut config) };
+    unsafe { WebPFreeDecBuffer(&mut config.output) };
+    if status != VP8StatusCode::VP8_STATUS_OK {
+        return None;
+    }
+    orient(
+        RgbaImage::from_raw(width, height, pixels)?,
+        bytes,
+        ImageFormat::WebP,
+    )
+}
+
+fn decode_jpeg(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
+    let mut decoder = turbojpeg::Decompressor::new().ok()?;
+    let header = decoder.read_header(bytes).ok()?;
+    let factor = edge.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
+        [
+            turbojpeg::ScalingFactor::ONE_EIGHTH,
+            turbojpeg::ScalingFactor::ONE_QUARTER,
+            turbojpeg::ScalingFactor::ONE_HALF,
+            turbojpeg::ScalingFactor::ONE,
+        ]
+        .into_iter()
+        .find(|factor| factor.scale(header.width.max(header.height)) >= edge as usize)
+        .unwrap_or(turbojpeg::ScalingFactor::ONE)
+    });
+    decoder.set_scaling_factor(factor).ok()?;
+    let (width, height) = (factor.scale(header.width), factor.scale(header.height));
+    let mut pixels = vec![0; width.checked_mul(height)?.checked_mul(4)?];
+    decoder
+        .decompress(
+            bytes,
+            turbojpeg::Image {
+                pixels: &mut pixels,
+                width,
+                pitch: width.checked_mul(4)?,
+                height,
+                format: turbojpeg::PixelFormat::RGBA,
+            },
+        )
+        .ok()?;
+    let image = RgbaImage::from_raw(width.try_into().ok()?, height.try_into().ok()?, pixels)?;
+    let image = match edge {
+        Some(edge) => DynamicImage::ImageRgba8(image)
+            .thumbnail(edge, edge)
+            .into_rgba8(),
+        None => image,
+    };
+    orient(image, bytes, ImageFormat::Jpeg)
+}
+
+fn orient(image: RgbaImage, bytes: &[u8], format: ImageFormat) -> Option<RgbaImage> {
+    let mut decoder = ImageReader::with_format(Cursor::new(bytes), format)
+        .into_decoder()
+        .ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::ImageRgba8(image);
+    image.apply_orientation(orientation);
+    Some(image.into_rgba8())
+}
+
+fn fit(width: u32, height: u32, edge: u32) -> (u32, u32) {
+    if width.max(height) <= edge {
+        return (width, height);
+    }
+    if width >= height {
+        (
+            edge,
+            ((u64::from(height) * u64::from(edge)) / u64::from(width)).max(1) as u32,
+        )
+    } else {
+        (
+            ((u64::from(width) * u64::from(edge)) / u64::from(height)).max(1) as u32,
+            edge,
+        )
+    }
 }
 
 fn drawable(thumbnail: RgbaImage) -> Arc<RenderImage> {
@@ -116,7 +237,7 @@ fn cache_dir() -> Option<PathBuf> {
 
 fn read_cached(file: &Path) -> Option<RgbaImage> {
     let bytes = std::fs::read(file).ok()?;
-    Some(image::load_from_memory(&bytes).ok()?.into_rgba8())
+    decode_webp(&bytes, None)
 }
 
 fn write_cached(file: &Path, thumbnail: &DynamicImage) {
@@ -129,7 +250,7 @@ fn write_cached(file: &Path, thumbnail: &DynamicImage) {
     let Some(encoded) = crate::convert::encode(
         thumbnail,
         crate::convert::Format::WebP,
-        crate::convert::Quality::LOSSLESS,
+        crate::convert::Quality::lossy(80.),
     ) else {
         return;
     };
@@ -186,7 +307,7 @@ pub(crate) fn to_bgra(mut image: RgbaImage) -> RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgba};
+    use image::{ImageBuffer, Rgb, Rgba};
 
     #[test]
     fn swaps_red_and_blue_and_leaves_alpha_alone() {
@@ -306,6 +427,42 @@ mod tests {
         assert!(
             restored.to_rgba8().pixels().any(|pixel| pixel.0[3] == 0),
             "the see-through half came back opaque"
+        );
+    }
+
+    #[test]
+    fn native_decoders_scale_by_contents_and_keep_orientation_and_alpha() {
+        const EXIF_ROTATE_90: [u8; 36] = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2a, 0, 0, 0, 8,
+            0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+        ];
+        let dir = scratch("native-decoders");
+
+        let honest = dir.join("cutout.webp");
+        ImageBuffer::from_pixel(400, 100, Rgba([20u8, 30, 40, 0]))
+            .save(&honest)
+            .unwrap();
+        let webp = dir.join("cutout.png");
+        std::fs::rename(honest, &webp).unwrap();
+        let decoded = decode_native(&webp, Some(96)).expect("WebP magic selects libwebp");
+        assert_eq!(decoded.dimensions(), (96, 24));
+        assert!(decoded.pixels().all(|pixel| pixel.0[3] == 0));
+
+        let jpeg = dir.join("camera.jpg");
+        ImageBuffer::from_pixel(400, 100, Rgb([20u8, 30, 40]))
+            .save(&jpeg)
+            .unwrap();
+        let bytes = std::fs::read(&jpeg).unwrap();
+        let mut oriented = Vec::with_capacity(bytes.len() + EXIF_ROTATE_90.len());
+        oriented.extend_from_slice(&bytes[..2]);
+        oriented.extend_from_slice(&EXIF_ROTATE_90);
+        oriented.extend_from_slice(&bytes[2..]);
+        std::fs::write(&jpeg, oriented).unwrap();
+        assert_eq!(
+            decode_native(&jpeg, Some(96))
+                .expect("JPEG uses TurboJPEG")
+                .dimensions(),
+            (24, 96)
         );
     }
 

@@ -1179,7 +1179,7 @@ fn key_repeats_share_one_next_frame_redraw(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn delayed_gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
+fn gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         let first = audit.entry_at(0).unwrap();
@@ -1194,7 +1194,7 @@ fn delayed_gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn thumbnail_decodes_fill_only_two_worker_slots(cx: &mut TestAppContext) {
+fn thumbnail_decodes_use_four_native_or_two_fallback_slots(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         audit.grid = true;
@@ -1207,6 +1207,7 @@ fn thumbnail_decodes_fill_only_two_worker_slots(cx: &mut TestAppContext) {
                 dataset_generation: audit.dataset_generation,
                 edge: thumbs::THUMB_EDGE,
                 path: PathBuf::from("missing-thumbnail.png"),
+                native_scaled: true,
             });
         }
 
@@ -1218,8 +1219,27 @@ fn thumbnail_decodes_fill_only_two_worker_slots(cx: &mut TestAppContext) {
     cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.thumb_inflight, 0);
+        assert_eq!(audit.thumb_slow_inflight, 0);
         assert!(audit.thumb_queue.is_empty());
     });
+
+    audit.update(cx, |audit, cx| {
+        let index = audit.entry_at(0).unwrap();
+        for _ in 0..THUMB_SLOW_WORKERS + 2 {
+            audit.thumb_queue.push_back(ThumbRequest {
+                index,
+                dataset_generation: audit.dataset_generation,
+                edge: thumbs::THUMB_EDGE,
+                path: PathBuf::from("missing-thumbnail.png"),
+                native_scaled: false,
+            });
+        }
+        audit.start_thumb_jobs(cx);
+        assert_eq!(audit.thumb_inflight, THUMB_SLOW_WORKERS);
+        assert_eq!(audit.thumb_slow_inflight, THUMB_SLOW_WORKERS);
+        assert_eq!(audit.thumb_queue.len(), 2);
+    });
+    cx.run_until_parked();
 }
 
 #[gpui::test]
@@ -1376,6 +1396,28 @@ fn double_click_opens_a_source_preview_before_comparison(cx: &mut TestAppContext
             opened.pair.is_none(),
             "preview opening does not run an encoder"
         );
+    });
+}
+
+#[gpui::test]
+fn an_open_preview_draws_the_loaded_thumbnail_immediately(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        let thumbnail = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
+        audit.thumbs.insert(0, thumbnail.clone());
+
+        audit.open_preview(0, cx);
+
+        let preview = audit
+            .compare
+            .as_ref()
+            .and_then(|comparison| comparison.preview.as_ref())
+            .expect("the thumbnail is already visible");
+        assert!(Arc::ptr_eq(&preview.image, &thumbnail));
+        assert_eq!((preview.width, preview.height), (1000, 1000));
     });
 }
 
