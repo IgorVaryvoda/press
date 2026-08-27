@@ -76,11 +76,11 @@ impl Tool {
 
     pub fn result_label(self) -> &'static str {
         match self {
-            Self::ImageToImage => "Studio transformation",
-            Self::RemoveBackground => "Studio background removal",
-            Self::ReplaceBackground => "Studio background replace",
-            Self::Upscale => "Studio upscale 2×",
-            Self::ProductLifestyle => "Studio lifestyle image",
+            Self::ImageToImage => "AI transformation",
+            Self::RemoveBackground => "AI background removal",
+            Self::ReplaceBackground => "AI background replace",
+            Self::Upscale => "AI upscale 2×",
+            Self::ProductLifestyle => "AI lifestyle image",
         }
     }
 

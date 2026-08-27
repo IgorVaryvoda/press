@@ -252,8 +252,21 @@ impl AuditTable {
         show_result: bool,
         show_sync: bool,
     ) {
-        (self.compact, self.name_width, self.columns) =
-            Self::layout(width, prefs, show_result, show_sync);
+        let (compact, name_width, next) = Self::layout(width, prefs, show_result, show_sync);
+        let mut columns: Vec<_> = self
+            .columns
+            .iter()
+            .copied()
+            .filter(|column| next.contains(column))
+            .collect();
+        for column in next {
+            if !columns.contains(&column) {
+                columns.push(column);
+            }
+        }
+        self.compact = compact;
+        self.name_width = name_width;
+        self.columns = columns;
     }
 }
 
@@ -366,10 +379,10 @@ impl TableDelegate for AuditTable {
             return row;
         };
         let audit_state = audit.read(cx);
-        let ticked = audit_state
-            .entry_at(row_ix)
-            .is_some_and(|entry| audit_state.selected.contains(&entry));
+        let entry = audit_state.entry_at(row_ix);
+        let ticked = entry.is_some_and(|entry| audit_state.selected.contains(&entry));
         let cursor = audit_state.cursor;
+        let selection_bounds = audit_state.selection_bounds.clone();
 
         row.h(px(ROW_HEIGHT))
             .relative()
@@ -379,12 +392,54 @@ impl TableDelegate for AuditTable {
             .when(row_ix == cursor, |row| {
                 row.border_color(cx.theme().muted_foreground)
             })
+            .on_prepaint(move |bounds, _, _| {
+                if let Some(entry) = entry {
+                    selection_bounds.borrow_mut().insert(entry, bounds);
+                }
+            })
             .on_click(cx.listener(move |table, event: &gpui::ClickEvent, _, cx| {
                 let Some(audit) = table.delegate().audit.upgrade() else {
                     return;
                 };
                 audit.update(cx, |audit, cx| audit.click_row(row_ix, event, cx));
             }))
+    }
+
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        menu: PopupMenu,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        let Some(audit) = self.audit.upgrade() else {
+            return menu;
+        };
+        let state = audit.read(cx);
+        let Some(index) = state.entry_at(row_ix) else {
+            return menu;
+        };
+        media::image_context_menu(
+            self.audit.clone(),
+            index,
+            state.result_paths.contains_key(&index),
+            state.converting || state.local_ai_busy() || state.studio_busy(),
+            menu,
+        )
+    }
+
+    fn move_column(
+        &mut self,
+        col_ix: usize,
+        to_ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) {
+        if col_ix >= self.columns.len() || to_ix >= self.columns.len() || col_ix == to_ix {
+            return;
+        }
+        let column = self.columns.remove(col_ix);
+        self.columns.insert(to_ix, column);
     }
 
     fn render_td(

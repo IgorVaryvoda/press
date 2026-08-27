@@ -25,13 +25,13 @@ impl StudioJob {
         match &self.state {
             StudioJobState::Running => {
                 format!(
-                    "Running {} on {} in Studio…",
+                    "Running {} on {} with AI operations…",
                     self.tool.label(),
                     self.source_name
                 )
             }
             StudioJobState::Done(path) => format!(
-                "Studio saved {}",
+                "AI result saved {}",
                 path.strip_prefix(root).unwrap_or(path).display()
             ),
             StudioJobState::Failed(message) => {
@@ -60,7 +60,7 @@ impl Audit {
         }
         let key = self.studio_key_input.read(cx).value().trim().to_string();
         if !key.starts_with("sk_live_") {
-            self.studio_status = Some((false, "Studio API keys start with sk_live_".into()));
+            self.studio_status = Some((false, "AI API keys start with sk_live_".into()));
             cx.notify();
             return;
         }
@@ -85,8 +85,7 @@ impl Audit {
                 match checked {
                     Ok(key) => {
                         audit.studio_key = Some(key);
-                        audit.studio_status =
-                            Some((true, "Studio API key verified and saved".into()));
+                        audit.studio_status = Some((true, "AI API key verified and saved".into()));
                     }
                     Err(message) => audit.studio_status = Some((false, message)),
                 }
@@ -100,8 +99,7 @@ impl Audit {
         match studio::forget_key() {
             Ok(()) => {
                 self.studio_key = None;
-                self.studio_status =
-                    Some((true, "Studio API key forgotten on this computer".into()));
+                self.studio_status = Some((true, "AI API key forgotten on this computer".into()));
                 self.studio_key_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                 });
@@ -121,7 +119,7 @@ impl Audit {
             return;
         }
         let Some(key) = self.studio_key.clone() else {
-            self.studio_status = Some((false, "Save a Studio API key first".into()));
+            self.studio_status = Some((false, "Save an AI API key first".into()));
             cx.notify();
             return;
         };
@@ -233,7 +231,7 @@ impl Audit {
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .pb_1()
-                            .child("Runs through the Studio API and brings the image back here."),
+                            .child("Uses hosted AI and brings the image back here."),
                     )
                     .children(studio::TOOLS.iter().copied().map(|tool| {
                         Button::new(gpui::SharedString::from(format!(
@@ -277,7 +275,7 @@ impl Audit {
                             .child(if has_key {
                                 "API key saved on this computer"
                             } else {
-                                "Studio API key"
+                                "AI API key"
                             })
                             .when(has_key, |row| {
                                 row.child(
@@ -403,13 +401,13 @@ impl Audit {
         let tool = self.studio_tool;
         let prompt_missing = tool.needs_prompt() && self.studio_prompt_text(cx).is_empty();
         let reason = if self.studio_key.is_none() {
-            "Open the Studio rail and save an API key".to_string()
+            "Open AI operations and save an API key".to_string()
         } else if index.is_none() {
-            "Select one image to run in Studio".to_string()
+            "Select one image to run with AI operations".to_string()
         } else if prompt_missing {
-            format!("Open the Studio rail and add a prompt for {}", tool.label())
+            format!("Open AI operations and add a prompt for {}", tool.label())
         } else {
-            format!("Run {} through the Studio API", tool.label())
+            format!("Run {} with hosted AI operations", tool.label())
         };
         let running = self
             .studio_job
@@ -421,7 +419,7 @@ impl Audit {
             .when_some(crate::assets::studio_icon(tool.slug()), |button, path| {
                 button.icon(Icon::default().path(path))
             })
-            .when(labelled, |button| button.label("Studio"))
+            .when(labelled, |button| button.label("AI operations"))
             .tooltip(reason)
             .loading(running)
             .disabled(

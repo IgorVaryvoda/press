@@ -6,13 +6,70 @@ pub(super) fn comparison_landing_applies(
     open: Option<&Comparison>,
     index: usize,
     dataset_generation: u64,
+    mode: MediaMode,
     key: &compare::Key,
 ) -> bool {
     open.is_some_and(|comparison| {
         comparison.index == index
             && comparison.dataset_generation == dataset_generation
+            && comparison.mode == mode
             && comparison.key == *key
     })
+}
+
+pub(super) fn image_context_menu(
+    audit: gpui::WeakEntity<Audit>,
+    index: usize,
+    has_result: bool,
+    busy: bool,
+    menu: PopupMenu,
+) -> PopupMenu {
+    let preview = audit.clone();
+    let compare = audit.clone();
+    let result = audit.clone();
+    let convert = audit.clone();
+    let ai_operations = audit;
+    let menu = menu
+        .item(PopupMenuItem::new("Preview").on_click(move |_, _, cx| {
+            if let Some(audit) = preview.upgrade() {
+                audit.update(cx, |audit, cx| audit.open_preview(index, cx));
+            }
+        }))
+        .item(PopupMenuItem::new("Compare").on_click(move |_, _, cx| {
+            if let Some(audit) = compare.upgrade() {
+                audit.update(cx, |audit, cx| audit.open_compare(index, cx));
+            }
+        }));
+    let menu = if has_result {
+        menu.item(
+            PopupMenuItem::new("See converted result").on_click(move |_, _, cx| {
+                if let Some(audit) = result.upgrade() {
+                    audit.update(cx, |audit, cx| audit.open_result(index, cx));
+                }
+            }),
+        )
+    } else {
+        menu
+    };
+    menu.separator()
+        .item(
+            PopupMenuItem::new("Convert this image")
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    if let Some(audit) = convert.upgrade() {
+                        audit.update(cx, |audit, cx| audit.convert_one(index, cx));
+                    }
+                }),
+        )
+        .item(
+            PopupMenuItem::new("AI operations…")
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    if let Some(audit) = ai_operations.upgrade() {
+                        audit.update(cx, |audit, cx| audit.open_ai_operations(index, cx));
+                    }
+                }),
+        )
 }
 
 impl Audit {
@@ -91,8 +148,10 @@ impl Audit {
         self.compare = Some(Comparison {
             index,
             dataset_generation,
+            mode: MediaMode::Compare,
             focused: false,
             key: key.clone(),
+            preview: None,
             pair: None,
             failed: false,
             split: 0.5,
@@ -120,6 +179,7 @@ impl Audit {
                     audit.compare.as_ref(),
                     index,
                     dataset_generation,
+                    MediaMode::Compare,
                     &key,
                 ) {
                     return;
@@ -133,6 +193,68 @@ impl Audit {
         .detach();
     }
 
+    pub(super) fn open_preview(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
+            return;
+        };
+        let dataset_generation = self.dataset_generation;
+        let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
+        self.compare = Some(Comparison {
+            index,
+            dataset_generation,
+            mode: MediaMode::Preview,
+            focused: false,
+            key: key.clone(),
+            preview: None,
+            pair: None,
+            failed: false,
+            split: 0.5,
+            pan: (0., 0.),
+            zoom: None,
+            drag: None,
+            written: None,
+            produced_by: None,
+        });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let built = cx
+                .background_executor()
+                .spawn(async move { compare::preview(&path) })
+                .await
+                .map(Arc::new);
+            let _ = this.update(cx, |audit, cx| {
+                if !comparison_landing_applies(
+                    audit.compare.as_ref(),
+                    index,
+                    dataset_generation,
+                    MediaMode::Preview,
+                    &key,
+                ) {
+                    return;
+                }
+                let comparison = audit.compare.as_mut().unwrap();
+                comparison.failed = built.is_none();
+                comparison.preview = built;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn convert_one(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.converting || self.local_ai_busy() || self.studio_busy() {
+            return;
+        }
+        self.compare = None;
+        self.selected.clear();
+        if index < self.entries.len() {
+            self.selected.insert(index);
+        }
+        self.selection_changed(cx);
+        self.start_conversion(cx);
+    }
+
     pub(super) fn open_compare(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
@@ -142,8 +264,10 @@ impl Audit {
         self.compare = Some(Comparison {
             index,
             dataset_generation,
+            mode: MediaMode::Compare,
             focused: false,
             key: key.clone(),
+            preview: None,
             pair: None,
             failed: false,
             split: 0.5,
@@ -181,6 +305,7 @@ impl Audit {
                         audit.compare.as_ref(),
                         index,
                         dataset_generation,
+                        MediaMode::Compare,
                         &key,
                     )
                 })
@@ -201,6 +326,7 @@ impl Audit {
                     audit.compare.as_ref(),
                     index,
                     dataset_generation,
+                    MediaMode::Compare,
                     &key,
                 );
                 if applies {

@@ -172,6 +172,19 @@ impl Audit {
         cx.notify();
     }
 
+    pub(super) fn open_ai_operations(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.entries.len() {
+            return;
+        }
+        self.selected.clear();
+        self.selected.insert(index);
+        if let Some(row) = self.row_of(index) {
+            self.cursor = row;
+        }
+        self.rail = Rail::Studio;
+        self.selection_changed(cx);
+    }
+
     /// What an open rail takes from the list. Zero when none is open.
     pub(super) fn rail_width(&self) -> f32 {
         if self.rail == Rail::None {
@@ -469,7 +482,7 @@ impl Audit {
 
         if event.click_count() >= 2 {
             self.cursor = row;
-            self.open_compare(entry, cx);
+            self.open_preview(entry, cx);
             return;
         }
 
@@ -499,6 +512,93 @@ impl Audit {
 
         self.cursor = row;
         self.selection_changed(cx);
+    }
+
+    pub(super) fn start_marquee(&mut self, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) {
+        let surface = self.selection_surface.get();
+        if self.converting
+            || !surface.contains(&event.position)
+            || event.position.x >= surface.right() - Scrollbar::width()
+        {
+            return;
+        }
+        let item_bounds = self.selection_bounds.borrow();
+        let first_item_top = item_bounds
+            .values()
+            .map(|bounds| f32::from(bounds.origin.y))
+            .fold(f32::INFINITY, f32::min);
+        if item_bounds.is_empty()
+            || (!self.grid && f32::from(event.position.y) < first_item_top)
+            || item_bounds
+                .values()
+                .any(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
+        drop(item_bounds);
+
+        let toggle = event.modifiers.control || event.modifiers.platform;
+        let additive = toggle || event.modifiers.shift;
+        let base = if additive {
+            self.selected.clone()
+        } else {
+            HashSet::new()
+        };
+        self.selected = base.clone();
+        let at = (f32::from(event.position.x), f32::from(event.position.y));
+        self.marquee = Some(Marquee {
+            start: at,
+            current: at,
+            base,
+            toggle,
+        });
+        self.refresh_target_summary();
+        cx.notify();
+    }
+
+    pub(super) fn move_marquee(&mut self, event: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
+        if !event.dragging() {
+            self.finish_marquee(cx);
+            return;
+        }
+        let surface = self.selection_surface.get();
+        let Some(marquee) = self.marquee.as_mut() else {
+            return;
+        };
+        marquee.current = (
+            f32::from(event.position.x.clamp(surface.left(), surface.right())),
+            f32::from(event.position.y.clamp(surface.top(), surface.bottom())),
+        );
+        let bounds = marquee.bounds();
+        let base = marquee.base.clone();
+        let toggle = marquee.toggle;
+        let hits: Vec<_> = self
+            .selection_bounds
+            .borrow()
+            .iter()
+            .filter_map(|(index, item)| item.intersects(&bounds).then_some(*index))
+            .collect();
+        let mut selected = base;
+        if toggle {
+            for hit in hits {
+                if !selected.insert(hit) {
+                    selected.remove(&hit);
+                }
+            }
+        } else {
+            selected.extend(hits);
+        }
+        if selected != self.selected {
+            self.selected = selected;
+            self.refresh_target_summary();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn finish_marquee(&mut self, cx: &mut Context<Self>) {
+        if self.marquee.take().is_some() {
+            self.selection_changed(cx);
+        }
     }
 
     pub(super) fn toggle_cursor_selection(&mut self, cx: &mut Context<Self>) {
@@ -620,6 +720,14 @@ impl Audit {
             return;
         };
         self.cursor = row;
-        self.open_compare(entry, cx);
+        if self
+            .compare
+            .as_ref()
+            .is_some_and(|comparison| comparison.mode == MediaMode::Compare)
+        {
+            self.open_compare(entry, cx);
+        } else {
+            self.open_preview(entry, cx);
+        }
     }
 }

@@ -330,8 +330,10 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
     let comparison = Comparison {
         index: 2,
         dataset_generation: 7,
+        mode: MediaMode::Compare,
         focused: false,
         key: key.clone(),
+        preview: None,
         pair: None,
         failed: false,
         split: 0.5,
@@ -342,8 +344,41 @@ fn a_comparison_result_only_belongs_to_its_exact_request() {
         produced_by: None,
     };
 
-    assert!(comparison_landing_applies(Some(&comparison), 2, 7, &key));
-    assert!(!comparison_landing_applies(Some(&comparison), 2, 8, &key));
+    assert!(comparison_landing_applies(
+        Some(&comparison),
+        2,
+        7,
+        MediaMode::Compare,
+        &key
+    ));
+    assert!(!comparison_landing_applies(
+        Some(&comparison),
+        2,
+        8,
+        MediaMode::Compare,
+        &key
+    ));
+    assert!(!comparison_landing_applies(
+        Some(&comparison),
+        2,
+        7,
+        MediaMode::Preview,
+        &key
+    ));
+}
+
+#[test]
+fn marquee_bounds_work_in_every_drag_direction() {
+    let marquee = Marquee {
+        start: (90., 80.),
+        current: (20., 30.),
+        base: HashSet::new(),
+        toggle: false,
+    };
+
+    let bounds = marquee.bounds();
+    assert_eq!(bounds.origin, gpui::point(px(20.), px(30.)));
+    assert_eq!(bounds.size, gpui::size(px(70.), px(50.)));
 }
 
 #[test]
@@ -1243,6 +1278,185 @@ fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext
     });
 }
 
+#[gpui::test]
+fn double_click_opens_a_source_preview_before_comparison(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let click = gpui::ClickEvent::Mouse(gpui::MouseClickEvent {
+        down: gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        },
+        up: gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        },
+    });
+
+    audit.update(cx, |audit, cx| audit.click_row(0, &click, cx));
+
+    audit.read_with(cx, |audit, _| {
+        let opened = audit.compare.as_ref().expect("preview opens");
+        assert_eq!(opened.mode, MediaMode::Preview);
+        assert!(
+            opened.pair.is_none(),
+            "preview opening does not run an encoder"
+        );
+    });
+}
+
+#[gpui::test]
+fn marquee_selects_intersecting_visible_items(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selection_surface.set(gpui::Bounds::from_corners(
+            gpui::point(px(0.), px(0.)),
+            gpui::point(px(300.), px(300.)),
+        ));
+        audit.selection_bounds.borrow_mut().extend([
+            (
+                0,
+                gpui::Bounds::from_corners(
+                    gpui::point(px(70.), px(70.)),
+                    gpui::point(px(100.), px(100.)),
+                ),
+            ),
+            (
+                1,
+                gpui::Bounds::from_corners(
+                    gpui::point(px(200.), px(200.)),
+                    gpui::point(px(230.), px(230.)),
+                ),
+            ),
+        ]);
+        audit.start_marquee(
+            &gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(px(50.), px(50.)),
+                ..Default::default()
+            },
+            cx,
+        );
+        assert!(audit.marquee.is_none(), "the table header owns its drags");
+        audit.start_marquee(
+            &gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(px(50.), px(120.)),
+                ..Default::default()
+            },
+            cx,
+        );
+        audit.move_marquee(
+            &gpui::MouseMoveEvent {
+                position: gpui::point(px(120.), px(50.)),
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            },
+            cx,
+        );
+
+        assert_eq!(audit.selected, HashSet::from([0]));
+        audit.finish_marquee(cx);
+        assert!(audit.marquee.is_none());
+
+        audit.start_marquee(
+            &gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(px(50.), px(120.)),
+                modifiers: gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            cx,
+        );
+        audit.move_marquee(
+            &gpui::MouseMoveEvent {
+                position: gpui::point(px(120.), px(50.)),
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            },
+            cx,
+        );
+        assert!(audit.selected.is_empty(), "control-drag toggles a hit off");
+        audit.finish_marquee(cx);
+    });
+}
+
+#[gpui::test]
+fn action_bar_clicks_do_not_replace_the_marquee_selection(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    let selected = audit.read_with(cx, |audit, _| audit.selected.clone());
+    let convert = cx
+        .debug_bounds("action-bar")
+        .expect("the audit action bar is visible");
+
+    cx.simulate_click(convert.center(), gpui::Modifiers::none());
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, selected);
+        assert!(audit.marquee.is_none());
+    });
+}
+
+#[gpui::test]
+fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.extend([0, 1]);
+        audit.rail = Rail::Studio;
+
+        audit.open_ai_operations(2, cx);
+
+        assert_eq!(audit.selected, HashSet::from([2]));
+        assert_eq!(audit.cursor, audit.row_of(2).unwrap());
+        assert_eq!(audit.rail, Rail::Studio);
+    });
+}
+
+#[gpui::test]
+fn source_preview_has_ai_actions_but_compare_mode_does_not(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.compare = Some(Comparison {
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            mode: MediaMode::Preview,
+            focused: false,
+            key: compare::Key::new(
+                Path::new("photo.jpg"),
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+            ),
+            preview: None,
+            pair: None,
+            failed: false,
+            split: 0.5,
+            pan: (0., 0.),
+            zoom: None,
+            drag: None,
+            written: None,
+            produced_by: None,
+        });
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("compare-bar").is_some());
+    assert!(cx.debug_bounds("preview-ai-actions").is_some());
+
+    audit.update(cx, |audit, cx| {
+        audit.compare.as_mut().unwrap().mode = MediaMode::Compare;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("preview-ai-actions").is_none());
+}
+
 /// Bytes per pixel is a ratio, and a ratio on a 44-byte sliver is arithmetic
 /// rather than a finding. The claim is that converting would win something.
 #[test]
@@ -1294,6 +1508,35 @@ fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(!columns(cx).contains(&TableColumn::Density));
+}
+
+#[gpui::test]
+fn dragging_a_column_changes_and_keeps_its_display_order(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let table = audit
+        .read_with(cx, |audit, _| audit.table.clone())
+        .expect("audit owns its table");
+
+    table.update_in(cx, |table, window, cx| {
+        let before = table.delegate().columns_for_test().to_vec();
+        let from = before
+            .iter()
+            .position(|column| *column == TableColumn::Name)
+            .unwrap();
+        let to = before
+            .iter()
+            .position(|column| *column == TableColumn::Weight)
+            .unwrap();
+        TableDelegate::move_column(table.delegate_mut(), from, to, window, cx);
+
+        let moved = table.delegate().columns_for_test().to_vec();
+        assert_eq!(moved[to], TableColumn::Name);
+
+        table
+            .delegate_mut()
+            .set_viewport_width(1100., ColumnPrefs::default(), false, false);
+        assert_eq!(table.delegate().columns_for_test()[to], TableColumn::Name);
+    });
 }
 
 /// The two local models and the Studio API act on one file, so they only

@@ -65,12 +65,16 @@ impl Audit {
         index: usize,
         tile_size: f32,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui::AnyElement {
         let Some(entry) = self.entries.get(index) else {
-            return div().id(("tile", row));
+            return div().id(("tile", row)).into_any_element();
         };
         let thumb = self.thumbs.get(&index).cloned();
         let ticked = self.selected.contains(&index);
+        let has_result = self.result_paths.contains_key(&index);
+        let busy = self.converting || self.local_ai_busy() || self.studio_busy();
+        let audit = cx.weak_entity();
+        let selection_bounds = self.selection_bounds.clone();
 
         div()
             .id(("tile", row))
@@ -91,6 +95,9 @@ impl Audit {
             })
             .when(row == self.cursor, |tile| {
                 tile.border_color(cx.theme().muted_foreground)
+            })
+            .on_prepaint(move |bounds, _, _| {
+                selection_bounds.borrow_mut().insert(index, bounds);
             })
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |audit, event: &gpui::ClickEvent, _, cx| {
@@ -256,5 +263,9 @@ impl Audit {
                             .then(|| finding_chip("mislabelled", cx)),
                     ),
             )
+            .context_menu(move |menu, _, _| {
+                media::image_context_menu(audit.clone(), index, has_result, busy, menu)
+            })
+            .into_any_element()
     }
 }

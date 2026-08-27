@@ -25,12 +25,14 @@ use table::AuditTable;
 use table::{TableColumn, W_NAME_MIN};
 use view::meter;
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::compare::Pair;
+use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
@@ -44,6 +46,7 @@ use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
+use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
@@ -51,7 +54,7 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable};
 
 // Colours come from `cx.theme()` rather than a private palette. The window is
 // built out of this library's buttons, inputs and tags, and a hand-picked set of
@@ -133,7 +136,7 @@ impl Rail {
             Rail::Convert => "Convert",
             Rail::RemoveBackground => "Remove background",
             Rail::Upscale => "Upscale 4×",
-            Rail::Studio => "Sirv Studio",
+            Rail::Studio => "AI operations",
         }
     }
 }
@@ -143,6 +146,26 @@ struct ThumbRequest {
     dataset_generation: u64,
     edge: u32,
     path: PathBuf,
+}
+
+struct Marquee {
+    start: (f32, f32),
+    current: (f32, f32),
+    base: HashSet<usize>,
+    toggle: bool,
+}
+
+impl Marquee {
+    fn bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+        let left = self.start.0.min(self.current.0);
+        let top = self.start.1.min(self.current.1);
+        let right = self.start.0.max(self.current.0);
+        let bottom = self.start.1.max(self.current.1);
+        gpui::Bounds::from_corners(
+            gpui::point(px(left), px(top)),
+            gpui::point(px(right), px(bottom)),
+        )
+    }
 }
 
 fn is_checkbox_activation_key(event: &gpui::KeyDownEvent) -> bool {
@@ -251,6 +274,11 @@ pub(crate) struct Audit {
     quality_slider: gpui::Entity<SliderState>,
     /// Rows ticked for conversion. Empty means "all of them".
     selected: HashSet<usize>,
+    /// Bounds of the rendered rows or tiles. Marquee selection only needs the
+    /// visible objects, so virtualised items never get measured eagerly.
+    selection_bounds: Rc<RefCell<HashMap<usize, gpui::Bounds<gpui::Pixels>>>>,
+    selection_surface: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
+    marquee: Option<Marquee>,
     /// Encoded size per row, filled in as conversion progresses.
     results: HashMap<usize, u64>,
     /// Where each of those rows was written. Kept because a run renames on a
@@ -570,13 +598,22 @@ fn credentials_complete(client_id: &str, client_secret: &str) -> bool {
     !client_id.trim().is_empty() && !client_secret.trim().is_empty()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaMode {
+    Preview,
+    Compare,
+}
+
 struct Comparison {
     index: usize,
     dataset_generation: u64,
+    mode: MediaMode,
     /// Take focus once after the comparison tree exists. Re-focusing on every
     /// render steals keyboard ownership from the comparison buttons.
     focused: bool,
     key: compare::Key,
+    /// The source-only image. It lands without running an encoder.
+    preview: Option<Arc<Preview>>,
     /// `None` while the two sides are still decoding.
     pair: Option<Arc<Pair>>,
     /// A completed build can fail after the initial loading frame.
@@ -597,6 +634,19 @@ struct Comparison {
     /// made on purpose, so it is offered for keeping or throwing away rather
     /// than filed silently and reported in a line of green text.
     produced_by: Option<ProducedBy>,
+}
+
+impl Comparison {
+    fn dimensions(&self) -> Option<(u32, u32)> {
+        self.pair
+            .as_ref()
+            .map(|pair| (pair.width, pair.height))
+            .or_else(|| {
+                self.preview
+                    .as_ref()
+                    .map(|preview| (preview.width, preview.height))
+            })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -719,6 +769,8 @@ impl Audit {
         self.requested.clear();
         self.thumb_queue.clear();
         self.selected.clear();
+        self.marquee = None;
+        self.selection_bounds.borrow_mut().clear();
         self.clear_results();
         self.completed_outputs.clear();
         self.failures.clear();
@@ -755,7 +807,7 @@ impl Audit {
         cx.notify();
 
         if single {
-            self.open_compare(0, cx);
+            self.open_preview(0, cx);
         }
     }
 
@@ -1147,6 +1199,9 @@ pub(crate) fn build_audit(
             max_edge,
             quality_slider,
             selected: HashSet::new(),
+            selection_bounds: Rc::new(RefCell::new(HashMap::new())),
+            selection_surface: Rc::new(Cell::new(gpui::Bounds::default())),
+            marquee: None,
             sort: Sort {
                 column: Column::Weight,
                 descending: true,
@@ -1204,7 +1259,7 @@ pub(crate) fn build_audit(
         audit.refresh_visible();
         audit.schedule_estimate(cx);
         if open_single {
-            audit.open_compare(0, cx);
+            audit.open_preview(0, cx);
         }
         audit
     });

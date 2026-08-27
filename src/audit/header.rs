@@ -228,7 +228,7 @@ impl Audit {
                         } else {
                             "Copy audit"
                         })
-                        .tooltip("Copy a shareable Press audit with Sirv and Studio next steps")
+                        .tooltip("Copy a shareable Press audit with Sirv and AI next steps")
                         .disabled(self.converting)
                         .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
                 )
@@ -258,6 +258,8 @@ impl Audit {
                         audit.requested.clear();
                         audit.thumb_queue.clear();
                         audit.thumb_order.clear();
+                        audit.marquee = None;
+                        audit.selection_bounds.borrow_mut().clear();
                         cx.notify();
                     },
                 )

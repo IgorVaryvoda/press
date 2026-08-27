@@ -43,6 +43,14 @@ pub struct Pair {
     pub height: u32,
 }
 
+/// One decoded source image for the preview-first view. Opening a file should
+/// not run an encoder until the user asks to compare it.
+pub struct Preview {
+    pub image: Arc<RenderImage>,
+    pub width: u32,
+    pub height: u32,
+}
+
 impl Pair {
     /// What the conversion saved, as a percentage. Negative when the file grew.
     pub fn saving_percent(&self, source_bytes: u64) -> f32 {
@@ -51,6 +59,16 @@ impl Pair {
         }
         (source_bytes as f32 - self.converted_bytes as f32) / source_bytes as f32 * 100.
     }
+}
+
+pub fn preview(path: &Path) -> Option<Preview> {
+    let image = crate::scan::decode(path)?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(Preview {
+        image: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(image))])),
+        width,
+        height,
+    })
 }
 
 /// Decode `path`, encode it at `quality`, and decode that back, so both sides are
@@ -138,6 +156,44 @@ mod tests {
         assert_eq!(u32::from(pair.converted.size(0).width), 120);
         assert_eq!(u32::from(pair.converted.size(0).height), 80);
         assert!(pair.converted_bytes > 0);
+    }
+
+    #[test]
+    fn preview_decodes_only_the_source() {
+        let dir = std::env::temp_dir().join("imageguide-source-preview");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.png");
+        ImageBuffer::from_fn(73, 41, |x, y| Rgb([x as u8, y as u8, 120]))
+            .save(&path)
+            .unwrap();
+
+        let preview = preview(&path).expect("source preview decodes");
+
+        assert_eq!((preview.width, preview.height), (73, 41));
+        assert_eq!(u32::from(preview.image.size(0).width), 73);
+        assert_eq!(u32::from(preview.image.size(0).height), 41);
+    }
+
+    #[test]
+    fn written_comparison_reads_the_existing_output() {
+        let dir = std::env::temp_dir().join("imageguide-written-comparison");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.png");
+        let written = dir.join("already-written.png");
+        ImageBuffer::from_fn(120, 80, |x, y| Rgb([x as u8, y as u8, 40]))
+            .save(&source)
+            .unwrap();
+        ImageBuffer::from_fn(60, 40, |x, y| Rgb([y as u8, x as u8, 90]))
+            .save(&written)
+            .unwrap();
+
+        let pair = build_written(&source, &written).expect("existing output compares");
+
+        assert_eq!((pair.width, pair.height), (60, 40));
+        assert_eq!(
+            pair.converted_bytes,
+            std::fs::metadata(&written).unwrap().len()
+        );
     }
 
     /// The cache is only correct if the key notices every setting that changes the

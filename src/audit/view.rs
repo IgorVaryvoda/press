@@ -751,6 +751,15 @@ impl Audit {
             .flex_col()
             .bg(cx.theme().background)
             .track_focus(&self.focus)
+            .on_mouse_move(cx.listener(|audit, event: &gpui::MouseMoveEvent, _, cx| {
+                audit.move_marquee(event, cx);
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|audit, _: &gpui::MouseUpEvent, _, cx| {
+                    audit.finish_marquee(cx);
+                }),
+            )
             // Always bordered, so a hovering drag recolours the frame instead of
             // shifting the whole window's contents inward by two pixels.
             .border_2()
@@ -811,7 +820,7 @@ impl Audit {
                             if !audit.converting
                                 && let Some(entry) = audit.entry_at(audit.cursor)
                             {
-                                audit.open_compare(entry, cx);
+                                audit.open_preview(entry, cx);
                             }
                         }
                         _ => {}
@@ -859,12 +868,32 @@ impl Audit {
     }
 
     /// The list or the gallery, filling the space left of the panel.
+    fn marquee_overlay(&self, cx: &App) -> Option<gpui::AnyElement> {
+        let marquee = self.marquee.as_ref()?;
+        let bounds = marquee.bounds();
+        let surface = self.selection_surface.get();
+        Some(
+            div()
+                .debug_selector(|| "selection-marquee".into())
+                .absolute()
+                .left(bounds.origin.x - surface.origin.x)
+                .top(bounds.origin.y - surface.origin.y)
+                .w(bounds.size.width)
+                .h(bounds.size.height)
+                .border_1()
+                .border_color(cx.theme().primary)
+                .bg(cx.theme().primary.opacity(0.12))
+                .into_any_element(),
+        )
+    }
+
     fn audit_content(
         &mut self,
         count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        self.selection_bounds.borrow_mut().clear();
         // The list runs to the window edge; hairlines above it, not a
         // card floating in padding.
         div()
@@ -873,6 +902,12 @@ impl Audit {
             .flex_1()
             .overflow_hidden()
             .bg(cx.theme().table)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|audit, event: &gpui::MouseDownEvent, _, cx| {
+                    audit.start_marquee(event, cx);
+                }),
+            )
             // The action bar floats over this strip rather than over the last
             // row, so every file can be scrolled into the clear.
             .pb(px(panel::BAR_CLEARANCE))
@@ -933,11 +968,13 @@ impl Audit {
                     .flex_1()
                     .overflow_hidden()
                     .child(self.gallery_sort_bar(cx))
-                    .child(
+                    .child({
+                        let surface = self.selection_surface.clone();
                         div()
                             .relative()
                             .flex_1()
                             .overflow_hidden()
+                            .on_prepaint(move |bounds, _, _| surface.set(bounds))
                             .child(gallery)
                             .child(
                                 div()
@@ -953,13 +990,19 @@ impl Audit {
                                             .mode(ScrollbarMode::Always)
                                             .viewport_from_layout(),
                                     ),
-                            ),
-                    )
+                            )
+                            .children(self.marquee_overlay(cx))
+                    })
                     .into_any_element()
             } else if let Some(table) = self.table.as_ref() {
-                DataTable::new(table)
-                    .stripe(true)
-                    .bordered(false)
+                let surface = self.selection_surface.clone();
+                div()
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .on_prepaint(move |bounds, _, _| surface.set(bounds))
+                    .child(DataTable::new(table).stripe(true).bordered(false))
+                    .children(self.marquee_overlay(cx))
                     .into_any_element()
             } else {
                 div().into_any_element()

@@ -1,7 +1,7 @@
 //! The action bar and its rails.
 //!
 //! The bar floats over the list and holds verbs only: Convert, the two local
-//! models, and Sirv Studio. Choosing one opens its rail on the
+//! models, and hosted AI operations. Choosing one opens its rail on the
 //! right, carrying that operation's settings and the button that commits it.
 //! No operation borrows another's controls, and the bar never has to explain
 //! itself — which is what the old right-hand inspector column was doing for
@@ -153,8 +153,8 @@ impl Audit {
                                 crate::assets::studio_icon(self.studio_tool.slug()),
                                 |button, path| button.icon(Icon::default().path(path)),
                             )
-                            .when(labelled, |button| button.label("Studio"))
-                            .tooltip("Run an image through the Sirv Studio API")
+                            .when(labelled, |button| button.label("AI operations"))
+                            .tooltip("Run an image with hosted AI operations")
                             .outline()
                             .selected(self.rail == Rail::Studio)
                             .disabled(busy)
@@ -288,7 +288,7 @@ impl Audit {
                     (local_ai::Tool::Upscale, Some(entry)) => {
                         local_ai::upscale_dimensions(entry.width, entry.height)
                             .err()
-                            .map(|message| format!("{message}; use Sirv Studio for this image"))
+                            .map(|message| format!("{message}; use AI operations for this image"))
                     }
                     _ => None,
                 }

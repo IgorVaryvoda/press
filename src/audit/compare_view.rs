@@ -44,8 +44,15 @@ impl Audit {
             (_, _, Some(row)) => format!("{} of {}", row + 1, self.visible.len()),
             _ => String::new(),
         };
-        let can_previous = self.compare_target_from(comparison.index, -1).is_some();
-        let can_next = self.compare_target_from(comparison.index, 1).is_some();
+        let (can_previous, can_next) = if comparison.written.is_some() {
+            self.result_position(comparison.index)
+                .map_or((false, false), |(at, total)| (at > 1, at < total))
+        } else {
+            (
+                self.compare_target_from(comparison.index, -1).is_some(),
+                self.compare_target_from(comparison.index, 1).is_some(),
+            )
+        };
 
         let mut stage = div()
             .id("compare-stage")
@@ -77,7 +84,7 @@ impl Audit {
                     let Some(comparison) = audit.compare.as_mut() else {
                         return;
                     };
-                    let Some(pair) = comparison.pair.as_ref() else {
+                    let Some((width, height)) = comparison.dimensions() else {
                         return;
                     };
 
@@ -89,9 +96,7 @@ impl Audit {
                         return;
                     }
 
-                    let fit = (view_w / pair.width as f32)
-                        .min(view_h / pair.height as f32)
-                        .min(1.);
+                    let fit = (view_w / width as f32).min(view_h / height as f32).min(1.);
                     let before = comparison.zoom.unwrap_or(fit);
                     // Fit is the floor: below it the image is a stamp adrift in
                     // a black stage, and there is nothing smaller-than-everything
@@ -136,8 +141,12 @@ impl Audit {
                             comparison.pan =
                                 (start_pan.0 + at.0 - from.0, start_pan.1 + at.1 - from.1);
                         }
-                        // Free: the divider tracks the pointer.
-                        None => comparison.split = (at.0 / view_w).clamp(0., 1.),
+                        // Free: the divider tracks the pointer only when there
+                        // are two sides to divide.
+                        None if comparison.mode == MediaMode::Compare => {
+                            comparison.split = (at.0 / view_w).clamp(0., 1.)
+                        }
+                        None => return,
                     }
                     cx.notify();
                 }),
@@ -146,14 +155,28 @@ impl Audit {
         // Fit never scales up: a 400px thumbnail blown across a 4K window is just a
         // blurry 400px thumbnail. Computed before the branch because the chrome
         // reports the zoom as well as the image using it.
-        let scale = comparison.pair.as_ref().map(|pair| {
-            let fit = (view_w / pair.width as f32)
-                .min(view_h / pair.height as f32)
-                .min(1.);
+        let scale = comparison.dimensions().map(|(width, height)| {
+            let fit = (view_w / width as f32).min(view_h / height as f32).min(1.);
             comparison.zoom.unwrap_or(fit)
         });
 
-        if let (Some(pair), Some(scale)) = (comparison.pair.as_ref(), scale) {
+        if comparison.mode == MediaMode::Preview {
+            if let (Some(preview), Some(scale)) = (comparison.preview.as_ref(), scale) {
+                let image_w = preview.width as f32 * scale;
+                let image_h = preview.height as f32 * scale;
+                let left = (view_w - image_w) / 2. + comparison.pan.0;
+                let top = (view_h - image_h) / 2. + comparison.pan.1;
+                stage = stage.child(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(px(image_w))
+                        .h(px(image_h))
+                        .child(img(preview.image.clone()).w(px(image_w)).h(px(image_h))),
+                );
+            }
+        } else if let (Some(pair), Some(scale)) = (comparison.pair.as_ref(), scale) {
             let natural = (pair.width as f32, pair.height as f32);
             let (image_w, image_h) = (natural.0 * scale, natural.1 * scale);
             // Negative when the image is larger than the window: that is the crop.
@@ -268,7 +291,11 @@ impl Audit {
                     .child(
                         Alert::error(
                             "compare-error",
-                            "Could not build a comparison preview for this image.",
+                            if comparison.mode == MediaMode::Preview {
+                                "Could not decode a preview for this image."
+                            } else {
+                                "Could not build a comparison for this image."
+                            },
                         )
                         .max_w(px(420.)),
                     ),
@@ -278,7 +305,18 @@ impl Audit {
         // The pair decodes and encodes in the background; until it lands the
         // stage used to be a black void with six grey letters in the footer.
         // A build in progress should look like one.
-        if comparison.pair.is_none() && !comparison.failed {
+        if comparison.dimensions().is_none() && !comparison.failed {
+            let message = match (comparison.mode, comparison.written.is_some()) {
+                (MediaMode::Preview, _) => "Loading preview…".to_string(),
+                (MediaMode::Compare, true) => {
+                    "Loading the original and converted output…".to_string()
+                }
+                (MediaMode::Compare, false) => format!(
+                    "Building comparison — encoding to {} {}…",
+                    self.format.label().to_uppercase(),
+                    self.quality.label()
+                ),
+            };
             stage = stage.child(
                 div()
                     .size_full()
@@ -296,11 +334,7 @@ impl Audit {
                         div()
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "Building preview — encoding to {} {}…",
-                                self.format.label().to_uppercase(),
-                                self.quality.label()
-                            )),
+                            .child(message),
                     ),
             );
         }
@@ -541,9 +575,8 @@ impl Audit {
             )
     }
 
-    /// The comparison's action bar: what this image costs now and converted,
-    /// then the same four verbs the audit's bar carries. They act on the image
-    /// you are looking at, so none of them needs a selection rule.
+    /// The media action bar. A source preview keeps the image actions close;
+    /// a before/after comparison stays focused on reviewing and converting.
     fn compare_bar(
         &self,
         comparison: &Comparison,
@@ -557,25 +590,46 @@ impl Audit {
         let index = comparison.index;
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let busy = self.local_ai_busy() || self.studio_busy() || self.converting;
+        let previewing = comparison.mode == MediaMode::Preview;
         let showing_result = comparison.written.is_some();
         let upscale_error =
             entry.and_then(|entry| local_ai::upscale_dimensions(entry.width, entry.height).err());
 
         // One readout, in this order of usefulness: a running job, then the
         // encoded result, then why there is not one yet.
-        let running = self
-            .local_ai_job
-            .as_ref()
-            .filter(|job| job.busy())
-            .map(|job| job.message(&self.root))
-            .or_else(|| {
-                self.studio_job
-                    .as_ref()
-                    .filter(|job| job.busy())
-                    .map(|job| job.message(&self.root))
-            });
+        let running = if previewing {
+            self.local_ai_job
+                .as_ref()
+                .filter(|job| job.busy())
+                .map(|job| job.message(&self.root))
+                .or_else(|| {
+                    self.studio_job
+                        .as_ref()
+                        .filter(|job| job.busy())
+                        .map(|job| job.message(&self.root))
+                })
+        } else {
+            None
+        };
         let (text, colour) = if let Some(message) = running {
             (message, cx.theme().muted_foreground)
+        } else if previewing {
+            match comparison.preview.as_ref() {
+                Some(preview) => (
+                    format!(
+                        "{}×{} · {}",
+                        preview.width,
+                        preview.height,
+                        format_bytes(source_bytes)
+                    ),
+                    cx.theme().foreground,
+                ),
+                None if comparison.failed => (
+                    "Preview unavailable".to_string(),
+                    cx.theme().muted_foreground,
+                ),
+                None => ("Loading preview…".to_string(), cx.theme().muted_foreground),
+            }
         } else {
             match comparison.pair.as_ref() {
                 Some(pair) => {
@@ -640,6 +694,29 @@ impl Audit {
                     .children(
                         (width >= 700.).then(|| div().w(px(1.)).h(px(20.)).bg(cx.theme().border)),
                     )
+                    .children(previewing.then(|| {
+                        Button::new("preview-compare")
+                            .small()
+                            .primary()
+                            .label("Compare")
+                            .tooltip("Build a before-and-after comparison")
+                            .disabled(entry.is_none())
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                audit.open_compare(index, cx);
+                            }))
+                    }))
+                    .children(
+                        (previewing && self.result_paths.contains_key(&index)).then(|| {
+                            Button::new("preview-result")
+                                .small()
+                                .outline()
+                                .label("See result")
+                                .tooltip("Compare the existing output with its original")
+                                .on_click(cx.listener(move |audit, _, _, cx| {
+                                    audit.open_result(index, cx);
+                                }))
+                        }),
+                    )
                     // A file that already exists wants opening, not converting
                     // again — and the folder is the thing you actually go to.
                     .children(comparison.produced_by.map(|_| {
@@ -689,58 +766,52 @@ impl Audit {
                             .tooltip("Convert this image with the current settings")
                             .disabled(busy || entry.is_none())
                             .on_click(cx.listener(move |audit, _, _, cx| {
-                                // The run's progress lives in the list, and the
-                                // list is where the result lands.
-                                audit.compare = None;
-                                audit.selected.clear();
-                                if let Some(entry) = audit.entries.get(index).map(|_| index) {
-                                    audit.selected.insert(entry);
-                                }
-                                audit.selection_changed(cx);
-                                audit.start_conversion(cx);
+                                audit.convert_one(index, cx);
                             }))
                     }))
-                    // Not every platform ships the local models. A verb that
-                    // cannot run anywhere on this machine is not disabled, it
-                    // is absent.
-                    .children(
-                        (local_ai::available() && comparison.produced_by.is_none()).then(|| {
-                            self.compare_local_ai(
-                                "compare-remove-background",
-                                IconName::Frame,
-                                "Remove background",
-                                local_ai::Tool::RemoveBackground,
-                                index,
-                                entry.is_none(),
-                                busy,
+                    .children(previewing.then(|| {
+                        div()
+                            .debug_selector(|| "preview-ai-actions".into())
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            // Not every platform ships the local models. A verb
+                            // that cannot run here is absent, not disabled.
+                            .children(local_ai::available().then(|| {
+                                self.compare_local_ai(
+                                    "compare-remove-background",
+                                    IconName::Frame,
+                                    "Remove background",
+                                    local_ai::Tool::RemoveBackground,
+                                    index,
+                                    entry.is_none(),
+                                    busy,
+                                    labelled,
+                                    cx,
+                                )
+                            }))
+                            .children(local_ai::available().then(|| {
+                                self.compare_local_ai(
+                                    "compare-upscale",
+                                    IconName::Maximize,
+                                    "Upscale 4×",
+                                    local_ai::Tool::Upscale,
+                                    index,
+                                    entry.is_none() || upscale_error.is_some(),
+                                    busy,
+                                    labelled,
+                                    cx,
+                                )
+                            }))
+                            .child(self.studio_button(
+                                "compare-edit-studio",
+                                entry.map(|_| index),
+                                comparison.written.clone(),
                                 labelled,
-                                cx,
-                            )
-                        }),
-                    )
-                    .children(
-                        (local_ai::available() && comparison.produced_by.is_none()).then(|| {
-                            self.compare_local_ai(
-                                "compare-upscale",
-                                IconName::Maximize,
-                                "Upscale 4×",
-                                local_ai::Tool::Upscale,
-                                index,
-                                entry.is_none() || upscale_error.is_some(),
                                 busy,
-                                labelled,
                                 cx,
-                            )
-                        }),
-                    )
-                    .child(self.studio_button(
-                        "compare-edit-studio",
-                        entry.map(|_| index),
-                        comparison.written.clone(),
-                        labelled,
-                        busy,
-                        cx,
-                    )),
+                            ))
+                    })),
             )
     }
 

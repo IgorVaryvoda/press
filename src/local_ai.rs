@@ -197,7 +197,7 @@ pub fn upscale_dimensions(width: u32, height: u32) -> Result<(u32, u32), String>
         .ok_or_else(|| "this image is too large to upscale 4×".to_string())?;
     if u64::from(out_width) * u64::from(out_height) > MAX_UPSCALED_PIXELS {
         return Err(format!(
-            "4× would create a {out_width}×{out_height} image; use Studio for this size"
+            "4× would create a {out_width}×{out_height} image; use AI operations for this size"
         ));
     }
     Ok((out_width, out_height))
