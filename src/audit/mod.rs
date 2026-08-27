@@ -36,7 +36,7 @@ use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
-use futures::future::select_all;
+use futures::{StreamExt, future::select_all};
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
@@ -406,6 +406,9 @@ pub(crate) struct Audit {
     scan_generation: u64,
     /// The path currently being scanned, if any.
     scanning: Option<String>,
+    /// The new folder has published rows already. Until then the old dataset stays
+    /// installed behind the scanning screen; once true, those new rows are safe to draw.
+    scan_partial: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -839,6 +842,42 @@ impl Audit {
         }
     }
 
+    /// Add rows whose headers finished while the rest of the folder is still being
+    /// scanned. Existing indices never move, so loaded thumbnails and selection remain
+    /// attached to the files that produced them.
+    fn append_scan_batch(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.heavy += entries
+            .iter()
+            .filter(|entry| Finding::Heavy.holds(entry))
+            .count();
+        self.mislabelled += entries
+            .iter()
+            .filter(|entry| entry.extension_lies())
+            .count();
+        self.marketplace += entries
+            .iter()
+            .filter(|entry| acquisition::marketplace_fails(entry))
+            .count();
+        self.entries.extend(entries);
+        self.refresh_visible();
+        if let Some(table) = self.table.clone() {
+            cx.defer(move |cx| table.update(cx, |table, cx| table.refresh(cx)));
+        }
+        cx.notify();
+    }
+
+    fn finish_progressive_scan(&mut self, scanned: scan::Scan, cx: &mut Context<Self>) {
+        debug_assert_eq!(self.entries.len(), scanned.entries.len());
+        self.skipped_raw = scanned.skipped_raw;
+        self.skipped_packages = scanned.skipped_packages;
+        self.unreadable = scanned.unreadable;
+        self.walk_errors = scanned.walk_errors;
+        self.existing_output = scanned.existing_output;
+        self.spins = acquisition::detect_spins(&self.root, &self.entries);
+        self.schedule_estimate(cx);
+        cx.notify();
+    }
+
     /// Scan a requested path away from the UI thread. A newer request wins, while a
     /// failed current request leaves the last usable dataset in place.
     pub(super) fn request_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -851,50 +890,114 @@ impl Audit {
         }
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
+        let progressive = !single && (self.root != path || self.sirv_pairing.is_none());
         let label = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         self.scanning = Some(label);
+        self.scan_partial = false;
         // A chosen destination follows the audit to the new folder: it is a
         // preference about where output belongs, not about this folder.
         let output = self.output.clone();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    if single {
-                        let entry = scan::probe(&path)?;
-                        let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                        Some((
-                            scan::Scan {
-                                entries: vec![entry],
-                                skipped_raw: 0,
-                                skipped_packages: 0,
-                                unreadable: Vec::new(),
-                                walk_errors: Vec::new(),
-                                existing_output: 0,
-                            },
-                            root,
-                            true,
-                        ))
-                    } else {
-                        Some((scan::scan(&path, &output.root(&path)), path, false))
-                    }
-                })
-                .await;
+            if !progressive {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        if single {
+                            let entry = scan::probe(&path)?;
+                            let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+                            Some((
+                                scan::Scan {
+                                    entries: vec![entry],
+                                    skipped_raw: 0,
+                                    skipped_packages: 0,
+                                    unreadable: Vec::new(),
+                                    walk_errors: Vec::new(),
+                                    existing_output: 0,
+                                },
+                                root,
+                                true,
+                            ))
+                        } else {
+                            Some((scan::scan(&path, &output.root(&path)), path, false))
+                        }
+                    })
+                    .await;
 
+                let _ = this.update_in(cx, |audit, window, cx| {
+                    if audit.scan_generation != request {
+                        return;
+                    }
+                    audit.scanning = None;
+                    audit.scan_partial = false;
+                    if let Some((scanned, root, single)) = result {
+                        audit.install_dataset(scanned, root, single, window, cx);
+                    } else {
+                        cx.notify();
+                    }
+                });
+                return;
+            }
+
+            let root = path.clone();
+            let output_root = output.root(&path);
+            let (sender, mut batches) = futures::channel::mpsc::unbounded();
+            let scan_task = cx.background_executor().spawn(async move {
+                scan::scan_progressive(&path, &output_root, |batch| {
+                    let _ = sender.unbounded_send(batch.to_vec());
+                })
+            });
+            let mut installed = false;
+            while let Some(entries) = batches.next().await {
+                let first = !installed;
+                let root = root.clone();
+                let accepted = this
+                    .update_in(cx, |audit, window, cx| {
+                        if audit.scan_generation != request {
+                            return false;
+                        }
+                        if first {
+                            audit.install_dataset(
+                                scan::Scan {
+                                    entries,
+                                    skipped_raw: 0,
+                                    skipped_packages: 0,
+                                    unreadable: Vec::new(),
+                                    walk_errors: Vec::new(),
+                                    existing_output: 0,
+                                },
+                                root,
+                                false,
+                                window,
+                                cx,
+                            );
+                            audit.scan_partial = true;
+                        } else {
+                            audit.append_scan_batch(entries, cx);
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !accepted {
+                    return;
+                }
+                installed = true;
+            }
+            let scanned = scan_task.await;
             let _ = this.update_in(cx, |audit, window, cx| {
                 if audit.scan_generation != request {
                     return;
                 }
                 audit.scanning = None;
-                if let Some((scanned, root, single)) = result {
-                    audit.install_dataset(scanned, root, single, window, cx);
+                audit.scan_partial = false;
+                if installed {
+                    audit.finish_progressive_scan(scanned, cx);
                 } else {
-                    cx.notify();
+                    audit.install_dataset(scanned, root, false, window, cx);
                 }
             });
         })
@@ -1253,6 +1356,7 @@ pub(crate) fn build_audit(
             dataset_generation: 0,
             scan_generation: 0,
             scanning: None,
+            scan_partial: false,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),

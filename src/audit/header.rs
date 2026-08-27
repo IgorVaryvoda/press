@@ -42,6 +42,9 @@ impl Audit {
                 many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
             });
         }
+        if self.scan_partial {
+            stats.push_str(" · scanning…");
+        }
         div()
             .debug_selector(|| "audit-header".into())
             .flex()

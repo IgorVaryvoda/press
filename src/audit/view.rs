@@ -543,7 +543,7 @@ impl Render for Audit {
             }
         }
 
-        if let Some(scanning) = self.scanning.as_ref() {
+        if let Some(scanning) = self.scanning.as_ref().filter(|_| !self.scan_partial) {
             let label = scanning.clone();
             return div()
                 .size_full()

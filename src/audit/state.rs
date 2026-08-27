@@ -312,6 +312,9 @@ impl Audit {
     pub(super) fn schedule_estimate(&mut self, cx: &mut Context<Self>) {
         self.estimate_generation += 1;
         self.estimate = None;
+        if self.scanning.is_some() {
+            return;
+        }
         let generation = self.estimate_generation;
         let dataset_generation = self.dataset_generation;
 

@@ -915,6 +915,30 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_progressive_scan_appends_rows_without_replacing_the_dataset(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let generation = audit.read_with(cx, |audit, _| audit.dataset_generation);
+
+    audit.update(cx, |audit, cx| {
+        audit.scanning = Some("more-images".into());
+        audit.scan_partial = true;
+        audit.schedule_estimate(cx);
+        audit.append_scan_batch(
+            vec![entry("new-heavy.png", 100, 100, 400_000, ImageFormat::Png)],
+            cx,
+        );
+    });
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.dataset_generation, generation);
+        assert_eq!(audit.entries.len(), 4);
+        assert_eq!(audit.visible.len(), 4);
+        assert_eq!(audit.entries[audit.visible[0]].name(), "new-heavy.png");
+        assert!(audit.estimate.is_none());
+    });
+}
+
+#[gpui::test]
 fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {

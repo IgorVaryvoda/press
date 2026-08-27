@@ -51,6 +51,11 @@ const PACKAGE_EXTENSIONS: [&str; 13] = [
     "docset",
 ];
 
+/// Enough rows for the first viewport, then larger updates so a fast scan does not
+/// spend its win rebuilding the table hundreds of times.
+const FIRST_SCAN_BATCH: usize = 32;
+const NEXT_SCAN_BATCH: usize = 256;
+
 /// True when this directory is one macOS keeps opaque. Packages are a macOS
 /// concept — on other systems these names are just folders, so they keep being
 /// walked there.
@@ -283,6 +288,17 @@ fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
 /// files under it are counted, never audited — otherwise the second scan of a
 /// folder offers you last run's WebPs as candidates for conversion.
 pub fn scan(root: &Path, output_root: &Path) -> Scan {
+    scan_progressive(root, output_root, |_| {})
+}
+
+/// The same complete scan, publishing small groups as their headers become ready.
+/// The window can draw those rows while the remaining files are still being probed;
+/// callers that need one final result keep using `scan`.
+pub fn scan_progressive(
+    root: &Path,
+    output_root: &Path,
+    mut publish: impl FnMut(&[Entry]),
+) -> Scan {
     let mut candidates = Vec::new();
     let mut skipped_raw = 0;
     let mut existing_output = 0;
@@ -358,34 +374,65 @@ pub fn scan(root: &Path, output_root: &Path) -> Scan {
     let chunk = candidates.len().div_ceil(threads).max(1);
     let mut entries = Vec::with_capacity(candidates.len());
     let mut unreadable = Vec::new();
+    let mut published = 0;
     std::thread::scope(|scope| {
-        // Chunks are contiguous and joined in order, so the walk order survives into
-        // the stable sort below and ties still break the way they always did.
+        enum Probed {
+            Entry(Entry),
+            Unreadable(PathBuf),
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
         let workers: Vec<_> = candidates
             .chunks(chunk)
             .map(|chunk| {
+                let sender = sender.clone();
                 scope.spawn(move || {
-                    let mut found = Vec::new();
-                    let mut missed = Vec::new();
                     for path in chunk {
                         match probe(path) {
-                            Some(entry) => found.push(entry),
+                            Some(entry) => {
+                                if sender.send(Probed::Entry(entry)).is_err() {
+                                    return;
+                                }
+                            }
                             // Only report things that claimed to be images. A README is
                             // not a failure.
-                            None if looks_like_an_image(path) => missed.push(path.clone()),
+                            None if looks_like_an_image(path)
+                                && sender.send(Probed::Unreadable(path.clone())).is_err() =>
+                            {
+                                return;
+                            }
                             None => {}
                         }
                     }
-                    (found, missed)
                 })
             })
             .collect();
+        drop(sender);
+
+        for result in receiver {
+            match result {
+                Probed::Entry(entry) => {
+                    entries.push(entry);
+                    let batch = if published == 0 {
+                        FIRST_SCAN_BATCH
+                    } else {
+                        NEXT_SCAN_BATCH
+                    };
+                    if entries.len() - published == batch {
+                        publish(&entries[published..]);
+                        published = entries.len();
+                    }
+                }
+                Probed::Unreadable(path) => unreadable.push(path),
+            }
+        }
         for worker in workers {
-            let (found, missed) = worker.join().unwrap_or_default();
-            entries.extend(found);
-            unreadable.extend(missed);
+            let _ = worker.join();
         }
     });
+    if published < entries.len() {
+        publish(&entries[published..]);
+    }
 
     // Heaviest first: the top of the list is the work worth doing.
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
@@ -902,6 +949,29 @@ mod tests {
         // Pointed elsewhere, the same folder is ordinary input again.
         let elsewhere = scan(&dir, &dir.join("optimized"));
         assert_eq!(elsewhere.entries.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_progressive_scan_publishes_each_image_once() {
+        let dir = temp_dir("progressive");
+        for index in 0..35 {
+            write_sample(&dir, &format!("image-{index}.png"), 8, 8);
+        }
+        let mut published = Vec::new();
+
+        let scanned = scan_progressive(&dir, &dir.join(OUTPUT_DIR), |batch| {
+            published.extend(batch.iter().map(|entry| entry.path.clone()));
+        });
+
+        published.sort();
+        let mut complete: Vec<_> = scanned
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        complete.sort();
+        assert_eq!(published, complete);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
