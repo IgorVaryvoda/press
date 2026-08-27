@@ -6,7 +6,8 @@ The conversion tools on [imageguide.dev](https://www.imageguide.dev) post your f
 to a worker to do the work. That is fine for one screenshot and wrong for a client
 shoot. This does the same job on your computer: auditing, comparing, and converting
 do not upload files, and the folder size is bounded by the disk rather than by a
-browser tab. Files leave the machine only when you explicitly use a Sirv upload.
+browser tab. Files leave the machine only when you explicitly use a Sirv upload or
+run a Studio API tool.
 
 ![Press auditing a folder of PNG exports, with the Convert rail open beside the list](docs/audit.webp)
 
@@ -92,6 +93,23 @@ Reading headers only is deliberate. Decoding a 6000px JPEG to learn that it is 6
 wide costs a hundred times what reading its header costs, and a shoot folder holds
 thousands of them.
 
+## Sirv Studio API
+
+**Studio** runs five image-producing Studio tools directly from Press: Image to
+Image, Background Removal, Background Replace, Image Upscale 2×, and Product
+Lifestyle. The prompt field appears only for tools that need one.
+
+Create a key in [Studio API settings](https://dev.sirv.studio/settings/api), paste
+it into the Studio rail, then choose one image and run the tool. Press verifies and
+saves the key owner-only on Unix. It uploads that image to Studio (JPEG, PNG, GIF,
+WebP, or AVIF; 20 MB maximum), calls the authenticated REST endpoint, downloads the
+result, and opens the real file beside the original. **Keep** retains it in the
+output folder; **Discard** removes it. No Sirv folder pairing or browser handoff is
+involved.
+
+A normal audit, comparison, or conversion makes no Studio request. Only pressing
+the Studio run button uploads an image.
+
 ## Optional Sirv sync
 
 Open the Sirv folder browser, choose a remote folder, and pair it with the current
@@ -99,24 +117,6 @@ local folder. Press then shows files that exist on only one side or have a
 different byte size. **Push** uploads missing local originals. **Pull** downloads
 missing remote files. Replacing a different file requires a second confirming click,
 and **Stop** prevents the next file in the transfer from starting.
-
-**Studio** in the action bar opens a rail listing the twelve Sirv AI Studio tools
-that take an image URL — Image to Image, Background Removal, Background Replace,
-Object Removal, Image Upscale, Image Optimizer, Marketplace Optimizer, Product
-Lifestyle, Alt Text Generation, Image Translation, Image to 3D, and Video
-Generation. They carry Studio's own names, because a tool called one thing here
-and another thing there is two tools to learn. The rest of Studio's catalogue is
-not offered: those routes ignore the image they are opened with, and a tool that
-silently drops your file is worse than no link.
-
-Pick a tool, and the commit at the foot of the rail says what it will do. A
-byte-identical synced image says **Edit in Studio** and opens straight there. A
-local-only image or written result says **Upload & edit**, uploads that one file
-first, then opens it. Replacing a different remote copy requires a second click.
-The comparison bar carries the same action for the image in front of you.
-
-Without credentials the rail says **Connect Sirv** instead, and the credentials
-form links to account signup and to the article naming the client ID and secret.
 
 A completed conversion can publish its outputs to `optimized/` in the paired Sirv
 folder and copy responsive image markup. Press also detects numbered image sequences:
@@ -146,7 +146,7 @@ part of a normal audit, comparison, or conversion.
 ## Converting
 
 The bar along the foot of the window holds the verbs: **Convert**, the two local
-models, and the handoff to Sirv Studio. Choosing one opens a rail on the right with
+models, and Sirv Studio. Choosing one opens a rail on the right with
 that operation's own settings and the button that commits it — for Convert, the
 presets, format, quality and size limit, with the projected saving above the button.
 `--convert` does the same work without a window.
@@ -290,7 +290,7 @@ At q40 on a 12 MB photo the sky goes from grainy to smooth and the file goes to
 rather than tells you.
 
 The bar carries the same verbs as the audit, acting on the image in front of you:
-convert it, run either local model on it, or open it in Studio. Arrows step through
+convert it, run either local model on it, or run it through Studio. Arrows step through
 the folder without leaving the view.
 
 ## Build

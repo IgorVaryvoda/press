@@ -3,7 +3,7 @@
 //! The browser tools on imageguide.dev post files to a worker to convert them. This
 //! does the same work locally, so auditing and conversion send nothing away and the
 //! folder size is bounded by the disk rather than by a tab. Files move over the
-//! network only when the user explicitly uses the optional Sirv sync actions.
+//! network only when the user explicitly uses optional Sirv or Studio actions.
 
 mod assets;
 mod audit;
@@ -16,6 +16,7 @@ mod menus;
 mod scan;
 mod settings;
 mod sirv;
+mod studio;
 mod thumbs;
 #[cfg(feature = "updater")]
 mod update;

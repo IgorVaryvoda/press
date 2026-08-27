@@ -1,7 +1,7 @@
-use super::acquisition::StudioAction;
 use super::local_ai_actions::local_ai_landing_applies;
 use super::media::comparison_landing_applies;
 use super::sirv_actions::{browser_landing_applies, remember_failure, walk_landing_applies};
+use super::studio_actions::studio_landing_applies;
 use super::*;
 use crate::{
     Launch, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
@@ -387,6 +387,45 @@ fn a_local_ai_result_belongs_to_its_exact_file_and_dataset() {
 }
 
 #[test]
+fn a_studio_result_belongs_to_its_exact_file_and_dataset() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let job = StudioJob {
+        tool: studio::Tool::ReplaceBackground,
+        index: 2,
+        dataset_generation: 7,
+        source_name: "photo.jpg".into(),
+        state: StudioJobState::Running,
+        cancelled: cancelled.clone(),
+    };
+
+    assert!(studio_landing_applies(
+        Some(&job),
+        2,
+        7,
+        studio::Tool::ReplaceBackground
+    ));
+    assert!(!studio_landing_applies(
+        Some(&job),
+        2,
+        8,
+        studio::Tool::ReplaceBackground
+    ));
+    assert!(!studio_landing_applies(
+        Some(&job),
+        2,
+        7,
+        studio::Tool::Upscale
+    ));
+    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!studio_landing_applies(
+        Some(&job),
+        2,
+        7,
+        studio::Tool::ReplaceBackground
+    ));
+}
+
+#[test]
 fn table_layout_keeps_decision_columns_at_compact_width() {
     let prefs = ColumnPrefs::default();
     // The narrowest the list ever gets: the minimum window with a rail open.
@@ -726,103 +765,6 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
-fn studio_handoff_opens_or_uploads_and_still_requires_a_ready_host(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, _| {
-        let node = sirv::Node {
-            filename: "/photos/photo.jpg".into(),
-            size: 100_000,
-            is_directory: false,
-            kind: None,
-        };
-        audit.sirv_pairing = Some(SirvPairing {
-            dir: "/photos".into(),
-            files: Listing::Ready(HashMap::from([("photo.jpg".into(), node)])),
-            cdn_host: CdnHost::Ready("demo.sirv.com".into()),
-            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
-                sirv::Credentials {
-                    client_id: String::new(),
-                    client_secret: String::new(),
-                },
-            ))),
-        });
-
-        let StudioAction::Open(url) = audit.studio_action_for(0, None) else {
-            panic!("an exact remote copy opens directly");
-        };
-        assert_eq!(
-            url,
-            "https://www.sirv.studio/tools/image-to-image\
-             ?image=https%3A%2F%2Fdemo.sirv.com%2Fphotos%2Fphoto.jpg\
-             &utm_source=press&utm_medium=desktop&utm_campaign=studio-handoff"
-        );
-
-        // The rail's choice has to reach the handoff, or the tool list is decoration.
-        audit.studio_tool = "background-replace";
-        let StudioAction::Open(url) = audit.studio_action_for(0, None) else {
-            panic!("an exact remote copy opens directly");
-        };
-        assert!(
-            url.starts_with("https://www.sirv.studio/tools/background-replace?image="),
-            "the chosen tool must open, got {url}"
-        );
-        audit.studio_tool = sirv::STUDIO_DEFAULT_TOOL;
-
-        if let Some(SirvPairing {
-            files: Listing::Ready(files),
-            ..
-        }) = audit.sirv_pairing.as_mut()
-        {
-            files.get_mut("photo.jpg").unwrap().size = 1;
-        }
-        assert!(matches!(
-            audit.studio_action_for(0, None),
-            StudioAction::Upload { replaces: true, .. }
-        ));
-
-        if let Some(SirvPairing {
-            files: Listing::Ready(files),
-            ..
-        }) = audit.sirv_pairing.as_mut()
-        {
-            files.clear();
-        }
-        assert!(matches!(
-            audit.studio_action_for(0, None),
-            StudioAction::Upload {
-                replaces: false,
-                ..
-            }
-        ));
-
-        if let Some(SirvPairing {
-            files: Listing::Ready(files),
-            cdn_host,
-            ..
-        }) = audit.sirv_pairing.as_mut()
-        {
-            files.insert(
-                "photo.jpg".into(),
-                sirv::Node {
-                    filename: "/photos/photo.jpg".into(),
-                    size: 100_000,
-                    is_directory: false,
-                    kind: None,
-                },
-            );
-            *cdn_host = CdnHost::Failed("account unavailable".into());
-        }
-        let StudioAction::Unavailable(reason) = audit.studio_action_for(0, None) else {
-            panic!("a failed CDN host is not actionable");
-        };
-        assert_eq!(
-            reason,
-            "Could not find the Sirv CDN host: account unavailable"
-        );
-    });
-}
-
 #[test]
 fn a_walk_from_a_previous_pairing_lands_nowhere() {
     assert!(!walk_landing_applies(1, 2, 3, 3));
@@ -1039,6 +981,19 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
         assert!(!audit.automatic_update_can_restart());
         audit.local_ai_job.as_mut().unwrap().state =
             LocalAiJobState::Done(PathBuf::from("optimized/photo-4x.png"));
+        assert!(audit.automatic_update_can_restart());
+
+        audit.studio_job = Some(StudioJob {
+            tool: studio::Tool::Upscale,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".to_string(),
+            state: StudioJobState::Running,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        assert!(!audit.automatic_update_can_restart());
+        audit.studio_job.as_mut().unwrap().state =
+            StudioJobState::Done(PathBuf::from("optimized/photo-studio-2x.png"));
         assert!(audit.automatic_update_can_restart());
     });
 }
@@ -1323,10 +1278,10 @@ fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
     assert!(!columns(cx).contains(&TableColumn::Density));
 }
 
-/// The two local models and the Studio handoff act on one file, so they only
+/// The two local models and the Studio API act on one file, so they only
 /// light up when the ticked set names exactly one.
 #[gpui::test]
-fn one_ticked_file_is_what_the_local_models_act_on(cx: &mut TestAppContext) {
+fn one_ticked_file_is_what_single_image_tools_act_on(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.read_with(cx, |audit, _| assert_eq!(audit.single_target(), None));
 

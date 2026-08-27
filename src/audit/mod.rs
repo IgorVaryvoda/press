@@ -12,6 +12,7 @@ mod sirv_actions;
 mod sirv_view;
 mod state;
 mod statusbar;
+mod studio_actions;
 mod table;
 #[cfg(test)]
 mod tests;
@@ -32,7 +33,7 @@ use std::time::Duration;
 use crate::compare::Pair;
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
-use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, thumbs};
+use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
 use futures::future::select_all;
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
@@ -283,6 +284,15 @@ pub(crate) struct Audit {
     /// One local inference job. It stays visible after the comparison closes so a
     /// completed file or named failure never disappears with the view that started it.
     local_ai_job: Option<LocalAiJob>,
+    /// One direct Studio API run, with the same stale-dataset and cancellation
+    /// ownership as a local model run.
+    studio_job: Option<StudioJob>,
+    studio_tool: studio::Tool,
+    studio_key: Option<String>,
+    studio_key_input: gpui::Entity<InputState>,
+    studio_prompt: gpui::Entity<InputState>,
+    studio_key_checking: bool,
+    studio_status: Option<(bool, String)>,
     /// The paired Sirv folder, if any: the client, the remote path, and its
     /// listing keyed by the same relative keys the local rows use.
     sirv_pairing: Option<SirvPairing>,
@@ -389,11 +399,6 @@ pub(crate) struct Audit {
     report_copied: bool,
     published_results: Vec<String>,
     published_spins: Vec<String>,
-    /// A differing Sirv image needs a second Studio click before replacement.
-    studio_confirm: Option<usize>,
-    /// Which Studio tool a handoff opens. Chosen in the Studio rail, and used
-    /// by the comparison bar too, so one choice covers both surfaces.
-    studio_tool: &'static str,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -500,8 +505,6 @@ enum SirvJobKind {
     PushChanged,
     /// Publish converted results under optimized/.
     Publish,
-    /// Upload one image, then continue in Studio.
-    Studio,
     /// Publish complete numbered sequences under press-spins/.
     Spin,
 }
@@ -509,7 +512,6 @@ enum SirvJobKind {
 #[derive(Clone)]
 enum UploadCompletion {
     None,
-    OpenStudio(String),
     Results(Vec<String>),
     Spins(Vec<String>),
 }
@@ -591,10 +593,26 @@ struct Comparison {
     /// The output being examined, when this is a finished result rather than a
     /// preview. Set means both sides came off disk and the bytes are real.
     written: Option<PathBuf>,
-    /// The model that produced it, when a local run did. Its output is one file
+    /// The model that produced it. Its output is one file
     /// made on purpose, so it is offered for keeping or throwing away rather
     /// than filed silently and reported in a line of green text.
-    produced_by: Option<local_ai::Tool>,
+    produced_by: Option<ProducedBy>,
+}
+
+#[derive(Clone, Copy)]
+enum ProducedBy {
+    Local(local_ai::Tool),
+    Studio(studio::Tool),
+}
+
+impl ProducedBy {
+    fn result_label(self) -> &'static str {
+        match self {
+            Self::Local(local_ai::Tool::RemoveBackground) => "background removed",
+            Self::Local(local_ai::Tool::Upscale) => "upscaled 4×",
+            Self::Studio(tool) => tool.result_label(),
+        }
+    }
 }
 
 enum LocalAiJobState {
@@ -611,6 +629,21 @@ struct LocalAiJob {
     source_name: String,
     first_setup: bool,
     state: LocalAiJobState,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+enum StudioJobState {
+    Running,
+    Done(PathBuf),
+    Failed(String),
+}
+
+struct StudioJob {
+    tool: studio::Tool,
+    index: usize,
+    dataset_generation: u64,
+    source_name: String,
+    state: StudioJobState,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -641,6 +674,10 @@ impl Audit {
         self.converting = false;
         self.active_target_count = None;
         if let Some(job) = self.local_ai_job.take() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(job) = self.studio_job.take() {
             job.cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -689,7 +726,6 @@ impl Audit {
         self.cached = None;
         self.report_copied = false;
         self.published_spins.clear();
-        self.studio_confirm = None;
         self.filter.clear();
         // A finding belongs to the folder it was found in. Carrying it over would show
         // the new folder narrowed to something nobody asked about.
@@ -1020,6 +1056,23 @@ pub(crate) fn build_audit(
         )
         .detach();
 
+        let studio_key = studio::load_key();
+        let studio_key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("sk_live_…")
+        });
+        let studio_prompt =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Describe the result"));
+        for input in [&studio_key_input, &studio_prompt] {
+            cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+
         let quality_slider = cx.new(|_| {
             SliderState::new()
                 .min(1.)
@@ -1075,8 +1128,13 @@ pub(crate) fn build_audit(
             report_copied: false,
             published_results: Vec::new(),
             published_spins: Vec::new(),
-            studio_confirm: None,
-            studio_tool: sirv::STUDIO_DEFAULT_TOOL,
+            studio_job: None,
+            studio_tool: studio::Tool::default(),
+            studio_key,
+            studio_key_input,
+            studio_prompt,
+            studio_key_checking: false,
+            studio_status: None,
             selected_target_count: 0,
             selected_target_bytes: 0,
             thumbs: HashMap::new(),

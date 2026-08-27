@@ -12,6 +12,7 @@
 //! JPEG XL encoding uses jixel and decoding uses jxl-oxide, both in Rust.
 
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -399,6 +400,45 @@ pub fn convert_each(
 pub fn output_path(root: &Path, source: &Path, out_dir: &Path, format: Format) -> PathBuf {
     let relative = source.strip_prefix(root).unwrap_or(source);
     out_dir.join(relative).with_extension(format.extension())
+}
+
+/// A collision-free path for one AI result beside the normal converted files.
+pub fn ai_output_path(
+    root: &Path,
+    out_dir: &Path,
+    source: &Path,
+    suffix: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    let relative = source
+        .strip_prefix(root)
+        .map_err(|_| "the source image is outside the audited folder".to_string())?;
+    let relative_parent = relative.parent().unwrap_or(Path::new(""));
+    if relative_parent
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("the source image has an unsafe relative path".into());
+    }
+    let parent = out_dir.join(relative_parent);
+    let stem = relative
+        .file_stem()
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| OsStr::new("image"));
+    for attempt in 1..=10_000 {
+        let mut name = OsString::from(stem);
+        name.push(suffix);
+        if attempt > 1 {
+            name.push(format!("-{attempt}"));
+        }
+        let candidate = parent.join(name).with_extension(extension);
+        match candidate.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => return Err(format!("could not inspect the AI output path: {error}")),
+        }
+    }
+    Err("too many AI outputs already use this name".into())
 }
 
 /// One output path per source, no two of them the same.

@@ -41,7 +41,6 @@ impl Audit {
     /// missing store routes directly to the existing settings form.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
         self.sirv_confirm = None;
-        self.studio_confirm = None;
         self.sirv_browser_generation = self.sirv_browser_generation.wrapping_add(1);
         let session = self.sirv_browser_generation;
         // A live pairing already holds a warm client; reuse it so the browser
@@ -315,7 +314,6 @@ impl Audit {
         // The detached loop may finish one file, but has no pairing to update.
         self.sirv_job = None;
         self.sirv_confirm = None;
-        self.studio_confirm = None;
         cx.notify();
     }
 
@@ -666,8 +664,8 @@ impl Audit {
         self.run_upload_plan(plan, kind, UploadCompletion::None, cx);
     }
 
-    /// The one upload loop used by sync, converted results, Studio handoff and
-    /// spins. All four need the same caps, cancellation and named failures.
+    /// The one upload loop used by sync, converted results, and spins. All need
+    /// the same caps, cancellation and named failures.
     pub(super) fn run_upload_plan(
         &mut self,
         plan: Vec<(String, PathBuf)>,
@@ -884,7 +882,6 @@ impl Audit {
                     if failed == 0 {
                         match completion {
                             UploadCompletion::None => {}
-                            UploadCompletion::OpenStudio(url) => cx.open_url(&url),
                             UploadCompletion::Results(urls) => {
                                 audit.published_results = urls;
                                 audit.report_copied = false;

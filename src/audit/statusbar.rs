@@ -18,6 +18,17 @@ impl Audit {
         Some(alert.py_1().into_any_element())
     }
 
+    pub(super) fn studio_notice(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let job = self.studio_job.as_ref()?;
+        let message = job.message(&self.root);
+        let alert = match job.state {
+            StudioJobState::Running => Alert::info("studio-status", message),
+            StudioJobState::Done(_) => Alert::success("studio-status", message),
+            StudioJobState::Failed(_) => Alert::error("studio-status", message),
+        };
+        Some(alert.py_1().into_any_element())
+    }
+
     /// A finished run, still said after its results view is closed. A fast
     /// conversion can be over before you have looked up, and "it worked" plus
     /// the way to the files is what you want to find when you look back.
@@ -150,7 +161,6 @@ impl Audit {
                 SirvJobKind::Push => "Sirv push",
                 SirvJobKind::PushChanged => "Sirv push (overwrite)",
                 SirvJobKind::Publish => "Sirv publish",
-                SirvJobKind::Studio => "Studio upload",
                 SirvJobKind::Spin => "Spin publish",
             };
             let failures = if job.failed == 0 {

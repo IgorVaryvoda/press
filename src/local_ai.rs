@@ -4,7 +4,6 @@
 //! decoded to a scratch PNG, inference runs as a local process, and only the checked
 //! result is copied into the audit's `optimized/` tree.
 
-use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -205,35 +204,7 @@ pub fn upscale_dimensions(width: u32, height: u32) -> Result<(u32, u32), String>
 }
 
 fn output_path(root: &Path, out_dir: &Path, source: &Path, tool: Tool) -> Result<PathBuf, String> {
-    let relative = source
-        .strip_prefix(root)
-        .map_err(|_| "the source image is outside the audited folder".to_string())?;
-    let relative_parent = relative.parent().unwrap_or(Path::new(""));
-    if relative_parent
-        .components()
-        .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err("the source image has an unsafe relative path".into());
-    }
-    let parent = out_dir.join(relative_parent);
-    let stem = relative
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| std::ffi::OsStr::new("image"));
-    for attempt in 1..=10_000 {
-        let mut name = OsString::from(stem);
-        name.push(tool.output_suffix());
-        if attempt > 1 {
-            name.push(format!("-{attempt}"));
-        }
-        let candidate = parent.join(name).with_extension("png");
-        match candidate.symlink_metadata() {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
-            Ok(_) => {}
-            Err(error) => return Err(format!("could not inspect the AI output path: {error}")),
-        }
-    }
-    Err("too many local AI outputs already use this name".into())
+    convert::ai_output_path(root, out_dir, source, tool.output_suffix(), "png")
 }
 
 fn validate_result(

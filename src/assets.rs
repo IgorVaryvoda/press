@@ -1,9 +1,7 @@
 //! Asset source: Studio's own tool icons, then everything gpui-component ships.
 //!
-//! The Studio rail draws the glyph each tool has inside Studio, so a person who
-//! learns the tool in one place recognises it in the other. gpui-component's set
-//! has no scissors, no cube and no wand, and a near-enough substitute per tool
-//! would quietly teach a second vocabulary.
+//! The Studio rail draws the glyph each direct API tool has inside Studio, so a
+//! person who learns the tool in one place recognises it in the other.
 //!
 //! The files are Hugeicons, MIT, taken from the same catalogue Studio renders
 //! from — `EXPECTED_TOOL_GLYPHS` in the Studio repository names the mapping.
@@ -27,15 +25,8 @@ const STUDIO_ICONS: &[(&str, &[u8])] = studio_icons![
     "image-to-image",
     "background-removal",
     "background-replace",
-    "object-removal",
     "upscale",
-    "image-optimizer",
-    "marketplace-optimizer",
     "product-lifestyle",
-    "alt-text",
-    "image-translation",
-    "image-to-3d",
-    "video-generation",
 ];
 
 /// The icon path for a Studio tool slug, or `None` when this build ships no
@@ -75,7 +66,8 @@ mod tests {
 
     #[test]
     fn every_offered_studio_tool_has_its_studio_glyph() {
-        for (slug, _) in crate::sirv::STUDIO_TOOLS {
+        for tool in crate::studio::TOOLS {
+            let slug = tool.slug();
             assert!(
                 studio_icon(slug).is_some(),
                 "{slug} is offered in the rail with no icon"

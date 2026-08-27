@@ -70,7 +70,7 @@ impl Audit {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.local_ai_busy() {
+        if self.local_ai_busy() || self.studio_busy() || self.converting {
             return;
         }
         let Some(entry) = self.entries.get(index) else {
@@ -178,7 +178,7 @@ impl Audit {
                         // A model that ran for thirty seconds and answered with a
                         // line of green text was asking you to go and find its
                         // work. Open it instead.
-                        audit.open_written(index, path, Some(tool), cx);
+                        audit.open_written(index, path, Some(ProducedBy::Local(tool)), cx);
                     }
                     Err(message) => {
                         audit.local_ai_job.as_mut().unwrap().state =

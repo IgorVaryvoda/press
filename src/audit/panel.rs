@@ -1,7 +1,7 @@
 //! The action bar and its rails.
 //!
 //! The bar floats over the list and holds verbs only: Convert, the two local
-//! models, and the handoff to Sirv Studio. Choosing one opens its rail on the
+//! models, and Sirv Studio. Choosing one opens its rail on the
 //! right, carrying that operation's settings and the button that commits it.
 //! No operation borrows another's controls, and the bar never has to explain
 //! itself — which is what the old right-hand inspector column was doing for
@@ -75,7 +75,7 @@ impl Audit {
         let labelled = width >= BAR_LABELS_WIDTH;
         let target_count = self.target_count();
         let single = self.single_target();
-        let busy = self.converting || self.local_ai_busy();
+        let busy = self.converting || self.local_ai_busy() || self.studio_busy();
 
         div()
             .absolute()
@@ -110,7 +110,7 @@ impl Audit {
                             .tooltip("Choose a format and quality, then convert")
                             .outline()
                             .selected(self.rail == Rail::Convert)
-                            .disabled(self.converting || target_count == 0)
+                            .disabled(busy || target_count == 0)
                             .on_click(
                                 cx.listener(|audit, _, _, cx| audit.open_rail(Rail::Convert, cx)),
                             ),
@@ -149,9 +149,12 @@ impl Audit {
                     .child(
                         Button::new("rail-studio")
                             .small()
-                            .icon(IconName::ExternalLink)
+                            .when_some(
+                                crate::assets::studio_icon(self.studio_tool.slug()),
+                                |button, path| button.icon(Icon::default().path(path)),
+                            )
                             .when(labelled, |button| button.label("Studio"))
-                            .tooltip("Choose a Sirv Studio tool, then continue there")
+                            .tooltip("Run an image through the Sirv Studio API")
                             .outline()
                             .selected(self.rail == Rail::Studio)
                             .disabled(busy)
@@ -301,6 +304,7 @@ impl Audit {
                 .local_ai_job
                 .as_ref()
                 .map(|job| job.message(&self.root))
+                .or_else(|| self.studio_job.as_ref().map(|job| job.message(&self.root)))
                 .unwrap_or_else(|| "Local AI is running…".into()),
             (None, false) => format!("{label} on this computer; the first run downloads the model"),
         };
@@ -594,7 +598,12 @@ impl Audit {
                             .primary()
                             .w_full()
                             .label(commit)
-                            .disabled(entry.is_none() || self.local_ai_busy() || self.converting)
+                            .disabled(
+                                entry.is_none()
+                                    || self.local_ai_busy()
+                                    || self.studio_busy()
+                                    || self.converting,
+                            )
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 if let Some(index) = audit.single_target() {
                                     audit.start_local_ai(tool, index, cx);

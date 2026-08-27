@@ -244,10 +244,7 @@ impl Audit {
                                 // The file, not the format: in result mode this
                                 // side is a thing on disk with a name.
                                 Some(written) => match comparison.produced_by {
-                                    Some(local_ai::Tool::RemoveBackground) => {
-                                        "background removed".to_string()
-                                    }
-                                    Some(local_ai::Tool::Upscale) => "upscaled 4×".to_string(),
+                                    Some(producer) => producer.result_label().to_string(),
                                     None => written
                                         .file_name()
                                         .map(|name| name.to_string_lossy().into_owned())
@@ -559,40 +556,54 @@ impl Audit {
         let labelled = width >= 900.;
         let index = comparison.index;
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
-        let busy = self.local_ai_busy() || self.converting;
+        let busy = self.local_ai_busy() || self.studio_busy() || self.converting;
         let showing_result = comparison.written.is_some();
         let upscale_error =
             entry.and_then(|entry| local_ai::upscale_dimensions(entry.width, entry.height).err());
 
         // One readout, in this order of usefulness: a running job, then the
         // encoded result, then why there is not one yet.
-        let (text, colour) = match (self.local_ai_job.as_ref(), comparison.pair.as_ref()) {
-            (Some(job), _) if job.busy() => (job.message(&self.root), cx.theme().muted_foreground),
-            (_, Some(pair)) => {
-                let saving = pair.saving_percent(source_bytes);
-                (
-                    format!(
-                        "{} → {} · {}",
-                        format_bytes(source_bytes),
-                        format_bytes(pair.converted_bytes),
+        let running = self
+            .local_ai_job
+            .as_ref()
+            .filter(|job| job.busy())
+            .map(|job| job.message(&self.root))
+            .or_else(|| {
+                self.studio_job
+                    .as_ref()
+                    .filter(|job| job.busy())
+                    .map(|job| job.message(&self.root))
+            });
+        let (text, colour) = if let Some(message) = running {
+            (message, cx.theme().muted_foreground)
+        } else {
+            match comparison.pair.as_ref() {
+                Some(pair) => {
+                    let saving = pair.saving_percent(source_bytes);
+                    (
+                        format!(
+                            "{} → {} · {}",
+                            format_bytes(source_bytes),
+                            format_bytes(pair.converted_bytes),
+                            if saving >= 0. {
+                                format!("−{saving:.0}%")
+                            } else {
+                                format!("+{:.0}%", -saving)
+                            }
+                        ),
                         if saving >= 0. {
-                            format!("−{saving:.0}%")
+                            cx.theme().green
                         } else {
-                            format!("+{:.0}%", -saving)
-                        }
-                    ),
-                    if saving >= 0. {
-                        cx.theme().green
-                    } else {
-                        cx.theme().yellow
-                    },
-                )
+                            cx.theme().yellow
+                        },
+                    )
+                }
+                None if comparison.failed => (
+                    "Preview unavailable".to_string(),
+                    cx.theme().muted_foreground,
+                ),
+                None => ("Building preview…".to_string(), cx.theme().muted_foreground),
             }
-            (_, None) if comparison.failed => (
-                "Preview unavailable".to_string(),
-                cx.theme().muted_foreground,
-            ),
-            (_, None) => ("Building preview…".to_string(), cx.theme().muted_foreground),
         };
 
         div()
@@ -756,6 +767,7 @@ impl Audit {
             self.local_ai_job
                 .as_ref()
                 .map(|job| job.message(&self.root))
+                .or_else(|| self.studio_job.as_ref().map(|job| job.message(&self.root)))
                 .unwrap_or_else(|| "Local AI is running…".into())
         } else {
             format!("{label} on this computer; the first run downloads the model")

@@ -9,6 +9,7 @@ impl Audit {
     pub(crate) fn automatic_update_can_restart(&self) -> bool {
         !self.converting
             && !self.local_ai_busy()
+            && !self.studio_busy()
             && self.sirv_job.as_ref().is_none_or(|job| job.finished)
     }
 
@@ -157,7 +158,7 @@ impl Audit {
     }
 
     /// The one image an operation would act on, if the selection names exactly
-    /// one. The local models and the Studio handoff work on a single file, and
+    /// one. The local models and Studio API work on a single file, and
     /// guessing which of five ticked files was meant is worse than saying no.
     pub(super) fn single_target(&self) -> Option<usize> {
         let mut ticked = self.visible.iter().filter(|ix| self.selected.contains(ix));
@@ -181,7 +182,6 @@ impl Audit {
     }
 
     pub(super) fn selection_changed(&mut self, cx: &mut Context<Self>) {
-        self.studio_confirm = None;
         self.refresh_target_summary();
         self.schedule_estimate(cx);
         cx.notify();
@@ -535,7 +535,7 @@ impl Audit {
     }
 
     /// Step to the next or previous image while the comparison is open.
-    /// Throw away a local model's output. It is one file this app wrote in its
+    /// Throw away an AI model's output. It is one file this app wrote in its
     /// own output folder, named by it, and the view that offers this is showing
     /// you the file — so the delete is the answer to a question you just asked,
     /// not a background sweep.
@@ -555,7 +555,15 @@ impl Audit {
         if std::fs::remove_file(&written).is_ok() {
             self.existing_output = self.existing_output.saturating_sub(1);
         }
-        self.local_ai_job = None;
+        match self
+            .compare
+            .as_ref()
+            .and_then(|comparison| comparison.produced_by)
+        {
+            Some(ProducedBy::Local(_)) => self.local_ai_job = None,
+            Some(ProducedBy::Studio(_)) => self.studio_job = None,
+            None => {}
+        }
         self.compare = None;
         cx.notify();
     }

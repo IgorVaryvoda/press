@@ -80,7 +80,7 @@ impl Audit {
         &mut self,
         index: usize,
         written: PathBuf,
-        produced_by: Option<local_ai::Tool>,
+        produced_by: Option<ProducedBy>,
         cx: &mut Context<Self>,
     ) {
         let Some(source) = self.entries.get(index).map(|entry| entry.path.clone()) else {

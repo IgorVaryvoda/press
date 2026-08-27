@@ -4,7 +4,8 @@ use super::*;
 
 impl Audit {
     pub(super) fn start_conversion(&mut self, cx: &mut Context<Self>) {
-        if self.converting || self.scanning.is_some() {
+        if self.converting || self.local_ai_busy() || self.studio_busy() || self.scanning.is_some()
+        {
             return;
         }
         let targets = self.targets();

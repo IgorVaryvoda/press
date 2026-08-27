@@ -2,7 +2,7 @@
 name = "press"
 version = "0.3.1"
 edition = "2024"
-description = "Audit and optimise a folder of images without uploading them anywhere"
+description = "Audit and optimise images locally, with optional Sirv and Studio actions"
 
 [[bin]]
 name = "press"
@@ -69,7 +69,7 @@ product-name = "Press"
 # product rather than an upgrade. It is invisible to users; the name they read is
 # product-name. Change it only in a release that accepts a clean reinstall.
 identifier = "dev.imageguide.desktop"
-description = "Audit and optimise a folder of images without uploading them anywhere"
+description = "Audit and optimise images locally, with optional Sirv and Studio actions"
 homepage = "https://imageguide.dev"
 license-file = "LICENSE"
 category = "Graphics and Design"
