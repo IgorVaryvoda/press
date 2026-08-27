@@ -3,6 +3,7 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-28 | user | Added a retained thumbnail fallback without routing the table renderer through it, so evicted rows became permanent black gaps | Keep the existing bounded lazy cache unless the exact top-to-deep-scroll-to-Home path passes in the real table window |
 | 2026-08-27 | user | Expanded the Sirv Studio integration as browser deep links carrying image URLs even though Studio already exposes authenticated REST, upload, batch, and MCP execution paths | Treat links as navigation only; for a desktop Studio integration, connect an account, call the Studio REST API directly, and return the processed result to Press |
 | 2026-08-27 | self | Repeated the documented `/tmp` cross-filesystem hard-link failure while building a spin-proof fixture | Start proof fixtures under `/home/igor/.cache`; do not retry a path already named in this napkin |
 | 2026-08-26 | self | Resolved the active Ponytail skill under the general agents skill root even though the session catalog mapped it to the plugin cache | Expand the exact root alias from the available-skills catalog before reading any skill |
