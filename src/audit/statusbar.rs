@@ -44,15 +44,41 @@ impl Audit {
         Some(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
                 .px_3()
                 .py_1()
-                .child(div().flex_1().min_w_0().child(if grew {
+                .child(div().flex_1().min_w(px(260.)).child(if grew {
                     Alert::warning("conversion-done", message)
                 } else {
                     Alert::success("conversion-done", message)
                 }))
+                .child(if self.published_results.is_empty() {
+                    let waiting = self.publish_waiting();
+                    Button::new("conversion-publish")
+                        .small()
+                        .outline()
+                        .icon(IconName::ArrowUp)
+                        .label(if self.sirv_pairing.is_some() {
+                            "Publish to Sirv"
+                        } else {
+                            "Connect & publish"
+                        })
+                        .tooltip(waiting.clone().unwrap_or_else(|| {
+                            "Upload the converted files to optimized/ on Sirv".into()
+                        }))
+                        .disabled(self.sirv_busy() || waiting.is_some())
+                        .on_click(cx.listener(|audit, _, _, cx| audit.publish_results(cx)))
+                } else {
+                    Button::new("conversion-copy-embed")
+                        .small()
+                        .outline()
+                        .icon(IconName::Copy)
+                        .label("Copy embed")
+                        .tooltip("Copy responsive Sirv image markup")
+                        .on_click(cx.listener(|audit, _, _, cx| audit.copy_result_embeds(cx)))
+                })
                 .child(
                     Button::new("conversion-done-reveal")
                         .small()
@@ -123,6 +149,9 @@ impl Audit {
                 SirvJobKind::PullChanged => "Sirv pull (overwrite)",
                 SirvJobKind::Push => "Sirv push",
                 SirvJobKind::PushChanged => "Sirv push (overwrite)",
+                SirvJobKind::Publish => "Sirv publish",
+                SirvJobKind::Studio => "Studio upload",
+                SirvJobKind::Spin => "Spin publish",
             };
             let failures = if job.failed == 0 {
                 String::new()

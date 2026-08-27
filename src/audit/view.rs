@@ -162,12 +162,24 @@ impl Audit {
                             (false, SirvJobKind::PushChanged) => {
                                 format!("Overwriting on Sirv {} of {}…", job.done, job.total)
                             }
+                            (false, SirvJobKind::Publish) => {
+                                format!("Publishing {} of {}…", job.done, job.total)
+                            }
+                            (false, SirvJobKind::Studio) => {
+                                format!("Uploading for Studio {} of {}…", job.done, job.total)
+                            }
+                            (false, SirvJobKind::Spin) => {
+                                format!("Publishing spin frames {} of {}…", job.done, job.total)
+                            }
                             (true, kind) => {
                                 let verb = match kind {
                                     SirvJobKind::Pull => "Pulled",
                                     SirvJobKind::PullChanged => "Took from Sirv",
                                     SirvJobKind::Push => "Pushed",
                                     SirvJobKind::PushChanged => "Overwrote on Sirv",
+                                    SirvJobKind::Publish => "Published",
+                                    SirvJobKind::Studio => "Uploaded for Studio",
+                                    SirvJobKind::Spin => "Published spin frames",
                                 };
                                 let failures = if job.failed == 0 {
                                     String::new()
@@ -836,6 +848,7 @@ impl Audit {
                             .min_w_0()
                             .overflow_hidden()
                             .children(self.conversion_notice(cx))
+                            .children(self.spin_notice(cx))
                             .children(self.notices(cx))
                             .children(self.local_ai_notice(cx))
                             .child(self.audit_content(count, window, cx))

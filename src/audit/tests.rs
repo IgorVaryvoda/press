@@ -1,3 +1,4 @@
+use super::acquisition::StudioAction;
 use super::local_ai_actions::local_ai_landing_applies;
 use super::media::comparison_landing_applies;
 use super::sirv_actions::{browser_landing_applies, remember_failure, walk_landing_applies};
@@ -713,7 +714,7 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn studio_handoff_requires_exact_remote_bytes_and_a_ready_host(cx: &mut TestAppContext) {
+fn studio_handoff_opens_or_uploads_and_still_requires_a_ready_host(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
         let node = sirv::Node {
@@ -734,8 +735,11 @@ fn studio_handoff_requires_exact_remote_bytes_and_a_ready_host(cx: &mut TestAppC
             ))),
         });
 
+        let StudioAction::Open(url) = audit.studio_action_for(0, None) else {
+            panic!("an exact remote copy opens directly");
+        };
         assert_eq!(
-            audit.studio_url_for(&audit.entries[0]).unwrap(),
+            url,
             "https://dev.sirv.studio/tools/image-to-image?image=https%3A%2F%2Fdemo.sirv.com%2Fphotos%2Fphoto.jpg"
         );
 
@@ -746,10 +750,10 @@ fn studio_handoff_requires_exact_remote_bytes_and_a_ready_host(cx: &mut TestAppC
         {
             files.get_mut("photo.jpg").unwrap().size = 1;
         }
-        assert_eq!(
-            audit.studio_url_for(&audit.entries[0]).unwrap_err(),
-            "Push the changed image to Sirv first"
-        );
+        assert!(matches!(
+            audit.studio_action_for(0, None),
+            StudioAction::Upload { replaces: true, .. }
+        ));
 
         if let Some(SirvPairing {
             files: Listing::Ready(files),
@@ -758,10 +762,13 @@ fn studio_handoff_requires_exact_remote_bytes_and_a_ready_host(cx: &mut TestAppC
         {
             files.clear();
         }
-        assert_eq!(
-            audit.studio_url_for(&audit.entries[0]).unwrap_err(),
-            "Push this image to Sirv first"
-        );
+        assert!(matches!(
+            audit.studio_action_for(0, None),
+            StudioAction::Upload {
+                replaces: false,
+                ..
+            }
+        ));
 
         if let Some(SirvPairing {
             files: Listing::Ready(files),
@@ -780,10 +787,10 @@ fn studio_handoff_requires_exact_remote_bytes_and_a_ready_host(cx: &mut TestAppC
             );
             *cdn_host = CdnHost::Failed("account unavailable".into());
         }
-        assert_eq!(
-            audit.studio_url_for(&audit.entries[0]).unwrap_err(),
-            "Could not find the Sirv CDN host: account unavailable"
-        );
+        let StudioAction::Unavailable(reason) = audit.studio_action_for(0, None) else {
+            panic!("a failed CDN host is not actionable");
+        };
+        assert_eq!(reason, "Could not find the Sirv CDN host: account unavailable");
     });
 }
 

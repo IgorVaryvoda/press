@@ -6,7 +6,7 @@ The conversion tools on [imageguide.dev](https://www.imageguide.dev) post your f
 to a worker to do the work. That is fine for one screenshot and wrong for a client
 shoot. This does the same job on your computer: auditing, comparing, and converting
 do not upload files, and the folder size is bounded by the disk rather than by a
-browser tab. Files leave the machine only when you explicitly use Sirv sync.
+browser tab. Files leave the machine only when you explicitly use a Sirv upload.
 
 ![Press auditing a folder of PNG exports, with the Convert rail open beside the list](docs/audit.webp)
 
@@ -100,9 +100,20 @@ different byte size. **Push** uploads missing local originals. **Pull** download
 missing remote files. Replacing a different file requires a second confirming click,
 and **Stop** prevents the next file in the transfer from starting.
 
-A byte-identical synced image has **Edit in Studio** in its comparison. The action
-opens that exact Sirv image in Sirv AI Studio. New or changed local bytes must be
-pushed explicitly first; opening Studio never uploads a file.
+A byte-identical synced image has **Edit in Studio** in its comparison. A local-only
+image or written result instead says **Upload & edit**, uploads that one file, then
+opens it in Sirv Studio. Replacing a different remote copy requires a second click.
+
+A completed conversion can publish its outputs to `optimized/` in the paired Sirv
+folder and copy responsive image markup. Press also detects numbered image sequences:
+complete, consistently sized sets of 8–1000 frames can be published to
+`press-spins/`, where Sirv creates the `.spin` file, then copied as a Sirv JS v3
+embed. Incomplete or inconsistent sets are named instead of uploaded.
+
+The **preflight** finding applies the file checks Press can prove without decoding:
+1400×1400 pixels, no more than 250 KB, and a truthful extension. Background colour
+still needs a visual review. **Copy audit** creates a shareable Markdown summary with
+the findings, conversion result, heaviest files, and Sirv/Sirv Studio next steps.
 
 The comparison has two local actions that never upload the source:
 **Remove background** uses BiRefNet Lite and **Upscale 4×** uses tiled Real-ESRGAN.
@@ -267,11 +278,6 @@ rather than tells you.
 The bar carries the same verbs as the audit, acting on the image in front of you:
 convert it, run either local model on it, or open it in Studio. Arrows step through
 the folder without leaving the view.
-
-## Planned
-
-- Spec profiles — "1400×1400, white background, under 250 KB" — for marketplace
-  pre-flight.
 
 ## Build
 

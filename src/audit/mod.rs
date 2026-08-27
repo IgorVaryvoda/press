@@ -1,5 +1,6 @@
 //! Audit window state, background jobs, rendering, and tests.
 
+mod acquisition;
 mod compare_view;
 mod convert_job;
 mod gallery;
@@ -378,6 +379,16 @@ pub(crate) struct Audit {
     heavy: usize,
     /// Files whose extension disagrees with their contents, also fixed for a scan.
     mislabelled: usize,
+    /// Files outside the one marketplace preflight Press can prove from headers.
+    marketplace: usize,
+    /// Numbered sequences found once per scan, ready or with a named issue.
+    spins: Vec<acquisition::SpinSet>,
+    /// Copy/publish acknowledgements stay visible until the dataset or results change.
+    report_copied: bool,
+    published_results: Vec<String>,
+    published_spins: Vec<String>,
+    /// A differing Sirv image needs a second Studio click before replacement.
+    studio_confirm: Option<usize>,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -482,6 +493,20 @@ enum SirvJobKind {
     Push,
     /// Deliberately overwrite the differing remote copy.
     PushChanged,
+    /// Publish converted results under optimized/.
+    Publish,
+    /// Upload one image, then continue in Studio.
+    Studio,
+    /// Publish complete numbered sequences under press-spins/.
+    Spin,
+}
+
+#[derive(Clone)]
+enum UploadCompletion {
+    None,
+    OpenStudio(String),
+    Results(Vec<String>),
+    Spins(Vec<String>),
 }
 
 struct SirvJob {
@@ -625,6 +650,12 @@ impl Audit {
             .iter()
             .filter(|entry| Finding::Heavy.holds(entry))
             .count();
+        self.marketplace = scanned
+            .entries
+            .iter()
+            .filter(|entry| acquisition::marketplace_fails(entry))
+            .count();
+        self.spins = acquisition::detect_spins(&self.root, &scanned.entries);
         self.entries = scanned.entries;
         // The scroll handle belongs to the gallery rather than its data. A new folder
         // can have the same column count, so a render-time column transition cannot
@@ -651,6 +682,9 @@ impl Audit {
         self.failures.clear();
         self.compare = None;
         self.cached = None;
+        self.report_copied = false;
+        self.published_spins.clear();
+        self.studio_confirm = None;
         self.filter.clear();
         // A finding belongs to the folder it was found in. Carrying it over would show
         // the new folder narrowed to something nobody asked about.
@@ -840,6 +874,8 @@ enum Finding {
     /// More bytes per pixel than a photograph needs. These are the files a conversion
     /// is actually for.
     Heavy,
+    /// Objective marketplace file checks. Background colour remains a visual check.
+    Marketplace,
 }
 
 impl Finding {
@@ -853,6 +889,7 @@ impl Finding {
                     && u64::from(entry.width) * u64::from(entry.height) >= HEAVY_MIN_PIXELS
                     && entry.bytes_per_pixel() > DENSITY_HEAVY
             }
+            Finding::Marketplace => acquisition::marketplace_fails(entry),
         }
     }
 }
@@ -1012,6 +1049,11 @@ pub(crate) fn build_audit(
             .iter()
             .filter(|entry| Finding::Heavy.holds(entry))
             .count();
+        let marketplace = entries
+            .iter()
+            .filter(|entry| acquisition::marketplace_fails(entry))
+            .count();
+        let spins = acquisition::detect_spins(&root, &entries);
         let mut audit = Audit {
             table: None,
             table_signature: None,
@@ -1023,6 +1065,12 @@ pub(crate) fn build_audit(
             visible_bytes: 0,
             heavy,
             mislabelled,
+            marketplace,
+            spins,
+            report_copied: false,
+            published_results: Vec::new(),
+            published_spins: Vec::new(),
+            studio_confirm: None,
             selected_target_count: 0,
             selected_target_bytes: 0,
             thumbs: HashMap::new(),

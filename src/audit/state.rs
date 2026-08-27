@@ -111,6 +111,8 @@ impl Audit {
         self.results.clear();
         self.result_paths.clear();
         self.converted_totals = (0, 0);
+        self.published_results.clear();
+        self.report_copied = false;
     }
 
     /// The finished outputs, in the order the list is showing their sources.
@@ -179,6 +181,7 @@ impl Audit {
     }
 
     pub(super) fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.studio_confirm = None;
         self.refresh_target_summary();
         self.schedule_estimate(cx);
         cx.notify();

@@ -76,12 +76,6 @@ impl Audit {
         let target_count = self.target_count();
         let single = self.single_target();
         let busy = self.converting || self.local_ai_busy();
-        let studio = single
-            .and_then(|index| self.entries.get(index))
-            .map_or_else(
-                || Err("Select one image to open it in Sirv AI Studio".to_string()),
-                |entry| self.studio_url_for(entry),
-            );
 
         div()
             .absolute()
@@ -148,28 +142,7 @@ impl Audit {
                             cx,
                         )
                     }))
-                    .child(
-                        Button::new("studio")
-                            .small()
-                            .outline()
-                            .icon(IconName::ExternalLink)
-                            .when(labelled, |button| button.label("Edit in Studio"))
-                            .tooltip(match &studio {
-                                Ok(_) => "Open this synced image in Sirv AI Studio".to_string(),
-                                Err(reason) => reason.clone(),
-                            })
-                            .disabled(studio.is_err() || busy)
-                            .on_click(cx.listener(move |audit, _, _, cx| {
-                                let Some(entry) =
-                                    audit.single_target().and_then(|ix| audit.entries.get(ix))
-                                else {
-                                    return;
-                                };
-                                if let Ok(url) = audit.studio_url_for(entry) {
-                                    cx.open_url(&url);
-                                }
-                            })),
-                    ),
+                    .child(self.studio_button("studio", single, None, labelled, busy, cx)),
             )
     }
 

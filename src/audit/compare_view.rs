@@ -561,10 +561,6 @@ impl Audit {
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
         let busy = self.local_ai_busy() || self.converting;
         let showing_result = comparison.written.is_some();
-        let studio = entry.map_or_else(
-            || Err("This image is no longer in the audit".to_string()),
-            |entry| self.studio_url_for(entry),
-        );
         let upscale_error =
             entry.and_then(|entry| local_ai::upscale_dimensions(entry.width, entry.height).err());
 
@@ -726,24 +722,14 @@ impl Audit {
                             )
                         }),
                     )
-                    .children(comparison.produced_by.is_none().then(|| {
-                        let url = studio.as_ref().ok().cloned();
-                        Button::new("compare-edit-studio")
-                            .small()
-                            .outline()
-                            .icon(IconName::ExternalLink)
-                            .when(labelled, |button| button.label("Edit in Studio"))
-                            .tooltip(match &studio {
-                                Ok(_) => "Open this synced image in Sirv AI Studio".to_string(),
-                                Err(reason) => reason.clone(),
-                            })
-                            .disabled(url.is_none() || busy)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(url) = &url {
-                                    cx.open_url(url);
-                                }
-                            }))
-                    })),
+                    .child(self.studio_button(
+                        "compare-edit-studio",
+                        entry.map(|_| index),
+                        comparison.written.clone(),
+                        labelled,
+                        busy,
+                        cx,
+                    )),
             )
     }
 

@@ -41,6 +41,7 @@ impl Audit {
     /// missing store routes directly to the existing settings form.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
         self.sirv_confirm = None;
+        self.studio_confirm = None;
         self.sirv_browser_generation = self.sirv_browser_generation.wrapping_add(1);
         let session = self.sirv_browser_generation;
         // A live pairing already holds a warm client; reuse it so the browser
@@ -301,41 +302,6 @@ impl Audit {
         .detach();
     }
 
-    /// The exact synced remote image this local row can hand to Studio.
-    pub(super) fn studio_url_for(&self, entry: &Entry) -> Result<String, String> {
-        let pairing = self
-            .sirv_pairing
-            .as_ref()
-            .ok_or_else(|| "Pair this folder with Sirv first".to_string())?;
-        let files = match &pairing.files {
-            Listing::Walking => return Err("Waiting for the Sirv folder listing".into()),
-            Listing::Failed(message) => {
-                return Err(format!("Could not read the Sirv folder: {message}"));
-            }
-            Listing::Ready(files) => files,
-        };
-        let key = sirv::relative_key(&self.root, &entry.path)
-            .ok_or_else(|| "This image is outside the paired folder".to_string())?;
-        let remote = files.get(&key);
-        match sirv::classify(entry.bytes, remote) {
-            sirv::SyncState::OnlyLocal => return Err("Push this image to Sirv first".into()),
-            sirv::SyncState::Changed => {
-                return Err("Push the changed image to Sirv first".into());
-            }
-            sirv::SyncState::Same => {}
-        }
-        let host = match &pairing.cdn_host {
-            CdnHost::Loading => return Err("Finding the Sirv CDN host…".into()),
-            CdnHost::Failed(message) => {
-                return Err(format!("Could not find the Sirv CDN host: {message}"));
-            }
-            CdnHost::Ready(host) => host,
-        };
-        let public_url =
-            sirv::public_url(host, &remote.unwrap().filename).map_err(|error| error.to_string())?;
-        Ok(sirv::studio_image_to_image_url(&public_url))
-    }
-
     pub(super) fn unpair_sirv(&mut self, cx: &mut Context<Self>) {
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
@@ -349,6 +315,7 @@ impl Audit {
         // The detached loop may finish one file, but has no pairing to update.
         self.sirv_job = None;
         self.sirv_confirm = None;
+        self.studio_confirm = None;
         cx.notify();
     }
 
@@ -690,21 +657,40 @@ impl Audit {
         let Listing::Ready(files) = &pairing.files else {
             return;
         };
-        let dir = pairing.dir.clone();
-        let client = pairing.client.clone();
         let plan = sirv_push_plan(&self.root, &self.entries, files, accept);
+        let kind = if accept == sirv::SyncState::Changed {
+            SirvJobKind::PushChanged
+        } else {
+            SirvJobKind::Push
+        };
+        self.run_upload_plan(plan, kind, UploadCompletion::None, cx);
+    }
+
+    /// The one upload loop used by sync, converted results, Studio handoff and
+    /// spins. All four need the same caps, cancellation and named failures.
+    pub(super) fn run_upload_plan(
+        &mut self,
+        plan: Vec<(String, PathBuf)>,
+        kind: SirvJobKind,
+        completion: UploadCompletion,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pairing) = &self.sirv_pairing else {
+            return;
+        };
+        if self.sirv_busy() {
+            return;
+        }
         if plan.is_empty() {
             return;
         }
+        let dir = pairing.dir.clone();
+        let client = pairing.client.clone();
         let total = plan.len();
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         let generation = self.sirv_generation;
         self.sirv_job = Some(SirvJob {
-            kind: if accept == sirv::SyncState::Changed {
-                SirvJobKind::PushChanged
-            } else {
-                SirvJobKind::Push
-            },
+            kind,
             done: 0,
             total,
             failed: 0,
@@ -895,6 +881,17 @@ impl Audit {
                     false
                 };
                 if owns_job {
+                    if failed == 0 {
+                        match completion {
+                            UploadCompletion::None => {}
+                            UploadCompletion::OpenStudio(url) => cx.open_url(&url),
+                            UploadCompletion::Results(urls) => {
+                                audit.published_results = urls;
+                                audit.report_copied = false;
+                            }
+                            UploadCompletion::Spins(urls) => audit.published_spins = urls,
+                        }
+                    }
                     // Re-list the pair: pushed files must stop reading as new.
                     audit.walk_sirv_pairing(cx);
                     cx.notify();
