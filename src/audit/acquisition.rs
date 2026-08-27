@@ -326,7 +326,7 @@ impl Audit {
             Ok(url) => url,
             Err(error) => return StudioAction::Unavailable(error.to_string()),
         };
-        let url = sirv::studio_image_to_image_url(&public);
+        let url = sirv::studio_tool_url(self.studio_tool, &public);
         match state {
             sirv::SyncState::Same => StudioAction::Open(url),
             sirv::SyncState::OnlyLocal => StudioAction::Upload {
@@ -344,6 +344,85 @@ impl Audit {
         }
     }
 
+    /// The Studio rail: which tool the handoff opens, then the handoff itself.
+    /// The tool list is the whole reason this rail exists — one hardcoded tool
+    /// made every Studio arrival start in the same place regardless of intent.
+    pub(super) fn studio_rail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let index = self.single_target();
+        let chosen = self.studio_tool;
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("studio-tools")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .gap_1()
+                    .px_3()
+                    .py_3()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .pb_1()
+                            .child("Opens in your browser with this image loaded."),
+                    )
+                    .children(sirv::STUDIO_TOOLS.iter().map(|(slug, name)| {
+                        Button::new(gpui::SharedString::from(format!("studio-tool-{slug}")))
+                            .small()
+                            .ghost()
+                            .w_full()
+                            .label(*name)
+                            // Studio's own glyph for this tool, so the list reads
+                            // the same here as it does there.
+                            .when_some(crate::assets::studio_icon(slug), |button, path| {
+                                button.icon(Icon::default().path(path))
+                            })
+                            .selected(chosen == *slug)
+                            // Button centres its own content and offers no way
+                            // to say otherwise. A trailing flexible child eats
+                            // the slack instead, so twelve rows line up on one
+                            // left edge and the icons read as a column.
+                            .child(div().flex_1())
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                audit.studio_tool = slug;
+                                audit.studio_confirm = None;
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        self.studio_button(
+                            "studio-commit",
+                            index,
+                            None,
+                            true,
+                            self.sirv_busy(),
+                            cx,
+                        )
+                        .primary()
+                        .w_full(),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn studio_button(
         &self,
         id: &'static str,
@@ -353,10 +432,17 @@ impl Audit {
         busy: bool,
         cx: &mut Context<Self>,
     ) -> Button {
-        let action = index.map_or_else(
-            || StudioAction::Unavailable("Select one image to continue in Studio".into()),
-            |index| self.studio_action_for(index, written.as_deref()),
-        );
+        // Connecting an account does not need a chosen image, and telling a
+        // person without Sirv to select one first sends them looking for a
+        // problem in the wrong place.
+        let action = if self.sirv_pairing.is_none() {
+            StudioAction::Connect
+        } else {
+            index.map_or_else(
+                || StudioAction::Unavailable("Select one image to continue in Studio".into()),
+                |index| self.studio_action_for(index, written.as_deref()),
+            )
+        };
         let confirming = index.is_some() && self.studio_confirm == index;
         let (label, tooltip, disabled) = match &action {
             StudioAction::Connect => (

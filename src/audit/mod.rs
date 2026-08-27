@@ -50,7 +50,7 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 
 // Colours come from `cx.theme()` rather than a private palette. The window is
 // built out of this library's buttons, inputs and tags, and a hand-picked set of
@@ -122,6 +122,7 @@ pub(super) enum Rail {
     Convert,
     RemoveBackground,
     Upscale,
+    Studio,
 }
 
 impl Rail {
@@ -131,6 +132,7 @@ impl Rail {
             Rail::Convert => "Convert",
             Rail::RemoveBackground => "Remove background",
             Rail::Upscale => "Upscale 4×",
+            Rail::Studio => "Sirv Studio",
         }
     }
 }
@@ -389,6 +391,9 @@ pub(crate) struct Audit {
     published_spins: Vec<String>,
     /// A differing Sirv image needs a second Studio click before replacement.
     studio_confirm: Option<usize>,
+    /// Which Studio tool a handoff opens. Chosen in the Studio rail, and used
+    /// by the comparison bar too, so one choice covers both surfaces.
+    studio_tool: &'static str,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -1071,6 +1076,7 @@ pub(crate) fn build_audit(
             published_results: Vec::new(),
             published_spins: Vec::new(),
             studio_confirm: None,
+            studio_tool: sirv::STUDIO_DEFAULT_TOOL,
             selected_target_count: 0,
             selected_target_bytes: 0,
             thumbs: HashMap::new(),

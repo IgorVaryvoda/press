@@ -93,6 +93,30 @@ impl Audit {
                 true,
                 cx,
             ))
+            // Without these two, the form is a wall: it asks for keys and says
+            // nothing about where they come from, so a person who does not
+            // already pay for Sirv has nowhere to go from here.
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("sirv-signup")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label("Create a free account")
+                            .on_click(|_, _, cx| cx.open_url(sirv::SIGNUP_URL)),
+                    )
+                    .child(
+                        Button::new("sirv-api-keys")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label("Where are my keys?")
+                            .on_click(|_, _, cx| cx.open_url(sirv::API_KEYS_URL)),
+                    ),
+            )
             .child(
                 div()
                     .flex()

@@ -80,6 +80,19 @@ fn screenshot() {
                 window,
                 cx,
             );
+            // The rails are part of the window's shape, so they have to be
+            // reachable from here too — otherwise the only way to look at one
+            // is to run the app and point Sirv at a real account.
+            if let Some(rail) = match mode.as_str() {
+                "studio" => Some(Rail::Studio),
+                "convert" => Some(Rail::Convert),
+                _ => None,
+            } {
+                audit.update(cx, |audit, cx| {
+                    audit.rail = rail;
+                    cx.notify();
+                });
+            }
             cx.new(|cx| Root::new(audit, window, cx).bg(cx.theme().background))
         })
         .expect("window opens");
@@ -740,8 +753,21 @@ fn studio_handoff_opens_or_uploads_and_still_requires_a_ready_host(cx: &mut Test
         };
         assert_eq!(
             url,
-            "https://dev.sirv.studio/tools/image-to-image?image=https%3A%2F%2Fdemo.sirv.com%2Fphotos%2Fphoto.jpg"
+            "https://www.sirv.studio/tools/image-to-image\
+             ?image=https%3A%2F%2Fdemo.sirv.com%2Fphotos%2Fphoto.jpg\
+             &utm_source=press&utm_medium=desktop&utm_campaign=studio-handoff"
         );
+
+        // The rail's choice has to reach the handoff, or the tool list is decoration.
+        audit.studio_tool = "background-replace";
+        let StudioAction::Open(url) = audit.studio_action_for(0, None) else {
+            panic!("an exact remote copy opens directly");
+        };
+        assert!(
+            url.starts_with("https://www.sirv.studio/tools/background-replace?image="),
+            "the chosen tool must open, got {url}"
+        );
+        audit.studio_tool = sirv::STUDIO_DEFAULT_TOOL;
 
         if let Some(SirvPairing {
             files: Listing::Ready(files),
@@ -790,7 +816,10 @@ fn studio_handoff_opens_or_uploads_and_still_requires_a_ready_host(cx: &mut Test
         let StudioAction::Unavailable(reason) = audit.studio_action_for(0, None) else {
             panic!("a failed CDN host is not actionable");
         };
-        assert_eq!(reason, "Could not find the Sirv CDN host: account unavailable");
+        assert_eq!(
+            reason,
+            "Could not find the Sirv CDN host: account unavailable"
+        );
     });
 }
 

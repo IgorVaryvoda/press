@@ -100,9 +100,23 @@ different byte size. **Push** uploads missing local originals. **Pull** download
 missing remote files. Replacing a different file requires a second confirming click,
 and **Stop** prevents the next file in the transfer from starting.
 
-A byte-identical synced image has **Edit in Studio** in its comparison. A local-only
-image or written result instead says **Upload & edit**, uploads that one file, then
-opens it in Sirv Studio. Replacing a different remote copy requires a second click.
+**Studio** in the action bar opens a rail listing the twelve Sirv AI Studio tools
+that take an image URL — Image to Image, Background Removal, Background Replace,
+Object Removal, Image Upscale, Image Optimizer, Marketplace Optimizer, Product
+Lifestyle, Alt Text Generation, Image Translation, Image to 3D, and Video
+Generation. They carry Studio's own names, because a tool called one thing here
+and another thing there is two tools to learn. The rest of Studio's catalogue is
+not offered: those routes ignore the image they are opened with, and a tool that
+silently drops your file is worse than no link.
+
+Pick a tool, and the commit at the foot of the rail says what it will do. A
+byte-identical synced image says **Edit in Studio** and opens straight there. A
+local-only image or written result says **Upload & edit**, uploads that one file
+first, then opens it. Replacing a different remote copy requires a second click.
+The comparison bar carries the same action for the image in front of you.
+
+Without credentials the rail says **Connect Sirv** instead, and the credentials
+form links to account signup and to the article naming the client ID and secret.
 
 A completed conversion can publish its outputs to `optimized/` in the paired Sirv
 folder and copy responsive image markup. Press also detects numbered image sequences:

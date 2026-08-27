@@ -152,10 +152,52 @@ pub fn public_url(cdn_host: &str, remote_filename: &str) -> Result<String, Error
     Ok(format!("https://{cdn_host}/{path}"))
 }
 
-/// Open one public image in Studio without uploading another copy.
-pub fn studio_image_to_image_url(public_url: &str) -> String {
+/// Where a person with no Sirv account starts. The credentials form is the
+/// only door into sync, so it has to name the way in as well as the way through.
+pub const SIGNUP_URL: &str =
+    "https://sirv.com/?utm_source=press&utm_medium=desktop&utm_campaign=connect";
+
+/// Where the client ID and secret in that form come from.
+pub const API_KEYS_URL: &str = "https://sirv.com/help/articles/sirv-api/?utm_source=press&utm_medium=desktop&utm_campaign=connect";
+
+/// The Studio tools that take a public image URL, with Studio's own names for
+/// them. Studio reads `?image=` on these routes and on no others, so offering
+/// the rest of its catalogue here would hand the user a tool that ignores the
+/// image it was opened with.
+pub const STUDIO_TOOLS: &[(&str, &str)] = &[
+    ("image-to-image", "Image to Image"),
+    ("background-removal", "Background Removal"),
+    ("background-replace", "Background Replace"),
+    ("object-removal", "Object Removal"),
+    ("upscale", "Image Upscale"),
+    ("image-optimizer", "Image Optimizer"),
+    ("marketplace-optimizer", "Marketplace Optimizer"),
+    ("product-lifestyle", "Product Lifestyle"),
+    ("alt-text", "Alt Text Generation"),
+    ("image-translation", "Image Translation"),
+    ("image-to-3d", "Image to 3D"),
+    ("video-generation", "Video Generation"),
+];
+
+/// The tool a handoff uses until the user picks another one.
+pub const STUDIO_DEFAULT_TOOL: &str = "image-to-image";
+
+/// True for a slug this build knows Studio will consume an image on.
+pub fn studio_tool_known(tool: &str) -> bool {
+    STUDIO_TOOLS.iter().any(|(slug, _)| *slug == tool)
+}
+
+/// Open one public image in a Studio tool without uploading another copy. The
+/// campaign tag is what makes a Studio arrival attributable to Press.
+pub fn studio_tool_url(tool: &str, public_url: &str) -> String {
+    let tool = if studio_tool_known(tool) {
+        tool
+    } else {
+        STUDIO_DEFAULT_TOOL
+    };
     format!(
-        "https://dev.sirv.studio/tools/image-to-image?image={}",
+        "https://www.sirv.studio/tools/{tool}?image={}\
+         &utm_source=press&utm_medium=desktop&utm_campaign=studio-handoff",
         encode_path(public_url)
     )
 }
@@ -1216,9 +1258,34 @@ mod tests {
     #[test]
     fn a_studio_url_encodes_the_public_image() {
         assert_eq!(
-            studio_image_to_image_url("https://demo.sirv.com/folder/a b.jpg"),
-            "https://dev.sirv.studio/tools/image-to-image?image=https%3A%2F%2Fdemo.sirv.com%2Ffolder%2Fa%20b.jpg"
+            studio_tool_url("image-to-image", "https://demo.sirv.com/folder/a b.jpg"),
+            "https://www.sirv.studio/tools/image-to-image\
+             ?image=https%3A%2F%2Fdemo.sirv.com%2Ffolder%2Fa%20b.jpg\
+             &utm_source=press&utm_medium=desktop&utm_campaign=studio-handoff"
         );
+    }
+
+    #[test]
+    fn a_studio_url_names_the_chosen_tool() {
+        let url = studio_tool_url("background-replace", "https://demo.sirv.com/a.jpg");
+        assert!(url.starts_with("https://www.sirv.studio/tools/background-replace?image="));
+    }
+
+    #[test]
+    fn an_unknown_studio_tool_falls_back_instead_of_building_a_dead_url() {
+        // A slug this build does not know would open a Studio route that
+        // ignores `?image=`, which looks like the handoff silently failed.
+        let url = studio_tool_url("no-such-tool", "https://demo.sirv.com/a.jpg");
+        assert!(url.starts_with("https://www.sirv.studio/tools/image-to-image?image="));
+    }
+
+    #[test]
+    fn every_offered_studio_tool_is_known() {
+        assert!(studio_tool_known(STUDIO_DEFAULT_TOOL));
+        for (slug, name) in STUDIO_TOOLS {
+            assert!(studio_tool_known(slug), "{slug} is offered but not known");
+            assert!(!name.is_empty());
+        }
     }
 
     #[test]

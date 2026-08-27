@@ -5,6 +5,7 @@
 //! folder size is bounded by the disk rather than by a tab. Files move over the
 //! network only when the user explicitly uses the optional Sirv sync actions.
 
+mod assets;
 mod audit;
 mod avif;
 mod compare;
@@ -461,7 +462,7 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
     application()
         // Every `IconName` is an SVG loaded through the app's asset source. Without
         // this the icons resolve to nothing and the toolbar renders as bare words.
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             init_theme(cx);
             // GPUI's macOS default keeps the process alive after the last window

@@ -142,7 +142,23 @@ impl Audit {
                             cx,
                         )
                     }))
-                    .child(self.studio_button("studio", single, None, labelled, busy, cx)),
+                    // A verb that opens its rail, like the others. The rail
+                    // carries the tool list and the state, so the bar stays a
+                    // row of verbs and a stranger can open it to find out how
+                    // to connect.
+                    .child(
+                        Button::new("rail-studio")
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .when(labelled, |button| button.label("Studio"))
+                            .tooltip("Choose a Sirv Studio tool, then continue there")
+                            .outline()
+                            .selected(self.rail == Rail::Studio)
+                            .disabled(busy)
+                            .on_click(
+                                cx.listener(|audit, _, _, cx| audit.open_rail(Rail::Studio, cx)),
+                            ),
+                    ),
             )
     }
 
@@ -310,6 +326,7 @@ impl Audit {
         let body = match self.rail {
             Rail::Convert => self.convert_rail(cx).into_any_element(),
             Rail::RemoveBackground | Rail::Upscale => self.local_ai_rail(self.rail, cx),
+            Rail::Studio => self.studio_rail(cx),
             Rail::None => return None,
         };
         Some(
