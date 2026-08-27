@@ -884,6 +884,24 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
 }
 
 #[gpui::test]
+fn acquisition_extras_stay_off_the_primary_surface(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.spins = vec![acquisition::SpinSet {
+            name: "shoe".into(),
+            indices: (0..8).collect(),
+            remote_folder: "press-spins/shoe".into(),
+            issue: None,
+        }];
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("copy-audit-report").is_none());
+    assert!(cx.debug_bounds("spin-preflight").is_none());
+}
+
+#[gpui::test]
 fn choosing_avif_leaves_lossless_for_the_last_slider_quality(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {

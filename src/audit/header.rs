@@ -204,7 +204,7 @@ impl Audit {
                     cx,
                 )
             }))
-            .children((self.marketplace > 0).then(|| {
+            .children((acquisition::SHOW_ACQUISITION_EXTRAS && self.marketplace > 0).then(|| {
                 self.finding_button(
                     Finding::Marketplace,
                     IconName::TriangleAlert,
@@ -213,24 +213,26 @@ impl Audit {
                     cx,
                 )
             }))
-            .child(
-                Button::new("copy-audit-report")
-                    .small()
-                    .ghost()
-                    .icon(if self.report_copied {
-                        IconName::Check
-                    } else {
-                        IconName::Copy
-                    })
-                    .label(if self.report_copied {
-                        "Copied"
-                    } else {
-                        "Copy audit"
-                    })
-                    .tooltip("Copy a shareable Press audit with Sirv and Studio next steps")
-                    .disabled(self.converting)
-                    .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
-            )
+            .when(acquisition::SHOW_ACQUISITION_EXTRAS, |header| {
+                header.child(
+                    Button::new("copy-audit-report")
+                        .small()
+                        .ghost()
+                        .icon(if self.report_copied {
+                            IconName::Check
+                        } else {
+                            IconName::Copy
+                        })
+                        .label(if self.report_copied {
+                            "Copied"
+                        } else {
+                            "Copy audit"
+                        })
+                        .tooltip("Copy a shareable Press audit with Sirv and Studio next steps")
+                        .disabled(self.converting)
+                        .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
+                )
+            })
             // The view toggle sits at the far end of the window: it changes how
             // the list below is drawn and nothing else.
             .child(

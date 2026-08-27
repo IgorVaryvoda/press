@@ -844,7 +844,9 @@ impl Audit {
                             .min_w_0()
                             .overflow_hidden()
                             .children(self.conversion_notice(cx))
-                            .children(self.spin_notice(cx))
+                            .when(acquisition::SHOW_ACQUISITION_EXTRAS, |view| {
+                                view.children(self.spin_notice(cx))
+                            })
                             .children(self.notices(cx))
                             .children(self.local_ai_notice(cx))
                             .children(self.studio_notice(cx))

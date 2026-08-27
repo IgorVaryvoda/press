@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 pub(super) const MARKETPLACE_EDGE: u32 = 1400;
 pub(super) const MARKETPLACE_MAX_BYTES: u64 = 250 * 1024;
+pub(super) const SHOW_ACQUISITION_EXTRAS: bool = false;
 
 type SpinGroupKey = (String, String, String, String);
 type NumberedFrames = Vec<(u32, usize)>;
