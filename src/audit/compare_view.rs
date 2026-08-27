@@ -18,6 +18,30 @@ fn compare_chip(text: impl Into<gpui::SharedString>, colour: gpui::Hsla, _cx: &A
 }
 
 impl Audit {
+    fn preview_processing_message(&self, comparison: &Comparison) -> Option<String> {
+        if comparison.mode != MediaMode::Preview {
+            return None;
+        }
+        self.local_ai_job
+            .as_ref()
+            .filter(|job| {
+                job.busy()
+                    && job.index == comparison.index
+                    && job.dataset_generation == comparison.dataset_generation
+            })
+            .map(|job| job.message(&self.root))
+            .or_else(|| {
+                self.studio_job
+                    .as_ref()
+                    .filter(|job| {
+                        job.busy()
+                            && job.index == comparison.index
+                            && job.dataset_generation == comparison.dataset_generation
+                    })
+                    .map(|job| job.message(&self.root))
+            })
+    }
+
     /// Full-window comparison. It opens fitted, because you cannot judge a crop of an
     /// image you have not seen yet, and zooms to 1:1 and beyond — fitting a 5568px
     /// photo into a 900px window hides exactly the artefacts this view exists to show.
@@ -33,6 +57,7 @@ impl Audit {
         // Keep the image name readable and drop the duplicate byte summary first.
         let entry = self.entries.get(comparison.index);
         let name = entry.map(|entry| entry.name()).unwrap_or_default();
+        let processing = self.preview_processing_message(comparison);
         // Where this image sits in the folder, so stepping through it has a
         // sense of distance rather than just a pair of arrows.
         let position = match (
@@ -173,7 +198,35 @@ impl Audit {
                         .top(px(top))
                         .w(px(image_w))
                         .h(px(image_h))
-                        .child(img(preview.image.clone()).w(px(image_w)).h(px(image_h))),
+                        .child(img(preview.image.clone()).w(px(image_w)).h(px(image_h)))
+                        .when_some(processing.clone(), |image, message| {
+                            image.child(
+                                div()
+                                    .debug_selector(|| "preview-processing-overlay".into())
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .bg(rgba(0x00000099))
+                                    .child(
+                                        gpui_component::spinner::Spinner::new()
+                                            .large()
+                                            .color(gpui::white()),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(440.))
+                                            .text_center()
+                                            .text_size(px(12.))
+                                            .text_color(gpui::white())
+                                            .child(message),
+                                    ),
+                            )
+                        }),
                 );
             }
         } else if let (Some(pair), Some(scale)) = (comparison.pair.as_ref(), scale) {
@@ -597,20 +650,7 @@ impl Audit {
 
         // One readout, in this order of usefulness: a running job, then the
         // encoded result, then why there is not one yet.
-        let running = if previewing {
-            self.local_ai_job
-                .as_ref()
-                .filter(|job| job.busy())
-                .map(|job| job.message(&self.root))
-                .or_else(|| {
-                    self.studio_job
-                        .as_ref()
-                        .filter(|job| job.busy())
-                        .map(|job| job.message(&self.root))
-                })
-        } else {
-            None
-        };
+        let running = self.preview_processing_message(comparison);
         let (text, colour) = if let Some(message) = running {
             (message, cx.theme().muted_foreground)
         } else if previewing {

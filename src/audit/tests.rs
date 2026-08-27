@@ -1446,6 +1446,60 @@ fn an_open_preview_draws_the_loaded_thumbnail_immediately(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_running_ai_job_overlays_only_its_own_preview(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
+        audit.compare = Some(Comparison {
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            mode: MediaMode::Preview,
+            key: compare::Key::new(
+                Path::new("photo.jpg"),
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+            ),
+            preview: Some(Arc::new(Preview {
+                image,
+                width: 1000,
+                height: 1000,
+            })),
+            pair: None,
+            failed: false,
+            split: 0.5,
+            pan: (0., 0.),
+            zoom: None,
+            drag: None,
+            written: None,
+            produced_by: None,
+            focused: false,
+        });
+        audit.local_ai_job = Some(LocalAiJob {
+            tool: local_ai::Tool::RemoveBackground,
+            index: 1,
+            dataset_generation: audit.dataset_generation,
+            source_name: "screenshot.png".into(),
+            first_setup: false,
+            state: LocalAiJobState::Running,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("preview-processing-overlay").is_none());
+
+    audit.update(cx, |audit, cx| {
+        audit.local_ai_job.as_mut().unwrap().index = 0;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("preview-processing-overlay").is_some());
+}
+
+#[gpui::test]
 fn marquee_selects_intersecting_visible_items(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
