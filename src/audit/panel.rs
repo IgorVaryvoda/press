@@ -97,7 +97,7 @@ impl Audit {
                     .border_1()
                     .border_color(cx.theme().border)
                     .shadow_lg()
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .block_mouse_except_scroll()
                     .children((width >= BAR_READOUT_WIDTH).then(|| self.bar_readout(cx)))
                     .children(
                         (width >= BAR_READOUT_WIDTH)

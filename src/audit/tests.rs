@@ -1508,7 +1508,10 @@ fn action_bar_clicks_do_not_replace_the_marquee_selection(cx: &mut TestAppContex
         .debug_bounds("action-bar")
         .expect("the audit action bar is visible");
 
-    cx.simulate_click(convert.center(), gpui::Modifiers::none());
+    cx.simulate_click(
+        gpui::point(convert.left() + px(2.), convert.center().y),
+        gpui::Modifiers::none(),
+    );
 
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.selected, selected);
