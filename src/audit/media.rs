@@ -129,12 +129,23 @@ impl Audit {
         thumb_overscan_rows(self.thumb_visible_rows(cx), self.visible.len()).contains(&row)
     }
 
-    fn notify_thumbs(&self, cx: &mut Context<Self>) {
-        if self.grid {
-            cx.notify();
-        } else if let Some(table) = self.table.clone() {
-            table.update(cx, |_, cx| cx.notify());
+    fn notify_thumbs(&mut self, cx: &mut Context<Self>) {
+        if self.thumb_notify_pending {
+            return;
         }
+        self.thumb_notify_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(THUMB_REDRAW_DELAY).await;
+            let _ = this.update(cx, |audit, cx| {
+                audit.thumb_notify_pending = false;
+                if audit.grid {
+                    cx.notify();
+                } else if let Some(table) = audit.table.clone() {
+                    table.update(cx, |_, cx| cx.notify());
+                }
+            });
+        })
+        .detach();
     }
 
     /// Open the side-by-side view for a row and start building both sides.
@@ -486,24 +497,35 @@ impl Audit {
 
     /// Kick off decoding for a row, unless it is already loaded or in flight.
     pub(super) fn request_thumb(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.promote_thumb(index) {
-            self.start_thumb_jobs(cx);
-        }
-        self.queue_thumb(index, cx);
-        if self.compare.is_some() || self.thumb_prefetch_pending {
+        self.promote_thumb(index);
+        self.queue_thumb(index, true);
+        if self.thumb_prefetch_pending {
             return;
         }
         self.thumb_prefetch_pending = true;
         cx.spawn(async move |this, cx| {
             let _ = this.update(cx, |audit, cx| {
                 audit.thumb_prefetch_pending = false;
-                let indices =
-                    thumb_overscan_rows(audit.thumb_visible_rows(cx), audit.visible.len())
+                if audit.compare.is_none() {
+                    let visible = audit.thumb_visible_rows(cx);
+                    let wanted = thumb_overscan_rows(visible.clone(), audit.visible.len());
+                    let visible_indices = visible
+                        .clone()
                         .filter_map(|row| audit.entry_at(row))
                         .collect::<Vec<_>>();
-                for index in indices {
-                    audit.queue_thumb(index, cx);
+                    let wanted_indices = wanted
+                        .filter(|row| !visible.contains(row))
+                        .filter_map(|row| audit.entry_at(row))
+                        .collect::<Vec<_>>();
+                    for index in visible_indices {
+                        audit.promote_thumb(index);
+                        audit.queue_thumb(index, true);
+                    }
+                    for index in wanted_indices {
+                        audit.queue_thumb(index, false);
+                    }
                 }
+                audit.start_thumb_jobs(cx);
             });
         })
         .detach();
@@ -524,11 +546,12 @@ impl Audit {
         }
     }
 
-    fn queue_thumb(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn queue_thumb(&mut self, index: usize, visible: bool) {
         if self.thumbs.contains_key(&index) || !self.requested.insert(index) {
             return;
         }
         let Some(entry) = self.entries.get(index) else {
+            self.requested.remove(&index);
             return;
         };
         let request = ThumbRequest {
@@ -540,43 +563,19 @@ impl Audit {
                 entry.format,
                 scan::FileFormat::Image(image::ImageFormat::Jpeg | image::ImageFormat::WebP)
             ),
+            fallback: false,
         };
-
-        cx.spawn(async move |this, cx| {
-            // Native scaling is cheap enough to start next turn. Full decodes get a
-            // short scroll debounce and do not contend with the opening frame.
-            if !request.native_scaled {
-                cx.background_executor().timer(THUMB_SLOW_SETTLE).await;
-            }
-            let _ = this.update(cx, |audit, cx| {
-                if !audit.thumb_request_is_current(&request) {
-                    return;
-                }
-                let visible = audit.thumb_is_visible(request.index, cx);
-                if !visible && !audit.thumb_is_wanted(request.index, cx) {
-                    audit.requested.remove(&request.index);
-                    return;
-                }
-                if visible {
-                    audit.thumb_queue.push_front(request);
-                } else {
-                    audit.thumb_queue.push_back(request);
-                }
-                audit.start_thumb_jobs(cx);
-            });
-        })
-        .detach();
+        if visible {
+            self.thumb_queue.push_front(request);
+        } else {
+            self.thumb_queue.push_back(request);
+        }
     }
 
     pub(super) fn start_thumb_jobs(&mut self, cx: &mut Context<Self>) {
-        while !self.thumb_queue.is_empty() {
-            let native_inflight = self.thumb_inflight.saturating_sub(self.thumb_slow_inflight);
+        while self.thumb_inflight < THUMB_WORKERS && !self.thumb_queue.is_empty() {
             let Some(position) = self.thumb_queue.iter().position(|request| {
-                if request.native_scaled {
-                    native_inflight < THUMB_WORKERS
-                } else {
-                    self.thumb_slow_inflight < THUMB_SLOW_WORKERS
-                }
+                !request.fallback || self.thumb_slow_inflight < THUMB_SLOW_WORKERS
             }) else {
                 return;
             };
@@ -593,36 +592,86 @@ impl Audit {
             }
 
             self.thumb_inflight += 1;
-            self.thumb_slow_inflight += usize::from(!request.native_scaled);
-            let ThumbRequest {
-                index,
-                dataset_generation,
-                edge,
-                path,
-                native_scaled,
-            } = request;
+            self.thumb_slow_inflight += usize::from(request.fallback);
+            let worker = request.clone();
             cx.spawn(async move |this, cx| {
                 let loaded = cx
                     .background_executor()
-                    .spawn(async move { thumbs::load(&path, edge) })
+                    .spawn(async move {
+                        if worker.fallback {
+                            Ok(thumbs::load_fallback(&worker.path, worker.edge))
+                        } else {
+                            match thumbs::load_fast(&worker.path, worker.edge, worker.native_scaled)
+                            {
+                                thumbs::FastLoad::Ready(loaded) => Ok(Some(loaded)),
+                                thumbs::FastLoad::Fallback => Err(()),
+                            }
+                        }
+                    })
                     .await;
 
                 let _ = this.update(cx, |audit, cx| {
+                    let mut pending_cache = None;
+                    if audit.thumb_request_is_current(&request) {
+                        match loaded {
+                            Ok(Some(loaded)) => {
+                                let thumbs::LoadedThumb { image, cache } = loaded;
+                                audit.thumbs.insert(request.index, image);
+                                audit.thumb_order.push_back(request.index);
+                                audit.trim_thumbs();
+                                if audit.thumb_is_visible(request.index, cx) {
+                                    audit.notify_thumbs(cx);
+                                }
+                                pending_cache = cache;
+                            }
+                            Err(()) if audit.thumb_is_wanted(request.index, cx) => {
+                                let mut request = request.clone();
+                                request.fallback = true;
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_executor().timer(THUMB_SLOW_SETTLE).await;
+                                    let _ = this.update(cx, |audit, cx| {
+                                        if !audit.thumb_request_is_current(&request)
+                                            || !audit.thumb_is_wanted(request.index, cx)
+                                        {
+                                            audit.requested.remove(&request.index);
+                                            return;
+                                        }
+                                        if audit.thumb_is_visible(request.index, cx) {
+                                            audit.thumb_queue.push_front(request);
+                                        } else {
+                                            audit.thumb_queue.push_back(request);
+                                        }
+                                        audit.start_thumb_jobs(cx);
+                                    });
+                                })
+                                .detach();
+                            }
+                            Err(()) => {
+                                audit.requested.remove(&request.index);
+                            }
+                            Ok(None) => {}
+                        }
+                    }
+                    if let Some(cache) = pending_cache {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .spawn(async move { thumbs::persist(cache) })
+                                .await;
+                            let _ = this.update(cx, |audit, cx| {
+                                audit.thumb_inflight = audit.thumb_inflight.saturating_sub(1);
+                                audit.thumb_slow_inflight = audit
+                                    .thumb_slow_inflight
+                                    .saturating_sub(usize::from(request.fallback));
+                                audit.start_thumb_jobs(cx);
+                            });
+                        })
+                        .detach();
+                        return;
+                    }
                     audit.thumb_inflight = audit.thumb_inflight.saturating_sub(1);
                     audit.thumb_slow_inflight = audit
                         .thumb_slow_inflight
-                        .saturating_sub(usize::from(!native_scaled));
-                    if audit.dataset_generation == dataset_generation
-                        && audit.thumb_edge() == edge
-                        && let Some(image) = loaded
-                    {
-                        audit.thumbs.insert(index, image);
-                        audit.thumb_order.push_back(index);
-                        audit.trim_thumbs();
-                        if audit.thumb_is_visible(index, cx) {
-                            audit.notify_thumbs(cx);
-                        }
-                    }
+                        .saturating_sub(usize::from(request.fallback));
                     audit.start_thumb_jobs(cx);
                 });
             })
@@ -652,7 +701,8 @@ impl Audit {
     /// Drop the oldest thumbnails once the cache is over its bound. `requested` has to
     /// forget them too, or scrolling back to a dropped row would show a permanent gap.
     pub(super) fn trim_thumbs(&mut self) {
-        while self.thumb_order.len() > THUMB_CACHE {
+        let limit = thumb_cache_limit(self.thumb_edge());
+        while self.thumb_order.len() > limit {
             let Some(oldest) = self.thumb_order.pop_front() else {
                 return;
             };

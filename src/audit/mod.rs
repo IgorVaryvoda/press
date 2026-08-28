@@ -109,21 +109,18 @@ const PREFETCH_BUDGET: u64 = 128 * 1024 * 1024;
 /// Settling time before the window state reaches disk, so a resize drag is one write.
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(500);
 
-/// Decoded thumbnails kept in memory at once. A viewport holds a few dozen, so this is
-/// still far more than scrolling needs; without it a 5,000-image folder scrolled end to
-/// end retains 5,000 decoded thumbnails and a GPU texture for each.
-///
-/// Lower than it was, because `THUMB_EDGE` grew to fill a gallery tile. A 3:2 thumbnail
-/// is about 150KB of texture at that size against 25KB before, so 512 of them would be
-/// 75MB of video memory for rows nobody is looking at.
-const THUMB_CACHE: usize = 192;
+/// Approximate upper bound for decoded thumbnail pixels. The table can retain many
+/// more 96px rows than the 224px gallery without turning either mode into an
+/// unbounded GPU cache.
+const THUMB_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Native JPEG/WebP scaling avoids full-image allocations, so four jobs fill a
 /// viewport quickly without recreating the old full-decode CPU spike.
 const THUMB_WORKERS: usize = 4;
 const THUMB_SLOW_WORKERS: usize = 2;
 const THUMB_SLOW_SETTLE: Duration = Duration::from_millis(300);
+const THUMB_REDRAW_DELAY: Duration = Duration::from_millis(8);
 /// Start the next rows while the current ones are still on screen. Four viewports fit
-/// comfortably inside `THUMB_CACHE` and hide decode latency during normal wheel scrolls.
+/// comfortably inside the decoded-pixel budget and hide latency during normal scrolling.
 const THUMB_OVERSCAN_VIEWPORTS: usize = 4;
 
 fn thumb_overscan_rows(visible: Range<usize>, total: usize) -> Range<usize> {
@@ -133,6 +130,14 @@ fn thumb_overscan_rows(visible: Range<usize>, total: usize) -> Range<usize> {
         .saturating_sub(start)
         .saturating_mul(THUMB_OVERSCAN_VIEWPORTS);
     start.saturating_sub(extra)..end.saturating_add(extra).min(total)
+}
+
+fn thumb_cache_limit(edge: u32) -> usize {
+    let bytes = (edge as usize)
+        .saturating_mul(edge as usize)
+        .saturating_mul(4)
+        .max(1);
+    (THUMB_CACHE_BYTES / bytes).max(THUMB_WORKERS)
 }
 
 /// The open rail. Every operation with settings owns one, so the action bar
@@ -159,12 +164,14 @@ impl Rail {
     }
 }
 
+#[derive(Clone)]
 struct ThumbRequest {
     index: usize,
     dataset_generation: u64,
     edge: u32,
     path: PathBuf,
     native_scaled: bool,
+    fallback: bool,
 }
 
 struct Marquee {
@@ -284,8 +291,9 @@ pub(crate) struct Audit {
     thumb_inflight: usize,
     thumb_slow_inflight: usize,
     thumb_prefetch_pending: bool,
+    thumb_notify_pending: bool,
     /// The order `thumbs` filled up in, so the oldest decode is the one that leaves
-    /// when the cache reaches `THUMB_CACHE`.
+    /// when the cache reaches the current mode's decoded-pixel limit.
     thumb_order: VecDeque<usize>,
     format: Format,
     quality: Quality,
@@ -1357,6 +1365,7 @@ pub(crate) fn build_audit(
             thumb_inflight: 0,
             thumb_slow_inflight: 0,
             thumb_prefetch_pending: false,
+            thumb_notify_pending: false,
             thumb_order: VecDeque::new(),
             format,
             quality,

@@ -40,34 +40,98 @@ pub const TABLE_THUMB_EDGE: u32 = 96;
 /// near 110MB; normal lossy entries are smaller.
 const CACHE_FILES: usize = 3_000;
 
-/// Decode `path`, scale it to fit `edge`, and hand back something `img()` can draw.
-/// Returns `None` for anything that fails to decode, which the caller shows as a gap
-/// rather than an error — a folder of holiday photos will contain a broken file.
-pub fn load(path: &Path, edge: u32) -> Option<Arc<RenderImage>> {
-    load_using(cache_dir().as_deref(), path, edge)
+pub(crate) struct PendingCache {
+    file: PathBuf,
+    thumbnail: RgbaImage,
 }
 
-/// `load`, against a cache directory the caller names. `None` skips the cache, which
-/// is how tests stay off a developer's real one.
-pub fn load_using(cache: Option<&Path>, path: &Path, edge: u32) -> Option<Arc<RenderImage>> {
+pub(crate) struct LoadedThumb {
+    pub(crate) image: Arc<RenderImage>,
+    pub(crate) cache: Option<PendingCache>,
+}
+
+pub(crate) enum FastLoad {
+    Ready(LoadedThumb),
+    Fallback,
+}
+
+/// The synchronous form used by focused cache tests. Production publishes the fast
+/// and fallback stages separately so cache writing cannot hold up the window.
+#[cfg(test)]
+fn load_using(cache: Option<&Path>, path: &Path, edge: u32) -> Option<Arc<RenderImage>> {
+    let loaded = match load_fast_using(cache, path, edge, true) {
+        FastLoad::Ready(loaded) => loaded,
+        FastLoad::Fallback => load_fallback_using(cache, path, edge)?,
+    };
+    if let Some(cache) = loaded.cache {
+        persist(cache);
+    }
+    Some(loaded.image)
+}
+
+/// Read a persistent thumbnail, or use a decoder that can scale without allocating
+/// the full source. A cache hit is fast regardless of the source format.
+pub(crate) fn load_fast(path: &Path, edge: u32, native_scaled: bool) -> FastLoad {
+    load_fast_using(cache_dir().as_deref(), path, edge, native_scaled)
+}
+
+fn load_fast_using(cache: Option<&Path>, path: &Path, edge: u32, native_scaled: bool) -> FastLoad {
     let cached = cache.and_then(|dir| cache_file(dir, path, edge));
     if let Some(thumbnail) = cached.as_deref().and_then(read_cached) {
-        return Some(drawable(thumbnail));
+        return FastLoad::Ready(LoadedThumb {
+            image: drawable(thumbnail),
+            cache: None,
+        });
+    }
+
+    if !native_scaled {
+        return FastLoad::Fallback;
+    }
+
+    let Some(thumbnail) = decode_native(path, Some(edge)) else {
+        return FastLoad::Fallback;
+    };
+    FastLoad::Ready(loaded(thumbnail, cached))
+}
+
+/// The general decoder is the expensive fallback. It runs only after the viewport
+/// settles and after the persistent cache has already missed.
+pub(crate) fn load_fallback(path: &Path, edge: u32) -> Option<LoadedThumb> {
+    load_fallback_using(cache_dir().as_deref(), path, edge)
+}
+
+fn load_fallback_using(cache: Option<&Path>, path: &Path, edge: u32) -> Option<LoadedThumb> {
+    let cached = cache.and_then(|dir| cache_file(dir, path, edge));
+    if let Some(thumbnail) = cached.as_deref().and_then(read_cached) {
+        return Some(LoadedThumb {
+            image: drawable(thumbnail),
+            cache: None,
+        });
     }
 
     // `thumbnail` preserves the aspect ratio and fits inside the box. RGBA, not RGB:
     // lossless WebP carries the alpha, and a cut-out drawn opaque is a wrong thumbnail.
-    let scaled = DynamicImage::ImageRgba8(decode_native(path, Some(edge)).or_else(|| {
-        Some(
-            crate::scan::decode(path)?
-                .thumbnail(edge, edge)
-                .into_rgba8(),
-        )
-    })?);
-    if let Some(file) = cached {
-        write_cached(&file, &scaled);
+    let thumbnail = crate::scan::decode(path)?
+        .thumbnail(edge, edge)
+        .into_rgba8();
+    Some(loaded(thumbnail, cached))
+}
+
+fn loaded(thumbnail: RgbaImage, file: Option<PathBuf>) -> LoadedThumb {
+    let cache = file.map(|file| PendingCache {
+        file,
+        thumbnail: thumbnail.clone(),
+    });
+    LoadedThumb {
+        image: drawable(thumbnail),
+        cache,
     }
-    Some(drawable(scaled.into_rgba8()))
+}
+
+/// Persist after the drawable image has been handed to the UI. Cache encoding and
+/// writing are useful for the next visit, but must not delay this one.
+pub(crate) fn persist(cache: PendingCache) {
+    write_cached(&cache.file, &DynamicImage::ImageRgba8(cache.thumbnail));
 }
 
 pub(crate) fn decode_native(path: &Path, edge: Option<u32>) -> Option<RgbaImage> {
@@ -376,6 +440,39 @@ mod tests {
             .unwrap();
         let again = load_using(Some(&cache), &path, 96).expect("cached");
         assert_eq!(again.size(0), first.size(0));
+    }
+
+    #[test]
+    fn a_cached_png_uses_the_fast_stage() {
+        let dir = scratch("cache-fast-png");
+        let cache = dir.join("cache");
+        let path = dir.join("wide.png");
+        ImageBuffer::from_pixel(400, 100, Rgba([9u8, 8, 7, 255]))
+            .save(&path)
+            .unwrap();
+        load_using(Some(&cache), &path, 96).expect("initial decode");
+
+        let FastLoad::Ready(loaded) = load_fast_using(Some(&cache), &path, 96, false) else {
+            panic!("a persistent WebP hit must not inherit the PNG source delay");
+        };
+        assert_eq!(u32::from(loaded.image.size(0).width), 96);
+        assert!(loaded.cache.is_none(), "a cache hit has nothing to rewrite");
+    }
+
+    #[test]
+    fn a_new_thumbnail_is_drawable_before_its_cache_write() {
+        let dir = scratch("cache-deferred-write");
+        let cache = dir.join("cache");
+        let path = dir.join("wide.png");
+        ImageBuffer::from_pixel(400, 100, Rgba([9u8, 8, 7, 255]))
+            .save(&path)
+            .unwrap();
+
+        let loaded = load_fallback_using(Some(&cache), &path, 96).expect("decodes");
+        assert_eq!(u32::from(loaded.image.size(0).width), 96);
+        assert_eq!(cached_files(&cache), 0, "display does not wait for disk");
+        persist(loaded.cache.expect("cache write remains pending"));
+        assert_eq!(cached_files(&cache), 1);
     }
 
     /// The cache must never show a picture as it was before an edit. That is the whole

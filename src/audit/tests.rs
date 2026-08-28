@@ -1363,7 +1363,7 @@ fn thumbnail_overscan_covers_four_neighbor_viewports() {
 }
 
 #[gpui::test]
-fn thumbnail_decodes_use_independent_native_and_fallback_slots(cx: &mut TestAppContext) {
+fn thumbnail_decodes_share_four_slots_and_cap_fallbacks_at_two(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         audit.grid = true;
@@ -1378,6 +1378,7 @@ fn thumbnail_decodes_use_independent_native_and_fallback_slots(cx: &mut TestAppC
                 edge: thumbs::THUMB_EDGE,
                 path: PathBuf::from("missing-thumbnail.png"),
                 native_scaled: true,
+                fallback: false,
             });
         }
         assert!(audit.promote_thumb(next));
@@ -1391,6 +1392,7 @@ fn thumbnail_decodes_use_independent_native_and_fallback_slots(cx: &mut TestAppC
                 edge: thumbs::THUMB_EDGE,
                 path: PathBuf::from("missing-thumbnail.png"),
                 native_scaled: true,
+                fallback: false,
             });
         }
 
@@ -1415,6 +1417,7 @@ fn thumbnail_decodes_use_independent_native_and_fallback_slots(cx: &mut TestAppC
                 edge: thumbs::THUMB_EDGE,
                 path: PathBuf::from("missing-thumbnail.png"),
                 native_scaled: false,
+                fallback: true,
             });
         }
         audit.start_thumb_jobs(cx);
@@ -1435,12 +1438,13 @@ fn thumbnail_decodes_use_independent_native_and_fallback_slots(cx: &mut TestAppC
                 edge: thumbs::THUMB_EDGE,
                 path: PathBuf::from("missing-thumbnail.png"),
                 native_scaled,
+                fallback: !native_scaled,
             });
         }
         audit.start_thumb_jobs(cx);
-        assert_eq!(audit.thumb_inflight, THUMB_SLOW_WORKERS + THUMB_WORKERS);
+        assert_eq!(audit.thumb_inflight, THUMB_WORKERS);
         assert_eq!(audit.thumb_slow_inflight, THUMB_SLOW_WORKERS);
-        assert!(audit.thumb_queue.is_empty());
+        assert_eq!(audit.thumb_queue.len(), THUMB_SLOW_WORKERS);
     });
     cx.run_until_parked();
 }
