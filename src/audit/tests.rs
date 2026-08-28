@@ -342,6 +342,99 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
     let _ = std::fs::remove_dir_all(&folder);
 }
 
+#[gpui::test]
+fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
+    let folder =
+        std::env::temp_dir().join(format!("press-preview-prefetch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).expect("the fixture folder is created");
+    for (name, edge) in [("a.png", 40), ("b.png", 30), ("c.png", 20)] {
+        image::ImageBuffer::from_fn(edge, edge, |x, y| image::Rgb([x as u8, y as u8, 90]))
+            .save(folder.join(name))
+            .expect("the fixture image is written");
+    }
+
+    cx.update(init_theme);
+    let scanned = scan::scan(&folder, &folder.join(scan::OUTPUT_DIR));
+    let launch = Launch {
+        root: folder.clone(),
+        entries: scanned.entries,
+        skipped_raw: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+        open_single: false,
+        format: Format::WebP,
+        quality: Quality::lossy(80.),
+        max_edge: MaxEdge::FULL,
+        grid: false,
+        columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
+    };
+    let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
+        audit: build_audit(launch, window, cx),
+    });
+    let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
+    let (first, second, third, second_path, third_path) = audit.read_with(cx, |audit, _| {
+        let [first, second, third, ..] = audit.visible.as_slice() else {
+            panic!("the fixture has three visible images");
+        };
+        (
+            *first,
+            *second,
+            *third,
+            audit.entries[*second].path.clone(),
+            audit.entries[*third].path.clone(),
+        )
+    });
+
+    audit.update(cx, |audit, cx| audit.open_preview(first, cx));
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| audit.step_compare(1, cx));
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the preview stays open");
+        assert_eq!(comparison.index, second);
+        assert!(
+            audit.prefetch_key.as_ref().is_some_and(|(key, mode)| {
+                key.path == second_path && *mode == MediaMode::Preview
+            })
+        );
+    });
+
+    cx.executor()
+        .advance_clock(PREVIEW_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the preview stays open");
+        assert!(comparison.preview.is_some());
+        assert!(audit.cached.as_ref().is_some_and(|(key, media)| {
+            key.path == second_path && matches!(media, CachedMedia::Preview(_))
+        }));
+    });
+
+    cx.executor()
+        .advance_clock(PREVIEW_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+    let prefetched = audit.read_with(cx, |audit, _| match audit.ahead.as_ref() {
+        Some((key, CachedMedia::Preview(preview))) if key.path == third_path => preview.clone(),
+        _ => panic!("the next full-resolution preview is ready"),
+    });
+
+    audit.update(cx, |audit, cx| audit.step_compare(1, cx));
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the preview stays open");
+        assert_eq!(comparison.index, third);
+        let shown = comparison
+            .preview
+            .as_ref()
+            .expect("the preview is immediate");
+        assert!(Arc::ptr_eq(shown, &prefetched));
+    });
+
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
 #[test]
 fn push_plan_lists_only_files_sirv_lacks() {
     let entries = vec![
