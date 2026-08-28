@@ -172,7 +172,7 @@ fn orient(image: RgbaImage, bytes: &[u8], format: ImageFormat) -> Option<RgbaIma
     Some(image.into_rgba8())
 }
 
-fn fit(width: u32, height: u32, edge: u32) -> (u32, u32) {
+pub(crate) fn fit(width: u32, height: u32, edge: u32) -> (u32, u32) {
     if width.max(height) <= edge {
         return (width, height);
     }

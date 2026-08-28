@@ -102,6 +102,10 @@ const ESTIMATE_DELAY: Duration = Duration::from_millis(400);
 /// Settling time before building a comparison, so a held arrow key does not queue one
 /// full decode and encode per repeat.
 const COMPARE_DELAY: Duration = Duration::from_millis(120);
+/// The most a pair built ahead of the cursor may cost. A pair holds two full-size
+/// RGBA buffers, so this is the second one of those the window ever holds: past
+/// this size the sweep would buy its head start with a quarter gigabyte.
+const PREFETCH_BUDGET: u64 = 128 * 1024 * 1024;
 /// Settling time before the window state reaches disk, so a resize drag is one write.
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(500);
 
@@ -437,6 +441,15 @@ pub(crate) struct Audit {
     // ponytail: one entry. A pair holds two full-size RGBA buffers — 165 MB for a
     // 5568x3712 photo — so a bigger cache would need a byte budget, not a count.
     cached: Option<(compare::Key, Arc<Pair>)>,
+    /// The pair for the file the arrow key is about to ask for, built while you
+    /// look at the current one. `PREFETCH_BUDGET` bounds this second slot.
+    ahead: Option<(compare::Key, Arc<Pair>)>,
+    /// Which way the arrows last stepped, so the pair built ahead is the one the
+    /// sweep wants rather than the one behind it.
+    compare_step: isize,
+    /// The build running ahead of the cursor. Holding the task lets a replacement
+    /// cancel it during its settle before it reaches the encoder.
+    prefetch: Option<gpui::Task<()>>,
     /// Bytes of the heaviest visible file, so every row's weight bar is drawn
     /// against the same scale. Cached because the alternative is a scan of the
     /// whole list once per row.
@@ -819,6 +832,9 @@ impl Audit {
         self.failures.clear();
         self.compare = None;
         self.cached = None;
+        self.ahead = None;
+        self.compare_step = 1;
+        self.prefetch = None;
         self.report_copied = false;
         self.published_spins.clear();
         self.filter.clear();
@@ -1377,6 +1393,9 @@ pub(crate) fn build_audit(
             settings: settings::Settings::default(),
             settings_save_pending: false,
             cached: None,
+            ahead: None,
+            compare_step: 1,
+            prefetch: None,
             results: HashMap::new(),
             result_paths: HashMap::new(),
             completed_outputs: HashSet::new(),

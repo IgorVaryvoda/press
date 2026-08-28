@@ -235,6 +235,113 @@ fn comparison_navigation_stops_at_visible_edges(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext) {
+    let folder =
+        std::env::temp_dir().join(format!("press-compare-prefetch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).expect("the fixture folder is created");
+    for (name, edge) in [("a.png", 40), ("b.png", 30)] {
+        image::ImageBuffer::from_fn(edge, edge, |x, y| image::Rgb([x as u8, y as u8, 90]))
+            .save(folder.join(name))
+            .expect("the fixture image is written");
+    }
+
+    cx.update(init_theme);
+    let scanned = scan::scan(&folder, &folder.join(scan::OUTPUT_DIR));
+    let launch = Launch {
+        root: folder.clone(),
+        entries: scanned.entries,
+        skipped_raw: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+        open_single: false,
+        format: Format::WebP,
+        quality: Quality::lossy(80.),
+        max_edge: MaxEdge::FULL,
+        grid: false,
+        columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
+    };
+    let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
+        audit: build_audit(launch, window, cx),
+    });
+    let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
+    let (first, second, next_path) = audit.read_with(cx, |audit, _| {
+        (
+            audit.visible[0],
+            audit.visible[1],
+            audit.entries[audit.visible[1]].path.clone(),
+        )
+    });
+
+    audit.update(cx, |audit, cx| audit.open_compare(first, cx));
+    for _ in 0..2 {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(COMPARE_DELAY + Duration::from_millis(50));
+        cx.run_until_parked();
+    }
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit
+                .compare
+                .as_ref()
+                .is_some_and(|comparison| comparison.pair.is_some())
+        );
+        assert_eq!(
+            audit.ahead.as_ref().map(|(key, _)| key.path.clone()),
+            Some(next_path.clone())
+        );
+    });
+
+    audit.update(cx, |audit, cx| audit.step_compare(1, cx));
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the comparison stays open");
+        assert_eq!(comparison.index, second);
+        assert!(comparison.pair.is_some());
+        assert_eq!(
+            audit.cached.as_ref().map(|(key, _)| key.path.clone()),
+            Some(next_path.clone())
+        );
+    });
+
+    let optimized = folder.join(scan::OUTPUT_DIR);
+    std::fs::create_dir_all(&optimized).expect("the output folder is created");
+    let next_output = optimized.join(next_path.file_name().expect("the fixture is a file"));
+    audit.update(cx, |audit, _| {
+        for index in [first, second] {
+            let source = audit.entries[index].path.clone();
+            let written = optimized.join(source.file_name().expect("the fixture is a file"));
+            std::fs::copy(&source, &written).expect("the output is written");
+            audit.result_paths.insert(index, written);
+        }
+    });
+    audit.update(cx, |audit, cx| audit.open_result(first, cx));
+    for _ in 0..2 {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(COMPARE_DELAY + Duration::from_millis(50));
+        cx.run_until_parked();
+    }
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.ahead.as_ref().map(|(key, _)| key.path.clone()),
+            Some(next_output)
+        );
+    });
+    audit.update(cx, |audit, cx| audit.step_compare(1, cx));
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the results view stays open");
+        assert_eq!(comparison.index, second);
+        assert!(comparison.pair.is_some());
+    });
+
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
 #[test]
 fn push_plan_lists_only_files_sirv_lacks() {
     let entries = vec![

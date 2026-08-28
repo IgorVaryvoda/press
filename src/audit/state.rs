@@ -730,6 +730,7 @@ impl Audit {
         let Some(entry) = self.compare.as_ref().map(|comparison| comparison.index) else {
             return;
         };
+        self.compare_step = delta.signum();
         // Looking at a result steps through the run's outputs, not through every
         // file in the folder: the other files are not what you came to check.
         if self

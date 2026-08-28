@@ -184,6 +184,14 @@ impl Audit {
         for row in self.strip_rows(index) {
             self.request_thumb(row, cx);
         }
+        if let Some(pair) = self.take_cached(&key) {
+            if let Some(comparison) = self.compare.as_mut() {
+                comparison.pair = Some(pair);
+            }
+            self.prefetch_pair(cx);
+            cx.notify();
+            return;
+        }
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -205,6 +213,7 @@ impl Audit {
                 let comparison = audit.compare.as_mut().unwrap();
                 comparison.failed = built.is_none();
                 comparison.pair = built;
+                audit.prefetch_pair(cx);
                 cx.notify();
             });
         })
@@ -272,6 +281,7 @@ impl Audit {
         if self.converting || self.local_ai_busy() || self.studio_busy() {
             return;
         }
+        self.prefetch = None;
         self.compare = None;
         self.selected.clear();
         if index < self.entries.len() {
@@ -309,13 +319,14 @@ impl Audit {
         let quality = self.quality;
         let format = self.format;
         let max_edge = self.max_edge;
-        // Same image, same settings: skip the encoder entirely.
-        if let Some((cached_key, pair)) = self.cached.as_ref()
-            && *cached_key == key
-        {
+        // Same image, same settings: skip the encoder entirely. Arrowing through a
+        // folder lands here every step, on the pair built while you looked at the
+        // one before it.
+        if let Some(pair) = self.take_cached(&key) {
             if let Some(comparison) = self.compare.as_mut() {
-                comparison.pair = Some(pair.clone());
+                comparison.pair = Some(pair);
             }
+            self.prefetch_pair(cx);
             cx.notify();
             return;
         }
@@ -362,11 +373,115 @@ impl Audit {
                     let comparison = audit.compare.as_mut().unwrap();
                     comparison.failed = built.is_none();
                     comparison.pair = built;
+                    audit.prefetch_pair(cx);
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    /// Return the current or prebuilt pair for `key`. A pair built ahead becomes
+    /// the current cache entry when navigation reaches it.
+    fn take_cached(&mut self, key: &compare::Key) -> Option<Arc<Pair>> {
+        if let Some((cached, pair)) = self.cached.as_ref()
+            && cached == key
+        {
+            return Some(pair.clone());
+        }
+        match self.ahead.take() {
+            Some((ahead, pair)) if ahead == *key => {
+                self.cached = Some((ahead, pair.clone()));
+                Some(pair)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build the pair the next arrow step will request while the current one is on
+    /// screen. Only one speculative build exists and large pairs stay demand-driven.
+    fn prefetch_pair(&mut self, cx: &mut Context<Self>) {
+        if self.converting || self.local_ai_busy() || self.studio_busy() {
+            return;
+        }
+        let Some(comparison) = self.compare.as_ref() else {
+            return;
+        };
+        if comparison.mode != MediaMode::Compare {
+            return;
+        }
+        let looking_at_results = comparison.written.is_some();
+        if looking_at_results && comparison.produced_by.is_some() {
+            return;
+        }
+        let target = if looking_at_results {
+            let rows = self.result_rows();
+            rows.iter()
+                .position(|row| *row == comparison.index)
+                .and_then(|at| at.checked_add_signed(self.compare_step))
+                .and_then(|next| rows.get(next).copied())
+        } else {
+            self.compare_target_from(comparison.index, self.compare_step)
+                .map(|(_, target)| target)
+        };
+        let Some(target) = target else {
+            self.prefetch = None;
+            return;
+        };
+        let Some(entry) = self.entries.get(target) else {
+            return;
+        };
+        let Some(written) = (if looking_at_results {
+            self.result_paths.get(&target).cloned().map(Some)
+        } else {
+            Some(None)
+        }) else {
+            return;
+        };
+        let edge = if written.is_some() {
+            u32::MAX
+        } else {
+            self.max_edge.0.unwrap_or(u32::MAX)
+        };
+        let (width, height) = thumbs::fit(entry.width, entry.height, edge);
+        if u64::from(width) * u64::from(height) * 8 > PREFETCH_BUDGET {
+            return;
+        }
+        let path = entry.path.clone();
+        let key = compare::Key::new(
+            written.as_deref().unwrap_or(&path),
+            self.format,
+            self.quality,
+            self.max_edge,
+        );
+        if self.cached.as_ref().is_some_and(|(held, _)| *held == key)
+            || self.ahead.as_ref().is_some_and(|(held, _)| *held == key)
+        {
+            return;
+        }
+
+        let dataset_generation = self.dataset_generation;
+        let (format, quality, max_edge) = (self.format, self.quality, self.max_edge);
+        self.prefetch = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COMPARE_DELAY).await;
+            let built = cx
+                .background_executor()
+                .spawn(async move {
+                    match written {
+                        Some(written) => compare::build_written(&path, &written),
+                        None => compare::build(&path, format, quality, max_edge),
+                    }
+                })
+                .await;
+            let Some(pair) = built else {
+                return;
+            };
+            let _ = this.update(cx, |audit, _| {
+                if audit.dataset_generation == dataset_generation {
+                    audit.ahead = Some((key, Arc::new(pair)));
+                }
+            });
+        }));
     }
 
     /// Kick off decoding for a row, unless it is already loaded or in flight.
