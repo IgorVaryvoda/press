@@ -1217,14 +1217,35 @@ fn gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
     });
 }
 
+#[test]
+fn thumbnail_overscan_covers_four_neighbor_viewports() {
+    assert_eq!(thumb_overscan_rows(20..30, 100), 0..70);
+    assert_eq!(thumb_overscan_rows(0..10, 100), 0..50);
+    assert_eq!(thumb_overscan_rows(90..100, 100), 50..100);
+}
+
 #[gpui::test]
-fn thumbnail_decodes_use_four_native_or_two_fallback_slots(cx: &mut TestAppContext) {
+fn thumbnail_decodes_use_independent_native_and_fallback_slots(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         audit.grid = true;
         audit.gallery_columns = Some(1);
         audit.gallery_visible = 0..1;
         let index = audit.entry_at(0).unwrap();
+        let next = audit.entry_at(1).unwrap();
+        for queued in [index, next] {
+            audit.thumb_queue.push_back(ThumbRequest {
+                index: queued,
+                dataset_generation: audit.dataset_generation,
+                edge: thumbs::THUMB_EDGE,
+                path: PathBuf::from("missing-thumbnail.png"),
+                native_scaled: true,
+            });
+        }
+        assert!(audit.promote_thumb(next));
+        assert_eq!(audit.thumb_queue.front().unwrap().index, next);
+        audit.thumb_queue.clear();
+
         for _ in 0..THUMB_WORKERS + 2 {
             audit.thumb_queue.push_back(ThumbRequest {
                 index,
@@ -1262,6 +1283,26 @@ fn thumbnail_decodes_use_four_native_or_two_fallback_slots(cx: &mut TestAppConte
         assert_eq!(audit.thumb_inflight, THUMB_SLOW_WORKERS);
         assert_eq!(audit.thumb_slow_inflight, THUMB_SLOW_WORKERS);
         assert_eq!(audit.thumb_queue.len(), 2);
+    });
+    cx.run_until_parked();
+
+    audit.update(cx, |audit, cx| {
+        let index = audit.entry_at(0).unwrap();
+        for native_scaled in std::iter::repeat_n(false, THUMB_SLOW_WORKERS)
+            .chain(std::iter::repeat_n(true, THUMB_WORKERS))
+        {
+            audit.thumb_queue.push_back(ThumbRequest {
+                index,
+                dataset_generation: audit.dataset_generation,
+                edge: thumbs::THUMB_EDGE,
+                path: PathBuf::from("missing-thumbnail.png"),
+                native_scaled,
+            });
+        }
+        audit.start_thumb_jobs(cx);
+        assert_eq!(audit.thumb_inflight, THUMB_SLOW_WORKERS + THUMB_WORKERS);
+        assert_eq!(audit.thumb_slow_inflight, THUMB_SLOW_WORKERS);
+        assert!(audit.thumb_queue.is_empty());
     });
     cx.run_until_parked();
 }

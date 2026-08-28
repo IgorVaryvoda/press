@@ -27,6 +27,7 @@ use view::meter;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -117,6 +118,18 @@ const THUMB_CACHE: usize = 192;
 const THUMB_WORKERS: usize = 4;
 const THUMB_SLOW_WORKERS: usize = 2;
 const THUMB_SLOW_SETTLE: Duration = Duration::from_millis(300);
+/// Start the next rows while the current ones are still on screen. Four viewports fit
+/// comfortably inside `THUMB_CACHE` and hide decode latency during normal wheel scrolls.
+const THUMB_OVERSCAN_VIEWPORTS: usize = 4;
+
+fn thumb_overscan_rows(visible: Range<usize>, total: usize) -> Range<usize> {
+    let start = visible.start.min(total);
+    let end = visible.end.min(total).max(start);
+    let extra = end
+        .saturating_sub(start)
+        .saturating_mul(THUMB_OVERSCAN_VIEWPORTS);
+    start.saturating_sub(extra)..end.saturating_add(extra).min(total)
+}
 
 /// The open rail. Every operation with settings owns one, so the action bar
 /// can hold verbs alone and no operation borrows another's controls.
@@ -266,6 +279,7 @@ pub(crate) struct Audit {
     thumb_queue: VecDeque<ThumbRequest>,
     thumb_inflight: usize,
     thumb_slow_inflight: usize,
+    thumb_prefetch_pending: bool,
     /// The order `thumbs` filled up in, so the oldest decode is the one that leaves
     /// when the cache reaches `THUMB_CACHE`.
     thumb_order: VecDeque<usize>,
@@ -1326,6 +1340,7 @@ pub(crate) fn build_audit(
             thumb_queue: VecDeque::new(),
             thumb_inflight: 0,
             thumb_slow_inflight: 0,
+            thumb_prefetch_pending: false,
             thumb_order: VecDeque::new(),
             format,
             quality,

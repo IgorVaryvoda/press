@@ -85,6 +85,22 @@ impl Audit {
         self.dataset_generation == request.dataset_generation && self.thumb_edge() == request.edge
     }
 
+    fn thumb_visible_rows(&self, cx: &App) -> std::ops::Range<usize> {
+        if self.grid {
+            let columns = self.gallery_columns.unwrap_or(1).max(1);
+            self.gallery_visible.start.saturating_mul(columns)
+                ..self
+                    .gallery_visible
+                    .end
+                    .saturating_mul(columns)
+                    .min(self.visible.len())
+        } else {
+            self.table
+                .as_ref()
+                .map_or(0..0, |table| table.read(cx).visible_range().rows().clone())
+        }
+    }
+
     pub(super) fn thumb_is_visible(&self, index: usize, cx: &App) -> bool {
         // The results strip is a viewport too. Without this every thumbnail it
         // asked for was dropped on arrival for not being in the list, and the
@@ -100,15 +116,17 @@ impl Audit {
         let Some(row) = self.row_of(index) else {
             return false;
         };
-        if self.grid {
-            let columns = self.gallery_columns.unwrap_or(1).max(1);
-            let band = row / columns;
-            self.gallery_visible.contains(&band)
-        } else {
-            self.table
-                .as_ref()
-                .is_some_and(|table| table.read(cx).visible_range().rows().contains(&row))
+        self.thumb_visible_rows(cx).contains(&row)
+    }
+
+    fn thumb_is_wanted(&self, index: usize, cx: &App) -> bool {
+        if self.thumb_is_visible(index, cx) {
+            return true;
         }
+        let Some(row) = self.row_of(index) else {
+            return false;
+        };
+        thumb_overscan_rows(self.thumb_visible_rows(cx), self.visible.len()).contains(&row)
     }
 
     fn notify_thumbs(&self, cx: &mut Context<Self>) {
@@ -353,6 +371,45 @@ impl Audit {
 
     /// Kick off decoding for a row, unless it is already loaded or in flight.
     pub(super) fn request_thumb(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.promote_thumb(index) {
+            self.start_thumb_jobs(cx);
+        }
+        self.queue_thumb(index, cx);
+        if self.compare.is_some() || self.thumb_prefetch_pending {
+            return;
+        }
+        self.thumb_prefetch_pending = true;
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |audit, cx| {
+                audit.thumb_prefetch_pending = false;
+                let indices =
+                    thumb_overscan_rows(audit.thumb_visible_rows(cx), audit.visible.len())
+                        .filter_map(|row| audit.entry_at(row))
+                        .collect::<Vec<_>>();
+                for index in indices {
+                    audit.queue_thumb(index, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn promote_thumb(&mut self, index: usize) -> bool {
+        if let Some(position) = self
+            .thumb_queue
+            .iter()
+            .position(|request| request.index == index)
+            && position > 0
+        {
+            let request = self.thumb_queue.remove(position).unwrap();
+            self.thumb_queue.push_front(request);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn queue_thumb(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.thumbs.contains_key(&index) || !self.requested.insert(index) {
             return;
         }
@@ -380,11 +437,16 @@ impl Audit {
                 if !audit.thumb_request_is_current(&request) {
                     return;
                 }
-                if !audit.thumb_is_visible(request.index, cx) {
+                let visible = audit.thumb_is_visible(request.index, cx);
+                if !visible && !audit.thumb_is_wanted(request.index, cx) {
                     audit.requested.remove(&request.index);
                     return;
                 }
-                audit.thumb_queue.push_back(request);
+                if visible {
+                    audit.thumb_queue.push_front(request);
+                } else {
+                    audit.thumb_queue.push_back(request);
+                }
                 audit.start_thumb_jobs(cx);
             });
         })
@@ -392,23 +454,25 @@ impl Audit {
     }
 
     pub(super) fn start_thumb_jobs(&mut self, cx: &mut Context<Self>) {
-        while let Some(request) = self.thumb_queue.front() {
-            let workers = if self.thumb_slow_inflight > 0 || !request.native_scaled {
-                THUMB_SLOW_WORKERS
-            } else {
-                THUMB_WORKERS
-            };
-            if self.thumb_inflight >= workers {
+        while !self.thumb_queue.is_empty() {
+            let native_inflight = self.thumb_inflight.saturating_sub(self.thumb_slow_inflight);
+            let Some(position) = self.thumb_queue.iter().position(|request| {
+                if request.native_scaled {
+                    native_inflight < THUMB_WORKERS
+                } else {
+                    self.thumb_slow_inflight < THUMB_SLOW_WORKERS
+                }
+            }) else {
                 return;
-            }
-            let request = self.thumb_queue.pop_front().unwrap();
+            };
+            let request = self.thumb_queue.remove(position).unwrap();
             if !self.thumb_request_is_current(&request) {
                 continue;
             }
             if self.thumbs.contains_key(&request.index) {
                 continue;
             }
-            if !self.thumb_is_visible(request.index, cx) {
+            if !self.thumb_is_wanted(request.index, cx) {
                 self.requested.remove(&request.index);
                 continue;
             }
