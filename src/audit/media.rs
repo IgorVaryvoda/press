@@ -126,7 +126,12 @@ impl Audit {
         let Some(row) = self.row_of(index) else {
             return false;
         };
-        thumb_overscan_rows(self.thumb_visible_rows(cx), self.visible.len()).contains(&row)
+        thumb_overscan_rows(
+            self.thumb_visible_rows(cx),
+            self.visible.len(),
+            thumb_cache_limit(self.thumb_edge()),
+        )
+        .contains(&row)
     }
 
     fn notify_thumbs(&mut self, cx: &mut Context<Self>) {
@@ -626,7 +631,11 @@ impl Audit {
                 audit.thumb_prefetch_pending = false;
                 if audit.compare.is_none() {
                     let visible = audit.thumb_visible_rows(cx);
-                    let wanted = thumb_overscan_rows(visible.clone(), audit.visible.len());
+                    let wanted = thumb_overscan_rows(
+                        visible.clone(),
+                        audit.visible.len(),
+                        thumb_cache_limit(audit.thumb_edge()),
+                    );
                     let visible_indices = visible
                         .clone()
                         .filter_map(|row| audit.entry_at(row))

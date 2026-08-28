@@ -1450,9 +1450,19 @@ fn gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
 
 #[test]
 fn thumbnail_overscan_covers_four_neighbor_viewports() {
-    assert_eq!(thumb_overscan_rows(20..30, 100), 0..70);
-    assert_eq!(thumb_overscan_rows(0..10, 100), 0..50);
-    assert_eq!(thumb_overscan_rows(90..100, 100), 50..100);
+    assert_eq!(thumb_overscan_rows(20..30, 100, 100), 0..70);
+    assert_eq!(thumb_overscan_rows(0..10, 100, 100), 0..50);
+    assert_eq!(thumb_overscan_rows(90..100, 100, 100), 50..100);
+}
+
+#[test]
+fn thumbnail_overscan_never_outgrows_the_cache() {
+    let limit = thumb_cache_limit(thumbs::THUMB_EDGE);
+    let wanted = thumb_overscan_rows(400..448, 1_000, limit);
+
+    assert_eq!(wanted.len(), limit);
+    assert!(wanted.contains(&400));
+    assert!(wanted.contains(&447));
 }
 
 #[gpui::test]

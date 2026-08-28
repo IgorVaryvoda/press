@@ -122,17 +122,27 @@ const THUMB_WORKERS: usize = 4;
 const THUMB_SLOW_WORKERS: usize = 2;
 const THUMB_SLOW_SETTLE: Duration = Duration::from_millis(300);
 const THUMB_REDRAW_DELAY: Duration = Duration::from_millis(8);
-/// Start the next rows while the current ones are still on screen. Four viewports fit
-/// comfortably inside the decoded-pixel budget and hide latency during normal scrolling.
+/// Start the next rows while the current ones are still on screen. The requested range
+/// is narrowed on large grids so it never exceeds the decoded-pixel budget.
 const THUMB_OVERSCAN_VIEWPORTS: usize = 4;
 
-fn thumb_overscan_rows(visible: Range<usize>, total: usize) -> Range<usize> {
+fn thumb_overscan_rows(visible: Range<usize>, total: usize, limit: usize) -> Range<usize> {
     let start = visible.start.min(total);
     let end = visible.end.min(total).max(start);
     let extra = end
         .saturating_sub(start)
         .saturating_mul(THUMB_OVERSCAN_VIEWPORTS);
-    start.saturating_sub(extra)..end.saturating_add(extra).min(total)
+    let wanted = start.saturating_sub(extra)..end.saturating_add(extra).min(total);
+    let capacity = limit.max(end - start).min(total);
+    if wanted.len() <= capacity {
+        return wanted;
+    }
+
+    let before = (capacity - (end - start)) / 2;
+    let mut bounded_start = start.saturating_sub(before);
+    let bounded_end = bounded_start.saturating_add(capacity).min(total);
+    bounded_start = bounded_end.saturating_sub(capacity);
+    bounded_start..bounded_end
 }
 
 fn thumb_cache_limit(edge: u32) -> usize {
