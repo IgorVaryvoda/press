@@ -917,8 +917,8 @@ impl Audit {
                     // drag from the anchor.
                     let extend = event.keystroke.modifiers.shift;
                     match event.keystroke.key.as_str() {
-                        "down" => audit.step_cursor(1, extend, window, cx),
-                        "up" => audit.step_cursor(-1, extend, window, cx),
+                        "down" => audit.step_cursor_vertical(1, extend, window, cx),
+                        "up" => audit.step_cursor_vertical(-1, extend, window, cx),
                         "left" => audit.step_cursor_lateral(-1, extend, window, cx),
                         "right" => audit.step_cursor_lateral(1, extend, window, cx),
                         "pagedown" => audit.step_cursor(10, extend, window, cx),

@@ -398,8 +398,8 @@ pub(crate) struct Audit {
     /// One next-frame callback draws the latest position instead of rebuilding
     /// the table once for every queued key event.
     cursor_redraw_pending: bool,
-    /// Where the last plain click landed, which is the fixed end of a shift-click
-    /// range. Separate from `cursor` so arrowing around does not move the anchor.
+    /// Fixed end of a Shift range. Plain pointer or keyboard movement moves it;
+    /// Shift movement leaves it in place while the cursor extends from it.
     anchor: usize,
     /// The last quality the slider was set to, so turning Lossless off goes back to
     /// where you were rather than to an arbitrary default.

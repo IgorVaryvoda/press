@@ -1310,6 +1310,37 @@ fn key_repeats_share_one_next_frame_redraw(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn grid_arrows_move_by_tile_and_band_and_shift_range_shrinks(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.entries = (0..7)
+            .map(|index| entry(&format!("{index}.jpg"), 10, 10, 100, ImageFormat::Jpeg))
+            .collect();
+        audit.visible = (0..7).collect();
+        audit.grid = true;
+        audit.gallery_columns = Some(3);
+        audit.cursor = 0;
+        audit.anchor = 0;
+        audit.selected.clear();
+
+        audit.step_cursor_lateral(1, false, window, cx);
+        assert_eq!((audit.cursor, audit.anchor), (1, 1));
+
+        audit.step_cursor_vertical(1, true, window, cx);
+        assert_eq!(audit.cursor, 4);
+        assert_eq!(audit.selected, HashSet::from([1, 2, 3, 4]));
+
+        audit.step_cursor_lateral(-1, true, window, cx);
+        assert_eq!(audit.cursor, 3);
+        assert_eq!(audit.selected, HashSet::from([1, 2, 3]));
+
+        audit.step_cursor_vertical(-1, true, window, cx);
+        assert_eq!(audit.cursor, 0);
+        assert_eq!(audit.selected, HashSet::from([0, 1]));
+    });
+}
+
+#[gpui::test]
 fn gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {

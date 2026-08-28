@@ -450,9 +450,8 @@ impl Audit {
         }
     }
 
-    /// One keyboard step. With shift held it is a selection drag: the run from
-    /// the anchor to the new cursor joins the selection, exactly as a
-    /// shift-click does.
+    /// One keyboard step. With shift held, the run from the anchor to the new
+    /// cursor becomes the selection and shrinks again when the cursor comes back.
     pub(super) fn step_cursor(
         &mut self,
         delta: isize,
@@ -466,11 +465,30 @@ impl Audit {
         if extend {
             self.select_through_cursor(cx);
         } else {
+            self.anchor = self.cursor;
             self.schedule_cursor_redraw(window, cx);
         }
     }
 
-    /// Left and right: one row in the list, one tile across in the gallery.
+    /// Up and down: one row in either view, which is one item in the list and one
+    /// full band in the gallery.
+    pub(super) fn step_cursor_vertical(
+        &mut self,
+        direction: isize,
+        extend: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stride = if self.grid {
+            self.gallery_columns.unwrap_or(1).max(1) as isize
+        } else {
+            1
+        };
+        self.step_cursor(direction * stride, extend, window, cx);
+    }
+
+    /// Left and right remain one item apart; in the gallery that means the adjacent
+    /// tile instead of accidentally jumping a whole row.
     pub(super) fn step_cursor_lateral(
         &mut self,
         direction: isize,
@@ -478,12 +496,7 @@ impl Audit {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let columns = if self.grid {
-            self.gallery_columns.unwrap_or(1).max(1) as isize
-        } else {
-            1
-        };
-        self.step_cursor(direction * columns, extend, window, cx);
+        self.step_cursor(direction, extend, window, cx);
     }
 
     pub(super) fn select_through_cursor(&mut self, cx: &mut Context<Self>) {
@@ -496,6 +509,7 @@ impl Audit {
             (self.cursor, self.anchor)
         };
         let run: Vec<usize> = (from..=to).filter_map(|row| self.entry_at(row)).collect();
+        self.selected.clear();
         self.selected.extend(run);
         self.selection_changed(cx);
     }
@@ -648,6 +662,7 @@ impl Audit {
         if !self.selected.remove(&entry) {
             self.selected.insert(entry);
         }
+        self.anchor = self.cursor;
         self.selection_changed(cx);
     }
 
