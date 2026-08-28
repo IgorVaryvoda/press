@@ -1,6 +1,6 @@
 [package]
 name = "press"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2024"
 description = "Audit and optimise images locally, with optional Sirv and Studio actions"
 
