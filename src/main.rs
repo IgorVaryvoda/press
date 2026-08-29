@@ -10,6 +10,7 @@ mod audit;
 mod avif;
 mod compare;
 mod convert;
+mod crash;
 mod jxl;
 mod local_ai;
 mod menus;
@@ -594,6 +595,7 @@ fn convert_headless(
 }
 
 fn main() {
+    crash::install();
     let args = parse_args();
 
     match args.command {
@@ -790,6 +792,32 @@ fn main() {
         }
     }
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
+}
+
+fn reveal_path(path: &Path) {
+    if let Err(error) = open_with_desktop(path) {
+        eprintln!("press: could not open {}: {error}", path.display());
+    }
+}
+
+fn open_url(url: &str) {
+    if let Err(error) = open_with_desktop(url) {
+        eprintln!("press: could not open {url}: {error}");
+    }
+}
+
+fn open_with_desktop(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(target)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Build the audit view for a window. Shared by the app and the screenshot harness

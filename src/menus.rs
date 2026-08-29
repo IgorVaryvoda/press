@@ -16,7 +16,9 @@ actions!(
         Minimize,
         Zoom,
         OpenFolder,
-        OpenImage
+        OpenImage,
+        ShowCrashReports,
+        EmailCrashReport
     ]
 );
 
@@ -51,6 +53,8 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
     cx.on_action(move |_: &OpenImage, cx| {
         audit.update(cx, |audit, cx| audit.pick(false, cx));
     });
+    cx.on_action(|_: &ShowCrashReports, _| crate::crash::reveal_reports());
+    cx.on_action(|_: &EmailCrashReport, _| crate::crash::email_report());
 
     // The menu shows each item's key equivalent from the keymap, so the
     // bindings and the menus describe one truth.
@@ -81,6 +85,10 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
         Menu::new("Window").items(vec![
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
+        ]),
+        Menu::new("Help").items(vec![
+            MenuItem::action("Show Crash Reports", ShowCrashReports),
+            MenuItem::action("Email Crash Report…", EmailCrashReport),
         ]),
     ]);
 }

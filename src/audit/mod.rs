@@ -1089,14 +1089,7 @@ impl Audit {
         if !path.exists() {
             return;
         }
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else if cfg!(target_os = "windows") {
-            "explorer"
-        } else {
-            "xdg-open"
-        };
-        let _ = std::process::Command::new(opener).arg(path).spawn();
+        crate::reveal_path(&path);
     }
 
     /// Ask the desktop for a folder or a file. The dialog runs off the main thread so
