@@ -63,6 +63,21 @@ PKGBUILD
 The generated `PKGBUILD` is a useful inspection artifact, not the AUR recipe:
 the AUR package uses the required `press-bin` name and its own `.SRCINFO`.
 
+### AppImage download
+
+The AppImage itself is executable when built, but a browser download does not apply
+that Unix mode. Document the required first-run step beside every AppImage link:
+
+```bash
+chmod +x press_*.AppImage
+./press_*.AppImage
+```
+
+The graphical equivalent on Ubuntu is **Properties → Permissions → Allow executing
+file as program**. Do not wrap the AppImage in another archive to carry its mode;
+AppImage's distribution guide advises against that because it breaks integration.
+The `.deb` and APT channel are the no-`chmod` path for Ubuntu users.
+
 ### Native Linux release gate
 
 Run this on the Ubuntu release runner or an equivalent clean environment:
@@ -315,6 +330,8 @@ test fails.
 ## References
 
 - [Homebrew Cask Cookbook](https://docs.brew.sh/Cask-Cookbook)
+- [AppImage quickstart](https://docs.appimage.org/introduction/quickstart.html)
+- [Distributing AppImages](https://docs.appimage.org/packaging-guide/distribution.html)
 - [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines)
 - [Arch `.SRCINFO`](https://wiki.archlinux.org/title/.SRCINFO)
 - [Debian repository setup](https://wiki.debian.org/DebianRepository/Setup)

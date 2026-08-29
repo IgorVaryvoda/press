@@ -24,6 +24,11 @@ Download the current installer from [GitHub Releases](https://github.com/IgorVar
 - macOS: `.dmg` for Apple Silicon or Intel
 - Windows: `.exe` installer
 
+An AppImage download does not become executable automatically. From its folder,
+run `chmod +x press_*.AppImage`, then `./press_*.AppImage`. In Files, the equivalent
+is **Properties → Permissions → Allow executing file as program**. Ubuntu users can
+use the `.deb` instead.
+
 Packaged builds check that release feed in the background at launch. An available
 update is downloaded, signature-checked, and installed before Press relaunches itself.
 Source builds do not update themselves.

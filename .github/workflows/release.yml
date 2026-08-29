@@ -53,7 +53,7 @@ jobs:
             artifact: windows-x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: System dependencies (Linux)
         if: runner.os == 'Linux'
@@ -94,7 +94,7 @@ jobs:
 
       - name: Check out vision.cpp for macOS local AI
         if: runner.os == 'macOS'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Acly/vision.cpp
           ref: b766b0acc30f6706f1bfe46769635e361172ce96
@@ -164,20 +164,26 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          appimage=$(realpath "$(find dist -maxdepth 1 -type f -name 'press_*_x86_64.AppImage' -print -quit)")
           deb=$(find dist -maxdepth 1 -type f -name 'press_*_amd64.deb' -print -quit)
           pacman=$(find dist -maxdepth 1 -type f -name 'press_*_x86_64.tar.gz' -print -quit)
+          test -x "$appimage"
           test -n "$deb"
           test -n "$pacman"
+          probe=$(mktemp -d)
+          (cd "$probe" && "$appimage" --appimage-extract-and-run --help >/dev/null)
           test -n "$(dpkg-deb --field "$deb" Maintainer)"
           test -n "$(dpkg-deb --field "$deb" Depends)"
-          dpkg-deb --contents "$deb" | grep -q 'usr/bin/press$'
-          dpkg-deb --contents "$deb" | grep -q 'usr/share/applications/press.desktop$'
-          dpkg-deb --contents "$deb" | grep -q 'usr/share/icons/.*/press.png$'
-          dpkg-deb --contents "$deb" | grep -q 'usr/share/doc/press/copyright$'
-          tar -tzf "$pacman" | grep -q '^usr/bin/press$'
-          tar -tzf "$pacman" | grep -q '^usr/share/applications/press.desktop$'
-          tar -tzf "$pacman" | grep -q '^usr/share/icons/.*/press.png$'
-          tar -tzf "$pacman" | grep -q '^usr/share/licenses/press/LICENSE$'
+          dpkg-deb --contents "$deb" > "$RUNNER_TEMP/press-deb-contents"
+          tar -tzf "$pacman" > "$RUNNER_TEMP/press-pacman-contents"
+          grep -q 'usr/bin/press$' "$RUNNER_TEMP/press-deb-contents"
+          grep -q 'usr/share/applications/press.desktop$' "$RUNNER_TEMP/press-deb-contents"
+          grep -q 'usr/share/icons/.*/press.png$' "$RUNNER_TEMP/press-deb-contents"
+          grep -q 'usr/share/doc/press/copyright$' "$RUNNER_TEMP/press-deb-contents"
+          grep -q '^usr/bin/press$' "$RUNNER_TEMP/press-pacman-contents"
+          grep -q '^usr/share/applications/press.desktop$' "$RUNNER_TEMP/press-pacman-contents"
+          grep -q '^usr/share/icons/.*/press.png$' "$RUNNER_TEMP/press-pacman-contents"
+          grep -q '^usr/share/licenses/press/LICENSE$' "$RUNNER_TEMP/press-pacman-contents"
           sudo apt-get install -y "$deb"
           press --help >/dev/null
           sudo apt-get remove -y press
@@ -205,7 +211,7 @@ jobs:
           }));
           NODE
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
@@ -230,8 +236,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
