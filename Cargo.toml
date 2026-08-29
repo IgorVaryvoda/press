@@ -102,6 +102,7 @@ files = { "LICENSE" = "/usr/share/doc/press/copyright" }
 depends = [
     "dav1d",
     "glibc",
+    "hicolor-icon-theme",
     "libavif",
     "libgcc",
     "libxcb",
