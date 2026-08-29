@@ -72,11 +72,11 @@ The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discove
 automatically by Codex when it runs here. Installed builds also carry the same text:
 `press skill` prints it for use by agents in another workspace.
 
-Launched with no path it opens on an empty state: **Open folder…**, **Open image…**,
-or drop either onto the window. The same two buttons sit in the toolbar afterwards,
-so you can change folder without restarting. Picking a new one drops every thumbnail
-and result belonging to the old one, because a stale saving next to a new file is a
-lie.
+Launched with no path it opens on an empty state: **Open folder…**, **Open images…**,
+or drop one folder or any number of images onto the window. The compact source menu
+stays in the toolbar afterwards, so you can change source without restarting.
+Picking a new one drops every thumbnail and result belonging to the old one, because
+a stale saving next to a new file is a lie.
 
 It walks the folder and its subfolders, reads each image's header, and lists what it
 found — heaviest first, because that is where the work is.

@@ -582,11 +582,11 @@ impl Render for Audit {
                                 ),
                         ),
                 )
-                .on_drop(cx.listener(|audit, paths: &gpui::ExternalPaths, _, cx| {
-                    if let Some(path) = paths.paths().first() {
-                        audit.request_path(path.clone(), cx);
-                    }
-                }))
+                .on_drop(
+                    cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {
+                        audit.request_paths(paths.paths().to_vec(), window, cx);
+                    }),
+                )
                 .into_any_element();
         }
 
@@ -663,7 +663,7 @@ impl Render for Audit {
                                     Button::new("empty-file")
                                         .outline()
                                         .icon(IconName::File)
-                                        .label("Open image…")
+                                        .label("Open images…")
                                         .on_click(
                                             cx.listener(|audit, _, _, cx| audit.pick(false, cx)),
                                         ),
@@ -674,7 +674,9 @@ impl Render for Audit {
                                 .pt_2()
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Drop a folder or image anywhere in this window"),
+                                .child(
+                                    "Drop one folder or any number of images anywhere in this window",
+                                ),
                         ),
                 )
                 .on_drag_move(cx.listener(
@@ -685,11 +687,9 @@ impl Render for Audit {
                         }
                     },
                 ))
-                .on_drop(cx.listener(|audit, paths: &gpui::ExternalPaths, _, cx| {
+                .on_drop(cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {
                     audit.drag_over = false;
-                    if let Some(path) = paths.paths().first() {
-                        audit.request_path(path.clone(), cx);
-                    }
+                    audit.request_paths(paths.paths().to_vec(), window, cx);
                 }))
                 .into_any_element();
         }
@@ -961,12 +961,12 @@ impl Audit {
                     }
                 }),
             )
-            .on_drop(cx.listener(|audit, paths: &gpui::ExternalPaths, _, cx| {
-                audit.drag_over = false;
-                if let Some(path) = paths.paths().first() {
-                    audit.request_path(path.clone(), cx);
-                }
-            }))
+            .on_drop(
+                cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {
+                    audit.drag_over = false;
+                    audit.request_paths(paths.paths().to_vec(), window, cx);
+                }),
+            )
             .child(self.header(count, cx))
             // Audit on the left, the output panel on the right: the working
             // area and the settings column split below one shared header.

@@ -1102,6 +1102,7 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
                 },
                 PathBuf::from("/elsewhere"),
                 false,
+                None,
                 window,
                 cx,
             );
@@ -1169,6 +1170,7 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
                 },
                 PathBuf::from("/elsewhere"),
                 false,
+                None,
                 window,
                 cx,
             );
@@ -1228,6 +1230,42 @@ fn acquisition_extras_stay_off_the_primary_surface(cx: &mut TestAppContext) {
 
     assert!(cx.debug_bounds("copy-audit-report").is_none());
     assert!(cx.debug_bounds("spin-preflight").is_none());
+}
+
+#[gpui::test]
+fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppContext) {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("press-multi-drop-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let write = |name: &str, colour: [u8; 3]| {
+        let path = root.join(name);
+        image::RgbImage::from_pixel(8, 8, image::Rgb(colour))
+            .save(&path)
+            .unwrap();
+        path
+    };
+    let first = write("first.png", [255, 0, 0]);
+    let second = write("second.png", [0, 255, 0]);
+    write("not-dropped.png", [0, 0, 255]);
+
+    let (audit, cx) = finding_audit(cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let position = cx.debug_bounds("audit-header").unwrap().center();
+    cx.simulate_event(gpui::FileDropEvent::Entered {
+        position,
+        paths: gpui::ExternalPaths([first, second].into_iter().collect()),
+    });
+    cx.simulate_event(gpui::FileDropEvent::Submit { position });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.batch_size, Some(2));
+        assert_eq!(names(&audit.entries), ["first.png", "second.png"]);
+    });
 }
 
 #[gpui::test]
@@ -2457,7 +2495,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
     cx.run_until_parked();
     let first_scan = scan::scan(&first_folder, &first_folder.join(scan::OUTPUT_DIR));
     audit.update_in(cx, |audit, window, cx| {
-        audit.install_dataset(first_scan, first_folder.clone(), false, window, cx);
+        audit.install_dataset(first_scan, first_folder.clone(), false, None, window, cx);
         window.refresh();
     });
     cx.simulate_resize(size(px(873.), px(720.)));
@@ -2476,7 +2514,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
 
     let second_scan = scan::scan(&second_folder, &second_folder.join(scan::OUTPUT_DIR));
     audit.update_in(cx, |audit, window, cx| {
-        audit.install_dataset(second_scan, second_folder.clone(), false, window, cx);
+        audit.install_dataset(second_scan, second_folder.clone(), false, None, window, cx);
         window.refresh();
     });
     cx.simulate_resize(size(px(873.), px(720.)));
@@ -2546,7 +2584,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
         existing_output: 0,
     };
     audit.update_in(cx, |audit, window, cx| {
-        audit.install_dataset(scanned, PathBuf::from("new"), false, window, cx);
+        audit.install_dataset(scanned, PathBuf::from("new"), false, None, window, cx);
     });
     cx.run_until_parked();
     cx.simulate_resize(size(px(900.), px(640.)));

@@ -291,6 +291,32 @@ pub fn scan(root: &Path, output_root: &Path) -> Scan {
     scan_progressive(root, output_root, |_| {})
 }
 
+/// Probe exactly the files the user chose, without walking their folder and pulling
+/// unrelated neighbours into the audit.
+pub fn scan_files(paths: &[PathBuf]) -> Scan {
+    let mut entries = Vec::new();
+    let mut skipped_raw = 0;
+    let mut unreadable = Vec::new();
+    for path in paths {
+        if is_raw(path) {
+            skipped_raw += 1;
+        } else if let Some(entry) = probe(path) {
+            entries.push(entry);
+        } else {
+            unreadable.push(path.clone());
+        }
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
+    Scan {
+        entries,
+        skipped_raw,
+        skipped_packages: 0,
+        unreadable,
+        walk_errors: Vec::new(),
+        existing_output: 0,
+    }
+}
+
 /// The same complete scan, publishing small groups as their headers become ready.
 /// The window can draw those rows while the remaining files are still being probed;
 /// callers that need one final result keep using `scan`.

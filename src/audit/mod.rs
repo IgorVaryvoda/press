@@ -47,7 +47,7 @@ use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
@@ -55,7 +55,9 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable};
+use gpui_component::{
+    ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
+};
 
 // Colours come from `cx.theme()` rather than a private palette. The window is
 // built out of this library's buttons, inputs and tags, and a hand-picked set of
@@ -296,6 +298,9 @@ fn density_colour(density: f32, cx: &App) -> gpui::Hsla {
 
 pub(crate) struct Audit {
     root: PathBuf,
+    /// Present when the dataset is an explicit file batch rather than every image
+    /// found under `root`.
+    batch_size: Option<usize>,
     entries: Vec<Entry>,
     skipped_raw: usize,
     /// macOS packages the scan skipped whole, counted like raw: excluded by
@@ -808,6 +813,14 @@ fn write_settings(settings: &settings::Settings) {
     let _ = (settings, settings::save as fn(&settings::Settings));
 }
 
+fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
+    let parent = paths.first()?.parent()?;
+    paths
+        .iter()
+        .all(|path| path.parent() == Some(parent))
+        .then(|| parent.to_path_buf())
+}
+
 impl Audit {
     /// Install a completed scan. This is the one state transition that replaces the
     /// dataset and invalidates every detached job derived from the old rows.
@@ -816,6 +829,7 @@ impl Audit {
         scanned: scan::Scan,
         root: PathBuf,
         single: bool,
+        batch_size: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -835,6 +849,7 @@ impl Audit {
         }
         self.studio_source = None;
         self.root = root;
+        self.batch_size = batch_size;
         self.mislabelled = scanned
             .entries
             .iter()
@@ -1013,7 +1028,7 @@ impl Audit {
                     audit.scanning = None;
                     audit.scan_partial = false;
                     if let Some((scanned, root, single)) = result {
-                        audit.install_dataset(scanned, root, single, window, cx);
+                        audit.install_dataset(scanned, root, single, None, window, cx);
                     } else {
                         cx.notify();
                     }
@@ -1050,6 +1065,7 @@ impl Audit {
                                 },
                                 root,
                                 false,
+                                None,
                                 window,
                                 cx,
                             );
@@ -1075,8 +1091,65 @@ impl Audit {
                 if installed {
                     audit.finish_progressive_scan(scanned, cx);
                 } else {
-                    audit.install_dataset(scanned, root, false, window, cx);
+                    audit.install_dataset(scanned, root, false, None, window, cx);
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Accept one folder or an exact batch of files from either a native picker or
+    /// the desktop's external-file drop event.
+    pub(super) fn request_paths(
+        &mut self,
+        mut paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.converting || paths.is_empty() {
+            return;
+        }
+        paths.sort();
+        paths.dedup();
+        if paths.len() == 1 {
+            let path = paths.pop().unwrap();
+            if path.is_file() || path.is_dir() {
+                self.request_path(path, cx);
+            } else {
+                window.push_notification("Drop one folder or any number of images.", cx);
+            }
+            return;
+        }
+        if !paths.iter().all(|path| path.is_file()) {
+            window.push_notification("Drop one folder or any number of images.", cx);
+            return;
+        }
+        let Some(root) = batch_root(&paths) else {
+            window.push_notification("Choose images from one folder at a time.", cx);
+            return;
+        };
+        self.request_files(paths, root, cx);
+    }
+
+    fn request_files(&mut self, paths: Vec<PathBuf>, root: PathBuf, cx: &mut Context<Self>) {
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let request = self.scan_generation;
+        self.scanning = Some(format!("{} images", paths.len()));
+        self.scan_partial = false;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let scanned = cx
+                .background_executor()
+                .spawn(async move { scan::scan_files(&paths) })
+                .await;
+            let batch_size = scanned.entries.len();
+            let _ = this.update_in(cx, |audit, window, cx| {
+                if audit.scan_generation != request {
+                    return;
+                }
+                audit.scanning = None;
+                audit.install_dataset(scanned, root, false, Some(batch_size), window, cx);
             });
         })
         .detach();
@@ -1139,16 +1212,16 @@ impl Audit {
                 .spawn(async move {
                     let dialog = rfd::FileDialog::new().set_directory(&start);
                     if folders {
-                        dialog.pick_folder()
+                        dialog.pick_folder().into_iter().collect()
                     } else {
-                        dialog.pick_file()
+                        dialog.pick_files().unwrap_or_default()
                     }
                 })
                 .await;
 
-            if let Some(path) = chosen {
+            if !chosen.is_empty() {
                 let _ = this.update_in(cx, |audit, window, cx| {
-                    audit.request_path(path, cx);
+                    audit.request_paths(chosen, window, cx);
                     window.refresh();
                 });
             }
@@ -1366,6 +1439,7 @@ pub(crate) fn build_audit(
             table: None,
             table_signature: None,
             root,
+            batch_size: None,
             entries,
             skipped_raw,
             skipped_packages,

@@ -12,9 +12,24 @@ impl Audit {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.root.display().to_string());
+        let source_label = match self.batch_size {
+            Some(1) => "1 image".to_string(),
+            Some(count) => format!("{count} images"),
+            None => folder,
+        };
+        let source_icon = if self.batch_size.is_some() {
+            IconName::File
+        } else {
+            IconName::Folder
+        };
+        let source_menu = cx.entity().downgrade();
+        let reveal_root = self.root.clone();
+        let can_reveal = reveal_root.is_dir();
 
         let mut stats = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
             format!("{count} files only on Sirv")
+        } else if self.batch_size.is_some() && count == self.entries.len() {
+            format_bytes(self.visible_bytes())
         } else if count == self.entries.len() {
             format!("{count} images · {}", format_bytes(self.visible_bytes()))
         } else {
@@ -56,8 +71,8 @@ impl Audit {
             .bg(cx.theme().table_head)
             .border_b_1()
             .border_color(cx.theme().border)
-            // Identity and its openers hold the left; the path and the counts
-            // run beside them as metadata, on the same line.
+            // One named source control replaces three adjacent icon-only openers.
+            // Counts remain metadata beside it, on the same line.
             .child(
                 div()
                     .flex()
@@ -67,61 +82,46 @@ impl Audit {
                     .min_w_0()
                     .min_w(px(260.))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .font_family("SF Pro Display")
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().foreground)
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(folder),
-                            )
-                            .child(
-                                Button::new("open-folder")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Folder)
-                                    .tooltip("Open a folder")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, _, cx| audit.pick(true, cx))),
-                            )
-                            .child(
-                                Button::new("open-file")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::File)
-                                    .tooltip("Open a single image")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, _, cx| audit.pick(false, cx))),
-                            )
-                            .child(
-                                // The sync entry point: opens the remote-folder
-                                // browser, which is also where a pairing is undone.
-                                {
-                                    // A live pairing keeps its name on the
-                                    // button: the name IS the state.
-                                    let button = Button::new("sirv-browser")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::Globe)
-                                        .tooltip("Sync with a Sirv folder")
-                                        .disabled(self.converting)
-                                        .on_click(cx.listener(|audit, _, _, cx| {
-                                            audit.open_sirv_browser(cx)
-                                        }));
-                                    match &self.sirv_pairing {
-                                        Some(pairing) => button.label(pairing.dir.clone()),
-                                        None => button,
-                                    }
-                                },
-                            ),
+                        Button::new("source-picker")
+                            .small()
+                            .ghost()
+                            .icon(source_icon)
+                            .label(source_label)
+                            .tooltip(self.root.display().to_string())
+                            .dropdown_caret(true)
+                            .disabled(self.converting)
+                            .dropdown_menu(move |menu, _, _| {
+                                let open_folder = source_menu.clone();
+                                let open_images = source_menu.clone();
+                                let reveal_root = reveal_root.clone();
+                                menu.item(
+                                    PopupMenuItem::new("Open folder…")
+                                        .icon(IconName::Folder)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = open_folder.upgrade() {
+                                                audit.update(cx, |audit, cx| audit.pick(true, cx));
+                                            }
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Open images…")
+                                        .icon(IconName::File)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = open_images.upgrade() {
+                                                audit.update(cx, |audit, cx| audit.pick(false, cx));
+                                            }
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Reveal in file manager")
+                                        .icon(IconName::FolderOpen)
+                                        .disabled(!can_reveal)
+                                        .on_click(move |_, _, _| {
+                                            crate::reveal_path(&reveal_root)
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -132,7 +132,7 @@ impl Audit {
                             .overflow_hidden()
                             .text_ellipsis()
                             .min_w_0()
-                            .child(format!("{} · {stats}", self.root.display())),
+                            .child(stats),
                     ),
             )
             // The two controls that narrow the list, in the same row as the
@@ -222,6 +222,21 @@ impl Audit {
                         .tooltip("Copy a shareable Press audit with Sirv and AI next steps")
                         .disabled(self.converting)
                         .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
+                )
+            })
+            // Sirv is a separate remote pairing, not another kind of local source.
+            // Once paired, the reconciliation strip below owns its status and actions.
+            .when(self.sirv_pairing.is_none(), |header| {
+                header.child(
+                    Button::new("sirv-browser")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Globe)
+                        .label("Pair with Sirv")
+                        .disabled(self.converting)
+                        .on_click(
+                            cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
+                        ),
                 )
             })
             // The view toggle sits at the far end of the window: it changes how
