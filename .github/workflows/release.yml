@@ -165,8 +165,8 @@ jobs:
         shell: bash
         run: |
           appimage=$(realpath "$(find dist -maxdepth 1 -type f -name 'press_*_x86_64.AppImage' -print -quit)")
-          deb=$(find dist -maxdepth 1 -type f -name 'press_*_amd64.deb' -print -quit)
-          pacman=$(find dist -maxdepth 1 -type f -name 'press_*_x86_64.tar.gz' -print -quit)
+          deb=$(realpath "$(find dist -maxdepth 1 -type f -name 'press_*_amd64.deb' -print -quit)")
+          pacman=$(realpath "$(find dist -maxdepth 1 -type f -name 'press_*_x86_64.tar.gz' -print -quit)")
           test -x "$appimage"
           test -n "$deb"
           test -n "$pacman"
