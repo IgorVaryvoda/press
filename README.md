@@ -31,7 +31,8 @@ use the `.deb` instead.
 
 Packaged builds check that release feed in the background at launch. An available
 update is downloaded, signature-checked, and installed before Press relaunches itself.
-Source builds do not update themselves.
+Run `press update` to check and install one immediately. Source and package-manager
+builds do not update themselves.
 
 ## Status
 
@@ -46,6 +47,7 @@ press audit ~/path/to/folder --json           # stable, agent-friendly report
 press convert ~/path/to/folder                # convert to WebP, no window
 press convert ~/path/to/folder --format avif --max-edge 1600 --quality 60
 press convert ~/path/to/folder --format jxl --lossless
+press update                                    # install the latest signed release
 ```
 
 `press --help` is the complete command reference. `audit` never writes. `convert`

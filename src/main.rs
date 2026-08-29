@@ -47,11 +47,13 @@ const HELP: &str = concat!(
     "  press [PATH] [OPTIONS]\n",
     "  press audit <PATH> [--json]\n",
     "  press convert <PATH> [OPTIONS]\n",
-    "  press skill\n\n",
+    "  press skill\n",
+    "  press update\n\n",
     "Commands:\n",
     "  audit      Read image headers without opening a window or writing files\n",
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
+    "  update     Install the latest signed Press release\n",
     "  help       Print this help\n",
     "  version    Print the version\n\n",
     "Options:\n",
@@ -67,7 +69,7 @@ const HELP: &str = concat!(
     "  --webp, --avif, --jxl and PATH --convert remain supported.\n\n",
     "Exit status:\n",
     "  0  Complete success\n",
-    "  1  An audit was incomplete or one or more conversions failed\n",
+    "  1  The requested operation failed or was incomplete\n",
     "  2  Invalid invocation or target\n\n",
     "With --json, stdout contains only JSON; diagnostics go to stderr.\n"
 );
@@ -94,6 +96,7 @@ enum Command {
     Audit,
     Convert,
     Skill,
+    Update,
     Help,
     Version,
 }
@@ -136,6 +139,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
             "skill" if root.is_none() && command == Command::Window => command = Command::Skill,
+            "update" if root.is_none() && command == Command::Window => command = Command::Update,
             "help" if root.is_none() && command == Command::Window => command = Command::Help,
             "version" if root.is_none() && command == Command::Window => command = Command::Version,
             "--convert" => select_command(&mut command, Command::Convert, "--convert")?,
@@ -224,10 +228,17 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             unknown,
         });
     }
-    if command == Command::Skill
+    if matches!(command, Command::Skill | Command::Update)
         && (root.is_some() || conversion_option || grid || json || !unknown.is_empty())
     {
-        return Err("skill takes no arguments".into());
+        return Err(format!(
+            "{} takes no arguments",
+            if command == Command::Skill {
+                "skill"
+            } else {
+                "update"
+            }
+        ));
     }
     if command == Command::Audit && conversion_option {
         return Err("audit does not accept conversion options".into());
@@ -611,6 +622,10 @@ fn main() {
             print!("{AGENT_SKILL}");
             return;
         }
+        Command::Update => {
+            update_headless();
+            return;
+        }
         Command::Window | Command::Audit | Command::Convert => {}
     }
 
@@ -792,6 +807,29 @@ fn main() {
         }
     }
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
+}
+
+fn update_headless() {
+    #[cfg(feature = "updater")]
+    match update::install() {
+        update::Outcome::Installed => {
+            println!("Press updated; start it again to use the new version")
+        }
+        update::Outcome::Current => println!("Press {} is up to date", env!("CARGO_PKG_VERSION")),
+        update::Outcome::Unsupported => {
+            eprintln!(
+                "press: this installation cannot self-update; use its package manager or replace it manually"
+            );
+            std::process::exit(1);
+        }
+        update::Outcome::Failed => std::process::exit(1),
+    }
+
+    #[cfg(not(feature = "updater"))]
+    {
+        eprintln!("press: this build has no self-updater; update it with its package manager");
+        std::process::exit(1);
+    }
 }
 
 fn reveal_path(path: &Path) {
@@ -1149,6 +1187,12 @@ mod tests {
         assert!(parse(&["audit", "/photos", "--quality", "80"]).is_err());
         assert!(parse(&["convert", "one", "two"]).is_err());
         assert!(parse(&["--json", "/photos"]).is_err());
+    }
+
+    #[test]
+    fn update_is_a_targetless_command() {
+        assert_eq!(parse(&["update"]).unwrap().command, Command::Update);
+        assert!(parse(&["update", "/tmp"]).is_err());
     }
 
     #[test]

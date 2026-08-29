@@ -33,6 +33,10 @@ Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF.
 
 Treat exit status `1` as a partial result, not as proof that nothing was written. Read each file's `status`, report named failures, and use each successful `output` path as the source of truth. Never claim savings from the requested settings alone; use `summary.source_bytes` and `summary.output_bytes` from the completed run.
 
+## Update Press
+
+Run `press update` to install the latest signed release. Self-updating works for the Press AppImage, macOS app, and Windows installer; use the package manager for other installs.
+
 ## Bundled copy
 
 `press skill` prints this exact skill to stdout for installation or use outside the Press repository.

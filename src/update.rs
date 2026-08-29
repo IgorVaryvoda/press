@@ -114,12 +114,26 @@ fn public_key() -> &'static str {
     include_str!("../assets/updater.pub").trim()
 }
 
-pub fn install_if_available() -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Installed,
+    Current,
+    Unsupported,
+    Failed,
+}
+
+pub fn install() -> Outcome {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            *UPDATE_MESSAGE.lock() = Some(error.to_string());
+            UPDATE_STATE.store(2, Ordering::Relaxed);
+            eprintln!("press: could not locate this installation: {error}");
+            return Outcome::Failed;
+        }
     };
     if !updatable_install(&exe) {
-        return false;
+        return Outcome::Unsupported;
     }
 
     let config = Config {
@@ -136,24 +150,28 @@ pub fn install_if_available() -> bool {
             Ok(()) => {
                 *UPDATE_MESSAGE.lock() = None;
                 UPDATE_STATE.store(1, Ordering::Relaxed);
-                eprintln!("press: installed update; restarting");
-                true
+                eprintln!("press: installed update");
+                Outcome::Installed
             }
             Err(error) => {
                 *UPDATE_MESSAGE.lock() = Some(error.to_string());
                 UPDATE_STATE.store(2, Ordering::Relaxed);
                 eprintln!("press: could not install update: {error}");
-                false
+                Outcome::Failed
             }
         },
-        Ok(None) => false,
+        Ok(None) => Outcome::Current,
         Err(error) => {
             *UPDATE_MESSAGE.lock() = Some(error.to_string());
             UPDATE_STATE.store(2, Ordering::Relaxed);
             eprintln!("press: could not check for updates: {error}");
-            false
+            Outcome::Failed
         }
     }
+}
+
+pub fn install_if_available() -> bool {
+    install() == Outcome::Installed
 }
 
 #[cfg(target_os = "linux")]
