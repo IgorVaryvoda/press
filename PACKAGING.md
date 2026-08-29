@@ -78,6 +78,21 @@ file as program**. Do not wrap the AppImage in another archive to carry its mode
 AppImage's distribution guide advises against that because it breaks integration.
 The `.deb` and APT channel are the no-`chmod` path for Ubuntu users.
 
+`scripts/install.sh` is the no-`chmod` path everywhere else. It resolves the latest
+tag from the `/releases/latest` redirect, verifies the AppImage against the release
+`SHA256SUMS`, installs it as `~/.local/bin/press`, and installs the desktop entry and
+icon it extracts from that same verified file. Two facts it depends on, so check them
+if the AppImage layout ever changes:
+
+- `press.desktop` and `press.png` at the AppDir root are symlinks. Extract
+  `usr/share/applications/*.desktop` and
+  `usr/share/icons/hicolor/512x512/apps/*.png` instead.
+- The bundled `Exec=press` is rewritten to the installed absolute path, because a
+  launcher does not resolve a bare name against the user's shell PATH.
+
+The in-app updater keeps working after this install: it replaces the file `$APPIMAGE`
+names and keeps its filename, which is `press`.
+
 ### Native Linux release gate
 
 Run this on the Ubuntu release runner or an equivalent clean environment:

@@ -28,16 +28,29 @@ On Ubuntu 24.04 x86-64, follow the fingerprint-checked setup for the
 [signed Press APT repository](https://github.com/IgorVaryvoda/press-packages#ubuntu-2404-x86-64),
 then install or update with `sudo apt install press`.
 
+On any other x86-64 Linux, one command installs the AppImage, its menu entry, and
+its icon under `~/.local`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/IgorVaryvoda/press/main/scripts/install.sh | sh
+```
+
+It checks the download against the release's `SHA256SUMS` and installs nothing on a
+mismatch. Read it first if you prefer: [`scripts/install.sh`](scripts/install.sh).
+Remove Press by deleting `~/.local/bin/press`,
+`~/.local/share/applications/press.desktop`, and
+`~/.local/share/icons/hicolor/512x512/apps/press.png`.
+
 Or download the current installer from [GitHub Releases](https://github.com/IgorVaryvoda/press/releases/latest):
 
 - Linux: `.deb` for Ubuntu 24.04 x86-64, or `.AppImage`
 - macOS: `.dmg` for Apple Silicon or Intel
 - Windows: `.exe` installer
 
-An AppImage download does not become executable automatically. From its folder,
-run `chmod +x press_*.AppImage`, then `./press_*.AppImage`. In Files, the equivalent
-is **Properties → Permissions → Allow executing file as program**. Ubuntu users can
-use the `.deb` instead.
+A hand-downloaded AppImage does not become executable automatically. From its
+folder, run `chmod +x press_*.AppImage`, then `./press_*.AppImage`. In Files, the
+equivalent is **Properties → Permissions → Allow executing file as program**. The
+install script above and the `.deb` both avoid that step.
 
 AppImage, macOS, and Windows builds check that release feed in the background at
 launch. An available update is downloaded, signature-checked, and installed before
