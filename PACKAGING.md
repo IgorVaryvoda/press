@@ -132,7 +132,8 @@ cask "press" do
   version "VERSION"
   sha256 arm: "ARM64_SHA256", intel: "X64_SHA256"
 
-  url "https://github.com/IgorVaryvoda/press/releases/download/v#{version}/Press_#{version}_#{arch}.dmg"
+  url "https://github.com/IgorVaryvoda/press/releases/download/v#{version}/Press_#{version}_#{arch}.dmg",
+      verified: "github.com/IgorVaryvoda/press/"
   name "Press"
   desc "Audit and optimise images locally"
   homepage "https://imageguide.dev/"
@@ -299,9 +300,11 @@ $packageArgs = @{
 Install-ChocolateyPackage @packageArgs
 ```
 
-The NSIS installer registers `Press` in Programs and Features, so start with
-Chocolatey's automatic uninstaller. Add `chocolateyUninstall.ps1` only if an actual
-clean-VM uninstall test proves that automatic removal is insufficient.
+The NSIS installer registers `Press` in Programs and Features, but Chocolatey's
+automatic uninstaller cannot infer its silent command. Ship
+`chocolateyUninstall.ps1`; resolve the single `Press` entry with
+`Get-UninstallRegistryKey`, then pass its `UninstallString` and `/S` to
+`Uninstall-ChocolateyPackage`.
 
 Build and test in a disposable Windows VM:
 
