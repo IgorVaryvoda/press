@@ -183,7 +183,7 @@ pkgdesc='Audit and optimise images locally'
 arch=('x86_64')
 url='https://imageguide.dev/'
 license=('MIT')
-depends=('dav1d' 'glibc' 'libavif' 'libgcc' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11')
+depends=('dav1d' 'glibc' 'hicolor-icon-theme' 'libavif' 'libgcc' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11')
 provides=('press')
 conflicts=('press')
 options=('!strip')
@@ -192,6 +192,7 @@ sha256sums=('X86_64_SHA256')
 
 package() {
   cp -a "${srcdir}/usr" "${pkgdir}/"
+  mv "${pkgdir}/usr/share/licenses/press" "${pkgdir}/usr/share/licenses/${pkgname}"
 }
 ```
 
