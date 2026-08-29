@@ -18,9 +18,15 @@ rewrite your files. This one can.
 
 ## Install
 
-Download the current installer from [GitHub Releases](https://github.com/IgorVaryvoda/press/releases/latest):
+On macOS, install the signed app with Homebrew:
 
-- Linux: `.AppImage`
+```bash
+brew install --cask IgorVaryvoda/press/press
+```
+
+Or download the current installer from [GitHub Releases](https://github.com/IgorVaryvoda/press/releases/latest):
+
+- Linux: `.deb` for Ubuntu 24.04 x86-64, or `.AppImage`
 - macOS: `.dmg` for Apple Silicon or Intel
 - Windows: `.exe` installer
 
@@ -29,8 +35,9 @@ run `chmod +x press_*.AppImage`, then `./press_*.AppImage`. In Files, the equiva
 is **Properties → Permissions → Allow executing file as program**. Ubuntu users can
 use the `.deb` instead.
 
-Packaged builds check that release feed in the background at launch. An available
-update is downloaded, signature-checked, and installed before Press relaunches itself.
+AppImage, macOS, and Windows builds check that release feed in the background at
+launch. An available update is downloaded, signature-checked, and installed before
+Press relaunches itself. Native Linux packages update through their package manager.
 Run `press update` to check and install one immediately. Source and package-manager
 builds do not update themselves.
 
