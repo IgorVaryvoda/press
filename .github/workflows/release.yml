@@ -22,7 +22,7 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-24.04
-            formats: appimage
+            formats: appimage,deb,pacman
             platform: linux-x86_64
             update_glob: "*.AppImage"
             update_format: appimage
@@ -160,6 +160,28 @@ jobs:
             exit 1
           fi
 
+      - name: Verify native Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          deb=$(find dist -maxdepth 1 -type f -name 'press_*_amd64.deb' -print -quit)
+          pacman=$(find dist -maxdepth 1 -type f -name 'press_*_x86_64.tar.gz' -print -quit)
+          test -n "$deb"
+          test -n "$pacman"
+          test -n "$(dpkg-deb --field "$deb" Maintainer)"
+          test -n "$(dpkg-deb --field "$deb" Depends)"
+          dpkg-deb --contents "$deb" | grep -q 'usr/bin/press$'
+          dpkg-deb --contents "$deb" | grep -q 'usr/share/applications/press.desktop$'
+          dpkg-deb --contents "$deb" | grep -q 'usr/share/icons/.*/press.png$'
+          dpkg-deb --contents "$deb" | grep -q 'usr/share/doc/press/copyright$'
+          tar -tzf "$pacman" | grep -q '^usr/bin/press$'
+          tar -tzf "$pacman" | grep -q '^usr/share/applications/press.desktop$'
+          tar -tzf "$pacman" | grep -q '^usr/share/icons/.*/press.png$'
+          tar -tzf "$pacman" | grep -q '^usr/share/licenses/press/LICENSE$'
+          sudo apt-get install -y "$deb"
+          press --help >/dev/null
+          sudo apt-get remove -y press
+
       - name: Record update package
         shell: bash
         env:
@@ -196,6 +218,8 @@ jobs:
             dist/*.app.tar.gz.sig
             dist/*.exe
             dist/*.exe.sig
+            dist/*.deb
+            dist/press_*_x86_64.tar.gz
             dist/fragment-*.json
 
   publish:
@@ -242,6 +266,18 @@ jobs:
       - name: Verify tag matches Cargo version
         run: test "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" = "$GITHUB_REF_NAME"
 
+      - name: Build checksum ledger
+        run: |
+          cd release-assets
+          sha256sum \
+            *.AppImage \
+            *.dmg \
+            *.app.tar.gz \
+            *.exe \
+            *.deb \
+            press_*_x86_64.tar.gz \
+            latest.json > SHA256SUMS
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -251,4 +287,5 @@ jobs:
             release-assets/*.dmg release-assets/*.dmg.sig \
             release-assets/*.app.tar.gz release-assets/*.app.tar.gz.sig \
             release-assets/*.exe release-assets/*.exe.sig \
-            release-assets/latest.json
+            release-assets/*.deb release-assets/press_*_x86_64.tar.gz \
+            release-assets/latest.json release-assets/SHA256SUMS

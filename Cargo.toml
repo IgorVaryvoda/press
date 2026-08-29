@@ -2,6 +2,7 @@
 name = "press"
 version = "0.3.11"
 edition = "2024"
+authors = ["Igor Varyvoda <igor@varyvoda.com>"]
 description = "Audit and optimise images locally, with optional Sirv and Studio actions"
 
 [[bin]]
@@ -71,6 +72,7 @@ product-name = "Press"
 # product-name. Change it only in a release that accepts a clean reinstall.
 identifier = "dev.imageguide.desktop"
 description = "Audit and optimise images locally, with optional Sirv and Studio actions"
+long-description = "Press audits folders of images and converts them locally to WebP, AVIF, or JPEG XL."
 homepage = "https://imageguide.dev"
 license-file = "LICENSE"
 category = "Graphics and Design"
@@ -80,6 +82,33 @@ resources = [
     { src = "target/visioncpp-runtime/lib", target = "visioncpp/lib" },
     { src = "target/visioncpp-runtime/LICENSE", target = "visioncpp/LICENSE" },
 ]
+
+[package.metadata.packager.deb]
+package-name = "press"
+section = "graphics"
+priority = "optional"
+depends = [
+    "libavif16 (>= 1.0.4)",
+    "libc6 (>= 2.39)",
+    "libdav1d7 (>= 0.1.0)",
+    "libgcc-s1 (>= 4.2)",
+    "libxcb1 (>= 1.12)",
+    "libxkbcommon-x11-0 (>= 0.5.0)",
+    "libxkbcommon0 (>= 0.5.0)",
+]
+files = { "LICENSE" = "/usr/share/doc/press/copyright" }
+
+[package.metadata.packager.pacman]
+depends = [
+    "dav1d",
+    "glibc",
+    "libavif",
+    "libgcc",
+    "libxcb",
+    "libxkbcommon",
+    "libxkbcommon-x11",
+]
+files = { "LICENSE" = "/usr/share/licenses/press/LICENSE" }
 
 [package.metadata.packager.macos]
 # The env var override did not take, so the real identity lives here. Ad-hoc
