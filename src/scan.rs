@@ -299,105 +299,118 @@ pub fn scan_progressive(
     output_root: &Path,
     mut publish: impl FnMut(&[Entry]),
 ) -> Scan {
-    let mut candidates = Vec::new();
-    let mut skipped_raw = 0;
-    let mut existing_output = 0;
-    let mut walk_errors = Vec::new();
-    let mut skipped_packages = 0;
-    let counted_packages = &mut skipped_packages;
-
-    // `filter_entry` prunes: a package directory is never descended into, so its
-    // unreadable interior is never even attempted. Walk errors pass the predicate
-    // untouched — a folder that is locked and not a package still names itself.
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            // The folder the user asked for is entered whatever it is called.
-            if entry.depth() == 0 {
-                return true;
-            }
-            // Output is already excluded below, but it still has to be walked so the
-            // root output count remains truthful. A package there is not skipped input.
-            if entry
-                .path()
-                .components()
-                .any(|part| part.as_os_str() == OUTPUT_DIR)
-                || entry.path().starts_with(output_root)
-            {
-                return true;
-            }
-            if entry.file_type().is_dir() && is_opaque_package(entry.path()) {
-                *counted_packages += 1;
-                return false;
-            }
-            true
-        })
-    {
-        // A directory whose readdir fails yields an Err here. Dropping it would
-        // report a folder that was never fully looked at as fully audited, so the
-        // path is kept and named in the same way decode failures are.
-        let Ok(entry) = entry else {
-            if let Some(path) = entry.unwrap_err().path() {
-                walk_errors.push(path.to_path_buf());
-            }
-            continue;
-        };
-        let file = entry;
-        if !file.file_type().is_file() {
-            continue;
-        }
-        let relative = file.path().strip_prefix(root).unwrap_or(file.path());
-        let in_output = file.path().starts_with(output_root);
-        if in_output
-            || relative
-                .components()
-                .any(|part| part.as_os_str() == OUTPUT_DIR)
-        {
-            if in_output {
-                existing_output += 1;
-            }
-            continue;
-        }
-        if is_raw(file.path()) {
-            skipped_raw += 1;
-            continue;
-        }
-        candidates.push(file.into_path());
-    }
-
-    // A probe is an open and a header read, so a few thousand of them are waiting on
-    // the disk rather than arithmetic. Split the list across the cores and read them
-    // at the same time: the folder a photographer points this at holds thousands, and
-    // one at a time is the whole "Scanning…" wait.
     let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
-    let chunk = candidates.len().div_ceil(threads).max(1);
-    let mut entries = Vec::with_capacity(candidates.len());
+    let mut entries = Vec::new();
     let mut unreadable = Vec::new();
     let mut published = 0;
-    std::thread::scope(|scope| {
+    let summary = std::thread::scope(|scope| {
         enum Probed {
             Entry(Entry),
             Unreadable(PathBuf),
         }
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let workers: Vec<_> = candidates
-            .chunks(chunk)
-            .map(|chunk| {
-                let sender = sender.clone();
+        #[derive(Default)]
+        struct WalkSummary {
+            skipped_raw: usize,
+            skipped_packages: usize,
+            walk_errors: Vec<PathBuf>,
+            existing_output: usize,
+        }
+
+        // The walker can get only one path ahead of each worker. Downloads-style
+        // folders may hold a million non-images; retaining all of their PathBufs
+        // before probing makes memory scale with the folder instead of useful rows.
+        let (path_sender, path_receiver) = std::sync::mpsc::sync_channel(threads);
+        let path_receiver = std::sync::Arc::new(std::sync::Mutex::new(path_receiver));
+        let walker = scope.spawn(move || {
+            let mut summary = WalkSummary::default();
+            let counted_packages = &mut summary.skipped_packages;
+
+            // `filter_entry` prunes: a package directory is never descended into, so
+            // its unreadable interior is never even attempted. Walk errors pass the
+            // predicate untouched — a locked folder still names itself.
+            for entry in WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|entry| {
+                    if entry.depth() == 0 {
+                        return true;
+                    }
+                    // Output is excluded below, but still walked so its count remains
+                    // truthful. A package there is not skipped input.
+                    if entry
+                        .path()
+                        .components()
+                        .any(|part| part.as_os_str() == OUTPUT_DIR)
+                        || entry.path().starts_with(output_root)
+                    {
+                        return true;
+                    }
+                    if entry.file_type().is_dir() && is_opaque_package(entry.path()) {
+                        *counted_packages += 1;
+                        return false;
+                    }
+                    true
+                })
+            {
+                let Ok(file) = entry else {
+                    if let Some(path) = entry.unwrap_err().path() {
+                        summary.walk_errors.push(path.to_path_buf());
+                    }
+                    continue;
+                };
+                if !file.file_type().is_file() {
+                    continue;
+                }
+                let relative = file.path().strip_prefix(root).unwrap_or(file.path());
+                let in_output = file.path().starts_with(output_root);
+                if in_output
+                    || relative
+                        .components()
+                        .any(|part| part.as_os_str() == OUTPUT_DIR)
+                {
+                    if in_output {
+                        summary.existing_output += 1;
+                    }
+                    continue;
+                }
+                if is_raw(file.path()) {
+                    summary.skipped_raw += 1;
+                    continue;
+                }
+                if path_sender.send(file.into_path()).is_err() {
+                    break;
+                }
+            }
+            summary
+        });
+
+        let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(threads);
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                let path_receiver = path_receiver.clone();
+                let result_sender = result_sender.clone();
                 scope.spawn(move || {
-                    for path in chunk {
-                        match probe(path) {
+                    loop {
+                        let path = {
+                            let receiver = path_receiver
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            receiver.recv()
+                        };
+                        let Ok(path) = path else {
+                            return;
+                        };
+                        match probe(&path) {
                             Some(entry) => {
-                                if sender.send(Probed::Entry(entry)).is_err() {
+                                if result_sender.send(Probed::Entry(entry)).is_err() {
                                     return;
                                 }
                             }
                             // Only report things that claimed to be images. A README is
                             // not a failure.
-                            None if looks_like_an_image(path)
-                                && sender.send(Probed::Unreadable(path.clone())).is_err() =>
+                            None if looks_like_an_image(&path)
+                                && result_sender.send(Probed::Unreadable(path)).is_err() =>
                             {
                                 return;
                             }
@@ -407,9 +420,10 @@ pub fn scan_progressive(
                 })
             })
             .collect();
-        drop(sender);
+        drop(path_receiver);
+        drop(result_sender);
 
-        for result in receiver {
+        for result in result_receiver {
             match result {
                 Probed::Entry(entry) => {
                     entries.push(entry);
@@ -427,7 +441,13 @@ pub fn scan_progressive(
             }
         }
         for worker in workers {
-            let _ = worker.join();
+            if let Err(panic) = worker.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        match walker.join() {
+            Ok(summary) => summary,
+            Err(panic) => std::panic::resume_unwind(panic),
         }
     });
     if published < entries.len() {
@@ -438,11 +458,11 @@ pub fn scan_progressive(
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
     Scan {
         entries,
-        skipped_raw,
-        skipped_packages,
+        skipped_raw: summary.skipped_raw,
+        skipped_packages: summary.skipped_packages,
         unreadable,
-        walk_errors,
-        existing_output,
+        walk_errors: summary.walk_errors,
+        existing_output: summary.existing_output,
     }
 }
 
@@ -757,10 +777,10 @@ mod tests {
         );
     }
 
-    /// The walk hands its files to one thread per core, so every count and the sort
-    /// order have to survive being assembled from several chunks instead of one loop.
+    /// The walk streams files to one worker per core, so every count and the sort order
+    /// have to survive being assembled from the bounded queue instead of one loop.
     #[test]
-    fn a_folder_larger_than_one_chunk_reports_every_file_once() {
+    fn a_streamed_folder_reports_every_file_once() {
         let dir = temp_dir("parallel");
         for index in 0..40u32 {
             write_sample(&dir, &format!("s{index:02}.png"), 8 + index, 8);
