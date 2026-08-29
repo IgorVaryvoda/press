@@ -155,6 +155,8 @@ an in-app updater. Do not strip, re-sign, or rebuild the notarised DMG.
 Test on both macOS architectures:
 
 ```bash
+brew tap IgorVaryvoda/press
+brew trust --cask IgorVaryvoda/press/press
 brew audit --cask --strict press
 brew install --cask IgorVaryvoda/press/press
 press --help
@@ -185,7 +187,7 @@ depends=('dav1d' 'glibc' 'libavif' 'libgcc' 'libxcb' 'libxkbcommon' 'libxkbcommo
 provides=('press')
 conflicts=('press')
 options=('!strip')
-source=("press-${pkgver}-x86_64.tar.gz::https://github.com/IgorVaryvoda/press/releases/download/v${pkgver}/press_${pkgver}_x86_64.tar.gz")
+source=("press-${pkgver}-${CARCH}.tar.gz::https://github.com/IgorVaryvoda/press/releases/download/v${pkgver}/press_${pkgver}_${CARCH}.tar.gz")
 sha256sums=('X86_64_SHA256')
 
 package() {
@@ -318,10 +320,11 @@ automated checks and moderation to complete before advertising the command.
 
 ## Automation boundary
 
-Publish the first version manually. Once all four channels have completed one
-install/upgrade/uninstall cycle, automate only the repetitive version, URL, checksum,
-`.SRCINFO`, and repository-index updates. Keep registry credentials and the APT
-private key in their package repositories, not in this application repository.
+Manually dispatch the first publish. Once all four channels have completed one
+install/upgrade/uninstall cycle, connect release tags only to the repetitive version,
+URL, checksum, `.SRCINFO`, and repository-index updates. Keep registry credentials
+and the APT private key in their package repositories, not in this application
+repository.
 
 Every automated update must still stop when the GitHub release is incomplete, a
 checksum differs, a native package has empty dependency metadata, or a clean install
@@ -330,6 +333,7 @@ test fails.
 ## References
 
 - [Homebrew Cask Cookbook](https://docs.brew.sh/Cask-Cookbook)
+- [Homebrew tap trust](https://docs.brew.sh/Tap-Trust)
 - [AppImage quickstart](https://docs.appimage.org/introduction/quickstart.html)
 - [Distributing AppImages](https://docs.appimage.org/packaging-guide/distribution.html)
 - [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines)
