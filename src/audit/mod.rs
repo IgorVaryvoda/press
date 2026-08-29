@@ -74,6 +74,14 @@ const DENSITY_HEAVY: f32 = 1.5;
 /// that to be true.
 const HEAVY_MIN_BYTES: u64 = 32_768;
 const HEAVY_MIN_PIXELS: u64 = 64 * 64;
+
+/// Shared with the headless audit so its finding is exactly the one shown here.
+pub(super) fn is_heavy(entry: &Entry) -> bool {
+    entry.bytes >= HEAVY_MIN_BYTES
+        && u64::from(entry.width) * u64::from(entry.height) >= HEAVY_MIN_PIXELS
+        && entry.bytes_per_pixel() > DENSITY_HEAVY
+}
+
 /// Gallery rows stay uniform for virtualisation, but the tile itself grows to use the
 /// available surface instead of leaving a dead strip beside three tiny cards.
 const TILE_MIN: f32 = 168.;
@@ -1178,11 +1186,7 @@ impl Finding {
     pub(super) fn holds(self, entry: &Entry) -> bool {
         match self {
             Finding::Mislabelled => entry.extension_lies(),
-            Finding::Heavy => {
-                entry.bytes >= HEAVY_MIN_BYTES
-                    && u64::from(entry.width) * u64::from(entry.height) >= HEAVY_MIN_PIXELS
-                    && entry.bytes_per_pixel() > DENSITY_HEAVY
-            }
+            Finding::Heavy => is_heavy(entry),
             Finding::Marketplace => acquisition::marketplace_fails(entry),
         }
     }

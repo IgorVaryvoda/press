@@ -22,6 +22,7 @@ mod thumbs;
 mod update;
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use convert::{Format, MaxEdge, Quality};
@@ -29,12 +30,48 @@ use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::{ActiveTheme, Root};
 use gpui_platform::application;
 use scan::{Entry, format_bytes};
+use serde::Serialize;
 
 /// The smallest compositor window that supports every production view.
 const WINDOW_MIN_WIDTH: f32 = 760.;
 const WINDOW_MIN_HEIGHT: f32 = 560.;
 const WINDOW_DEFAULT_WIDTH: f32 = 900.;
 const WINDOW_DEFAULT_HEIGHT: f32 = 640.;
+
+const HELP: &str = concat!(
+    "Press ",
+    env!("CARGO_PKG_VERSION"),
+    " — audit and optimise images locally\n\n",
+    "Usage:\n",
+    "  press [PATH] [OPTIONS]\n",
+    "  press audit <PATH> [--json]\n",
+    "  press convert <PATH> [OPTIONS]\n",
+    "  press skill\n\n",
+    "Commands:\n",
+    "  audit      Read image headers without opening a window or writing files\n",
+    "  convert    Re-encode a file or folder into optimized/ without a window\n",
+    "  skill      Print the bundled Agent Skill to stdout\n",
+    "  help       Print this help\n",
+    "  version    Print the version\n\n",
+    "Options:\n",
+    "  --json                    Write one schema-versioned JSON document\n",
+    "  --format <webp|avif|jxl>  Output format (default: webp)\n",
+    "  --quality <1..100>        Lossy quality (default: 80)\n",
+    "  --lossless                Lossless WebP or JPEG XL\n",
+    "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
+    "  --grid                    Open the window in gallery view\n",
+    "  -h, --help                Print this help\n",
+    "  -V, --version             Print the version\n\n",
+    "Compatibility:\n",
+    "  --webp, --avif, --jxl and PATH --convert remain supported.\n\n",
+    "Exit status:\n",
+    "  0  Complete success\n",
+    "  1  An audit was incomplete or one or more conversions failed\n",
+    "  2  Invalid invocation or target\n\n",
+    "With --json, stdout contains only JSON; diagnostics go to stderr.\n"
+);
+
+const AGENT_SKILL: &str = include_str!("../.agents/skills/press-cli/SKILL.md");
 
 /// A persisted size can be absent or corrupted. Keep restore policy pure so native
 /// startup and tests agree about the supported window.
@@ -50,14 +87,25 @@ fn restored_window_size(width: Option<f32>, height: Option<f32>) -> (f32, f32) {
     (width, height)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    Window,
+    Audit,
+    Convert,
+    Skill,
+    Help,
+    Version,
+}
+
 struct Args {
     /// `None` when launched with no path: the window opens on its empty state.
     root: Option<PathBuf>,
-    convert: bool,
+    command: Command,
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
     grid: bool,
+    json: bool,
     unknown: Vec<String>,
 }
 
@@ -73,20 +121,49 @@ fn parse_args() -> Args {
 
 fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut root = None;
-    let mut convert = false;
+    let mut command = Command::Window;
     let mut format = Format::WebP;
     let mut quality = Quality::lossy(80.);
     let mut max_edge = MaxEdge::FULL;
     let mut grid = false;
+    let mut json = false;
     let mut unknown = Vec::new();
+    let mut conversion_option = false;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
-            "--convert" => convert = true,
-            "--avif" => format = Format::Avif,
-            "--jxl" => format = Format::JpegXl,
+            "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
+            "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
+            "skill" if root.is_none() && command == Command::Window => command = Command::Skill,
+            "help" if root.is_none() && command == Command::Window => command = Command::Help,
+            "version" if root.is_none() && command == Command::Window => command = Command::Version,
+            "--convert" => select_command(&mut command, Command::Convert, "--convert")?,
+            "--audit" => select_command(&mut command, Command::Audit, "--audit")?,
+            "--format" => {
+                conversion_option = true;
+                let value = rest
+                    .next()
+                    .ok_or_else(|| "--format needs webp, avif, or jxl".to_string())?;
+                format = match value.as_str() {
+                    "webp" => Format::WebP,
+                    "avif" => Format::Avif,
+                    "jxl" => Format::JpegXl,
+                    _ => return Err(format!("--format needs webp, avif, or jxl, got {value:?}")),
+                };
+            }
+            "--avif" => {
+                conversion_option = true;
+                format = Format::Avif;
+            }
+            "--jxl" => {
+                conversion_option = true;
+                format = Format::JpegXl;
+            }
             "--max-edge" => {
-                let value = rest.next().unwrap_or_else(|| "nothing".to_string());
+                conversion_option = true;
+                let value = rest
+                    .next()
+                    .ok_or_else(|| "--max-edge needs a positive number".to_string())?;
                 let edge = value
                     .parse()
                     .map_err(|_| format!("--max-edge needs a number, got {value:?}"))?;
@@ -95,43 +172,304 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 }
                 max_edge = MaxEdge(Some(edge));
             }
-            "--webp" => format = Format::WebP,
+            "--webp" => {
+                conversion_option = true;
+                format = Format::WebP;
+            }
             "--grid" => grid = true,
-            "--lossless" => quality = Quality::LOSSLESS,
+            "--json" => json = true,
+            "--lossless" => {
+                conversion_option = true;
+                quality = Quality::LOSSLESS;
+            }
             "--quality" => {
-                let value = rest.next().unwrap_or_else(|| "nothing".to_string());
+                conversion_option = true;
+                let value = rest
+                    .next()
+                    .ok_or_else(|| "--quality needs a number from 1 to 100".to_string())?;
                 let quality_value: f32 = value
                     .parse()
                     .map_err(|_| format!("--quality needs a number, got {value:?}"))?;
                 if !quality_value.is_finite() {
                     return Err(format!("--quality needs a finite number, got {value:?}"));
                 }
+                if !(1. ..=100.).contains(&quality_value) {
+                    return Err(format!("--quality needs 1 to 100, got {value:?}"));
+                }
                 quality = Quality::lossy(quality_value);
             }
+            "-h" | "--help" => command = Command::Help,
+            "-V" | "--version" => command = Command::Version,
             "--" => {
                 for argument in rest {
-                    root = Some(PathBuf::from(argument));
+                    set_root(&mut root, argument)?;
                 }
                 break;
             }
             _ if argument.starts_with('-') => unknown.push(argument),
-            _ => root = Some(PathBuf::from(argument)),
+            _ => set_root(&mut root, argument)?,
         }
     }
 
+    if matches!(command, Command::Help | Command::Version) {
+        return Ok(Args {
+            root,
+            command,
+            format,
+            quality,
+            max_edge,
+            grid,
+            json,
+            unknown,
+        });
+    }
+    if command == Command::Skill
+        && (root.is_some() || conversion_option || grid || json || !unknown.is_empty())
+    {
+        return Err("skill takes no arguments".into());
+    }
+    if command == Command::Audit && conversion_option {
+        return Err("audit does not accept conversion options".into());
+    }
+    if command == Command::Audit && grid {
+        return Err("--grid is available only for the window".into());
+    }
+    if command == Command::Convert && grid {
+        return Err("--grid is available only for the window".into());
+    }
+    if command == Command::Window && json {
+        return Err("--json needs audit or convert".into());
+    }
     if !format.supports_lossless() && quality == Quality::LOSSLESS {
         return Err("--lossless is available only with --webp or --jxl".into());
     }
 
     Ok(Args {
         root,
-        convert,
+        command,
         format,
         quality,
         max_edge,
         grid,
+        json,
         unknown,
     })
+}
+
+fn select_command(command: &mut Command, selected: Command, flag: &str) -> Result<(), String> {
+    if *command != Command::Window && *command != selected {
+        return Err(format!("{flag} conflicts with the selected command"));
+    }
+    *command = selected;
+    Ok(())
+}
+
+fn set_root(root: &mut Option<PathBuf>, value: String) -> Result<(), String> {
+    if root.is_some() {
+        return Err("only one file or folder may be given".into());
+    }
+    *root = Some(PathBuf::from(value));
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ScanSummary {
+    images: usize,
+    bytes: u64,
+    heavy: usize,
+    mislabelled: usize,
+    camera_raw_skipped: usize,
+    macos_packages_skipped: usize,
+    unreadable: usize,
+    walk_errors: usize,
+    existing_outputs: usize,
+}
+
+impl ScanSummary {
+    fn from_scan(scanned: &scan::Scan) -> Self {
+        Self {
+            images: scanned.entries.len(),
+            bytes: scanned.entries.iter().map(|entry| entry.bytes).sum(),
+            heavy: scanned
+                .entries
+                .iter()
+                .filter(|entry| audit::is_heavy(entry))
+                .count(),
+            mislabelled: scanned
+                .entries
+                .iter()
+                .filter(|entry| entry.extension_lies())
+                .count(),
+            camera_raw_skipped: scanned.skipped_raw,
+            macos_packages_skipped: scanned.skipped_packages,
+            unreadable: scanned.unreadable.len(),
+            walk_errors: scanned.walk_errors.len(),
+            existing_outputs: scanned.existing_output,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AuditFile {
+    path: String,
+    format: String,
+    width: u32,
+    height: u32,
+    bytes: u64,
+    bytes_per_pixel: f32,
+    heavy: bool,
+    mislabelled: bool,
+}
+
+#[derive(Serialize)]
+struct AuditReport {
+    schema_version: u32,
+    command: &'static str,
+    target: String,
+    summary: ScanSummary,
+    files: Vec<AuditFile>,
+    unreadable: Vec<String>,
+    walk_errors: Vec<String>,
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn sorted_paths(paths: &[PathBuf]) -> Vec<String> {
+    let mut paths: Vec<String> = paths.iter().map(|path| path_text(path)).collect();
+    paths.sort();
+    paths
+}
+
+fn audit_files(entries: &[Entry]) -> Vec<AuditFile> {
+    let mut files: Vec<_> = entries
+        .iter()
+        .map(|entry| AuditFile {
+            path: path_text(&entry.path),
+            format: scan::format_name(entry.format)
+                .to_ascii_lowercase()
+                .replace(' ', "_"),
+            width: entry.width,
+            height: entry.height,
+            bytes: entry.bytes,
+            bytes_per_pixel: entry.bytes_per_pixel(),
+            heavy: audit::is_heavy(entry),
+            mislabelled: entry.extension_lies(),
+        })
+        .collect();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files
+}
+
+fn audit_report(target: &Path, scanned: &scan::Scan) -> AuditReport {
+    AuditReport {
+        schema_version: 1,
+        command: "audit",
+        target: path_text(target),
+        summary: ScanSummary::from_scan(scanned),
+        files: audit_files(&scanned.entries),
+        unreadable: sorted_paths(&scanned.unreadable),
+        walk_errors: sorted_paths(&scanned.walk_errors),
+    }
+}
+
+fn write_json(value: &impl Serialize) -> Result<(), String> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    serde_json::to_writer(&mut out, value).map_err(|error| error.to_string())?;
+    writeln!(out).map_err(|error| error.to_string())
+}
+
+fn print_audit(target: &Path, scanned: &scan::Scan) {
+    let summary = ScanSummary::from_scan(scanned);
+    println!(
+        "{} images, {} on disk, {} heavy, {} mislabelled",
+        summary.images,
+        format_bytes(summary.bytes),
+        summary.heavy,
+        summary.mislabelled
+    );
+    for entry in &scanned.entries {
+        let relative = entry.path.strip_prefix(target).unwrap_or(&entry.path);
+        let mut findings = Vec::new();
+        if audit::is_heavy(entry) {
+            findings.push("heavy");
+        }
+        if entry.extension_lies() {
+            findings.push("mislabelled");
+        }
+        println!(
+            "{:<52} {:<8} {:>5}x{:<5} {:>9}  {:>5.2} B/px  {}",
+            relative.display(),
+            scan::format_name(entry.format),
+            entry.width,
+            entry.height,
+            format_bytes(entry.bytes),
+            entry.bytes_per_pixel(),
+            findings.join(", ")
+        );
+    }
+}
+
+fn print_scan_errors(scanned: &scan::Scan) {
+    for path in &scanned.unreadable {
+        eprintln!("press: could not read image {}", path.display());
+    }
+    for path in &scanned.walk_errors {
+        eprintln!("press: could not enter {}", path.display());
+    }
+}
+
+#[derive(Serialize)]
+struct ConversionFile {
+    source: String,
+    status: &'static str,
+    output: Option<String>,
+    source_bytes: u64,
+    output_bytes: Option<u64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    error: Option<String>,
+}
+
+struct ConversionRun {
+    before: u64,
+    after: u64,
+    failed: usize,
+    files: Vec<ConversionFile>,
+}
+
+#[derive(Serialize)]
+struct ConversionOptions {
+    format: &'static str,
+    quality: Option<f32>,
+    max_edge: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ConversionSummary {
+    attempted: usize,
+    converted: usize,
+    failed: usize,
+    source_bytes: u64,
+    output_bytes: u64,
+    grew: bool,
+    changed_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ConversionReport {
+    schema_version: u32,
+    command: &'static str,
+    target: String,
+    output: String,
+    options: ConversionOptions,
+    scan: ScanSummary,
+    summary: ConversionSummary,
+    files: Vec<ConversionFile>,
+    unreadable: Vec<String>,
+    walk_errors: Vec<String>,
 }
 
 /// Convert without opening a window, so the same work is scriptable and testable.
@@ -141,7 +479,8 @@ fn convert_headless(
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
-) -> usize {
+    json: bool,
+) -> ConversionRun {
     let out_dir = root.join(scan::OUTPUT_DIR);
     let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
     let by_path: HashMap<&Path, &Entry> = entries
@@ -151,7 +490,12 @@ fn convert_headless(
 
     // Lines arrive as files finish rather than in list order, which is what running
     // several at once looks like. The totals are the same either way.
-    let totals = parking_lot::Mutex::new((0u64, 0u64, 0usize));
+    let totals = parking_lot::Mutex::new(ConversionRun {
+        before: 0,
+        after: 0,
+        failed: 0,
+        files: Vec::with_capacity(entries.len()),
+    });
     convert::convert_each(
         root,
         &sources,
@@ -166,8 +510,8 @@ fn convert_headless(
             let mut totals = totals.lock();
             match converted {
                 Ok(converted) => {
-                    totals.0 += entry.bytes;
-                    totals.1 += converted.bytes;
+                    totals.before += entry.bytes;
+                    totals.after += converted.bytes;
                     let delta = entry.bytes as i64 - converted.bytes as i64;
                     let percent = delta as f64 / entry.bytes.max(1) as f64 * 100.;
                     let resized = if converted.width == entry.width {
@@ -175,76 +519,133 @@ fn convert_headless(
                     } else {
                         format!("  {}x{}", converted.width, converted.height)
                     };
-                    println!(
-                        "{:<52} {:>9} -> {:>9}  {percent:+.0}%{resized}",
-                        entry.name(),
-                        format_bytes(entry.bytes),
-                        format_bytes(converted.bytes)
-                    );
+                    if !json {
+                        println!(
+                            "{:<52} {:>9} -> {:>9}  {percent:+.0}%{resized}",
+                            entry.name(),
+                            format_bytes(entry.bytes),
+                            format_bytes(converted.bytes)
+                        );
+                    }
+                    totals.files.push(ConversionFile {
+                        source: path_text(source),
+                        status: "converted",
+                        output: Some(path_text(&converted.written)),
+                        source_bytes: entry.bytes,
+                        output_bytes: Some(converted.bytes),
+                        width: Some(converted.width),
+                        height: Some(converted.height),
+                        error: None,
+                    });
                 }
                 Err(error) => {
-                    totals.2 += 1;
+                    totals.failed += 1;
                     let reason = error
                         .reason()
                         .map(|reason| format!(": {reason}"))
                         .unwrap_or_default();
-                    println!("{:<52} failed{reason}", entry.name());
+                    if !json {
+                        println!("{:<52} failed{reason}", entry.name());
+                    }
+                    totals.files.push(ConversionFile {
+                        source: path_text(source),
+                        status: "failed",
+                        output: None,
+                        source_bytes: entry.bytes,
+                        output_bytes: None,
+                        width: None,
+                        height: None,
+                        error: Some(error.reason().unwrap_or("conversion failed").to_string()),
+                    });
                 }
             }
         },
     );
-    let (before, after, failed) = *totals.lock();
+    let mut totals = totals.into_inner();
+    totals
+        .files
+        .sort_by(|left, right| left.source.cmp(&right.source));
 
-    let growth = after > before;
-    let delta = before.abs_diff(after);
-    let percent = delta as f64 / before.max(1) as f64 * 100.;
-    println!(
-        "\n{} converted to {} at {} ({}): {} -> {}, {} {} ({percent:.0}%){}",
-        entries.len() - failed,
-        format.label(),
-        quality.label(),
-        max_edge.label(),
-        format_bytes(before),
-        format_bytes(after),
-        if growth { "grew" } else { "saved" },
-        format_bytes(delta),
-        if failed == 0 {
-            String::new()
-        } else {
-            format!(", {failed} failed")
+    if !json {
+        let growth = totals.after > totals.before;
+        let delta = totals.before.abs_diff(totals.after);
+        let percent = delta as f64 / totals.before.max(1) as f64 * 100.;
+        println!(
+            "\n{} converted to {} at {} ({}): {} -> {}, {} {} ({percent:.0}%){}",
+            entries.len() - totals.failed,
+            format.label(),
+            quality.label(),
+            max_edge.label(),
+            format_bytes(totals.before),
+            format_bytes(totals.after),
+            if growth { "grew" } else { "saved" },
+            format_bytes(delta),
+            if totals.failed == 0 {
+                String::new()
+            } else {
+                format!(", {} failed", totals.failed)
+            }
+        );
+        if entries.len() - totals.failed > 0 {
+            println!("written to {}", out_dir.display());
         }
-    );
-    if entries.len() - failed > 0 {
-        println!("written to {}", out_dir.display());
     }
-    failed
+    totals
 }
 
 fn main() {
     let args = parse_args();
 
-    if args.convert {
-        if let Some(first) = args.unknown.first() {
-            eprintln!("press: unknown option {first}");
-            std::process::exit(2);
+    match args.command {
+        Command::Help => {
+            print!("{HELP}");
+            return;
         }
-    } else {
+        Command::Version => {
+            println!("press {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Command::Skill => {
+            print!("{AGENT_SKILL}");
+            return;
+        }
+        Command::Window | Command::Audit | Command::Convert => {}
+    }
+
+    if args.command == Command::Window {
         for argument in &args.unknown {
             eprintln!("press: ignoring unknown option {argument}");
         }
+    } else if let Some(first) = args.unknown.first() {
+        eprintln!("press: unknown option {first}");
+        std::process::exit(2);
     }
 
-    let remembered = settings::load();
+    // Headless commands do not inherit window state. An agent should get the same
+    // audit and output location on every machine, independent of what its user last
+    // clicked in the app.
+    let remembered = if args.command == Command::Window {
+        settings::load()
+    } else {
+        settings::Settings::default()
+    };
     let target = args.root.clone().or_else(|| {
         remembered
             .folder
             .clone()
-            .filter(|folder| folder.is_dir() && !args.convert)
+            .filter(|folder| folder.is_dir() && args.command == Command::Window)
     });
 
     let Some(target) = target else {
-        if args.convert {
-            eprintln!("press: --convert needs a folder");
+        if args.command != Command::Window {
+            eprintln!(
+                "press: {} needs a file or folder",
+                if args.command == Command::Audit {
+                    "audit"
+                } else {
+                    "convert"
+                }
+            );
             std::process::exit(2);
         }
         // No path given: open the window on its empty state and let the user pick.
@@ -276,7 +677,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    if !args.convert {
+    if args.command == Command::Window {
         return run_window(
             Launch {
                 root: PathBuf::new(),
@@ -316,33 +717,77 @@ fn main() {
             parent,
         )
     } else {
-        (
-            scan::scan(&target, &remembered.output.root(&target)),
-            target.clone(),
-        )
+        let output = target.join(scan::OUTPUT_DIR);
+        (scan::scan(&target, &output), target.clone())
     };
-    let scanned_unreadable_count = scanned.unreadable.len();
-    let walk_error_count = scanned.walk_errors.len();
-    let entries = scanned.entries;
-    println!(
-        "{} images, {} on disk, {} camera raw skipped",
-        entries.len(),
-        format_bytes(entries.iter().map(|entry| entry.bytes).sum()),
-        scanned.skipped_raw
-    );
-    for path in &scanned.walk_errors {
-        eprintln!("press: could not enter {}", path.display());
-    }
-    match scanned.skipped_packages {
-        0 => {}
-        1 => println!("1 macOS package skipped"),
-        many => println!("{many} macOS packages skipped"),
+    print_scan_errors(&scanned);
+    let unread = scanned.unreadable.len() + scanned.walk_errors.len();
+
+    if args.command == Command::Audit {
+        let written = if args.json {
+            write_json(&audit_report(&target, &scanned))
+        } else {
+            print_audit(&root, &scanned);
+            Ok(())
+        };
+        if let Err(error) = written {
+            eprintln!("press: could not write JSON: {error}");
+            std::process::exit(1);
+        }
+        std::process::exit(if unread == 0 { 0 } else { 1 });
     }
 
-    let failed = convert_headless(&root, &entries, args.format, args.quality, args.max_edge);
-    let unread = scanned_unreadable_count + walk_error_count;
-    if unread > 0 {
-        eprintln!("press: {unread} files or folders could not be read");
+    if !args.json {
+        println!(
+            "{} images, {} on disk, {} camera raw skipped",
+            scanned.entries.len(),
+            format_bytes(scanned.entries.iter().map(|entry| entry.bytes).sum()),
+            scanned.skipped_raw
+        );
+        match scanned.skipped_packages {
+            0 => {}
+            1 => println!("1 macOS package skipped"),
+            many => println!("{many} macOS packages skipped"),
+        }
+    }
+    let run = convert_headless(
+        &root,
+        &scanned.entries,
+        args.format,
+        args.quality,
+        args.max_edge,
+        args.json,
+    );
+    let failed = run.failed;
+    if args.json {
+        let report = ConversionReport {
+            schema_version: 1,
+            command: "convert",
+            target: path_text(&target),
+            output: path_text(&root.join(scan::OUTPUT_DIR)),
+            options: ConversionOptions {
+                format: args.format.label(),
+                quality: args.quality.0,
+                max_edge: args.max_edge.0,
+            },
+            scan: ScanSummary::from_scan(&scanned),
+            summary: ConversionSummary {
+                attempted: scanned.entries.len(),
+                converted: scanned.entries.len() - run.failed,
+                failed: run.failed,
+                source_bytes: run.before,
+                output_bytes: run.after,
+                grew: run.after > run.before,
+                changed_bytes: run.before.abs_diff(run.after),
+            },
+            files: run.files,
+            unreadable: sorted_paths(&scanned.unreadable),
+            walk_errors: sorted_paths(&scanned.walk_errors),
+        };
+        if let Err(error) = write_json(&report) {
+            eprintln!("press: could not write JSON: {error}");
+            std::process::exit(1);
+        }
     }
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
@@ -561,40 +1006,44 @@ mod tests {
         let cases = [
             (
                 vec!["--convert", "--avif", "--quality", "40", "x"],
-                true,
+                Command::Convert,
                 Format::Avif,
                 Quality::lossy(40.),
                 MaxEdge::FULL,
+                false,
                 false,
                 "x",
             ),
             (
                 vec!["--max-edge", "1600", "--lossless", "--grid", "x"],
-                false,
+                Command::Window,
                 Format::WebP,
                 Quality::LOSSLESS,
                 MaxEdge(Some(1600)),
                 true,
+                false,
                 "x",
             ),
             (
-                vec!["--convert", "--jxl", "--lossless", "x"],
-                true,
+                vec!["convert", "x", "--format", "jxl", "--lossless", "--json"],
+                Command::Convert,
                 Format::JpegXl,
                 Quality::LOSSLESS,
                 MaxEdge::FULL,
                 false,
+                true,
                 "x",
             ),
         ];
 
-        for (arguments, convert, format, quality, max_edge, grid, root) in cases {
+        for (arguments, command, format, quality, max_edge, grid, json, root) in cases {
             let args = parse(&arguments).unwrap();
-            assert_eq!(args.convert, convert);
+            assert_eq!(args.command, command);
             assert_eq!(args.format, format);
             assert_eq!(args.quality, quality);
             assert_eq!(args.max_edge, max_edge);
             assert_eq!(args.grid, grid);
+            assert_eq!(args.json, json);
             assert_eq!(args.root, Some(PathBuf::from(root)));
         }
     }
@@ -610,6 +1059,13 @@ mod tests {
     #[test]
     fn a_non_finite_quality_is_an_error() {
         for value in ["NaN", "inf", "-inf"] {
+            assert!(parse(&["--quality", value]).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn quality_outside_the_documented_range_is_an_error() {
+        for value in ["0", "101", "-3"] {
             assert!(parse(&["--quality", value]).is_err(), "accepted {value}");
         }
     }
@@ -655,5 +1111,40 @@ mod tests {
         let args = parse(&["--", "-photos"]).unwrap();
         assert_eq!(args.root, Some(PathBuf::from("-photos")));
         assert!(args.unknown.is_empty());
+    }
+
+    #[test]
+    fn headless_commands_are_strict_and_take_one_target() {
+        let audit = parse(&["audit", "/photos", "--json"]).unwrap();
+        assert_eq!(audit.command, Command::Audit);
+        assert!(audit.json);
+        assert!(parse(&["audit", "/photos", "--quality", "80"]).is_err());
+        assert!(parse(&["convert", "one", "two"]).is_err());
+        assert!(parse(&["--json", "/photos"]).is_err());
+    }
+
+    #[test]
+    fn audit_json_has_a_stable_schema_and_the_ui_findings() {
+        let scanned = scan::Scan {
+            entries: vec![Entry {
+                path: PathBuf::from("/photos/heavy.png"),
+                format: image::ImageFormat::Png.into(),
+                width: 100,
+                height: 100,
+                bytes: 40_000,
+            }],
+            skipped_raw: 2,
+            skipped_packages: 0,
+            unreadable: vec![],
+            walk_errors: vec![],
+            existing_output: 3,
+        };
+
+        let json = serde_json::to_value(audit_report(Path::new("/photos"), &scanned)).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["summary"]["heavy"], 1);
+        assert_eq!(json["summary"]["camera_raw_skipped"], 2);
+        assert_eq!(json["files"][0]["path"], "/photos/heavy.png");
+        assert_eq!(json["files"][0]["heavy"], true);
     }
 }

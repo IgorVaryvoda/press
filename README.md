@@ -36,14 +36,23 @@ Audit, thumbnails, and WebP, AVIF, and JPEG XL conversion all work.
 press                                         # empty state: pick or drop
 press ~/path/to/folder                        # audit, in a window
 press ~/photo.jpg                             # straight into the comparison
-press ~/path/to/folder --convert              # convert to WebP, no window
-press ~/path/to/folder --convert --avif
-press ~/path/to/folder --convert --jxl
-press ~/path/to/folder --convert --max-edge 1600
-press ~/path/to/folder --convert --quality 60
-press ~/path/to/folder --convert --lossless       # lossless WebP
-press ~/path/to/folder --convert --jxl --lossless
+press audit ~/path/to/folder                  # read-only terminal audit
+press audit ~/path/to/folder --json           # stable, agent-friendly report
+press convert ~/path/to/folder                # convert to WebP, no window
+press convert ~/path/to/folder --format avif --max-edge 1600 --quality 60
+press convert ~/path/to/folder --format jxl --lossless
 ```
+
+`press --help` is the complete command reference. `audit` never writes. `convert`
+writes mirrored output under `optimized/`; the older `PATH --convert --avif` form
+remains compatible. With `--json`, stdout contains one document with
+`schema_version: 1`, exact byte counts, per-file findings or conversion outcomes,
+and named failures. Diagnostics stay on stderr. Exit `0` means complete success,
+`1` means a partial audit or conversion, and `2` means an invalid invocation.
+
+The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discovered
+automatically by Codex when it runs here. Installed builds also carry the same text:
+`press skill` prints it for use by agents in another workspace.
 
 Launched with no path it opens on an empty state: **Open folder…**, **Open image…**,
 or drop either onto the window. The same two buttons sit in the toolbar afterwards,
@@ -157,7 +166,7 @@ settings and the button that commits it — for Convert, the
 presets, format, quality and size limit, with the projected saving above the button.
 Hosted Studio operations appear in the preview where one exact image or completed
 local result supplies their context.
-`--convert` does the same work without a window.
+`press convert` does the same work without a window.
 
 Files are written to `optimized/` inside the folder, mirroring its subfolder layout.
 **Change** in the rail picks a different destination — a staging folder, a share, a
