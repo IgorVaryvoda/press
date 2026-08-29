@@ -231,6 +231,10 @@ A real `sudo apt install press` requires a signed repository. Host it separately
 from the application repository, for example at `packages.imageguide.dev`, with
 `dists/` and `pool/` at its web root.
 
+The current host is GitHub Pages for `IgorVaryvoda/press-packages`, served at
+`packages.imageguide.dev` through the Dynadot CNAME `packages` →
+`igorvaryvoda.github.io`. GitHub Pages enforces HTTPS.
+
 Create an APT-only OpenPGP signing key. Keep the private key in the publishing
 environment; publish only the public key and its full fingerprint. With `reprepro`,
 the repository's `conf/distributions` is:

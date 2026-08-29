@@ -24,6 +24,10 @@ On macOS, install the signed app with Homebrew:
 brew install --cask IgorVaryvoda/press/press
 ```
 
+On Ubuntu 24.04 x86-64, follow the fingerprint-checked setup for the
+[signed Press APT repository](https://github.com/IgorVaryvoda/press-packages#ubuntu-2404-x86-64),
+then install or update with `sudo apt install press`.
+
 Or download the current installer from [GitHub Releases](https://github.com/IgorVaryvoda/press/releases/latest):
 
 - Linux: `.deb` for Ubuntu 24.04 x86-64, or `.AppImage`
