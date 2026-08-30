@@ -6,8 +6,13 @@
 
 use std::{
     borrow::Cow,
-    ops::Range,
+    ops::{ControlFlow, Range},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use image::{
@@ -138,6 +143,12 @@ pub struct Scan {
     /// would not touch `~/Pictures/Screenshots/optimized`, so warning about it would
     /// name the wrong 5,415 files.
     pub existing_output: usize,
+}
+
+/// A cancelled scan never exposes its partial facts as a completed audit.
+pub(crate) enum ScanOutcome {
+    Complete(Scan),
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,7 +340,12 @@ fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
 /// files under it are counted, never audited — otherwise the second scan of a
 /// folder offers you last run's WebPs as candidates for conversion.
 pub fn scan(root: &Path, output_root: &Path) -> Scan {
-    scan_progressive(root, output_root, |_| {})
+    let cancelled = Arc::new(AtomicBool::new(false));
+    match scan_progressive_cancellable(root, output_root, cancelled, |_| ControlFlow::Continue(()))
+    {
+        ScanOutcome::Complete(scan) => scan,
+        ScanOutcome::Cancelled => unreachable!("a private token is never cancelled"),
+    }
 }
 
 /// Probe exactly the files the user chose, without walking their folder and pulling
@@ -366,10 +382,72 @@ pub fn scan_progressive(
     output_root: &Path,
     mut publish: impl FnMut(&[Entry]),
 ) -> Scan {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    match scan_progressive_cancellable(root, output_root, cancelled, |batch| {
+        publish(batch);
+        ControlFlow::Continue(())
+    }) {
+        ScanOutcome::Complete(scan) => scan,
+        ScanOutcome::Cancelled => unreachable!("a private token is never cancelled"),
+    }
+}
+
+/// The cancellable form is deliberately internal until the window can make its
+/// handoff return promptly. An admitted synchronous callback may finish, but no
+/// later callback is admitted after cancellation is observed by the collector.
+pub(crate) fn scan_progressive_cancellable(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Arc<AtomicBool>,
+    publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+) -> ScanOutcome {
+    scan_progressive_cancellable_with_hooks(
+        root,
+        output_root,
+        cancelled,
+        publish,
+        ScanHooks::default(),
+    )
+}
+
+struct ScanHooks {
+    queue_capacity: Option<usize>,
+    before_walk_next: Arc<dyn Fn() + Send + Sync>,
+    before_probe: Arc<dyn Fn(&Path) + Send + Sync>,
+    before_callback: Arc<dyn Fn() + Send + Sync>,
+    before_path_receive: Arc<dyn Fn() + Send + Sync>,
+    before_path_send: Arc<dyn Fn() + Send + Sync>,
+    before_result_receive: Arc<dyn Fn() + Send + Sync>,
+    before_result_send: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Default for ScanHooks {
+    fn default() -> Self {
+        Self {
+            queue_capacity: None,
+            before_walk_next: Arc::new(|| {}),
+            before_probe: Arc::new(|_| {}),
+            before_callback: Arc::new(|| {}),
+            before_path_receive: Arc::new(|| {}),
+            before_path_send: Arc::new(|| {}),
+            before_result_receive: Arc::new(|| {}),
+            before_result_send: Arc::new(|| {}),
+        }
+    }
+}
+
+fn scan_progressive_cancellable_with_hooks(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Arc<AtomicBool>,
+    mut publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+    hooks: ScanHooks,
+) -> ScanOutcome {
     let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
     let mut entries = Vec::new();
     let mut unreadable = Vec::new();
     let mut batches = ProductionBatchState::new();
+    let mut was_cancelled = false;
     let summary = std::thread::scope(|scope| {
         enum Probed {
             Entry(Entry),
@@ -387,8 +465,12 @@ pub fn scan_progressive(
         // The walker can get only one path ahead of each worker. Downloads-style
         // folders may hold a million non-images; retaining all of their PathBufs
         // before probing makes memory scale with the folder instead of useful rows.
-        let (path_sender, path_receiver) = std::sync::mpsc::sync_channel(threads);
+        let capacity = hooks.queue_capacity.unwrap_or(threads);
+        let (path_sender, path_receiver) = std::sync::mpsc::sync_channel(capacity);
         let path_receiver = std::sync::Arc::new(std::sync::Mutex::new(path_receiver));
+        let walker_cancelled = cancelled.clone();
+        let walk_hook = hooks.before_walk_next.clone();
+        let path_send_hook = hooks.before_path_send.clone();
         let walker = scope.spawn(move || {
             let mut summary = WalkSummary::default();
             let counted_packages = &mut summary.skipped_packages;
@@ -396,7 +478,7 @@ pub fn scan_progressive(
             // `filter_entry` prunes: a package directory is never descended into, so
             // its unreadable interior is never even attempted. Walk errors pass the
             // predicate untouched — a locked folder still names itself.
-            for entry in WalkDir::new(root)
+            let mut walk = WalkDir::new(root)
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|entry| {
@@ -418,8 +500,20 @@ pub fn scan_progressive(
                         return false;
                     }
                     true
-                })
-            {
+                });
+            loop {
+                // A walk step itself is not interruptible, so cancellation is checked
+                // on both sides of the one `next` call rather than claimed inside it.
+                if walker_cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                walk_hook();
+                let Some(entry) = walk.next() else {
+                    break;
+                };
+                if walker_cancelled.load(Ordering::Acquire) {
+                    break;
+                }
                 let Ok(file) = entry else {
                     if let Some(path) = entry.unwrap_err().path() {
                         summary.walk_errors.push(path.to_path_buf());
@@ -445,6 +539,10 @@ pub fn scan_progressive(
                     summary.skipped_raw += 1;
                     continue;
                 }
+                if walker_cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                path_send_hook();
                 if path_sender.send(file.into_path()).is_err() {
                     break;
                 }
@@ -452,34 +550,62 @@ pub fn scan_progressive(
             summary
         });
 
-        let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(threads);
+        let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(capacity);
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 let path_receiver = path_receiver.clone();
                 let result_sender = result_sender.clone();
+                let worker_cancelled = cancelled.clone();
+                let probe_hook = hooks.before_probe.clone();
+                let path_receive_hook = hooks.before_path_receive.clone();
+                let result_send_hook = hooks.before_result_send.clone();
                 scope.spawn(move || {
                     loop {
+                        if worker_cancelled.load(Ordering::Acquire) {
+                            return;
+                        }
+                        path_receive_hook();
                         let path = {
                             let receiver = path_receiver
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            receiver.recv()
+                            receiver.recv_timeout(Duration::from_millis(10))
                         };
-                        let Ok(path) = path else {
+                        let path = match path {
+                            Ok(path) => path,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        };
+                        if worker_cancelled.load(Ordering::Acquire) {
                             return;
-                        };
-                        match probe(&path) {
+                        }
+                        // A probe is one whole cooperative unit. It may finish after
+                        // cancellation, but its result is never sent afterwards.
+                        probe_hook(&path);
+                        let probed = probe(&path);
+                        if worker_cancelled.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match probed {
                             Some(entry) => {
+                                if worker_cancelled.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                result_send_hook();
                                 if result_sender.send(Probed::Entry(entry)).is_err() {
                                     return;
                                 }
                             }
                             // Only report things that claimed to be images. A README is
                             // not a failure.
-                            None if looks_like_an_image(&path)
-                                && result_sender.send(Probed::Unreadable(path)).is_err() =>
-                            {
-                                return;
+                            None if looks_like_an_image(&path) => {
+                                if worker_cancelled.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                result_send_hook();
+                                if result_sender.send(Probed::Unreadable(path)).is_err() {
+                                    return;
+                                }
                             }
                             None => {}
                         }
@@ -490,17 +616,48 @@ pub fn scan_progressive(
         drop(path_receiver);
         drop(result_sender);
 
-        for result in result_receiver {
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                was_cancelled = true;
+                break;
+            }
+            (hooks.before_result_receive)();
+            let result = match result_receiver.recv_timeout(Duration::from_millis(10)) {
+                Ok(result) => result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            if cancelled.load(Ordering::Acquire) {
+                was_cancelled = true;
+                break;
+            }
             match result {
                 Probed::Entry(entry) => {
                     entries.push(entry);
                     if let Some(range) = batches.ready_range(entries.len()) {
-                        publish(&entries[range]);
+                        if cancelled.load(Ordering::Acquire) {
+                            was_cancelled = true;
+                            break;
+                        }
+                        (hooks.before_callback)();
+                        if cancelled.load(Ordering::Acquire) {
+                            was_cancelled = true;
+                            break;
+                        }
+                        if publish(&entries[range]).is_break() || cancelled.load(Ordering::Acquire)
+                        {
+                            cancelled.store(true, Ordering::Release);
+                            was_cancelled = true;
+                            break;
+                        }
                     }
                 }
                 Probed::Unreadable(path) => unreadable.push(path),
             }
         }
+        // Dropping the result receiver wakes workers blocked sending a result. They
+        // then drop their path receivers, which wakes a walker blocked on a path.
+        drop(result_receiver);
         for worker in workers {
             if let Err(panic) = worker.join() {
                 std::panic::resume_unwind(panic);
@@ -511,20 +668,36 @@ pub fn scan_progressive(
             Err(panic) => std::panic::resume_unwind(panic),
         }
     });
+    if was_cancelled || cancelled.load(Ordering::Acquire) {
+        return ScanOutcome::Cancelled;
+    }
     if let Some(range) = batches.final_tail(entries.len()) {
-        publish(&entries[range]);
+        if cancelled.load(Ordering::Acquire) {
+            return ScanOutcome::Cancelled;
+        }
+        (hooks.before_callback)();
+        if cancelled.load(Ordering::Acquire) {
+            return ScanOutcome::Cancelled;
+        }
+        if publish(&entries[range]).is_break() || cancelled.load(Ordering::Acquire) {
+            cancelled.store(true, Ordering::Release);
+            return ScanOutcome::Cancelled;
+        }
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return ScanOutcome::Cancelled;
     }
 
     // Heaviest first: the top of the list is the work worth doing.
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
-    Scan {
+    ScanOutcome::Complete(Scan {
         entries,
         skipped_raw: summary.skipped_raw,
         skipped_packages: summary.skipped_packages,
         unreadable,
         walk_errors: summary.walk_errors,
         existing_output: summary.existing_output,
-    }
+    })
 }
 
 /// Extension-only guess, used to decide whether a decode failure is worth reporting.
@@ -569,6 +742,48 @@ mod tests {
     use image::{Frame, ImageBuffer, Rgb, Rgba, codecs::gif::GifEncoder};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Condvar, Mutex, mpsc};
+    use std::time::Duration;
+
+    struct Gate {
+        open: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl Gate {
+        fn new() -> Self {
+            Self {
+                open: Mutex::new(false),
+                changed: Condvar::new(),
+            }
+        }
+
+        fn wait(&self) {
+            let open = self.open.lock().unwrap();
+            drop(
+                self.changed
+                    .wait_while(open, |open| !*open)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        }
+
+        fn open(&self) {
+            *self.open.lock().unwrap() = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn worker_count() -> usize {
+        std::thread::available_parallelism().map_or(4, |count| count.get())
+    }
+
+    fn cancellable(
+        root: &Path,
+        cancelled: Arc<AtomicBool>,
+        publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+    ) -> ScanOutcome {
+        scan_progressive_cancellable(root, &root.join(OUTPUT_DIR), cancelled, publish)
+    }
 
     fn write_sample(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
         let path = dir.join(name);
@@ -1111,5 +1326,306 @@ mod tests {
         complete.sort();
         assert_eq!(published, complete);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pre_cancelled_scan_starts_no_work() {
+        let dir = temp_dir("pre-cancelled");
+        write_sample(&dir, "image.png", 8, 8);
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let walks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hooks = ScanHooks {
+            before_walk_next: {
+                let walks = walks.clone();
+                Arc::new(move || {
+                    walks.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+            before_probe: {
+                let probes = probes.clone();
+                Arc::new(move |_| {
+                    probes.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+            before_callback: {
+                let callbacks = callbacks.clone();
+                Arc::new(move || {
+                    callbacks.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+            ..ScanHooks::default()
+        };
+
+        assert!(matches!(
+            scan_progressive_cancellable_with_hooks(
+                &dir,
+                &dir.join(OUTPUT_DIR),
+                cancelled,
+                |_| ControlFlow::Continue(()),
+                hooks,
+            ),
+            ScanOutcome::Cancelled
+        ));
+        assert_eq!(walks.load(Ordering::Relaxed), 0);
+        assert_eq!(probes.load(Ordering::Relaxed), 0);
+        assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cancelled_scan_never_returns_partial_complete() {
+        let dir = temp_dir("partial-cancelled");
+        for index in 0..32 {
+            write_sample(&dir, &format!("image-{index}.png"), 8, 8);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let outcome = cancellable(&dir, cancelled.clone(), {
+            let published = published.clone();
+            move |batch| {
+                published.fetch_add(batch.len(), Ordering::Relaxed);
+                cancelled.store(true, Ordering::Release);
+                ControlFlow::Continue(())
+            }
+        });
+
+        assert!(matches!(outcome, ScanOutcome::Cancelled));
+        assert_eq!(published.load(Ordering::Relaxed), 32);
+    }
+
+    #[test]
+    fn cancellation_during_callback_never_returns_complete() {
+        let dir = temp_dir("callback-cancelled");
+        for index in 0..32 {
+            write_sample(&dir, &format!("image-{index}.png"), 8, 8);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let outcome = cancellable(&dir, cancelled.clone(), {
+            let callbacks = callbacks.clone();
+            move |_| {
+                callbacks.fetch_add(1, Ordering::Relaxed);
+                cancelled.store(true, Ordering::Release);
+                ControlFlow::Continue(())
+            }
+        });
+
+        assert!(matches!(outcome, ScanOutcome::Cancelled));
+        assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn observed_cancellation_suppresses_final_tail() {
+        let dir = temp_dir("tail-cancelled");
+        for index in 0..33 {
+            write_sample(&dir, &format!("image-{index}.png"), 8, 8);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hooks = ScanHooks {
+            before_callback: {
+                let cancelled = cancelled.clone();
+                Arc::new(move || cancelled.store(true, Ordering::Release))
+            },
+            ..ScanHooks::default()
+        };
+
+        let outcome = scan_progressive_cancellable_with_hooks(
+            &dir,
+            &dir.join(OUTPUT_DIR),
+            cancelled,
+            {
+                let callbacks = callbacks.clone();
+                move |_| {
+                    callbacks.fetch_add(1, Ordering::Relaxed);
+                    ControlFlow::Continue(())
+                }
+            },
+            hooks,
+        );
+
+        assert!(matches!(outcome, ScanOutcome::Cancelled));
+        assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cancellation_wakes_a_blocked_path_sender() {
+        let dir = temp_dir("blocked-path-send");
+        write_sample(&dir, "one.png", 8, 8);
+        write_sample(&dir, "two.png", 8, 8);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let workers_ready = Arc::new(Gate::new());
+        let walker_ready = Arc::new(Gate::new());
+        let (workers_entered_sender, workers_entered_receiver) = mpsc::channel();
+        let (path_attempt_sender, path_attempt_receiver) = mpsc::channel();
+        let path_sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut hooks = ScanHooks {
+            queue_capacity: Some(1),
+            ..ScanHooks::default()
+        };
+        hooks.before_path_receive = {
+            let workers_ready = workers_ready.clone();
+            Arc::new(move || {
+                workers_entered_sender.send(()).unwrap();
+                workers_ready.wait();
+            })
+        };
+        hooks.before_walk_next = {
+            let walker_ready = walker_ready.clone();
+            Arc::new(move || walker_ready.wait())
+        };
+        hooks.before_path_send = {
+            let path_sends = path_sends.clone();
+            Arc::new(move || {
+                if path_sends.fetch_add(1, Ordering::Relaxed) == 1 {
+                    path_attempt_sender.send(()).unwrap();
+                }
+            })
+        };
+        let (outcome_sender, outcome_receiver) = mpsc::channel();
+        let root = dir.clone();
+        let run_cancelled = cancelled.clone();
+        std::thread::spawn(move || {
+            outcome_sender
+                .send(scan_progressive_cancellable_with_hooks(
+                    &root,
+                    &root.join(OUTPUT_DIR),
+                    run_cancelled,
+                    |_| ControlFlow::Continue(()),
+                    hooks,
+                ))
+                .unwrap();
+        });
+
+        for _ in 0..worker_count() {
+            workers_entered_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("every worker waits before receiving a path");
+        }
+        walker_ready.open();
+        path_attempt_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second path send reaches its full queue");
+        cancelled.store(true, Ordering::Release);
+        workers_ready.open();
+        assert!(matches!(
+            outcome_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("cancellation tears down the blocked path send"),
+            ScanOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn cancellation_wakes_a_blocked_result_sender() {
+        let dir = temp_dir("blocked-result-send");
+        write_sample(&dir, "one.png", 8, 8);
+        write_sample(&dir, "two.png", 8, 8);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let collector_ready = Arc::new(Gate::new());
+        let (collector_entered_sender, collector_entered_receiver) = mpsc::channel();
+        let (result_attempt_sender, result_attempt_receiver) = mpsc::channel();
+        let result_sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut hooks = ScanHooks {
+            queue_capacity: Some(1),
+            ..ScanHooks::default()
+        };
+        hooks.before_result_receive = {
+            let collector_ready = collector_ready.clone();
+            Arc::new(move || {
+                collector_entered_sender.send(()).unwrap();
+                collector_ready.wait();
+            })
+        };
+        hooks.before_result_send = {
+            let result_sends = result_sends.clone();
+            Arc::new(move || {
+                if result_sends.fetch_add(1, Ordering::Relaxed) == 1 {
+                    result_attempt_sender.send(()).unwrap();
+                }
+            })
+        };
+        let (outcome_sender, outcome_receiver) = mpsc::channel();
+        let root = dir.clone();
+        let run_cancelled = cancelled.clone();
+        std::thread::spawn(move || {
+            outcome_sender
+                .send(scan_progressive_cancellable_with_hooks(
+                    &root,
+                    &root.join(OUTPUT_DIR),
+                    run_cancelled,
+                    |_| ControlFlow::Continue(()),
+                    hooks,
+                ))
+                .unwrap();
+        });
+
+        collector_entered_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("collector waits before receiving a result");
+        result_attempt_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second result send reaches its full queue");
+        cancelled.store(true, Ordering::Release);
+        collector_ready.open();
+        assert!(matches!(
+            outcome_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("cancellation tears down the blocked result send"),
+            ScanOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn cancellation_stops_trailing_non_images() {
+        let dir = temp_dir("non-image-tail");
+        for index in 0..32 {
+            write_sample(&dir, &format!("image-{index}.png"), 8, 8);
+        }
+        for index in 0..1_000 {
+            std::fs::write(dir.join(format!("tail-{index}.txt")), b"not an image").unwrap();
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probes_at_cancellation = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hooks = ScanHooks {
+            before_probe: {
+                let probes = probes.clone();
+                Arc::new(move |_| {
+                    probes.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+            ..ScanHooks::default()
+        };
+
+        let outcome = scan_progressive_cancellable_with_hooks(
+            &dir,
+            &dir.join(OUTPUT_DIR),
+            cancelled.clone(),
+            {
+                let callbacks = callbacks.clone();
+                let probes = probes.clone();
+                let probes_at_cancellation = probes_at_cancellation.clone();
+                move |_| {
+                    callbacks.fetch_add(1, Ordering::Relaxed);
+                    probes_at_cancellation.store(probes.load(Ordering::Relaxed), Ordering::Relaxed);
+                    cancelled.store(true, Ordering::Release);
+                    ControlFlow::Continue(())
+                }
+            },
+            hooks,
+        );
+
+        assert!(matches!(outcome, ScanOutcome::Cancelled));
+        assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+        assert!(
+            probes.load(Ordering::Relaxed)
+                <= probes_at_cancellation.load(Ordering::Relaxed) + worker_count(),
+            "only probes admitted before the callback can finish after cancellation"
+        );
     }
 }
