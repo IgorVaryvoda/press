@@ -395,6 +395,7 @@ pub fn scan_progressive(
 /// The cancellable form is deliberately internal until the window can make its
 /// handoff return promptly. An admitted synchronous callback may finish, but no
 /// later callback is admitted after cancellation is observed by the collector.
+#[cfg(test)]
 pub(crate) fn scan_progressive_cancellable(
     root: &Path,
     output_root: &Path,
@@ -410,6 +411,17 @@ pub(crate) fn scan_progressive_cancellable(
     )
 }
 
+#[cfg(not(test))]
+pub(crate) fn scan_progressive_cancellable(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Arc<AtomicBool>,
+    publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+) -> ScanOutcome {
+    scan_progressive_cancellable_inner(root, output_root, cancelled, publish)
+}
+
+#[cfg(test)]
 struct ScanHooks {
     queue_capacity: Option<usize>,
     before_walk_next: Arc<dyn Fn() + Send + Sync>,
@@ -421,6 +433,7 @@ struct ScanHooks {
     before_result_send: Arc<dyn Fn() + Send + Sync>,
 }
 
+#[cfg(test)]
 impl Default for ScanHooks {
     fn default() -> Self {
         Self {
@@ -436,12 +449,23 @@ impl Default for ScanHooks {
     }
 }
 
+#[cfg(test)]
 fn scan_progressive_cancellable_with_hooks(
     root: &Path,
     output_root: &Path,
     cancelled: Arc<AtomicBool>,
-    mut publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+    publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
     hooks: ScanHooks,
+) -> ScanOutcome {
+    scan_progressive_cancellable_inner(root, output_root, cancelled, publish, hooks)
+}
+
+fn scan_progressive_cancellable_inner(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Arc<AtomicBool>,
+    mut publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+    #[cfg(test)] hooks: ScanHooks,
 ) -> ScanOutcome {
     let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
     let mut entries = Vec::new();
@@ -465,11 +489,16 @@ fn scan_progressive_cancellable_with_hooks(
         // The walker can get only one path ahead of each worker. Downloads-style
         // folders may hold a million non-images; retaining all of their PathBufs
         // before probing makes memory scale with the folder instead of useful rows.
+        #[cfg(test)]
         let capacity = hooks.queue_capacity.unwrap_or(threads);
+        #[cfg(not(test))]
+        let capacity = threads;
         let (path_sender, path_receiver) = std::sync::mpsc::sync_channel(capacity);
         let path_receiver = std::sync::Arc::new(std::sync::Mutex::new(path_receiver));
         let walker_cancelled = cancelled.clone();
+        #[cfg(test)]
         let walk_hook = hooks.before_walk_next.clone();
+        #[cfg(test)]
         let path_send_hook = hooks.before_path_send.clone();
         let walker = scope.spawn(move || {
             let mut summary = WalkSummary::default();
@@ -507,6 +536,7 @@ fn scan_progressive_cancellable_with_hooks(
                 if walker_cancelled.load(Ordering::Acquire) {
                     break;
                 }
+                #[cfg(test)]
                 walk_hook();
                 let Some(entry) = walk.next() else {
                     break;
@@ -542,6 +572,7 @@ fn scan_progressive_cancellable_with_hooks(
                 if walker_cancelled.load(Ordering::Acquire) {
                     break;
                 }
+                #[cfg(test)]
                 path_send_hook();
                 if path_sender.send(file.into_path()).is_err() {
                     break;
@@ -556,14 +587,18 @@ fn scan_progressive_cancellable_with_hooks(
                 let path_receiver = path_receiver.clone();
                 let result_sender = result_sender.clone();
                 let worker_cancelled = cancelled.clone();
+                #[cfg(test)]
                 let probe_hook = hooks.before_probe.clone();
+                #[cfg(test)]
                 let path_receive_hook = hooks.before_path_receive.clone();
+                #[cfg(test)]
                 let result_send_hook = hooks.before_result_send.clone();
                 scope.spawn(move || {
                     loop {
                         if worker_cancelled.load(Ordering::Acquire) {
                             return;
                         }
+                        #[cfg(test)]
                         path_receive_hook();
                         let path = {
                             let receiver = path_receiver
@@ -581,6 +616,7 @@ fn scan_progressive_cancellable_with_hooks(
                         }
                         // A probe is one whole cooperative unit. It may finish after
                         // cancellation, but its result is never sent afterwards.
+                        #[cfg(test)]
                         probe_hook(&path);
                         let probed = probe(&path);
                         if worker_cancelled.load(Ordering::Acquire) {
@@ -591,6 +627,7 @@ fn scan_progressive_cancellable_with_hooks(
                                 if worker_cancelled.load(Ordering::Acquire) {
                                     return;
                                 }
+                                #[cfg(test)]
                                 result_send_hook();
                                 if result_sender.send(Probed::Entry(entry)).is_err() {
                                     return;
@@ -602,6 +639,7 @@ fn scan_progressive_cancellable_with_hooks(
                                 if worker_cancelled.load(Ordering::Acquire) {
                                     return;
                                 }
+                                #[cfg(test)]
                                 result_send_hook();
                                 if result_sender.send(Probed::Unreadable(path)).is_err() {
                                     return;
@@ -621,6 +659,7 @@ fn scan_progressive_cancellable_with_hooks(
                 was_cancelled = true;
                 break;
             }
+            #[cfg(test)]
             (hooks.before_result_receive)();
             let result = match result_receiver.recv_timeout(Duration::from_millis(10)) {
                 Ok(result) => result,
@@ -639,6 +678,7 @@ fn scan_progressive_cancellable_with_hooks(
                             was_cancelled = true;
                             break;
                         }
+                        #[cfg(test)]
                         (hooks.before_callback)();
                         if cancelled.load(Ordering::Acquire) {
                             was_cancelled = true;
@@ -675,6 +715,7 @@ fn scan_progressive_cancellable_with_hooks(
         if cancelled.load(Ordering::Acquire) {
             return ScanOutcome::Cancelled;
         }
+        #[cfg(test)]
         (hooks.before_callback)();
         if cancelled.load(Ordering::Acquire) {
             return ScanOutcome::Cancelled;
