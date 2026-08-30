@@ -162,21 +162,28 @@ pub fn acknowledge(report: &Path) -> io::Result<()> {
 }
 
 pub fn defer_prompt(window: &Window, cx: &mut App, report: Option<PathBuf>) {
-    defer_prompt_with(window, cx, report, email_report);
+    defer_prompt_with(window, cx, report, show_prompt);
 }
 
 fn defer_prompt_with(
     window: &Window,
     cx: &mut App,
     report: Option<PathBuf>,
-    handoff: impl Fn() -> io::Result<()> + 'static,
+    show: impl FnOnce(&mut Window, &mut App, PathBuf, fn() -> io::Result<()>) + 'static,
 ) {
     let Some(report) = report else {
         return;
     };
-    window.defer(cx, move |window, cx| {
-        show_prompt_with(window, cx, report, handoff)
-    });
+    window.defer(cx, move |window, cx| show(window, cx, report, email_report));
+}
+
+fn show_prompt(
+    window: &mut Window,
+    cx: &mut App,
+    report: PathBuf,
+    handoff: fn() -> io::Result<()>,
+) {
+    show_prompt_with(window, cx, report, handoff);
 }
 
 fn show_prompt_with(
@@ -846,8 +853,30 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[test]
-    fn production_prompt_submit_uses_generic_handoff() {
-        let _production_prompt: fn(&Window, &mut App, Option<PathBuf>) = defer_prompt;
+    #[gpui::test]
+    fn production_prompt_submit_uses_generic_handoff(cx: &mut TestAppContext) {
+        let directory = test_directory("production-handoff");
+        let report = report(&directory, 1);
+        let received = Rc::new(Cell::new(None));
+        let received_handoff = received.clone();
+        let cx = prompt_window(cx);
+        cx.update(|window, cx| {
+            defer_prompt_with(
+                window,
+                cx,
+                Some(report.clone()),
+                move |_, _, actual, handoff| {
+                    assert_eq!(actual, report);
+                    received_handoff.set(Some(handoff));
+                },
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            received.get().map(|handoff| handoff as *const () as usize),
+            Some(email_report as *const () as usize)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

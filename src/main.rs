@@ -28,7 +28,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use convert::{Format, MaxEdge, Quality};
-use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, Window, WindowBounds, WindowHandle, WindowOptions, prelude::*, px, size};
 use gpui_component::{ActiveTheme, Root};
 use gpui_platform::application;
 use scan::{Entry, format_bytes};
@@ -1069,18 +1069,26 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Opti
                 audit::register_quit_flush(audit, cx);
             }
             cx.activate(true);
-            root.update(cx, |_, window, cx| {
-                crash::defer_prompt(window, cx, pending_crash);
-            })
-            .ok();
+            schedule_pending_crash_prompt(&root, cx, pending_crash, crash::defer_prompt);
         });
+}
+
+/// The Root owns the dialog layer, so wait until its window exists before asking
+/// crash reporting to defer its prompt onto that still-open window.
+fn schedule_pending_crash_prompt(
+    root: &WindowHandle<Root>,
+    cx: &mut App,
+    pending_crash: Option<PathBuf>,
+    defer_prompt: impl FnOnce(&Window, &mut App, Option<PathBuf>),
+) {
+    root.update(cx, |_, window, cx| defer_prompt(window, cx, pending_crash))
+        .ok();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{Context, IntoElement, Render, TestAppContext};
-    use gpui_component::WindowExt;
 
     struct CrashWindowHarness;
 
@@ -1256,28 +1264,18 @@ mod tests {
     #[gpui::test]
     fn windowed_startup_runs_the_crash_prompt_hook(cx: &mut TestAppContext) {
         cx.update(init_theme);
-        let (_, cx) = cx.add_window_view(|window, cx| {
+        let report = PathBuf::from("crash-00000000000000000001-42-0000.log");
+        let scheduled = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let scheduled_prompt = scheduled.clone();
+        let root = cx.add_window(|window, cx| {
             let harness = cx.new(|_| CrashWindowHarness);
             Root::new(harness, window, cx)
         });
-        cx.update(|window, cx| {
-            crash::defer_prompt(
-                window,
-                cx,
-                Some(PathBuf::from("crash-00000000000000000001-42-0000.log")),
-            );
+        cx.update(|cx| {
+            schedule_pending_crash_prompt(&root, cx, Some(report.clone()), move |_, _, actual| {
+                *scheduled_prompt.borrow_mut() = actual
+            });
         });
-        cx.run_until_parked();
-        cx.simulate_resize(size(px(900.), px(640.)));
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(500));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("crash-prompt-title").is_some());
-
-        let not_now = cx.debug_bounds("crash-prompt-not-now").unwrap();
-        cx.simulate_click(not_now.center(), gpui::Modifiers::none());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| assert!(!window.has_active_dialog(cx)));
+        assert_eq!(*scheduled.borrow(), Some(report));
     }
 }
