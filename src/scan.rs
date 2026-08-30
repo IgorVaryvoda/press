@@ -532,6 +532,7 @@ pub fn format_name(format: FileFormat) -> &'static str {
 mod tests {
     use super::*;
     use image::{Frame, ImageBuffer, Rgb, Rgba, codecs::gif::GifEncoder};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn write_sample(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
@@ -845,6 +846,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_it_cannot_enter_is_named_not_swallowed() {
         let dir = temp_dir("walk-error");

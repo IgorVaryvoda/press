@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+  pull_request:
 
 permissions:
   contents: read
@@ -13,8 +14,20 @@ env:
   NO_STRIP: 1
 
 jobs:
+  workflow-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+          cache: false
+      - name: Validate workflows
+        run: scripts/check-workflows.sh
+
   package:
     name: ${{ matrix.name }}
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -89,7 +102,9 @@ jobs:
           "DAV1D_STATIC=1" >> $env:GITHUB_ENV
           "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib\pkgconfig" >> $env:GITHUB_ENV
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
       - name: Check out vision.cpp for macOS local AI
@@ -115,6 +130,9 @@ jobs:
           cmake --install target/visioncpp-build --config Release
           test -x target/visioncpp-runtime/bin/vision-cli
           test -f target/visioncpp-runtime/LICENSE
+
+      - name: Test updater feature
+        run: cargo test --locked --features updater
 
       - name: Install packager
         run: cargo install cargo-packager --version 0.11.8 --locked
