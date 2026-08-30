@@ -1,6 +1,8 @@
 //! The macOS menu bar. Without one, AppKit has no key equivalent for Quit,
 //! Close, Hide or Minimize, and the app cannot be quit from the keyboard.
 
+use std::io;
+
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 
 use crate::audit::Audit;
@@ -47,6 +49,22 @@ fn register_about_press(presenter: impl Fn(&mut App) + 'static, cx: &mut App) {
     cx.on_action(move |_: &AboutPress, cx| presenter(cx));
 }
 
+fn register_show_crash_reports(
+    handler: impl Fn() -> io::Result<()> + 'static,
+    reporter: impl Fn(&'static str, &io::Error) + 'static,
+    cx: &mut App,
+) {
+    cx.on_action(move |_: &ShowCrashReports, _| {
+        if let Err(error) = handler() {
+            reporter("Show Crash Reports", &error);
+        }
+    });
+}
+
+fn report_show_crash_reports_failure(action: &'static str, error: &io::Error) {
+    eprintln!("press: {action}: {error}");
+}
+
 fn help_menu() -> Menu {
     Menu::new("Help").items(vec![
         MenuItem::action("About Press", AboutPress),
@@ -88,11 +106,11 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
         audit.update(cx, |audit, cx| audit.pick(false, cx));
     });
     register_about_press(present_about_press, cx);
-    cx.on_action(|_: &ShowCrashReports, _| {
-        if let Err(error) = crate::crash::try_reveal_reports() {
-            eprintln!("press: could not show crash reports: {error}");
-        }
-    });
+    register_show_crash_reports(
+        crate::crash::try_reveal_reports,
+        report_show_crash_reports_failure,
+        cx,
+    );
     cx.on_action(|_: &EmailCrashReport, _| crate::crash::email_report());
 
     // The menu shows each item's key equivalent from the keymap, so the
@@ -131,7 +149,11 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        sync::Arc,
+    };
 
     use gpui::{MenuItem, TestAppContext};
 
@@ -147,6 +169,69 @@ mod tests {
         });
 
         assert_eq!(calls.get(), 1);
+    }
+
+    #[derive(Debug)]
+    struct InjectedShowCrashReportsError;
+
+    impl std::fmt::Display for InjectedShowCrashReportsError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("injected Show Crash Reports failure")
+        }
+    }
+
+    impl std::error::Error for InjectedShowCrashReportsError {}
+
+    #[gpui::test]
+    fn show_crash_reports_surfaces_its_name_and_original_error(cx: &mut TestAppContext) {
+        let calls = Rc::new(Cell::new(0));
+        let fail = Rc::new(Cell::new(true));
+        let payload = Arc::new(InjectedShowCrashReportsError);
+        let reported = Rc::new(RefCell::new(Vec::new()));
+        let handler_calls = calls.clone();
+        let handler_fail = fail.clone();
+        let handler_payload = payload.clone();
+        let reporter_calls = reported.clone();
+        let reporter_payload = payload.clone();
+
+        cx.update(|cx| {
+            register_show_crash_reports(
+                move || {
+                    handler_calls.set(handler_calls.get() + 1);
+                    if handler_fail.replace(false) {
+                        Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            handler_payload.clone(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+                move |action, error| {
+                    assert_eq!(action, "Show Crash Reports");
+                    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                    assert_eq!(error.to_string(), "injected Show Crash Reports failure");
+                    let reported_payload = error
+                        .get_ref()
+                        .and_then(|source| {
+                            source.downcast_ref::<Arc<InjectedShowCrashReportsError>>()
+                        })
+                        .expect("reporter should receive the original error payload");
+                    assert!(Arc::ptr_eq(&reporter_payload, reported_payload));
+                    reporter_calls.borrow_mut().push(());
+                },
+                cx,
+            );
+            cx.dispatch_action(&ShowCrashReports);
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(reported.borrow().len(), 1);
+
+        cx.update(|cx| cx.dispatch_action(&ShowCrashReports));
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(reported.borrow().len(), 1);
     }
 
     #[test]
