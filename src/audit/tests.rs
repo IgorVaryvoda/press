@@ -2410,39 +2410,76 @@ fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn scan_blocked_gallery_context_actions_are_disabled(cx: &mut TestAppContext) {
-    let (audit, cx) = pointer_checkbox_audit(true, cx);
-    audit.update(cx, |audit, cx| {
-        retained_scan(audit);
-        assert!(audit.media_commit_actions_disabled());
-        audit.scanning = None;
-        assert!(!audit.media_commit_actions_disabled());
-        retained_scan(audit);
-        let selected = audit.selected.clone();
-        let rail = audit.rail;
-        audit.convert_one(0, cx);
-        audit.open_ai_operations(0, None, cx);
-        assert_eq!(audit.selected, selected);
-        assert!(audit.compare.is_none());
-        assert_eq!(audit.rail, rail);
-    });
+    scan_blocked_context_actions_leave_state_unchanged(true, cx);
 }
 
 #[gpui::test]
 fn scan_blocked_table_context_actions_are_disabled(cx: &mut TestAppContext) {
-    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    scan_blocked_context_actions_leave_state_unchanged(false, cx);
+}
+
+fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(grid, cx);
     audit.update(cx, |audit, cx| {
+        audit.selected = HashSet::from([1]);
+        audit.studio_source = Some((1, PathBuf::from("optimized/second.webp")));
+        audit.rail = Rail::Convert;
         retained_scan(audit);
+        audit.scan_partial = true;
         assert!(audit.media_commit_actions_disabled());
         audit.scanning = None;
         assert!(!audit.media_commit_actions_disabled());
         retained_scan(audit);
-        let selected = audit.selected.clone();
-        let rail = audit.rail;
+        audit.scan_partial = true;
+        cx.notify();
+    });
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let target = cx
+        .debug_bounds(if grid {
+            "grid-checkbox-0"
+        } else {
+            "table-checkbox-0"
+        })
+        .expect("the image context-menu trigger is rendered")
+        .center();
+    cx.simulate_mouse_down(target, gpui::MouseButton::Right, gpui::Modifiers::none());
+    cx.simulate_mouse_up(target, gpui::MouseButton::Right, gpui::Modifiers::none());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // The first two rows are Preview and Compare. The separator occupies the
+    // next gap, then Convert and AI operations follow at the standard 26 px
+    // menu-item height. These pointer attempts exercise the rendered disabled
+    // rows; disabled PopupMenuItems install no click handler.
+    for y in [target.y + px(78.), target.y + px(106.)] {
+        cx.simulate_click(gpui::point(target.x + px(20.), y), gpui::Modifiers::none());
+    }
+
+    audit.update(cx, |audit, cx| {
+        assert_eq!(audit.selected, HashSet::from([1]));
+        assert!(audit.compare.is_none());
+        assert!(audit.prefetch.is_none());
+        assert!(audit.prefetch_key.is_none());
+        assert_eq!(
+            audit.studio_source,
+            Some((1, PathBuf::from("optimized/second.webp")))
+        );
+        assert_eq!(audit.rail, Rail::Convert);
+        assert!(!audit.converting);
+
         audit.convert_one(0, cx);
         audit.open_ai_operations(0, None, cx);
-        assert_eq!(audit.selected, selected);
+
+        assert_eq!(audit.selected, HashSet::from([1]));
         assert!(audit.compare.is_none());
-        assert_eq!(audit.rail, rail);
+        assert!(audit.prefetch.is_none());
+        assert!(audit.prefetch_key.is_none());
+        assert_eq!(
+            audit.studio_source,
+            Some((1, PathBuf::from("optimized/second.webp")))
+        );
+        assert_eq!(audit.rail, Rail::Convert);
+        assert!(!audit.converting);
     });
 }
 
