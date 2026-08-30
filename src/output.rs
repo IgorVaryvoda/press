@@ -182,7 +182,7 @@ impl Context {
     }
 
     /// Return a source path only when it is already canonical and strictly below root.
-    // First consumed by plan 1433 with the GUI conversion migration.
+    // First consumed by plan 1433 for GUI routing.
     #[allow(dead_code)]
     pub fn relative_source(&self, source: &Path) -> Result<PathBuf, Error> {
         validate_raw(source)?;
@@ -208,7 +208,7 @@ impl Context {
     }
 
     /// Join a normal source-relative path while retaining the proven output boundary.
-    // First consumed by plan 1434 with the CLI conversion migration.
+    // First consumed by plan 1434 for CLI routing.
     #[allow(dead_code)]
     pub fn final_path(&self, relative: &Path) -> Result<PathBuf, Error> {
         normal_relative(relative)?;
@@ -316,7 +316,7 @@ fn validate_windows_lexical(_path: &Path) -> Result<(), Error> {
 fn validate_windows_lexical(path: &Path) -> Result<(), Error> {
     use std::path::Prefix;
 
-    if path.is_absolute() {
+    if path.has_root() {
         let Some(Component::Prefix(prefix)) = path.components().next() else {
             return Err(Error::WindowsNamespace);
         };
@@ -624,10 +624,14 @@ mod tests {
         for path in [
             r"\\.\PhysicalDrive0",
             r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\image.png",
             r"\\?\pipe\name",
             r"\\?\mailslot\name",
             r"\\?\arbitrary\name",
+            r"\\.\PIPE\name",
+            r"\\.\MAILSLOT\name",
             r"\??\Device\HarddiskVolume1",
+            r"\??\C:\photos\image.png",
             r"\\server\PiPe\name",
             r"\\server\MAILSLOT\name",
             r"\\server\iPc$\name",
@@ -696,9 +700,7 @@ mod tests {
             }
         }
 
-        for unit in [
-            0x0000,
-            0x001f,
+        for unit in (0x0000..=0x001f).chain([
             b'<' as u16,
             b'>' as u16,
             b':' as u16,
@@ -708,7 +710,7 @@ mod tests {
             b'|' as u16,
             b'?' as u16,
             b'*' as u16,
-        ] {
+        ]) {
             assert!(
                 matches!(
                     validate_windows_component(&wide(&[b'a' as u16, unit])),
@@ -747,6 +749,7 @@ mod tests {
                 validate_windows_component(&wide(&units)).is_ok(),
                 "{units:?}"
             );
+            assert!(validate_raw(Path::new(&wide(&units))).is_ok(), "{units:?}");
         }
         assert!(is_ipc_share(&wide(&[
             b'P' as u16,
