@@ -137,14 +137,14 @@ impl Context {
     pub fn establish(source: &Path, output: &Path) -> Result<Self, Error> {
         validate_raw(source)?;
         validate_raw(output)?;
-        validate_existing_windows_components(source, false)?;
-        validate_existing_windows_components(output, true)?;
         if !source.is_absolute() {
             return Err(Error::SourceNotAbsolute);
         }
         if !output.is_absolute() {
             return Err(Error::OutputNotAbsolute);
         }
+        validate_existing_windows_components(source, false)?;
+        validate_existing_windows_components(output, true)?;
 
         let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
             path: source.to_path_buf(),
@@ -186,10 +186,10 @@ impl Context {
     #[allow(dead_code)]
     pub fn relative_source(&self, source: &Path) -> Result<PathBuf, Error> {
         validate_raw(source)?;
-        validate_existing_windows_components(source, false)?;
         if !source.is_absolute() {
             return Err(Error::SourceNotCanonical);
         }
+        validate_existing_windows_components(source, false)?;
         let canonical = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
             path: source.to_path_buf(),
             error,
@@ -435,20 +435,50 @@ fn validate_existing_windows_components(_path: &Path, _output: bool) -> Result<(
 fn validate_existing_windows_components(path: &Path, output: bool) -> Result<(), Error> {
     use std::os::windows::fs::MetadataExt;
 
-    let mut existing = PathBuf::new();
-    for component in path.components() {
-        existing.push(component.as_os_str());
-        match fs::symlink_metadata(&existing) {
-            Ok(metadata) => {
-                if metadata.file_attributes() & 0x400 != 0 {
-                    return Err(Error::WindowsReparse { path: existing });
-                }
+    validate_existing_windows_components_with(path, output, |candidate| {
+        fs::symlink_metadata(candidate).map(|metadata| metadata.file_attributes())
+    })
+}
+
+#[cfg(windows)]
+fn validate_existing_windows_components_with(
+    path: &Path,
+    output: bool,
+    mut metadata: impl FnMut(&Path) -> io::Result<u32>,
+) -> Result<(), Error> {
+    for candidate in windows_absolute_ancestors(path) {
+        match metadata(&candidate) {
+            Ok(attributes) if attributes & 0x400 != 0 => {
+                return Err(Error::WindowsReparse { path: candidate });
             }
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(metadata_error(existing, output, error)),
+            Err(error) => return Err(metadata_error(candidate, output, error)),
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_absolute_ancestors(path: &Path) -> Vec<PathBuf> {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Vec::new();
+    };
+    let Some(Component::RootDir) = components.next() else {
+        return Vec::new();
+    };
+
+    let mut ancestor = PathBuf::from(prefix.as_os_str());
+    ancestor.push(std::path::MAIN_SEPARATOR_STR);
+    let mut ancestors = vec![ancestor.clone()];
+    for component in components {
+        if let Component::Normal(part) = component {
+            ancestor.push(part);
+            ancestors.push(ancestor.clone());
+        }
+    }
+    ancestors
 }
 
 #[cfg(windows)]
@@ -775,6 +805,88 @@ mod tests {
         let error = io::Error::new(io::ErrorKind::InvalidInput, "injected failure");
         let result = metadata_error(PathBuf::from(r"C:\blocked"), true, error);
         assert!(matches!(result, Error::OutputLookup { .. }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_absolute_ancestor_walk() {
+        let base = temp_dir("absolute-ancestor");
+        let source = base.join("source");
+        let output = base.join("output");
+        fs::create_dir(&source).unwrap();
+        assert!(Context::establish(&source, &output).is_ok());
+        fs::remove_dir_all(&base).unwrap();
+
+        for (path, expected) in [
+            (
+                r"C:\album\missing",
+                vec![r"C:\", r"C:\album", r"C:\album\missing"],
+            ),
+            (
+                r"\\?\C:\album\missing",
+                vec![r"\\?\C:\", r"\\?\C:\album", r"\\?\C:\album\missing"],
+            ),
+            (
+                r"\\server\share\album\missing",
+                vec![
+                    r"\\server\share\",
+                    r"\\server\share\album",
+                    r"\\server\share\album\missing",
+                ],
+            ),
+            (
+                r"\\?\UNC\server\share\album\missing",
+                vec![
+                    r"\\?\UNC\server\share\",
+                    r"\\?\UNC\server\share\album",
+                    r"\\?\UNC\server\share\album\missing",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                windows_absolute_ancestors(Path::new(path)),
+                expected.into_iter().map(PathBuf::from).collect::<Vec<_>>(),
+                "{path}"
+            );
+        }
+
+        let path = Path::new(r"C:\existing\missing\child");
+        let expected = windows_absolute_ancestors(path);
+        let mut seen = Vec::new();
+        assert!(
+            validate_existing_windows_components_with(path, false, |candidate| {
+                seen.push(candidate.to_path_buf());
+                if candidate == Path::new(r"C:\existing\missing") {
+                    Err(io::Error::new(io::ErrorKind::NotFound, "missing suffix"))
+                } else {
+                    Ok(0)
+                }
+            })
+            .is_ok()
+        );
+        assert_eq!(seen, expected[..3].to_vec());
+
+        for (reparse, expected_error) in [
+            (Path::new(r"C:\"), PathBuf::from(r"C:\")),
+            (Path::new(r"C:\existing"), PathBuf::from(r"C:\existing")),
+        ] {
+            assert!(matches!(
+                validate_existing_windows_components_with(path, true, |candidate| {
+                    Ok(if candidate == reparse { 0x400 } else { 0 })
+                }),
+                Err(Error::WindowsReparse { path }) if path == expected_error
+            ));
+        }
+
+        let mut seen = Vec::new();
+        assert!(matches!(
+            validate_existing_windows_components_with(path, false, |candidate| {
+                seen.push(candidate.to_path_buf());
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            }),
+            Err(Error::SourceLookup { .. })
+        ));
+        assert_eq!(seen, expected[..1].to_vec());
     }
 
     #[cfg(windows)]
