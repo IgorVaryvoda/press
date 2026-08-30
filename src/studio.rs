@@ -139,6 +139,19 @@ pub struct PreparedUpload {
     pub height: u32,
 }
 
+#[cfg(test)]
+impl PreparedUpload {
+    pub(crate) fn for_test() -> Self {
+        Self {
+            bytes: Vec::new(),
+            mime: "image/webp",
+            extension: "webp",
+            width: 1,
+            height: 1,
+        }
+    }
+}
+
 pub enum Preflight {
     Ready(PreparedUpload),
     NeedsConfirmation(PreparedUpload),

@@ -56,6 +56,23 @@ impl StudioJob {
 }
 
 impl Audit {
+    pub(super) fn studio_commit_disabled(
+        &self,
+        index: Option<usize>,
+        has_key: bool,
+        prompt_missing: bool,
+        awaiting_confirmation: bool,
+    ) -> bool {
+        index.is_none()
+            || !has_key
+            || self.scan_blocks_delivery()
+            || (!awaiting_confirmation
+                && (prompt_missing
+                    || self.converting
+                    || self.local_ai_busy()
+                    || self.studio_busy()))
+    }
+
     pub(super) fn studio_busy(&self) -> bool {
         self.studio_key_checking || self.studio_job.as_ref().is_some_and(StudioJob::busy)
     }
@@ -236,6 +253,11 @@ impl Audit {
             }
         };
         self.run_prepared_studio(upload, cx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn confirm_studio_for_test(&mut self, cx: &mut Context<Self>) {
+        self.confirm_studio(cx);
     }
 
     fn run_prepared_studio(&mut self, upload: studio::PreparedUpload, cx: &mut Context<Self>) {
@@ -500,31 +522,34 @@ impl Audit {
                             .child(target),
                     )
                     .child(
-                        Button::new("studio-commit")
-                            .primary()
-                            .w_full()
-                            .label(if awaiting_confirmation {
-                                "Prepare upload copy & run".to_string()
-                            } else {
-                                format!("Run {}", chosen.label())
-                            })
-                            .loading(
-                                self.studio_job
-                                    .as_ref()
-                                    .is_some_and(|job| job.busy() && job.tool == chosen),
-                            )
-                            .disabled(
-                                index.is_none()
-                                    || !has_key
-                                    || !awaiting_confirmation && (prompt_missing || busy),
-                            )
-                            .on_click(cx.listener(move |audit, _, _, cx| {
-                                if awaiting_confirmation {
-                                    audit.confirm_studio(cx);
-                                } else if let Some(index) = index {
-                                    audit.start_studio(index, written.clone(), cx);
-                                }
-                            })),
+                        div().debug_selector(|| "studio-commit".into()).child(
+                            Button::new("studio-commit")
+                                .primary()
+                                .w_full()
+                                .label(if awaiting_confirmation {
+                                    "Prepare upload copy & run".to_string()
+                                } else {
+                                    format!("Run {}", chosen.label())
+                                })
+                                .loading(
+                                    self.studio_job
+                                        .as_ref()
+                                        .is_some_and(|job| job.busy() && job.tool == chosen),
+                                )
+                                .disabled(self.studio_commit_disabled(
+                                    index,
+                                    has_key,
+                                    prompt_missing,
+                                    awaiting_confirmation,
+                                ))
+                                .on_click(cx.listener(move |audit, _, _, cx| {
+                                    if awaiting_confirmation {
+                                        audit.confirm_studio(cx);
+                                    } else if let Some(index) = index {
+                                        audit.start_studio(index, written.clone(), cx);
+                                    }
+                                })),
+                        ),
                     ),
             )
             .into_any_element()

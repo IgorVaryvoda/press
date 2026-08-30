@@ -244,6 +244,9 @@ impl Audit {
     }
 
     pub(super) fn copy_audit_report(&mut self, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         let report = audit_report(
             &self.root,
             &self.entries,

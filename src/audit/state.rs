@@ -178,7 +178,7 @@ impl Audit {
         written: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if index >= self.entries.len() {
+        if self.media_commit_actions_disabled() || index >= self.entries.len() {
             return;
         }
         self.selected.clear();

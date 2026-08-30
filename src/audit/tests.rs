@@ -2326,6 +2326,7 @@ fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
     audit.update(cx, |audit, cx| {
         audit.selected.extend([0, 1]);
         audit.rail = Rail::Studio;
+        audit.selection_changed(cx);
 
         audit.open_ai_operations(2, None, cx);
 
@@ -2333,6 +2334,133 @@ fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
         assert_eq!(audit.cursor, audit.row_of(2).unwrap());
         assert_eq!(audit.rail, Rail::Studio);
     });
+}
+
+#[gpui::test]
+fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(0);
+        audit.studio_key = Some("sk_live_test".into());
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::AwaitingConfirmation(studio::PreparedUpload::for_test()),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        audit.rail = Rail::Studio;
+        retained_scan(audit);
+        audit.scan_partial = true;
+        assert!(audit.studio_commit_disabled(Some(0), true, false, true));
+        audit.scanning = None;
+        assert!(!audit.studio_commit_disabled(Some(0), true, false, true));
+        retained_scan(audit);
+        audit.scan_partial = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let commit = cx
+        .debug_bounds("studio-commit")
+        .expect("Studio commit is rendered");
+    cx.simulate_click(commit.center(), gpui::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(matches!(
+            audit.studio_job.as_ref().map(|job| &job.state),
+            Some(StudioJobState::AwaitingConfirmation(_))
+        ));
+    });
+    audit.update(cx, |audit, cx| audit.confirm_studio_for_test(cx));
+    audit.read_with(cx, |audit, _| assert!(audit.studio_job.is_none()));
+}
+
+#[gpui::test]
+fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_browser = Some(SirvBrowser {
+            client: test_pairing().client,
+            path: "/photos".into(),
+            needs_credentials: false,
+            nodes: Some(Ok(Vec::new())),
+            generation: 0,
+            session: 1,
+            focused: false,
+            focus: cx.focus_handle(),
+        });
+        retained_scan(audit);
+        audit.scan_partial = true;
+        assert!(audit.sirv_pair_disabled(false, true));
+        audit.scanning = None;
+        assert!(!audit.sirv_pair_disabled(false, true));
+        retained_scan(audit);
+        audit.scan_partial = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let pair = cx.debug_bounds("sirv-pair").expect("Sirv pair is rendered");
+    cx.simulate_click(pair.center(), gpui::Modifiers::none());
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
+    audit.update(cx, |audit, cx| audit.pair_sirv(cx));
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
+}
+
+#[gpui::test]
+fn scan_blocked_gallery_context_actions_are_disabled(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(true, cx);
+    audit.update(cx, |audit, cx| {
+        retained_scan(audit);
+        assert!(audit.media_commit_actions_disabled());
+        audit.scanning = None;
+        assert!(!audit.media_commit_actions_disabled());
+        retained_scan(audit);
+        let selected = audit.selected.clone();
+        let rail = audit.rail;
+        audit.convert_one(0, cx);
+        audit.open_ai_operations(0, None, cx);
+        assert_eq!(audit.selected, selected);
+        assert!(audit.compare.is_none());
+        assert_eq!(audit.rail, rail);
+    });
+}
+
+#[gpui::test]
+fn scan_blocked_table_context_actions_are_disabled(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    audit.update(cx, |audit, cx| {
+        retained_scan(audit);
+        assert!(audit.media_commit_actions_disabled());
+        audit.scanning = None;
+        assert!(!audit.media_commit_actions_disabled());
+        retained_scan(audit);
+        let selected = audit.selected.clone();
+        let rail = audit.rail;
+        audit.convert_one(0, cx);
+        audit.open_ai_operations(0, None, cx);
+        assert_eq!(audit.selected, selected);
+        assert!(audit.compare.is_none());
+        assert_eq!(audit.rail, rail);
+    });
+}
+
+#[gpui::test]
+fn an_incomplete_scan_cannot_copy_a_report(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+    audit.update(cx, |audit, cx| {
+        audit.report_copied = true;
+        retained_scan(audit);
+        audit.copy_audit_report(cx);
+        assert!(audit.report_copied);
+    });
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|clipboard| clipboard.text()),
+        Some("sentinel".into())
+    );
 }
 
 #[gpui::test]

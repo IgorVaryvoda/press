@@ -222,7 +222,7 @@ impl Audit {
                             "Copy audit"
                         })
                         .tooltip("Copy a shareable Press audit with Sirv and AI next steps")
-                        .disabled(self.converting)
+                        .disabled(self.converting || self.scan_blocks_delivery())
                         .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
                 )
             })
