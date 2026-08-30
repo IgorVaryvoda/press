@@ -30,14 +30,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
-use futures::{SinkExt, StreamExt, future::select_all};
+use futures::{FutureExt, SinkExt, StreamExt, future::select_all};
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
@@ -90,6 +93,52 @@ enum ScanBatchPublish {
 struct ScanBatchHandoff {
     sender: futures::channel::mpsc::Sender<Vec<Entry>>,
     closed: bool,
+}
+
+/// A folder scan owns one token and one wake-up edge. Keeping the handle in the
+/// audit lets a newer request stop the old handoff without taking terminal
+/// ownership away from the task that must join the scanner.
+struct ScanCancellation {
+    token: Arc<AtomicBool>,
+    wake: Option<futures::channel::oneshot::Sender<()>>,
+}
+
+impl ScanCancellation {
+    fn new() -> (Self, futures::channel::oneshot::Receiver<()>) {
+        let (wake, receiver) = futures::channel::oneshot::channel();
+        (
+            Self {
+                token: Arc::new(AtomicBool::new(false)),
+                wake: Some(wake),
+            },
+            receiver,
+        )
+    }
+
+    fn cancel(&mut self) {
+        self.token.store(true, Ordering::Release);
+        if let Some(wake) = self.wake.take() {
+            let _ = wake.send(());
+        }
+    }
+}
+
+/// Prefer cancellation even when a batch is already ready. Closing the receiver
+/// releases a publisher waiting in `feed`; the caller then joins the scanner.
+async fn next_scan_batch_or_cancel(
+    batches: &mut futures::channel::mpsc::Receiver<Vec<Entry>>,
+    cancelled: &mut futures::channel::oneshot::Receiver<()>,
+) -> Option<Vec<Entry>> {
+    let cancelled = cancelled.fuse();
+    let batch = batches.next().fuse();
+    futures::pin_mut!(cancelled, batch);
+    futures::select_biased! {
+        _ = cancelled => {
+            batches.close();
+            None
+        },
+        entries = batch => entries,
+    }
 }
 
 impl ScanBatchHandoff {
@@ -497,9 +546,14 @@ pub(crate) struct Audit {
     scan_generation: u64,
     /// The path currently being scanned, if any.
     scanning: Option<String>,
+    /// The cancellable folder scan currently allowed to publish into this audit.
+    scan_cancellation: Option<ScanCancellation>,
     /// The new folder has published rows already. Until then the old dataset stays
     /// installed behind the scanning screen; once true, those new rows are safe to draw.
     scan_partial: bool,
+    /// A cancelled replacement left its progressive rows on screen. They remain
+    /// readable but cannot be converted or delivered until a complete retry lands.
+    scan_interrupted: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -861,6 +915,27 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
 }
 
 impl Audit {
+    pub(super) fn scan_blocks_delivery(&self) -> bool {
+        self.scanning.is_some()
+    }
+
+    pub(super) fn cancel_retained_scan(&mut self) {
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+    }
+
+    fn owns_scan_request(&self, request: u64, token: Option<&Arc<AtomicBool>>) -> bool {
+        self.scan_generation == request
+            && match token {
+                Some(token) => self
+                    .scan_cancellation
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(&current.token, token)),
+                None => self.scan_cancellation.is_none(),
+            }
+    }
+
     /// Install a completed scan. This is the one state transition that replaces the
     /// dataset and invalidates every detached job derived from the old rows.
     fn install_dataset(
@@ -1023,12 +1098,24 @@ impl Audit {
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
         let progressive = !single && (self.root != path || self.sirv_pairing.is_none());
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+        self.scan_cancellation = None;
+        let (token, mut cancelled) = if single {
+            (None, None)
+        } else {
+            let (cancellation, receiver) = ScanCancellation::new();
+            let token = cancellation.token.clone();
+            self.scan_cancellation = Some(cancellation);
+            (Some(token), Some(receiver))
+        };
         let label = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         self.scanning = Some(label);
-        self.scan_partial = false;
+        self.scan_interrupted = false;
         // A chosen destination follows the audit to the new folder: it is a
         // preference about where output belongs, not about this folder.
         let output = self.output.clone();
@@ -1036,40 +1123,72 @@ impl Audit {
 
         cx.spawn(async move |this, cx| {
             if !progressive {
+                let scan_token = token.clone();
+                let scan_path = path.clone();
                 let result = cx
                     .background_executor()
                     .spawn(async move {
                         if single {
-                            let entry = scan::probe(&path)?;
-                            let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                            Some((
-                                scan::Scan {
+                            scan::probe(&scan_path).map(|entry| {
+                                scan::ScanOutcome::Complete(scan::Scan {
                                     entries: vec![entry],
                                     skipped_raw: 0,
                                     skipped_packages: 0,
                                     unreadable: Vec::new(),
                                     walk_errors: Vec::new(),
                                     existing_output: 0,
-                                },
-                                root,
-                                true,
-                            ))
+                                })
+                            })
                         } else {
-                            Some((scan::scan(&path, &output.root(&path)), path, false))
+                            let token = scan_token.expect("folders own a cancellation token");
+                            Some(scan::scan_progressive_cancellable(
+                                &scan_path,
+                                &output.root(&scan_path),
+                                token,
+                                |_| std::ops::ControlFlow::Continue(()),
+                            ))
                         }
                     })
                     .await;
 
                 let _ = this.update_in(cx, |audit, window, cx| {
-                    if audit.scan_generation != request {
+                    if !audit.owns_scan_request(request, token.as_ref()) {
                         return;
                     }
-                    audit.scanning = None;
-                    audit.scan_partial = false;
-                    if let Some((scanned, root, single)) = result {
-                        audit.install_dataset(scanned, root, single, None, window, cx);
-                    } else {
-                        cx.notify();
+                    match result {
+                        Some(scan::ScanOutcome::Complete(scanned)) => {
+                            audit.scanning = None;
+                            audit.scan_partial = false;
+                            audit.scan_interrupted = false;
+                            let root = if single {
+                                path.parent().unwrap_or(Path::new(".")).to_path_buf()
+                            } else {
+                                path.clone()
+                            };
+                            audit.install_dataset(scanned, root, single, None, window, cx);
+                            if !single {
+                                audit.scan_cancellation = None;
+                            }
+                        }
+                        Some(scan::ScanOutcome::Cancelled) if audit.scan_partial => {
+                            audit.scan_interrupted = true;
+                            cx.notify();
+                        }
+                        Some(scan::ScanOutcome::Cancelled) => {
+                            audit.scanning = None;
+                            if !single {
+                                audit.scan_cancellation = None;
+                            }
+                            cx.notify();
+                        }
+                        None if audit.scan_partial => {
+                            audit.scan_interrupted = true;
+                            cx.notify();
+                        }
+                        None => {
+                            audit.scanning = None;
+                            cx.notify();
+                        }
                     }
                 });
                 return;
@@ -1077,19 +1196,30 @@ impl Audit {
 
             let root = path.clone();
             let output_root = output.root(&path);
+            let token = token.expect("progressive folders own a cancellation token");
+            let mut cancelled = cancelled
+                .take()
+                .expect("folder cancellation wakes the handoff");
             let (mut handoff, mut batches) = ScanBatchHandoff::new();
+            let scan_token = token.clone();
             let scan_task = cx.background_executor().spawn(async move {
-                scan::scan_progressive(&path, &output_root, |batch| {
-                    let _ = futures::executor::block_on(handoff.publish(batch));
+                scan::scan_progressive_cancellable(&path, &output_root, scan_token, |batch| {
+                    match futures::executor::block_on(handoff.publish(batch)) {
+                        ScanBatchPublish::Queued => std::ops::ControlFlow::Continue(()),
+                        ScanBatchPublish::Closed | ScanBatchPublish::AlreadyClosed => {
+                            std::ops::ControlFlow::Break(())
+                        }
+                    }
                 })
             });
             let mut installed = false;
-            while let Some(entries) = batches.next().await {
+            while let Some(entries) = next_scan_batch_or_cancel(&mut batches, &mut cancelled).await
+            {
                 let first = !installed;
                 let root = root.clone();
                 let accepted = this
                     .update_in(cx, |audit, window, cx| {
-                        if audit.scan_generation != request {
+                        if !audit.owns_scan_request(request, Some(&token)) {
                             return false;
                         }
                         if first {
@@ -1116,21 +1246,37 @@ impl Audit {
                     })
                     .unwrap_or(false);
                 if !accepted {
-                    return;
+                    batches.close();
+                    break;
                 }
                 installed = true;
             }
-            let scanned = scan_task.await;
+            let outcome = scan_task.await;
             let _ = this.update_in(cx, |audit, window, cx| {
-                if audit.scan_generation != request {
+                if !audit.owns_scan_request(request, Some(&token)) {
                     return;
                 }
-                audit.scanning = None;
-                audit.scan_partial = false;
-                if installed {
-                    audit.finish_progressive_scan(scanned, cx);
-                } else {
-                    audit.install_dataset(scanned, root, false, None, window, cx);
+                match outcome {
+                    scan::ScanOutcome::Complete(scanned) => {
+                        audit.scanning = None;
+                        audit.scan_partial = false;
+                        audit.scan_interrupted = false;
+                        if installed {
+                            audit.finish_progressive_scan(scanned, cx);
+                        } else {
+                            audit.install_dataset(scanned, root, false, None, window, cx);
+                        }
+                        audit.scan_cancellation = None;
+                    }
+                    scan::ScanOutcome::Cancelled if audit.scan_partial => {
+                        audit.scan_interrupted = true;
+                        cx.notify();
+                    }
+                    scan::ScanOutcome::Cancelled => {
+                        audit.scanning = None;
+                        audit.scan_cancellation = None;
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -1173,8 +1319,12 @@ impl Audit {
     fn request_files(&mut self, paths: Vec<PathBuf>, root: PathBuf, cx: &mut Context<Self>) {
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+        self.scan_cancellation = None;
         self.scanning = Some(format!("{} images", paths.len()));
-        self.scan_partial = false;
+        self.scan_interrupted = false;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1184,10 +1334,12 @@ impl Audit {
                 .await;
             let batch_size = scanned.entries.len();
             let _ = this.update_in(cx, |audit, window, cx| {
-                if audit.scan_generation != request {
+                if !audit.owns_scan_request(request, None) {
                     return;
                 }
                 audit.scanning = None;
+                audit.scan_partial = false;
+                audit.scan_interrupted = false;
                 audit.install_dataset(scanned, root, false, Some(batch_size), window, cx);
             });
         })
@@ -1538,7 +1690,9 @@ pub(crate) fn build_audit(
             dataset_generation: 0,
             scan_generation: 0,
             scanning: None,
+            scan_cancellation: None,
             scan_partial: false,
+            scan_interrupted: false,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),
@@ -1594,6 +1748,23 @@ pub(crate) fn build_audit(
         cx.new(|cx| TableState::new(delegate, window, cx))
     };
     audit.update(cx, |audit, _| audit.table = Some(table));
+
+    audit.update(cx, |_, cx| {
+        cx.on_release(|audit, _| {
+            audit.cancel_retained_scan();
+        })
+        .detach();
+    });
+    let window_id = window.window_handle().window_id();
+    let weak_audit = audit.downgrade();
+    cx.on_window_closed(move |cx, closed_window_id| {
+        if closed_window_id == window_id {
+            let _ = weak_audit.update(cx, |audit, _| {
+                audit.cancel_retained_scan();
+            });
+        }
+    })
+    .detach();
 
     audit
 }

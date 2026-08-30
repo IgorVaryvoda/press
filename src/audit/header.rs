@@ -57,7 +57,9 @@ impl Audit {
                 many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
             });
         }
-        if self.scan_partial {
+        if self.scan_interrupted && self.scan_partial {
+            stats.push_str(" · scan incomplete");
+        } else if self.scan_partial {
             stats.push_str(" · scanning…");
         }
         div()
@@ -233,7 +235,7 @@ impl Audit {
                         .ghost()
                         .icon(IconName::Globe)
                         .label("Pair with Sirv")
-                        .disabled(self.converting)
+                        .disabled(self.converting || self.scan_blocks_delivery())
                         .on_click(
                             cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
                         ),

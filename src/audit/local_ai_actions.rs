@@ -70,7 +70,11 @@ impl Audit {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.local_ai_busy() || self.studio_busy() || self.converting {
+        if self.scan_blocks_delivery()
+            || self.local_ai_busy()
+            || self.studio_busy()
+            || self.converting
+        {
             return;
         }
         let Some(entry) = self.entries.get(index) else {
@@ -141,9 +145,16 @@ impl Audit {
                         index,
                         dataset_generation,
                         tool,
-                    );
+                    ) && !audit.scan_blocks_delivery();
                     if applies {
                         audit.local_ai_job.as_mut().unwrap().state = LocalAiJobState::Running;
+                        cx.notify();
+                    } else if audit.scan_blocks_delivery() {
+                        if let Some(job) = audit.local_ai_job.as_ref() {
+                            job.cancelled
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        audit.local_ai_job = None;
                         cx.notify();
                     }
                     applies

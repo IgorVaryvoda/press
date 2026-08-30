@@ -137,7 +137,11 @@ impl Audit {
         written: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if self.studio_busy() || self.local_ai_busy() || self.converting {
+        if self.scan_blocks_delivery()
+            || self.studio_busy()
+            || self.local_ai_busy()
+            || self.converting
+        {
             return;
         }
         if self.studio_key.is_none() {
@@ -191,6 +195,10 @@ impl Audit {
                 ) {
                     return;
                 }
+                if audit.scan_blocks_delivery() {
+                    audit.retire_studio_for_scan(cx);
+                    return;
+                }
                 match result {
                     Ok(studio::Preflight::Ready(upload)) => {
                         audit.run_prepared_studio(upload, cx);
@@ -211,6 +219,10 @@ impl Audit {
     }
 
     fn confirm_studio(&mut self, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            self.retire_studio_for_scan(cx);
+            return;
+        }
         let upload = {
             let Some(job) = self.studio_job.as_mut() else {
                 return;
@@ -227,6 +239,10 @@ impl Audit {
     }
 
     fn run_prepared_studio(&mut self, upload: studio::PreparedUpload, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            self.retire_studio_for_scan(cx);
+            return;
+        }
         let Some(key) = self.studio_key.clone() else {
             return;
         };
@@ -286,6 +302,14 @@ impl Audit {
         .detach();
     }
 
+    fn retire_studio_for_scan(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.studio_job.take() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        cx.notify();
+    }
+
     pub(super) fn studio_rail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let index = self.single_target();
         let target = index
@@ -296,7 +320,10 @@ impl Audit {
         let prompt = self.studio_prompt_text(cx);
         let prompt_missing = chosen.needs_prompt() && prompt.is_empty();
         let has_key = self.studio_key.is_some();
-        let busy = self.converting || self.local_ai_busy() || self.studio_busy();
+        let busy = self.converting
+            || self.local_ai_busy()
+            || self.studio_busy()
+            || self.scan_blocks_delivery();
         let awaiting_confirmation = self.studio_job.as_ref().is_some_and(|job| {
             job.index == index.unwrap_or(usize::MAX)
                 && job.tool == chosen

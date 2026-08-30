@@ -82,7 +82,9 @@ impl Audit {
                         .tooltip(waiting.clone().unwrap_or_else(|| {
                             "Upload the converted files to optimized/ on Sirv".into()
                         }))
-                        .disabled(self.sirv_busy() || waiting.is_some())
+                        .disabled(
+                            self.scan_blocks_delivery() || self.sirv_busy() || waiting.is_some(),
+                        )
                         .on_click(cx.listener(|audit, _, _, cx| audit.publish_results(cx)))
                 } else {
                     Button::new("conversion-copy-embed")

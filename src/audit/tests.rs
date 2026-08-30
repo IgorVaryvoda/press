@@ -12,8 +12,201 @@ use gpui_component::Root;
 use image::ImageFormat;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::Duration;
+
+struct WakeCount(AtomicUsize);
+
+impl futures::task::ArcWake for WakeCount {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn retained_scan(audit: &mut Audit) -> Arc<std::sync::atomic::AtomicBool> {
+    let (cancellation, _) = ScanCancellation::new();
+    let token = cancellation.token.clone();
+    audit.scan_cancellation = Some(cancellation);
+    audit.scanning = Some("old folder".into());
+    token
+}
+
+#[test]
+fn cancellation_wakes_an_already_pending_batch_feed() {
+    let (mut handoff, mut batches) = ScanBatchHandoff::new();
+    assert_eq!(
+        futures::executor::block_on(handoff.publish(&[])),
+        ScanBatchPublish::Queued
+    );
+    let mut publisher = Box::pin(handoff.publish(&[]));
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = futures::task::waker(wakes.clone());
+    let mut task = TaskContext::from_waker(&waker);
+    assert!(matches!(publisher.as_mut().poll(&mut task), Poll::Pending));
+    let (mut cancellation, mut receiver) = ScanCancellation::new();
+    cancellation.cancel();
+    assert!(
+        futures::executor::block_on(next_scan_batch_or_cancel(&mut batches, &mut receiver))
+            .is_none()
+    );
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        publisher.as_mut().poll(&mut task),
+        Poll::Ready(ScanBatchPublish::Closed)
+    );
+}
+
+#[gpui::test]
+fn opening_one_file_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update(cx, |audit, cx| {
+        let old = retained_scan(audit);
+        audit.request_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            cx,
+        );
+        old
+    });
+    assert!(old.load(Ordering::Acquire));
+}
+#[gpui::test]
+fn opening_many_files_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update(cx, |audit, cx| {
+        let old = retained_scan(audit);
+        audit.request_files(Vec::new(), PathBuf::new(), cx);
+        old
+    });
+    assert!(old.load(Ordering::Acquire));
+}
+#[gpui::test]
+fn an_invalid_path_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update(cx, |audit, cx| {
+        let old = retained_scan(audit);
+        audit.request_path(PathBuf::from("/not/a/press/image"), cx);
+        old
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit
+                .scan_cancellation
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(&current.token, &old))
+        )
+    });
+}
+#[gpui::test]
+fn a_rejected_mixed_root_selection_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update(cx, |audit, _| retained_scan(audit));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit
+                .scan_cancellation
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(&current.token, &old))
+        )
+    });
+}
+#[gpui::test]
+fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        let old = retained_scan(audit);
+        let request = audit.scan_generation;
+        let (new, _) = ScanCancellation::new();
+        audit.scan_cancellation = Some(new);
+        assert!(!audit.owns_scan_request(request, Some(&old)));
+    });
+}
+#[gpui::test]
+fn same_root_rescan_uses_the_cancellable_core(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        audit.root = root.clone();
+        audit.request_path(root, cx);
+        assert!(audit.scan_cancellation.is_some());
+    });
+}
+#[gpui::test]
+fn a_failed_replacement_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.scan_partial = true;
+        audit.scanning = Some("partial".into());
+        audit.request_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.scan_partial && audit.scanning.is_some() && audit.scan_interrupted)
+    });
+}
+#[gpui::test]
+fn a_cancelled_scan_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.scan_partial = true;
+        audit.scanning = Some("partial".into());
+        audit.scan_interrupted = true;
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.scan_partial && audit.scan_interrupted && audit.scan_blocks_delivery())
+    });
+}
+#[gpui::test]
+fn an_interrupted_partial_scan_blocks_delivery_actions(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| audit.scanning = Some("partial".into()));
+    audit.read_with(cx, |audit, _| assert!(audit.scan_blocks_delivery()));
+}
+#[gpui::test]
+fn a_successful_retry_clears_incomplete_state(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.scan_partial = false;
+        audit.scan_interrupted = false;
+        audit.scanning = None;
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.scan_partial && !audit.scan_interrupted && !audit.scan_blocks_delivery())
+    });
+}
+#[gpui::test]
+fn closing_the_window_cancels_a_retained_silent_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let token = audit.update(cx, |audit, _| retained_scan(audit));
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    assert!(token.load(Ordering::Acquire));
+}
+#[gpui::test]
+fn releasing_the_audit_cancels_a_silent_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let token = audit.update(cx, |audit, _| retained_scan(audit));
+    audit.update(cx, |audit, _| audit.cancel_retained_scan());
+    assert!(token.load(Ordering::Acquire));
+}
+#[gpui::test]
+fn a_normal_folder_scan_lands_once(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.request_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")), cx)
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.scan_cancellation.is_none() || audit.scanning.is_some())
+    });
+}
 
 #[test]
 fn the_scan_batch_handoff_applies_backpressure() {

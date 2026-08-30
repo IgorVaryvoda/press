@@ -25,7 +25,7 @@ pub(super) fn meter(
 impl Audit {
     fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let pairing = self.sirv_pairing.as_ref()?;
-        let busy = self.sirv_busy();
+        let busy = self.sirv_busy() || self.scan_blocks_delivery();
         let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
         let ready = matches!(pairing.files, Listing::Ready(_));
         let (to_push, changed, to_pull) = self.sirv_counts.unwrap_or((0, 0, 0));

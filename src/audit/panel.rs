@@ -75,7 +75,10 @@ impl Audit {
         let labelled = width >= BAR_LABELS_WIDTH;
         let target_count = self.target_count();
         let single = self.single_target();
-        let busy = self.converting || self.local_ai_busy() || self.studio_busy();
+        let busy = self.converting
+            || self.local_ai_busy()
+            || self.studio_busy()
+            || self.scan_blocks_delivery();
 
         div()
             .absolute()
@@ -583,7 +586,8 @@ impl Audit {
                                 entry.is_none()
                                     || self.local_ai_busy()
                                     || self.studio_busy()
-                                    || self.converting,
+                                    || self.converting
+                                    || self.scan_blocks_delivery(),
                             )
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 if let Some(index) = audit.single_target() {
