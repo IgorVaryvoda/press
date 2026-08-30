@@ -781,6 +781,69 @@ mod tests {
     }
 
     #[gpui::test]
+    fn public_defer_prompt_reaches_a_painted_prompt(cx: &mut TestAppContext) {
+        let directory = test_directory("public-defer-prompt");
+        let report = report(&directory, 1);
+        let cx = prompt_window(cx);
+        cx.update(|window, cx| defer_prompt(window, cx, Some(report)));
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(cx.debug_bounds("crash-prompt-title").is_some());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn backdrop_click_leaves_crash_prompt_pending(cx: &mut TestAppContext) {
+        let directory = test_directory("backdrop-click");
+        let report = report(&directory, 1);
+        let calls = Rc::new(Cell::new(0));
+        let handoff_calls = calls.clone();
+        let cx = prompt_window(cx);
+        cx.update(|window, cx| {
+            show_prompt_with(window, cx, report.clone(), move || {
+                handoff_calls.set(handoff_calls.get() + 1);
+                Ok(())
+            });
+        });
+        draw(cx);
+        cx.simulate_click(
+            gpui::point(gpui::px(10.), gpui::px(10.)),
+            gpui::Modifiers::none(),
+        );
+        draw(cx);
+
+        assert_eq!(calls.get(), 0);
+        assert!(!prompted_path(&report).exists());
+        assert_eq!(pending_snapshot_in(&directory).unwrap(), Some(report));
+        cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
+    fn window_removal_leaves_crash_report_pending(cx: &mut TestAppContext) {
+        let directory = test_directory("window-removal");
+        let report = report(&directory, 1);
+        let calls = Rc::new(Cell::new(0));
+        let handoff_calls = calls.clone();
+        let cx = prompt_window(cx);
+        cx.update(|window, cx| {
+            show_prompt_with(window, cx, report.clone(), move || {
+                handoff_calls.set(handoff_calls.get() + 1);
+                Ok(())
+            });
+        });
+        draw(cx);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+
+        assert_eq!(calls.get(), 0);
+        assert!(!prompted_path(&report).exists());
+        assert_eq!(pending_snapshot_in(&directory).unwrap(), Some(report));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
     fn not_now_leaves_the_report_pending(cx: &mut TestAppContext) {
         let directory = test_directory("not-now");
         let report = report(&directory, 1);
