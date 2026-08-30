@@ -19,10 +19,20 @@ pub enum Error {
     SourceNotAbsolute,
     OutputNotAbsolute,
     SourceNotDirectory,
-    SourceLookup { path: PathBuf, error: io::Error },
-    OutputLookup { path: PathBuf, error: io::Error },
-    OutputSymlink { path: PathBuf },
-    OutputNotDirectory { path: PathBuf },
+    SourceLookup {
+        path: PathBuf,
+        error: io::Error,
+    },
+    OutputLookup {
+        path: PathBuf,
+        error: io::Error,
+    },
+    OutputSymlink {
+        path: PathBuf,
+    },
+    OutputNotDirectory {
+        path: PathBuf,
+    },
     OutputContainsSource,
     SourceNotCanonical,
     SourceOutsideRoot,
@@ -30,6 +40,16 @@ pub enum Error {
     RelativePathEmpty,
     RelativePathNotNormal,
     FinalPathOutsideOutput,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsNamespace,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsComponent,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsDevice,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsReparse {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for Error {
@@ -82,6 +102,21 @@ impl fmt::Display for Error {
             Self::FinalPathOutsideOutput => {
                 write!(formatter, "the final path is outside the output directory")
             }
+            Self::WindowsNamespace => write!(formatter, "the path is not a disk filesystem path"),
+            Self::WindowsComponent => {
+                write!(formatter, "the path contains an invalid Windows component")
+            }
+            Self::WindowsDevice => write!(
+                formatter,
+                "the path contains a reserved Windows device name"
+            ),
+            Self::WindowsReparse { path } => {
+                write!(
+                    formatter,
+                    "path component is a Windows reparse point: {}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -102,6 +137,8 @@ impl Context {
     pub fn establish(source: &Path, output: &Path) -> Result<Self, Error> {
         validate_raw(source)?;
         validate_raw(output)?;
+        validate_existing_windows_components(source, false)?;
+        validate_existing_windows_components(output, true)?;
         if !source.is_absolute() {
             return Err(Error::SourceNotAbsolute);
         }
@@ -132,22 +169,24 @@ impl Context {
         })
     }
 
-    // First consumed by plan 1433 when CLI sources are normalized at capture time.
+    // First consumed by plan 1433 when GUI sources are normalized at capture time.
     #[allow(dead_code)]
     pub fn source_root(&self) -> &Path {
         &self.source_root
     }
 
-    // First consumed by plan 1434 when GUI conversion adopts this boundary.
+    // First consumed by plan 1434 when CLI conversion adopts this boundary.
     #[allow(dead_code)]
     pub fn output_root(&self) -> &Path {
         &self.output_root
     }
 
     /// Return a source path only when it is already canonical and strictly below root.
-    // First consumed by plan 1433 with the CLI conversion migration.
+    // First consumed by plan 1433 with the GUI conversion migration.
     #[allow(dead_code)]
     pub fn relative_source(&self, source: &Path) -> Result<PathBuf, Error> {
+        validate_raw(source)?;
+        validate_existing_windows_components(source, false)?;
         if !source.is_absolute() {
             return Err(Error::SourceNotCanonical);
         }
@@ -169,11 +208,13 @@ impl Context {
     }
 
     /// Join a normal source-relative path while retaining the proven output boundary.
-    // First consumed by plan 1434 with the GUI conversion migration.
+    // First consumed by plan 1434 with the CLI conversion migration.
     #[allow(dead_code)]
     pub fn final_path(&self, relative: &Path) -> Result<PathBuf, Error> {
         normal_relative(relative)?;
         let final_path = self.output_root.join(relative);
+        validate_raw(&final_path)?;
+        validate_existing_windows_components(&final_path, true)?;
         if !final_path.starts_with(&self.output_root) {
             return Err(Error::FinalPathOutsideOutput);
         }
@@ -262,7 +303,161 @@ fn validate_raw(path: &Path) -> Result<(), Error> {
             return Err(Error::ParentSegment);
         }
     }
+    validate_windows_lexical(path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_windows_lexical(_path: &Path) -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_lexical(path: &Path) -> Result<(), Error> {
+    use std::path::Prefix;
+
+    if path.is_absolute() {
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return Err(Error::WindowsNamespace);
+        };
+        match prefix.kind() {
+            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+            Prefix::UNC(_, share) | Prefix::VerbatimUNC(_, share) => {
+                if is_ipc_share(share) {
+                    return Err(Error::WindowsNamespace);
+                }
+            }
+            Prefix::DeviceNS(_) | Prefix::Verbatim(_) => return Err(Error::WindowsNamespace),
+        }
+    }
+
+    for component in path.components() {
+        if let Component::Normal(part) = component {
+            validate_windows_component(part)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_ipc_share(share: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    let share: Vec<_> = share.encode_wide().collect();
+    ascii_eq_ignore_case(&share, b"pipe")
+        || ascii_eq_ignore_case(&share, b"mailslot")
+        || ascii_eq_ignore_case(&share, b"ipc$")
+}
+
+#[cfg(windows)]
+fn validate_windows_component(part: &OsStr) -> Result<(), Error> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let units: Vec<_> = part.encode_wide().collect();
+    if matches!(units.first(), Some(unit) if *unit == 0x0020)
+        || matches!(units.last(), Some(0x0020 | 0x002e))
+    {
+        return Err(Error::WindowsComponent);
+    }
+    if units.iter().any(|unit| {
+        *unit <= 0x001f
+            || matches!(
+                *unit,
+                0x0022 | 0x002a | 0x002f | 0x003a | 0x003c | 0x003e | 0x003f | 0x005c | 0x007c
+            )
+    }) {
+        return Err(Error::WindowsComponent);
+    }
+
+    let device = units.split(|unit| *unit == 0x002e).next().unwrap_or(&units);
+    let device = trim_ascii_spaces_end(device);
+    if is_windows_device(device) {
+        return Err(Error::WindowsDevice);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ascii_eq_ignore_case(units: &[u16], ascii: &[u8]) -> bool {
+    units.len() == ascii.len()
+        && units.iter().zip(ascii).all(|(unit, expected)| {
+            *unit <= 0x7f
+                && if (0x0041..=0x005a).contains(unit) {
+                    *unit + 0x0020
+                } else {
+                    *unit
+                } == expected.to_ascii_lowercase() as u16
+        })
+}
+
+#[cfg(windows)]
+fn trim_ascii_spaces_end(units: &[u16]) -> &[u16] {
+    let end = units
+        .iter()
+        .rposition(|unit| *unit != 0x0020)
+        .map_or(0, |index| index + 1);
+    &units[..end]
+}
+
+#[cfg(windows)]
+fn is_windows_device(name: &[u16]) -> bool {
+    [
+        b"CON".as_slice(),
+        b"PRN",
+        b"AUX",
+        b"NUL",
+        b"CLOCK$",
+        b"CONIN$",
+        b"CONOUT$",
+    ]
+    .into_iter()
+    .any(|device| ascii_eq_ignore_case(name, device))
+        || is_windows_port(name, b"COM")
+        || is_windows_port(name, b"LPT")
+}
+
+#[cfg(windows)]
+fn is_windows_port(name: &[u16], prefix: &[u8]) -> bool {
+    name.len() == prefix.len() + 1
+        && ascii_eq_ignore_case(&name[..prefix.len()], prefix)
+        && matches!(
+            name[prefix.len()],
+            0x0031..=0x0039 | 0x00b9 | 0x00b2 | 0x00b3
+        )
+}
+
+#[cfg(not(windows))]
+fn validate_existing_windows_components(_path: &Path, _output: bool) -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_existing_windows_components(path: &Path, output: bool) -> Result<(), Error> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut existing = PathBuf::new();
+    for component in path.components() {
+        existing.push(component.as_os_str());
+        match fs::symlink_metadata(&existing) {
+            Ok(metadata) => {
+                if metadata.file_attributes() & 0x400 != 0 {
+                    return Err(Error::WindowsReparse { path: existing });
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(metadata_error(existing, output, error)),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_error(path: PathBuf, output: bool, error: io::Error) -> Error {
+    if output {
+        Error::OutputLookup { path, error }
+    } else {
+        Error::SourceLookup { path, error }
+    }
 }
 
 #[cfg(unix)]
@@ -290,6 +485,9 @@ fn raw_segments(path: &OsStr) -> impl Iterator<Item = std::ffi::OsString> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt;
 
     fn temp_dir(name: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -407,6 +605,202 @@ mod tests {
         assert!(matches!(
             context.final_path(Path::new("../escape.webp")),
             Err(Error::RelativePathNotNormal)
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_path_admits_only_disk_namespaces() {
+        for path in [
+            r"C:\photos\image.png",
+            r"\\server\share\image.png",
+            r"\\?\C:\photos\image.png",
+            r"\\?\UNC\server\share\image.png",
+            r"\\?\UNC\server\normal\image.png",
+        ] {
+            assert!(validate_raw(Path::new(path)).is_ok(), "{path}");
+        }
+        for path in [
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\\?\pipe\name",
+            r"\\?\mailslot\name",
+            r"\\?\arbitrary\name",
+            r"\??\Device\HarddiskVolume1",
+            r"\\server\PiPe\name",
+            r"\\server\MAILSLOT\name",
+            r"\\server\iPc$\name",
+            r"\\?\UNC\server\PiPe\name",
+            r"\\?\UNC\server\MAILSLOT\name",
+            r"\\?\UNC\server\iPc$\name",
+        ] {
+            assert!(
+                matches!(validate_raw(Path::new(path)), Err(Error::WindowsNamespace)),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_path_rejects_normalization_and_device_forms() {
+        for path in [
+            r"C:\ leading\image.png",
+            r"C:\trailing \image.png",
+            r"C:\trailing.\image.png",
+            r"C:\image:stream.png",
+            r"C:\CON.txt",
+            r"C:\aux .txt",
+            r"C:\LPT³.log",
+            r"\\?\C:\PRN.txt",
+        ] {
+            assert!(
+                matches!(
+                    validate_raw(Path::new(path)),
+                    Err(Error::WindowsComponent | Error::WindowsDevice)
+                ),
+                "{path}"
+            );
+        }
+        for path in [r"C:\COM0", r"C:\COM10", r"C:\LPT0", r"C:\LPT10"] {
+            assert!(validate_raw(Path::new(path)).is_ok(), "{path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_path_checks_raw_wide_components() {
+        fn wide(units: &[u16]) -> std::ffi::OsString {
+            std::ffi::OsString::from_wide(units)
+        }
+
+        for device in [
+            "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3",
+            "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+            "LPT6", "LPT7", "LPT8", "LPT9", "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
+        ] {
+            for name in [
+                device.to_owned(),
+                device.to_ascii_lowercase(),
+                format!("{device}.txt"),
+                format!("{device} .txt"),
+            ] {
+                assert!(
+                    matches!(
+                        validate_windows_component(&wide(&name.encode_utf16().collect::<Vec<_>>())),
+                        Err(Error::WindowsDevice)
+                    ),
+                    "{name}"
+                );
+            }
+        }
+
+        for unit in [
+            0x0000,
+            0x001f,
+            b'<' as u16,
+            b'>' as u16,
+            b':' as u16,
+            b'"' as u16,
+            b'/' as u16,
+            b'\\' as u16,
+            b'|' as u16,
+            b'?' as u16,
+            b'*' as u16,
+        ] {
+            assert!(
+                matches!(
+                    validate_windows_component(&wide(&[b'a' as u16, unit])),
+                    Err(Error::WindowsComponent)
+                ),
+                "{unit:#06x}"
+            );
+        }
+        for units in [
+            vec![b' ' as u16, b'a' as u16],
+            vec![b'a' as u16, b' ' as u16],
+            vec![b'a' as u16, b'.' as u16],
+        ] {
+            assert!(matches!(
+                validate_windows_component(&wide(&units)),
+                Err(Error::WindowsComponent)
+            ));
+        }
+        for units in [
+            vec![
+                0x00fc,
+                b'n' as u16,
+                b'i' as u16,
+                b'c' as u16,
+                b'o' as u16,
+                b'd' as u16,
+                b'e' as u16,
+            ],
+            vec![0xd800, b'n' as u16, b'a' as u16, b'm' as u16, b'e' as u16],
+            "COM0".encode_utf16().collect(),
+            "COM10".encode_utf16().collect(),
+            "LPT0".encode_utf16().collect(),
+            "LPT10".encode_utf16().collect(),
+        ] {
+            assert!(
+                validate_windows_component(&wide(&units)).is_ok(),
+                "{units:?}"
+            );
+        }
+        assert!(is_ipc_share(&wide(&[
+            b'P' as u16,
+            b'i' as u16,
+            b'P' as u16,
+            b'e' as u16,
+        ])));
+        assert!(!is_ipc_share(&wide(&[
+            b'p' as u16,
+            b'i' as u16,
+            b'p' as u16,
+            b'e' as u16,
+            0xd800,
+        ])));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_path_metadata_errors_fail_closed() {
+        let error = io::Error::new(io::ErrorKind::PermissionDenied, "injected failure");
+        let result = metadata_error(PathBuf::from(r"C:\blocked"), false, error);
+        assert!(matches!(result, Error::SourceLookup { .. }));
+        let error = io::Error::new(io::ErrorKind::InvalidInput, "injected failure");
+        let result = metadata_error(PathBuf::from(r"C:\blocked"), true, error);
+        assert!(matches!(result, Error::OutputLookup { .. }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_path_rejects_junctions_and_relative_sources() {
+        let base = temp_dir("junction");
+        let source = base.join("source");
+        let target = base.join("target");
+        let junction = base.join("junction");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                junction.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(matches!(
+            Context::establish(&source, &junction.join("output")),
+            Err(Error::WindowsReparse { .. })
+        ));
+        assert!(matches!(
+            Context::establish(Path::new("relative"), &base.join("output")),
+            Err(Error::SourceNotAbsolute)
         ));
         fs::remove_dir_all(base).unwrap();
     }
