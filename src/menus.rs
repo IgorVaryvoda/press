@@ -50,11 +50,35 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
     cx.on_action(move |_: &OpenFolder, cx| {
         for_folder.update(cx, |audit, cx| audit.pick(true, cx));
     });
+    let for_image = audit.clone();
     cx.on_action(move |_: &OpenImage, cx| {
-        audit.update(cx, |audit, cx| audit.pick(false, cx));
+        for_image.update(cx, |audit, cx| audit.pick(false, cx));
     });
-    cx.on_action(|_: &ShowCrashReports, _| crate::crash::reveal_reports());
-    cx.on_action(|_: &EmailCrashReport, _| crate::crash::email_report());
+    let for_reports = audit.clone();
+    cx.on_action(move |_: &ShowCrashReports, cx| {
+        if let Err(error) = crate::crash::reveal_reports() {
+            for_reports.update(cx, |audit, cx| {
+                audit.notify_error(
+                    "crash-reports",
+                    "Couldn’t show crash reports",
+                    error.to_string(),
+                    cx,
+                );
+            });
+        }
+    });
+    cx.on_action(move |_: &EmailCrashReport, cx| {
+        if let Err(error) = crate::crash::email_report() {
+            audit.update(cx, |audit, cx| {
+                audit.notify_error(
+                    "crash-email",
+                    "Couldn’t prepare crash report email",
+                    error.to_string(),
+                    cx,
+                );
+            });
+        }
+    });
 
     // The menu shows each item's key equivalent from the keymap, so the
     // bindings and the menus describe one truth.

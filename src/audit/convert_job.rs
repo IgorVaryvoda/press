@@ -125,6 +125,18 @@ impl Audit {
                 if audit.dataset_generation == dataset_generation {
                     audit.converting = false;
                     audit.active_target_count = None;
+                    if !audit.failures.is_empty() {
+                        audit.notify_error(
+                            "conversion",
+                            "Conversion incomplete",
+                            format!(
+                                "{} of {target_count} failed: {}",
+                                audit.failures.len(),
+                                named(audit.failures.iter().cloned())
+                            ),
+                            cx,
+                        );
+                    }
                     // A finished run has produced something to look at, and
                     // until now the app said so in a column and left you to
                     // find it. Open it.

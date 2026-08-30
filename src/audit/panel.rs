@@ -1045,7 +1045,7 @@ impl Audit {
                             .w_full()
                             .icon(IconName::FolderOpen)
                             .label("Show output")
-                            .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
+                            .on_click(cx.listener(|audit, _, _, cx| audit.reveal_output(cx))),
                     )
                 },
             )

@@ -82,7 +82,9 @@ impl Audit {
         }
         let key = self.studio_key_input.read(cx).value().trim().to_string();
         if !key.starts_with("sk_live_") {
-            self.studio_status = Some((false, "AI API keys start with sk_live_".into()));
+            let message = "AI API keys start with sk_live_";
+            self.studio_status = Some((false, message.into()));
+            self.notify_error("studio-key", "Couldn’t save AI API key", message, cx);
             cx.notify();
             return;
         }
@@ -109,7 +111,10 @@ impl Audit {
                         audit.studio_key = Some(key);
                         audit.studio_status = Some((true, "AI API key verified and saved".into()));
                     }
-                    Err(message) => audit.studio_status = Some((false, message)),
+                    Err(message) => {
+                        audit.studio_status = Some((false, message.clone()));
+                        audit.notify_error("studio-key", "Couldn’t save AI API key", message, cx);
+                    }
                 }
                 cx.notify();
             });
@@ -126,7 +131,10 @@ impl Audit {
                     input.set_value("", window, cx);
                 });
             }
-            Err(message) => self.studio_status = Some((false, message)),
+            Err(message) => {
+                self.studio_status = Some((false, message.clone()));
+                self.notify_error("studio-key", "Couldn’t forget AI API key", message, cx);
+            }
         }
         cx.notify();
     }
@@ -141,7 +149,9 @@ impl Audit {
             return;
         }
         if self.studio_key.is_none() {
-            self.studio_status = Some((false, "Save an AI API key first".into()));
+            let message = "Save an AI API key first";
+            self.studio_status = Some((false, message.into()));
+            self.notify_error("studio-job", "AI operation needs setup", message, cx);
             cx.notify();
             return;
         }
@@ -151,7 +161,9 @@ impl Audit {
         let tool = self.studio_tool;
         let prompt = self.studio_prompt_text(cx);
         if tool.needs_prompt() && prompt.is_empty() {
-            self.studio_status = Some((false, format!("{} needs a prompt", tool.label())));
+            let message = format!("{} needs a prompt", tool.label());
+            self.studio_status = Some((false, message.clone()));
+            self.notify_error("studio-job", "Add a prompt", message, cx);
             cx.notify();
             return;
         }
@@ -202,6 +214,8 @@ impl Audit {
                     }
                     Err(message) => {
                         audit.studio_job.as_mut().unwrap().state = StudioJobState::Failed(message);
+                        let message = audit.studio_job.as_ref().unwrap().message(&audit.root);
+                        audit.notify_error("studio-job", "AI operation failed", message, cx);
                     }
                 }
                 cx.notify();
@@ -278,6 +292,8 @@ impl Audit {
                     }
                     Err(message) => {
                         audit.studio_job.as_mut().unwrap().state = StudioJobState::Failed(message);
+                        let message = audit.studio_job.as_ref().unwrap().message(&audit.root);
+                        audit.notify_error("studio-job", "AI operation failed", message, cx);
                     }
                 }
                 cx.notify();

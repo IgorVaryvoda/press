@@ -100,7 +100,7 @@ impl Audit {
                         .icon(IconName::FolderOpen)
                         .label("Show output")
                         .tooltip("Open the output folder in the file manager")
-                        .on_click(cx.listener(|audit, _, _, _| audit.reveal_output())),
+                        .on_click(cx.listener(|audit, _, _, cx| audit.reveal_output(cx))),
                 )
                 .child(
                     Button::new("conversion-done-results")

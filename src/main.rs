@@ -832,16 +832,8 @@ fn update_headless() {
     }
 }
 
-fn reveal_path(path: &Path) {
-    if let Err(error) = open_with_desktop(path) {
-        eprintln!("press: could not open {}: {error}", path.display());
-    }
-}
-
-fn open_url(url: &str) {
-    if let Err(error) = open_with_desktop(url) {
-        eprintln!("press: could not open {url}: {error}");
-    }
+fn reveal_path(path: &Path) -> std::io::Result<()> {
+    open_with_desktop(path)
 }
 
 fn open_with_desktop(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
@@ -970,6 +962,30 @@ struct Launch {
     output: settings::Output,
 }
 
+/// `Root` owns these overlays but leaves their placement to the app's content view.
+struct WindowContent {
+    audit: gpui::Entity<audit::Audit>,
+}
+
+impl Render for WindowContent {
+    fn render(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let sheet = Root::render_sheet_layer(window, cx);
+        let dialog = Root::render_dialog_layer(window, cx);
+        let notifications = Root::render_notification_layer(window, cx);
+        gpui::div()
+            .relative()
+            .size_full()
+            .child(self.audit.clone())
+            .children(sheet)
+            .children(dialog)
+            .children(notifications)
+    }
+}
+
 fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
     application()
         // Every `IconName` is an SVG loaded through the app's asset source. Without
@@ -1004,9 +1020,8 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                 |window, cx| {
                     let audit = audit::build_audit(launch, window, cx);
                     audit_slot = Some(audit.clone());
-                    // Dialogs, notifications and tooltips are drawn by the Root, so
-                    // the window's first level has to be one.
-                    cx.new(|cx| Root::new(audit, window, cx).bg(cx.theme().background))
+                    let content = cx.new(|_| WindowContent { audit });
+                    cx.new(|cx| Root::new(content, window, cx).bg(cx.theme().background))
                 },
             )
             .unwrap();
@@ -1027,7 +1042,9 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                                 if !audit.automatic_update_can_restart() {
                                     return false;
                                 }
-                                audit.flush_settings();
+                                if let Err(error) = audit.flush_settings() {
+                                    eprintln!("press: could not save settings: {error}");
+                                }
                                 true
                             });
                             if restart {
@@ -1040,6 +1057,16 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                                         eprintln!(
                                             "press: installed update but could not restart: {error}"
                                         );
+                                        audit.update(cx, |audit, cx| {
+                                            audit.notify_error(
+                                                "update",
+                                                "Update installed, but restart failed",
+                                                format!(
+                                                    "Restart Press manually to finish updating: {error}"
+                                                ),
+                                                cx,
+                                            );
+                                        });
                                     }
                                 }
                             }

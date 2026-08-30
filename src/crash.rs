@@ -25,24 +25,31 @@ pub fn install() {
     }));
 }
 
-pub fn reveal_reports() {
-    let Some(directory) = directory() else {
-        eprintln!("press: no config directory for crash reports");
-        return;
-    };
-    if let Err(error) = std::fs::create_dir_all(&directory) {
-        eprintln!("press: could not create crash report folder: {error}");
-        return;
-    }
-    crate::reveal_path(&directory);
+pub fn reveal_reports() -> io::Result<()> {
+    let directory = directory().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no config directory is available for crash reports",
+        )
+    })?;
+    std::fs::create_dir_all(&directory)?;
+    crate::reveal_path(&directory)
 }
 
-pub fn email_report() {
-    reveal_reports();
-    crate::open_url(&format!(
+pub fn email_report() -> io::Result<()> {
+    email_report_with(reveal_reports, |url| crate::open_with_desktop(url))
+}
+
+fn email_report_with(
+    reveal: impl FnOnce() -> io::Result<()>,
+    open: impl FnOnce(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let revealed = reveal();
+    let mailed = open(&format!(
         "mailto:{REPORT_EMAIL}?subject=Press%20{}%20crash%20report&body=Please%20attach%20the%20newest%20.log%20file%20from%20the%20Press%20crash%20reports%20folder.",
         env!("CARGO_PKG_VERSION")
     ));
+    revealed.and(mailed)
 }
 
 fn directory() -> Option<PathBuf> {
@@ -159,5 +166,28 @@ mod tests {
         );
         assert!(directory.join("keep.txt").exists());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn email_is_attempted_even_when_revealing_reports_fails() {
+        let attempted = std::cell::Cell::new(false);
+        let error = email_report_with(
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "folder denied",
+                ))
+            },
+            |url| {
+                attempted.set(true);
+                assert!(url.starts_with("mailto:igor@varyvoda.com?"));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(attempted.get());
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "folder denied");
     }
 }

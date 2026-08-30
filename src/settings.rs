@@ -147,11 +147,14 @@ pub fn load() -> Settings {
     parse(&text)
 }
 
-pub fn save(settings: &Settings) {
+pub fn save(settings: &Settings) -> std::io::Result<()> {
     let Some(path) = path() else {
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no config directory is available",
+        ));
     };
-    let _ = save_to(&path, settings);
+    save_to(&path, settings)
 }
 
 fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {

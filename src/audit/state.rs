@@ -33,9 +33,20 @@ impl Audit {
             }) else {
                 return;
             };
-            cx.background_executor()
+            let saved = cx
+                .background_executor()
                 .spawn(async move { write_settings(&settings) })
-                .detach();
+                .await;
+            if let Err(error) = saved {
+                let _ = this.update(cx, |audit, cx| {
+                    audit.notify_error(
+                        "settings",
+                        "Couldn’t save settings",
+                        format!("Your changes apply until Press closes: {error}"),
+                        cx,
+                    );
+                });
+            }
         })
         .detach();
     }
@@ -43,9 +54,9 @@ impl Audit {
     /// Write the settings now, cancelling the debounce. Every quit path
     /// runs through this; without it, quitting inside the 500 ms window
     /// silently forgets the last resize or folder change.
-    pub(crate) fn flush_settings(&mut self) {
+    pub(crate) fn flush_settings(&mut self) -> std::io::Result<()> {
         self.settings_save_pending = false;
-        write_settings(&self.settings);
+        write_settings(&self.settings)
     }
 
     /// The rows a conversion would touch. An empty selection means the whole folder,
@@ -702,11 +713,26 @@ impl Audit {
         };
         // Only ever inside the destination this audit writes to.
         if !written.starts_with(self.output.root(&self.root)) {
+            self.notify_error(
+                "discard-output",
+                "Press refused to discard this file",
+                "The file is outside the selected output folder and was left untouched.",
+                cx,
+            );
             return;
         }
-        if std::fs::remove_file(&written).is_ok() {
-            self.existing_output = self.existing_output.saturating_sub(1);
+        if let Err(error) = std::fs::remove_file(&written)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            self.notify_error(
+                "discard-output",
+                "Couldn’t discard output",
+                format!("{} is still on disk: {error}", written.display()),
+                cx,
+            );
+            return;
         }
+        self.existing_output = self.existing_output.saturating_sub(1);
         match self
             .compare
             .as_ref()

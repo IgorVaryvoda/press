@@ -1,6 +1,8 @@
 use super::local_ai_actions::local_ai_landing_applies;
 use super::media::comparison_landing_applies;
-use super::sirv_actions::{browser_landing_applies, remember_failure, walk_landing_applies};
+use super::sirv_actions::{
+    browser_landing_applies, remember_failure, transfer_failure, walk_landing_applies,
+};
 use super::studio_actions::studio_landing_applies;
 use super::*;
 use crate::{
@@ -919,6 +921,68 @@ fn sirv_jobs_count_every_failure_but_keep_three_examples() {
 
     assert_eq!(count, 5);
     assert_eq!(examples, ["file-0", "file-1", "file-2"]);
+
+    let job = SirvJob {
+        kind: SirvJobKind::Push,
+        done: 5,
+        total: 5,
+        failed: count,
+        failures: examples,
+        current: None,
+        finished: true,
+        stopping: false,
+        generation: 1,
+    };
+    assert_eq!(
+        transfer_failure(&job),
+        Some((
+            "Sirv upload incomplete",
+            "5 of 5 failed: file-0, file-1, file-2 and 2 more".into()
+        ))
+    );
+}
+
+#[gpui::test]
+fn one_error_scope_replaces_its_existing_toast(cx: &mut TestAppContext) {
+    cx.update(init_theme);
+    let mut audit_entity = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let audit = build_audit(
+            Launch {
+                root: PathBuf::new(),
+                entries: Vec::new(),
+                skipped_raw: 0,
+                skipped_packages: 0,
+                unreadable: Vec::new(),
+                walk_errors: Vec::new(),
+                existing_output: 0,
+                open_single: false,
+                format: Format::WebP,
+                quality: Quality::lossy(80.),
+                max_edge: MaxEdge::FULL,
+                grid: false,
+                columns: ColumnPrefs::default(),
+                output: crate::settings::Output::default(),
+            },
+            window,
+            cx,
+        );
+        audit_entity = Some(audit.clone());
+        let content = cx.new(|_| crate::WindowContent { audit });
+        Root::new(content, window, cx).bg(cx.theme().background)
+    });
+    let audit = audit_entity.expect("audit is built for the production Root");
+
+    audit.update(cx, |audit, cx| {
+        audit.notify_error("conversion", "First error", "first detail", cx);
+        audit.notify_error("conversion", "Latest error", "latest detail", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert_eq!(window.notifications(cx).len(), 1);
+    });
+    assert!(cx.debug_bounds("error-toast-message").is_some());
 }
 
 #[gpui::test]
@@ -1657,7 +1721,7 @@ fn flushing_settings_clears_the_pending_debounce(cx: &mut TestAppContext) {
         audit.remember_settings(settings, cx);
         assert!(audit.settings_save_pending);
 
-        audit.flush_settings();
+        audit.flush_settings().unwrap();
         assert!(!audit.settings_save_pending);
     });
 }

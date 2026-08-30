@@ -12,6 +12,33 @@ pub(super) fn remember_failure(count: &mut usize, examples: &mut Vec<String>, me
     }
 }
 
+pub(super) fn transfer_failure(job: &SirvJob) -> Option<(&'static str, String)> {
+    if job.failed == 0 || job.failures.iter().all(|message| message == "stopped") {
+        return None;
+    }
+    let title = match job.kind {
+        SirvJobKind::Pull | SirvJobKind::PullChanged => "Sirv download incomplete",
+        SirvJobKind::Push | SirvJobKind::PushChanged => "Sirv upload incomplete",
+        SirvJobKind::Publish | SirvJobKind::Spin => "Sirv publish incomplete",
+    };
+    let rest = job.failed.saturating_sub(job.failures.len());
+    let examples = job.failures.join(", ");
+    Some((
+        title,
+        format!(
+            "{} of {} failed: {}{}",
+            job.failed,
+            job.total,
+            examples,
+            if rest == 0 {
+                String::new()
+            } else {
+                format!(" and {rest} more")
+            }
+        ),
+    ))
+}
+
 /// True when a finished walk still describes the current world: same
 /// dataset, same pairing as when it started. A walk that outlives either
 /// must land nowhere — installing folder A's listing under folder B's
@@ -118,6 +145,7 @@ impl Audit {
                 })
                 .await;
             this.update(cx, |audit, cx| {
+                let mut failure = None;
                 if let Some(browser) = audit.sirv_browser.as_mut()
                     && browser_landing_applies(
                         session,
@@ -128,8 +156,12 @@ impl Audit {
                         &browser.path,
                     )
                 {
+                    failure = result.as_ref().err().cloned();
                     browser.nodes = Some(result);
                     cx.notify();
+                }
+                if let Some(message) = failure {
+                    audit.notify_error("sirv-browser", "Couldn’t list Sirv folder", message, cx);
                 }
             })
         })
@@ -282,6 +314,8 @@ impl Audit {
                 let Some((cdn_host, walked)) = walked else {
                     return;
                 };
+                let cdn_failure = cdn_host.as_ref().err().cloned();
+                let walk_failure = walked.as_ref().err().cloned();
                 audit.sirv_walk_cancel = None;
                 let Some(pairing) = audit.sirv_pairing.as_mut() else {
                     return;
@@ -301,6 +335,11 @@ impl Audit {
                     // wrong operation and left `files` looking like a walk still
                     // running.
                     Err(message) => pairing.files = Listing::Failed(message),
+                }
+                if let Some(message) = walk_failure {
+                    audit.notify_error("sirv-listing", "Couldn’t compare with Sirv", message, cx);
+                } else if let Some(message) = cdn_failure {
+                    audit.notify_error("sirv-listing", "Couldn’t read Sirv account", message, cx);
                 }
                 cx.notify();
             })
@@ -396,7 +435,9 @@ impl Audit {
         };
         if !credentials_complete(&client_id, &client_secret) {
             let panel = self.settings_panel.as_mut().unwrap();
-            panel.cdn_status = Some((false, "Both fields are required.".into()));
+            let message = "Both fields are required.";
+            panel.cdn_status = Some((false, message.into()));
+            self.notify_error("sirv-settings", "Couldn’t save Sirv settings", message, cx);
             cx.notify();
             return;
         }
@@ -416,6 +457,14 @@ impl Audit {
             }
             Err(error) => (false, format!("Could not save: {error}")),
         };
+        if !status.0 {
+            self.notify_error(
+                "sirv-settings",
+                "Couldn’t save Sirv settings",
+                status.1.clone(),
+                cx,
+            );
+        }
         self.settings_panel.as_mut().unwrap().cdn_status = Some(status);
         if let Some(credentials) = new_credentials {
             self.adopt_new_credentials(credentials, cx);
@@ -647,6 +696,11 @@ impl Audit {
                     false
                 };
                 if owns_job {
+                    if let Some((title, message)) =
+                        audit.sirv_job.as_ref().and_then(transfer_failure)
+                    {
+                        audit.notify_error("sirv-transfer", title, message, cx);
+                    }
                     // The pulled files belong in the table: a full rescan, through
                     // the same path a folder change takes.
                     audit.request_path(audit.root.clone(), cx);
@@ -780,6 +834,10 @@ impl Audit {
                         job.failed = failed;
                         job.failures = failures;
                         job.finished = true;
+                        let notification = transfer_failure(job);
+                        if let Some((title, message)) = notification {
+                            audit.notify_error("sirv-transfer", title, message, cx);
+                        }
                         audit.walk_sirv_pairing(cx);
                         cx.notify();
                     }
@@ -924,6 +982,11 @@ impl Audit {
                             }
                             UploadCompletion::Spins(urls) => audit.published_spins = urls,
                         }
+                    }
+                    if let Some((title, message)) =
+                        audit.sirv_job.as_ref().and_then(transfer_failure)
+                    {
+                        audit.notify_error("sirv-transfer", title, message, cx);
                     }
                     // Re-list the pair: pushed files must stop reading as new.
                     audit.walk_sirv_pairing(cx);

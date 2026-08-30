@@ -79,15 +79,22 @@ impl Audit {
         if tool == local_ai::Tool::Upscale
             && let Err(message) = local_ai::upscale_dimensions(entry.width, entry.height)
         {
+            let source_name = entry.name();
             self.local_ai_job = Some(LocalAiJob {
                 tool,
                 index,
                 dataset_generation: self.dataset_generation,
-                source_name: entry.name(),
+                source_name: source_name.clone(),
                 first_setup: false,
-                state: LocalAiJobState::Failed(message),
+                state: LocalAiJobState::Failed(message.clone()),
                 cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
+            self.notify_error(
+                "local-ai",
+                "Couldn’t upscale image",
+                format!("{source_name}: {message}"),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -127,6 +134,8 @@ impl Audit {
                         ) {
                             audit.local_ai_job.as_mut().unwrap().state =
                                 LocalAiJobState::Failed(message);
+                            let message = audit.local_ai_job.as_ref().unwrap().message(&audit.root);
+                            audit.notify_error("local-ai", "Local AI failed", message, cx);
                             cx.notify();
                         }
                     });
@@ -183,6 +192,8 @@ impl Audit {
                     Err(message) => {
                         audit.local_ai_job.as_mut().unwrap().state =
                             LocalAiJobState::Failed(message);
+                        let message = audit.local_ai_job.as_ref().unwrap().message(&audit.root);
+                        audit.notify_error("local-ai", "Local AI failed", message, cx);
                     }
                 }
                 cx.notify();

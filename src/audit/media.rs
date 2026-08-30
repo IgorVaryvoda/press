@@ -73,6 +73,21 @@ pub(super) fn image_context_menu(
 }
 
 impl Audit {
+    fn notify_media_error(
+        &self,
+        index: usize,
+        title: &'static str,
+        detail: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .entries
+            .get(index)
+            .map(Entry::name)
+            .unwrap_or_else(|| "This image".into());
+        self.notify_error("media", title, format!("{name} {detail}"), cx);
+    }
+
     fn thumb_edge(&self) -> u32 {
         if self.grid {
             thumbs::THUMB_EDGE
@@ -233,6 +248,14 @@ impl Audit {
                 let comparison = audit.compare.as_mut().unwrap();
                 comparison.failed = built.is_none();
                 comparison.pair = built;
+                if comparison.failed {
+                    audit.notify_media_error(
+                        index,
+                        "Couldn’t compare result",
+                        "or its written output is missing, damaged, or unsupported.",
+                        cx,
+                    );
+                }
                 audit.prefetch_media(cx);
                 cx.notify();
             });
@@ -327,6 +350,14 @@ impl Audit {
                 let comparison = audit.compare.as_mut().unwrap();
                 comparison.failed = built.is_none();
                 comparison.preview = built;
+                if comparison.failed {
+                    audit.notify_media_error(
+                        index,
+                        "Couldn’t open preview",
+                        "is damaged or uses an unsupported image feature.",
+                        cx,
+                    );
+                }
                 audit.prefetch_media(cx);
                 cx.notify();
             });
@@ -435,6 +466,14 @@ impl Audit {
                     let comparison = audit.compare.as_mut().unwrap();
                     comparison.failed = built.is_none();
                     comparison.pair = built;
+                    if comparison.failed {
+                        audit.notify_media_error(
+                            index,
+                            "Couldn’t build comparison",
+                            "could not be decoded or encoded with these settings.",
+                            cx,
+                        );
+                    }
                     audit.prefetch_media(cx);
                     cx.notify();
                 }
@@ -594,6 +633,7 @@ impl Audit {
                     mode,
                     &key,
                 ) {
+                    let failed = built.is_none();
                     if let Some(media) = built.as_ref() {
                         audit.cached = Some((key.clone(), media.clone()));
                     }
@@ -608,6 +648,18 @@ impl Audit {
                             MediaMode::Preview => comparison.preview = None,
                             MediaMode::Compare => comparison.pair = None,
                         },
+                    }
+                    if failed {
+                        audit.notify_media_error(
+                            target,
+                            if mode == MediaMode::Preview {
+                                "Couldn’t open preview"
+                            } else {
+                                "Couldn’t build comparison"
+                            },
+                            "is damaged, unsupported, or could not be encoded.",
+                            cx,
+                        );
                     }
                     audit.prefetch_media(cx);
                     cx.notify();

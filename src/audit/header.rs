@@ -23,6 +23,7 @@ impl Audit {
             IconName::Folder
         };
         let source_menu = cx.entity().downgrade();
+        let reveal_source = source_menu.clone();
         let reveal_root = self.root.clone();
         let can_reveal = reveal_root.is_dir();
 
@@ -94,6 +95,7 @@ impl Audit {
                                 let open_folder = source_menu.clone();
                                 let open_images = source_menu.clone();
                                 let reveal_root = reveal_root.clone();
+                                let reveal_source = reveal_source.clone();
                                 menu.item(
                                     PopupMenuItem::new("Open folder…")
                                         .icon(IconName::Folder)
@@ -117,8 +119,17 @@ impl Audit {
                                     PopupMenuItem::new("Reveal in file manager")
                                         .icon(IconName::FolderOpen)
                                         .disabled(!can_reveal)
-                                        .on_click(move |_, _, _| {
-                                            crate::reveal_path(&reveal_root)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = reveal_source.upgrade() {
+                                                let path = reveal_root.clone();
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.reveal_path(
+                                                        &path,
+                                                        "Couldn’t show source folder",
+                                                        cx,
+                                                    );
+                                                });
+                                            }
                                         }),
                                 )
                             }),

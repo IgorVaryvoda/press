@@ -345,9 +345,9 @@ impl Audit {
                         Alert::error(
                             "compare-error",
                             if comparison.mode == MediaMode::Preview {
-                                "Could not decode a preview for this image."
+                                "Press could not decode this image. It may be damaged or use an unsupported feature."
                             } else {
-                                "Could not build a comparison for this image."
+                                "Press could not decode or encode this comparison. Try another output format or check the source file."
                             },
                         )
                         .max_w(px(420.)),
@@ -788,7 +788,7 @@ impl Audit {
                                 .icon(IconName::FolderOpen)
                                 .when(labelled, |button| button.label("Show in folder"))
                                 .tooltip("Open the output folder in the file manager")
-                                .on_click(cx.listener(|audit, _, _, _| audit.reveal_output()))
+                                .on_click(cx.listener(|audit, _, _, cx| audit.reveal_output(cx)))
                         }),
                     )
                     .children(comparison.produced_by.is_none().then(|| {

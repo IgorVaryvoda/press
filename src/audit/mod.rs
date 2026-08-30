@@ -48,6 +48,7 @@ use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::popover::Popover;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
@@ -58,6 +59,8 @@ use gpui_component::tag::Tag;
 use gpui_component::{
     ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
 };
+
+struct ErrorToast;
 
 // Colours come from `cx.theme()` rather than a private palette. The window is
 // built out of this library's buttons, inputs and tags, and a hand-picked set of
@@ -297,6 +300,7 @@ fn density_colour(density: f32, cx: &App) -> gpui::Hsla {
 }
 
 pub(crate) struct Audit {
+    window: gpui::AnyWindowHandle,
     root: PathBuf,
     /// Present when the dataset is an explicit file batch rather than every image
     /// found under `root`.
@@ -806,11 +810,17 @@ struct StudioJob {
 
 /// Write the remembered state, except in tests, where a render must not touch the
 /// user's real config file.
-fn write_settings(settings: &settings::Settings) {
+fn write_settings(settings: &settings::Settings) -> std::io::Result<()> {
     #[cfg(not(test))]
-    settings::save(settings);
+    return settings::save(settings);
     #[cfg(test)]
-    let _ = (settings, settings::save as fn(&settings::Settings));
+    {
+        let _ = (
+            settings,
+            settings::save as fn(&settings::Settings) -> std::io::Result<()>,
+        );
+        Ok(())
+    }
 }
 
 fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
@@ -822,6 +832,42 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
 }
 
 impl Audit {
+    /// Keep the detailed failure beside the work that owns it, and announce it once
+    /// where it cannot be missed. A scope replaces its previous toast so a failing
+    /// batch never turns into one popup per file.
+    pub(crate) fn notify_error(
+        &self,
+        scope: &'static str,
+        title: impl Into<gpui::SharedString>,
+        message: impl Into<gpui::SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        let notification = Notification::new()
+            .with_type(NotificationType::Error)
+            .id1::<ErrorToast>(scope)
+            .title(title)
+            .content(move |_, _, _| {
+                div()
+                    .debug_selector(|| "error-toast-message".into())
+                    .text_sm()
+                    .child(message.clone())
+                    .into_any_element()
+            })
+            .autohide(false);
+        let window = self.window;
+        cx.spawn(async move |_, cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                // Most focused tests render Audit in a tiny harness. Production always
+                // uses Root, which owns the notification layer.
+                if window.root::<gpui_component::Root>().flatten().is_some() {
+                    window.push_notification(notification, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Install a completed scan. This is the one state transition that replaces the
     /// dataset and invalidates every detached job derived from the old rows.
     fn install_dataset(
@@ -993,6 +1039,7 @@ impl Audit {
         // A chosen destination follows the audit to the new folder: it is a
         // preference about where output belongs, not about this folder.
         let output = self.output.clone();
+        let requested = path.clone();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1030,6 +1077,15 @@ impl Audit {
                     if let Some((scanned, root, single)) = result {
                         audit.install_dataset(scanned, root, single, None, window, cx);
                     } else {
+                        audit.notify_error(
+                            "open-image",
+                            "Couldn’t open image",
+                            format!(
+                                "{} is damaged, unsupported, or not an image.",
+                                requested.display()
+                            ),
+                            cx,
+                        );
                         cx.notify();
                     }
                 });
@@ -1116,16 +1172,28 @@ impl Audit {
             if path.is_file() || path.is_dir() {
                 self.request_path(path, cx);
             } else {
-                window.push_notification("Drop one folder or any number of images.", cx);
+                window.push_notification(
+                    Notification::warning("Drop one folder or any number of images.")
+                        .title("Couldn’t open selection"),
+                    cx,
+                );
             }
             return;
         }
         if !paths.iter().all(|path| path.is_file()) {
-            window.push_notification("Drop one folder or any number of images.", cx);
+            window.push_notification(
+                Notification::warning("Drop one folder or any number of images.")
+                    .title("Couldn’t open selection"),
+                cx,
+            );
             return;
         }
         let Some(root) = batch_root(&paths) else {
-            window.push_notification("Choose images from one folder at a time.", cx);
+            window.push_notification(
+                Notification::warning("Choose images from one folder at a time.")
+                    .title("Couldn’t open selection"),
+                cx,
+            );
             return;
         };
         self.request_files(paths, root, cx);
@@ -1157,12 +1225,29 @@ impl Audit {
 
     /// Hand the output folder to the desktop's file manager.
     // ponytail: three names for one idea, and no crate needed for it.
-    fn reveal_output(&self) {
+    fn reveal_output(&self, cx: &mut Context<Self>) {
         let path = self.output.root(&self.root);
         if !path.exists() {
+            self.notify_error(
+                "reveal-output",
+                "Output folder is unavailable",
+                format!("{} does not exist yet.", path.display()),
+                cx,
+            );
             return;
         }
-        crate::reveal_path(&path);
+        self.reveal_path(&path, "Couldn’t show output folder", cx);
+    }
+
+    fn reveal_path(&self, path: &Path, title: &'static str, cx: &mut Context<Self>) {
+        if let Err(error) = crate::reveal_path(path) {
+            self.notify_error(
+                "reveal-path",
+                title,
+                format!("{}: {error}", path.display()),
+                cx,
+            );
+        }
     }
 
     /// Ask the desktop for a folder or a file. The dialog runs off the main thread so
@@ -1436,6 +1521,7 @@ pub(crate) fn build_audit(
             .count();
         let spins = acquisition::detect_spins(&root, &entries);
         let mut audit = Audit {
+            window: window.window_handle(),
             table: None,
             table_signature: None,
             root,
@@ -1563,7 +1649,9 @@ pub(crate) fn build_audit(
 /// the quit took — menu, Cmd+W on the last window, or the close button.
 pub(crate) fn register_quit_flush(audit: gpui::Entity<Audit>, cx: &mut gpui::App) {
     cx.on_app_quit(move |cx| {
-        audit.update(cx, |audit, _| audit.flush_settings());
+        if let Err(error) = audit.update(cx, |audit, _| audit.flush_settings()) {
+            eprintln!("press: could not save settings while quitting: {error}");
+        }
         async {}
     })
     .detach();
