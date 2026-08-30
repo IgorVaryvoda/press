@@ -36,27 +36,34 @@ pub fn install() {
     }));
 }
 
-pub fn reveal_reports() {
-    if let Err(error) = try_reveal_reports() {
-        if is_missing_config_directory(&error) {
-            eprintln!("press: no config directory for crash reports");
-        } else {
-            eprintln!("press: could not reveal crash reports: {error}");
-        }
-    }
-}
-
 pub fn try_reveal_reports() -> io::Result<()> {
     let directory = prepare_reports_directory()?;
     open_reports_directory(directory, |target| crate::open_with_desktop(target))
 }
 
-pub fn email_report() {
-    reveal_reports();
-    crate::open_url(&format!(
+pub fn email_report() -> io::Result<()> {
+    email_report_with(try_reveal_reports, |target| {
+        crate::open_with_desktop(target)
+    })
+}
+
+fn email_report_with(
+    reveal_reports: impl FnOnce() -> io::Result<()>,
+    open_email: impl FnOnce(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let reveal = reveal_reports();
+    let email = open_email(&email_target());
+    match reveal {
+        Err(error) => Err(error),
+        Ok(()) => email,
+    }
+}
+
+fn email_target() -> String {
+    format!(
         "mailto:{REPORT_EMAIL}?subject=Press%20{}%20crash%20report&body=Please%20attach%20the%20newest%20.log%20file%20from%20the%20Press%20crash%20reports%20folder.",
         env!("CARGO_PKG_VERSION")
-    ));
+    )
 }
 
 fn directory() -> Option<PathBuf> {
@@ -85,12 +92,6 @@ fn open_reports_directory(
 ) -> io::Result<()> {
     open_directory(directory.as_os_str())?;
     Ok(())
-}
-
-fn is_missing_config_directory(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|source| source.is::<MissingConfigDirectory>())
 }
 
 fn render(info: &std::panic::PanicHookInfo<'_>) -> String {
@@ -188,7 +189,11 @@ mod tests {
         let missing = prepare_directory(None, |_| unreachable!()).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
         assert_eq!(missing.to_string(), "no config directory for crash reports");
-        assert!(is_missing_config_directory(&missing));
+        assert!(
+            missing
+                .get_ref()
+                .is_some_and(|source| source.is::<MissingConfigDirectory>())
+        );
 
         let expected = PathBuf::from("reports");
         let prepared = prepare_directory(Some(expected.clone()), |_| Ok(())).unwrap();
@@ -200,7 +205,11 @@ mod tests {
             prepare_directory(Some(PathBuf::from("reports")), |_| Err(injected)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert_eq!(error.to_string(), "injected preparation failure");
-        assert!(!is_missing_config_directory(&error));
+        assert!(
+            !error
+                .get_ref()
+                .is_some_and(|source| source.is::<MissingConfigDirectory>())
+        );
         let returned_payload = error
             .get_ref()
             .and_then(|source| source.downcast_ref::<Arc<InjectedPreparationError>>())
@@ -241,6 +250,80 @@ mod tests {
             .and_then(|source| source.downcast_ref::<Arc<InjectedOpenerError>>())
             .expect("injected payload should be preserved");
         assert!(Arc::ptr_eq(&payload, returned_payload));
+    }
+
+    #[test]
+    fn email_handoff_attempts_mail_after_every_reveal_outcome() {
+        let target = format!(
+            "mailto:{REPORT_EMAIL}?subject=Press%20{}%20crash%20report&body=Please%20attach%20the%20newest%20.log%20file%20from%20the%20Press%20crash%20reports%20folder.",
+            env!("CARGO_PKG_VERSION")
+        );
+        let reveal_errors = [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Other,
+        ];
+
+        for kind in reveal_errors {
+            let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let opened_by_email = opened.clone();
+            let expected_target = target.clone();
+            let error = email_report_with(
+                || Err(io::Error::from(kind)),
+                move |actual| {
+                    assert_eq!(actual, expected_target);
+                    opened_by_email.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert_eq!(opened.load(Ordering::Relaxed), 1);
+        }
+
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opened_by_email = opened.clone();
+        let expected_target = target.clone();
+        let mail_error = email_report_with(
+            || Ok(()),
+            move |actual| {
+                assert_eq!(actual, expected_target);
+                opened_by_email.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(mail_error.kind(), io::ErrorKind::ConnectionRefused);
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
+
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opened_by_email = opened.clone();
+        let expected_target = target.clone();
+        let first_error = email_report_with(
+            || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            move |actual| {
+                assert_eq!(actual, expected_target);
+                opened_by_email.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(first_error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
+
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opened_by_email = opened.clone();
+        let expected_target = target.clone();
+        email_report_with(
+            || Ok(()),
+            move |actual| {
+                assert_eq!(actual, expected_target);
+                opened_by_email.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
     }
 
     #[test]

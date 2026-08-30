@@ -61,8 +61,20 @@ fn register_show_crash_reports(
     });
 }
 
-fn report_show_crash_reports_failure(action: &'static str, error: &io::Error) {
+fn report_crash_action_failure(action: &'static str, error: &io::Error) {
     eprintln!("press: {action}: {error}");
+}
+
+fn register_email_crash_report(
+    handler: impl Fn() -> io::Result<()> + 'static,
+    reporter: impl Fn(&'static str, &io::Error) + 'static,
+    cx: &mut App,
+) {
+    cx.on_action(move |_: &EmailCrashReport, _| {
+        if let Err(error) = handler() {
+            reporter("Email Crash Report", &error);
+        }
+    });
 }
 
 fn help_menu() -> Menu {
@@ -108,10 +120,10 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
     register_about_press(present_about_press, cx);
     register_show_crash_reports(
         crate::crash::try_reveal_reports,
-        report_show_crash_reports_failure,
+        report_crash_action_failure,
         cx,
     );
-    cx.on_action(|_: &EmailCrashReport, _| crate::crash::email_report());
+    register_email_crash_report(crate::crash::email_report, report_crash_action_failure, cx);
 
     // The menu shows each item's key equivalent from the keymap, so the
     // bindings and the menus describe one truth.
@@ -231,6 +243,58 @@ mod tests {
         cx.update(|cx| cx.dispatch_action(&ShowCrashReports));
 
         assert_eq!(calls.get(), 2);
+        assert_eq!(reported.borrow().len(), 1);
+    }
+
+    #[derive(Debug)]
+    struct InjectedEmailCrashReportError;
+
+    impl std::fmt::Display for InjectedEmailCrashReportError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("injected Email Crash Report failure")
+        }
+    }
+
+    impl std::error::Error for InjectedEmailCrashReportError {}
+
+    #[gpui::test]
+    fn email_crash_report_surfaces_its_named_failure(cx: &mut TestAppContext) {
+        let calls = Rc::new(Cell::new(0));
+        let payload = Arc::new(InjectedEmailCrashReportError);
+        let reported = Rc::new(RefCell::new(Vec::new()));
+        let handler_calls = calls.clone();
+        let handler_payload = payload.clone();
+        let reporter_calls = reported.clone();
+        let reporter_payload = payload.clone();
+
+        cx.update(|cx| {
+            register_email_crash_report(
+                move || {
+                    handler_calls.set(handler_calls.get() + 1);
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        handler_payload.clone(),
+                    ))
+                },
+                move |action, error| {
+                    assert_eq!(action, "Email Crash Report");
+                    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                    assert_eq!(error.to_string(), "injected Email Crash Report failure");
+                    let reported_payload = error
+                        .get_ref()
+                        .and_then(|source| {
+                            source.downcast_ref::<Arc<InjectedEmailCrashReportError>>()
+                        })
+                        .expect("reporter should receive the original error payload");
+                    assert!(Arc::ptr_eq(&reporter_payload, reported_payload));
+                    reporter_calls.borrow_mut().push(());
+                },
+                cx,
+            );
+            cx.dispatch_action(&EmailCrashReport);
+        });
+
+        assert_eq!(calls.get(), 1);
         assert_eq!(reported.borrow().len(), 1);
     }
 

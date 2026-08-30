@@ -839,12 +839,6 @@ fn reveal_path(path: &Path) {
     }
 }
 
-fn open_url(url: &str) {
-    if let Err(error) = open_with_desktop(url) {
-        eprintln!("press: could not open {url}: {error}");
-    }
-}
-
 fn open_with_desktop(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
