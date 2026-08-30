@@ -14,6 +14,7 @@ mod crash;
 mod jxl;
 mod local_ai;
 mod menus;
+mod output;
 mod scan;
 mod settings;
 mod sirv;
