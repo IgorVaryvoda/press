@@ -808,7 +808,7 @@ mod tests {
         });
         draw(cx);
         cx.simulate_click(
-            gpui::point(gpui::px(10.), gpui::px(10.)),
+            gpui::point(gpui::px(10.), gpui::px(40.)),
             gpui::Modifiers::none(),
         );
         draw(cx);
