@@ -28,6 +28,7 @@ jobs:
   package:
     name: ${{ matrix.name }}
     if: github.event_name != 'pull_request'
+    needs: workflow-validation
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
