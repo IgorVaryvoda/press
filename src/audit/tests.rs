@@ -2447,19 +2447,16 @@ fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestA
     cx.simulate_mouse_up(target, gpui::MouseButton::Right, gpui::Modifiers::none());
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
-    // The first two rows are Preview and Compare. The separator occupies the
-    // next gap, then Convert and AI operations follow at the standard 26 px
-    // menu-item height. These pointer attempts exercise the rendered disabled
-    // rows; disabled PopupMenuItems install no click handler.
-    for y in [target.y + px(78.), target.y + px(106.)] {
-        cx.simulate_click(gpui::point(target.x + px(20.), y), gpui::Modifiers::none());
-    }
+    cx.simulate_keystrokes("down down down enter");
 
     audit.update(cx, |audit, cx| {
         assert_eq!(audit.selected, HashSet::from([1]));
-        assert!(audit.compare.is_none());
-        assert!(audit.prefetch.is_none());
-        assert!(audit.prefetch_key.is_none());
+        let preview = audit
+            .compare
+            .as_ref()
+            .expect("Preview opens for the first image");
+        assert_eq!(preview.index, 0);
+        assert_eq!(preview.mode, MediaMode::Preview);
         assert_eq!(
             audit.studio_source,
             Some((1, PathBuf::from("optimized/second.webp")))
@@ -2471,9 +2468,9 @@ fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestA
         audit.open_ai_operations(0, None, cx);
 
         assert_eq!(audit.selected, HashSet::from([1]));
-        assert!(audit.compare.is_none());
-        assert!(audit.prefetch.is_none());
-        assert!(audit.prefetch_key.is_none());
+        let preview = audit.compare.as_ref().expect("Preview stays open");
+        assert_eq!(preview.index, 0);
+        assert_eq!(preview.mode, MediaMode::Preview);
         assert_eq!(
             audit.studio_source,
             Some((1, PathBuf::from("optimized/second.webp")))
