@@ -37,18 +37,18 @@ pub fn install() {
 }
 
 pub fn reveal_reports() {
-    let directory = match prepare_reports_directory() {
-        Ok(directory) => directory,
-        Err(error) if is_missing_config_directory(&error) => {
+    if let Err(error) = try_reveal_reports() {
+        if is_missing_config_directory(&error) {
             eprintln!("press: no config directory for crash reports");
-            return;
+        } else {
+            eprintln!("press: could not reveal crash reports: {error}");
         }
-        Err(error) => {
-            eprintln!("press: could not create crash report folder: {error}");
-            return;
-        }
-    };
-    crate::reveal_path(&directory);
+    }
+}
+
+pub fn try_reveal_reports() -> io::Result<()> {
+    let directory = prepare_reports_directory()?;
+    open_reports_directory(directory, |target| crate::open_with_desktop(target))
 }
 
 pub fn email_report() {
@@ -77,6 +77,14 @@ fn prepare_directory(
         directory.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, MissingConfigDirectory))?;
     create_directory(&directory)?;
     Ok(directory)
+}
+
+fn open_reports_directory(
+    directory: PathBuf,
+    open_directory: impl FnOnce(&std::ffi::OsStr) -> io::Result<()>,
+) -> io::Result<()> {
+    open_directory(directory.as_os_str())?;
+    Ok(())
 }
 
 fn is_missing_config_directory(error: &io::Error) -> bool {
@@ -196,6 +204,41 @@ mod tests {
         let returned_payload = error
             .get_ref()
             .and_then(|source| source.downcast_ref::<Arc<InjectedPreparationError>>())
+            .expect("injected payload should be preserved");
+        assert!(Arc::ptr_eq(&payload, returned_payload));
+    }
+
+    #[derive(Debug)]
+    struct InjectedOpenerError;
+
+    impl std::fmt::Display for InjectedOpenerError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("injected opener failure")
+        }
+    }
+
+    impl std::error::Error for InjectedOpenerError {}
+
+    #[test]
+    fn folder_opener_preserves_target_and_error_identity() {
+        let expected = PathBuf::from("reports");
+        let mut opened = None;
+        open_reports_directory(expected.clone(), |target| {
+            opened = Some(PathBuf::from(target));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(opened, Some(expected));
+
+        let payload = Arc::new(InjectedOpenerError);
+        let injected = io::Error::new(io::ErrorKind::PermissionDenied, payload.clone());
+        let error =
+            open_reports_directory(PathBuf::from("reports"), |_| Err(injected)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "injected opener failure");
+        let returned_payload = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<Arc<InjectedOpenerError>>())
             .expect("injected payload should be preserved");
         assert!(Arc::ptr_eq(&payload, returned_payload));
     }

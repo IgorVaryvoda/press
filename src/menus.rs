@@ -88,7 +88,11 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
         audit.update(cx, |audit, cx| audit.pick(false, cx));
     });
     register_about_press(present_about_press, cx);
-    cx.on_action(|_: &ShowCrashReports, _| crate::crash::reveal_reports());
+    cx.on_action(|_: &ShowCrashReports, _| {
+        if let Err(error) = crate::crash::try_reveal_reports() {
+            eprintln!("press: could not show crash reports: {error}");
+        }
+    });
     cx.on_action(|_: &EmailCrashReport, _| crate::crash::email_report());
 
     // The menu shows each item's key equivalent from the keymap, so the
