@@ -607,6 +607,7 @@ fn convert_headless(
 }
 
 fn main() {
+    let pending_crash = crash::pending_snapshot();
     crash::install();
     let args = parse_args();
 
@@ -685,6 +686,7 @@ fn main() {
                 output: remembered.output.clone(),
             },
             None,
+            pending_crash,
         );
     };
 
@@ -714,6 +716,7 @@ fn main() {
                 output: remembered.output.clone(),
             },
             Some(target),
+            pending_crash,
         );
     }
 
@@ -965,7 +968,21 @@ struct Launch {
     output: settings::Output,
 }
 
-fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
+struct WindowContent {
+    audit: gpui::Entity<audit::Audit>,
+}
+
+impl Render for WindowContent {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::div()
+            .relative()
+            .size_full()
+            .child(self.audit.clone())
+            .children(Root::render_dialog_layer(window, cx))
+    }
+}
+
+fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Option<PathBuf>) {
     application()
         // Every `IconName` is an SVG loaded through the app's asset source. Without
         // this the icons resolve to nothing and the toolbar renders as bare words.
@@ -987,24 +1004,25 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
             let (width, height) = restored_window_size(remembered.width, remembered.height);
             let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             let mut audit_slot = None;
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
-                    // Matches the desktop entry cargo-packager derives from
-                    // product-name; a mismatch loses the icon under Wayland.
-                    app_id: Some("press".to_string()),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let audit = audit::build_audit(launch, window, cx);
-                    audit_slot = Some(audit.clone());
-                    // Dialogs, notifications and tooltips are drawn by the Root, so
-                    // the window's first level has to be one.
-                    cx.new(|cx| Root::new(audit, window, cx).bg(cx.theme().background))
-                },
-            )
-            .unwrap();
+            let root = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
+                        // Matches the desktop entry cargo-packager derives from
+                        // product-name; a mismatch loses the icon under Wayland.
+                        app_id: Some("press".to_string()),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        let audit = audit::build_audit(launch, window, cx);
+                        audit_slot = Some(audit.clone());
+                        // Root owns modal state; WindowContent paints its dialog layer.
+                        let content = cx.new(|_| WindowContent { audit });
+                        cx.new(|cx| Root::new(content, window, cx).bg(cx.theme().background))
+                    },
+                )
+                .unwrap();
             if let Some(audit) = audit_slot {
                 if let Some(path) = startup_path {
                     audit.update(cx, |audit, cx| audit.request_path(path, cx));
@@ -1051,12 +1069,32 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                 audit::register_quit_flush(audit, cx);
             }
             cx.activate(true);
+            root.update(cx, |_, window, cx| {
+                crash::defer_prompt(window, cx, pending_crash);
+            })
+            .ok();
         });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, IntoElement, Render, TestAppContext};
+    use gpui_component::WindowExt;
+
+    struct CrashWindowHarness;
+
+    impl Render for CrashWindowHarness {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            gpui::div()
+                .size_full()
+                .children(Root::render_dialog_layer(window, cx))
+        }
+    }
 
     fn parse(arguments: &[&str]) -> Result<Args, String> {
         parse_args_from(arguments.iter().map(|argument| (*argument).to_string()))
@@ -1213,5 +1251,33 @@ mod tests {
         assert_eq!(json["summary"]["camera_raw_skipped"], 2);
         assert_eq!(json["files"][0]["path"], "/photos/heavy.png");
         assert_eq!(json["files"][0]["heavy"], true);
+    }
+
+    #[gpui::test]
+    fn windowed_startup_runs_the_crash_prompt_hook(cx: &mut TestAppContext) {
+        cx.update(init_theme);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let harness = cx.new(|_| CrashWindowHarness);
+            Root::new(harness, window, cx)
+        });
+        cx.update(|window, cx| {
+            crash::defer_prompt(
+                window,
+                cx,
+                Some(PathBuf::from("crash-00000000000000000001-42-0000.log")),
+            );
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(900.), px(640.)));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("crash-prompt-title").is_some());
+
+        let not_now = cx.debug_bounds("crash-prompt-not-now").unwrap();
+        cx.simulate_click(not_now.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| assert!(!window.has_active_dialog(cx)));
     }
 }
