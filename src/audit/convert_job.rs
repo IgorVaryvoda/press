@@ -12,6 +12,7 @@ impl Audit {
         if targets.is_empty() {
             return;
         }
+        self.clear_error("conversion", cx);
         let target_count = targets.len();
         let dataset_generation = self.dataset_generation;
         self.converting = true;
@@ -136,6 +137,8 @@ impl Audit {
                             ),
                             cx,
                         );
+                    } else {
+                        audit.clear_error("conversion", cx);
                     }
                     // A finished run has produced something to look at, and
                     // until now the app said so in a column and left you to

@@ -56,6 +56,7 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
     });
     let for_reports = audit.clone();
     cx.on_action(move |_: &ShowCrashReports, cx| {
+        for_reports.update(cx, |audit, cx| audit.clear_error("crash-reports", cx));
         if let Err(error) = crate::crash::reveal_reports() {
             for_reports.update(cx, |audit, cx| {
                 audit.notify_error(
@@ -68,6 +69,7 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
         }
     });
     cx.on_action(move |_: &EmailCrashReport, cx| {
+        audit.update(cx, |audit, cx| audit.clear_error("crash-email", cx));
         if let Err(error) = crate::crash::email_report() {
             audit.update(cx, |audit, cx| {
                 audit.notify_error(

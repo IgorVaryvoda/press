@@ -76,6 +76,7 @@ impl Audit {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
+        self.clear_error("local-ai", cx);
         if tool == local_ai::Tool::Upscale
             && let Err(message) = local_ai::upscale_dimensions(entry.width, entry.height)
         {
@@ -181,6 +182,7 @@ impl Audit {
                 }
                 match result {
                     Ok(path) => {
+                        audit.clear_error("local-ai", cx);
                         audit.existing_output = audit.existing_output.saturating_add(1);
                         audit.local_ai_job.as_mut().unwrap().state =
                             LocalAiJobState::Done(path.clone());

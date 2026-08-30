@@ -67,6 +67,7 @@ impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
     /// missing store routes directly to the existing settings form.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
+        self.clear_error("sirv-browser", cx);
         self.sirv_confirm = None;
         self.sirv_browser_generation = self.sirv_browser_generation.wrapping_add(1);
         let session = self.sirv_browser_generation;
@@ -146,6 +147,7 @@ impl Audit {
                 .await;
             this.update(cx, |audit, cx| {
                 let mut failure = None;
+                let mut landed = false;
                 if let Some(browser) = audit.sirv_browser.as_mut()
                     && browser_landing_applies(
                         session,
@@ -156,12 +158,15 @@ impl Audit {
                         &browser.path,
                     )
                 {
+                    landed = true;
                     failure = result.as_ref().err().cloned();
                     browser.nodes = Some(result);
                     cx.notify();
                 }
                 if let Some(message) = failure {
                     audit.notify_error("sirv-browser", "Couldn’t list Sirv folder", message, cx);
+                } else if landed {
+                    audit.clear_error("sirv-browser", cx);
                 }
             })
         })
@@ -169,11 +174,13 @@ impl Audit {
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_error("sirv-settings", cx);
         self.settings_panel = None;
         Self::restore_audit_focus(window, cx);
     }
 
     pub(super) fn close_sirv_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_error("sirv-browser", cx);
         self.sirv_browser = None;
         self.sirv_confirm = None;
         Self::restore_audit_focus(window, cx);
@@ -186,6 +193,7 @@ impl Audit {
 
     /// Enter a folder of the listing.
     pub(super) fn descend_sirv(&mut self, name: String, cx: &mut Context<Self>) {
+        self.clear_error("sirv-browser", cx);
         let Some(browser) = self.sirv_browser.as_mut() else {
             return;
         };
@@ -200,6 +208,7 @@ impl Audit {
     /// Go up one folder. The root has no parent, so the button only exists
     /// below it.
     pub(super) fn ascend_sirv(&mut self, cx: &mut Context<Self>) {
+        self.clear_error("sirv-browser", cx);
         let Some(browser) = self.sirv_browser.as_mut() else {
             return;
         };
@@ -236,6 +245,7 @@ impl Audit {
         if dir.is_empty() {
             return;
         }
+        self.clear_error("sirv-browser", cx);
         // A transfer aimed at the old pairing must not outlive it, same rule as unpair.
         self.cancel_sirv_transfer();
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
@@ -256,6 +266,7 @@ impl Audit {
     /// List the paired folder end to end and rebuild its diff. Also the
     /// refresh a push finishes with, so pushed files stop reading as new.
     pub(super) fn walk_sirv_pairing(&mut self, cx: &mut Context<Self>) {
+        self.clear_error("sirv-listing", cx);
         let Some(pairing) = self.sirv_pairing.as_mut() else {
             return;
         };
@@ -340,6 +351,8 @@ impl Audit {
                     audit.notify_error("sirv-listing", "Couldn’t compare with Sirv", message, cx);
                 } else if let Some(message) = cdn_failure {
                     audit.notify_error("sirv-listing", "Couldn’t read Sirv account", message, cx);
+                } else {
+                    audit.clear_error("sirv-listing", cx);
                 }
                 cx.notify();
             })
@@ -348,6 +361,9 @@ impl Audit {
     }
 
     pub(super) fn unpair_sirv(&mut self, cx: &mut Context<Self>) {
+        for scope in ["sirv-browser", "sirv-listing", "sirv-transfer"] {
+            self.clear_error(scope, cx);
+        }
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
         self.sirv_counts = None;
@@ -424,6 +440,7 @@ impl Audit {
 
     /// Store the CDN credentials.
     pub(super) fn save_sirv_settings(&mut self, cx: &mut Context<Self>) {
+        self.clear_error("sirv-settings", cx);
         let (client_id, client_secret) = {
             let Some(panel) = self.settings_panel.as_mut() else {
                 return;
@@ -457,7 +474,9 @@ impl Audit {
             }
             Err(error) => (false, format!("Could not save: {error}")),
         };
-        if !status.0 {
+        if status.0 {
+            self.clear_error("sirv-settings", cx);
+        } else {
             self.notify_error(
                 "sirv-settings",
                 "Couldn’t save Sirv settings",
@@ -533,6 +552,7 @@ impl Audit {
         let files = files.clone();
         let dir = pairing.dir.clone();
         let client = pairing.client.clone();
+        self.clear_error("sirv-transfer", cx);
         let entry_sizes = if differing {
             self.entries
                 .iter()
@@ -700,6 +720,8 @@ impl Audit {
                         audit.sirv_job.as_ref().and_then(transfer_failure)
                     {
                         audit.notify_error("sirv-transfer", title, message, cx);
+                    } else {
+                        audit.clear_error("sirv-transfer", cx);
                     }
                     // The pulled files belong in the table: a full rescan, through
                     // the same path a folder change takes.
@@ -760,6 +782,7 @@ impl Audit {
         if plan.is_empty() {
             return;
         }
+        self.clear_error("sirv-transfer", cx);
         let dir = pairing.dir.clone();
         let client = pairing.client.clone();
         let total = plan.len();
@@ -987,6 +1010,8 @@ impl Audit {
                         audit.sirv_job.as_ref().and_then(transfer_failure)
                     {
                         audit.notify_error("sirv-transfer", title, message, cx);
+                    } else {
+                        audit.clear_error("sirv-transfer", cx);
                     }
                     // Re-list the pair: pushed files must stop reading as new.
                     audit.walk_sirv_pairing(cx);

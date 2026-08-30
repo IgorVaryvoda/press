@@ -80,6 +80,7 @@ impl Audit {
         if self.studio_key_checking {
             return;
         }
+        self.clear_error("studio-key", cx);
         let key = self.studio_key_input.read(cx).value().trim().to_string();
         if !key.starts_with("sk_live_") {
             let message = "AI API keys start with sk_live_";
@@ -108,6 +109,7 @@ impl Audit {
                 audit.studio_key_checking = false;
                 match checked {
                     Ok(key) => {
+                        audit.clear_error("studio-key", cx);
                         audit.studio_key = Some(key);
                         audit.studio_status = Some((true, "AI API key verified and saved".into()));
                     }
@@ -123,8 +125,10 @@ impl Audit {
     }
 
     fn forget_studio_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_error("studio-key", cx);
         match studio::forget_key() {
             Ok(()) => {
+                self.clear_error("studio-key", cx);
                 self.studio_key = None;
                 self.studio_status = Some((true, "AI API key forgotten on this computer".into()));
                 self.studio_key_input.update(cx, |input, cx| {
@@ -148,6 +152,7 @@ impl Audit {
         if self.studio_busy() || self.local_ai_busy() || self.converting {
             return;
         }
+        self.clear_error("studio-job", cx);
         if self.studio_key.is_none() {
             let message = "Save an AI API key first";
             self.studio_status = Some((false, message.into()));
@@ -285,6 +290,7 @@ impl Audit {
                 }
                 match result {
                     Ok(path) => {
+                        audit.clear_error("studio-job", cx);
                         audit.existing_output = audit.existing_output.saturating_add(1);
                         audit.studio_job.as_mut().unwrap().state =
                             StudioJobState::Done(path.clone());

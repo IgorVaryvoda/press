@@ -21,6 +21,7 @@ impl Audit {
         cx: &mut Context<Self>,
     ) {
         self.settings = settings;
+        self.clear_error("settings", cx);
         if self.settings_save_pending {
             return;
         }
@@ -37,16 +38,15 @@ impl Audit {
                 .background_executor()
                 .spawn(async move { write_settings(&settings) })
                 .await;
-            if let Err(error) = saved {
-                let _ = this.update(cx, |audit, cx| {
-                    audit.notify_error(
-                        "settings",
-                        "Couldn’t save settings",
-                        format!("Your changes apply until Press closes: {error}"),
-                        cx,
-                    );
-                });
-            }
+            let _ = this.update(cx, |audit, cx| match saved {
+                Ok(()) => audit.clear_error("settings", cx),
+                Err(error) => audit.notify_error(
+                    "settings",
+                    "Couldn’t save settings",
+                    format!("Your changes apply until Press closes: {error}"),
+                    cx,
+                ),
+            });
         })
         .detach();
     }
@@ -711,6 +711,7 @@ impl Audit {
         else {
             return;
         };
+        self.clear_error("discard-output", cx);
         // Only ever inside the destination this audit writes to.
         if !written.starts_with(self.output.root(&self.root)) {
             self.notify_error(

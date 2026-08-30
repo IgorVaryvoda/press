@@ -192,6 +192,7 @@ impl Audit {
         let Some(source) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
         };
+        self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
         let key = compare::Key::new(&written, self.format, self.quality, self.max_edge);
         self.compare = Some(Comparison {
@@ -255,6 +256,8 @@ impl Audit {
                         "or its written output is missing, damaged, or unsupported.",
                         cx,
                     );
+                } else {
+                    audit.clear_error("media", cx);
                 }
                 audit.prefetch_media(cx);
                 cx.notify();
@@ -271,6 +274,7 @@ impl Audit {
         else {
             return;
         };
+        self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
         let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
         let cached = self.take_cached_preview(&key);
@@ -357,6 +361,8 @@ impl Audit {
                         "is damaged or uses an unsupported image feature.",
                         cx,
                     );
+                } else {
+                    audit.clear_error("media", cx);
                 }
                 audit.prefetch_media(cx);
                 cx.notify();
@@ -384,6 +390,7 @@ impl Audit {
         let Some(path) = self.entries.get(index).map(|entry| entry.path.clone()) else {
             return;
         };
+        self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
         let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
         self.compare = Some(Comparison {
@@ -473,6 +480,8 @@ impl Audit {
                             "could not be decoded or encoded with these settings.",
                             cx,
                         );
+                    } else {
+                        audit.clear_error("media", cx);
                     }
                     audit.prefetch_media(cx);
                     cx.notify();
@@ -660,6 +669,8 @@ impl Audit {
                             "is damaged, unsupported, or could not be encoded.",
                             cx,
                         );
+                    } else {
+                        audit.clear_error("media", cx);
                     }
                     audit.prefetch_media(cx);
                     cx.notify();

@@ -942,15 +942,18 @@ fn sirv_jobs_count_every_failure_but_keep_three_examples() {
     );
 }
 
-#[gpui::test]
-fn one_error_scope_replaces_its_existing_toast(cx: &mut TestAppContext) {
+fn notification_audit(
+    cx: &mut TestAppContext,
+    entries: Vec<Entry>,
+) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
     cx.update(init_theme);
-    let mut audit_entity = None;
-    let (_, cx) = cx.add_window_view(|window, cx| {
+    let audit_entity = Rc::new(RefCell::new(None));
+    let capture = audit_entity.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
         let audit = build_audit(
             Launch {
                 root: PathBuf::new(),
-                entries: Vec::new(),
+                entries,
                 skipped_raw: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -967,22 +970,126 @@ fn one_error_scope_replaces_its_existing_toast(cx: &mut TestAppContext) {
             window,
             cx,
         );
-        audit_entity = Some(audit.clone());
+        *capture.borrow_mut() = Some(audit.clone());
         let content = cx.new(|_| crate::WindowContent { audit });
         Root::new(content, window, cx).bg(cx.theme().background)
     });
-    let audit = audit_entity.expect("audit is built for the production Root");
+    let audit = audit_entity
+        .borrow_mut()
+        .take()
+        .expect("audit is built for the production Root");
+    (audit, cx)
+}
+
+fn notification_count(cx: &mut gpui::VisualTestContext) -> usize {
+    let mut count = 0;
+    cx.update(|window, cx| count = window.notifications(cx).len());
+    count
+}
+
+fn finish_notification_exit(cx: &mut gpui::VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(250));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_newer_error_replaces_the_old_content_in_its_scope(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
 
     audit.update(cx, |audit, cx| {
         audit.notify_error("conversion", "First error", "first detail", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(notification_count(cx), 1);
+
+    audit.update(cx, |audit, cx| {
+        audit.clear_error("conversion", cx);
         audit.notify_error("conversion", "Latest error", "latest detail", cx);
     });
     cx.run_until_parked();
 
-    cx.update(|window, cx| {
-        assert_eq!(window.notifications(cx).len(), 1);
+    assert_eq!(notification_count(cx), 1);
+    assert!(
+        cx.debug_bounds("error-toast-message:latest detail")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("error-toast-message:first detail")
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn a_successful_retry_removes_its_old_error(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
+    audit.update(cx, |audit, cx| {
+        audit.notify_error("conversion", "Conversion incomplete", "disk was full", cx);
     });
-    assert!(cx.debug_bounds("error-toast-message").is_some());
+    cx.run_until_parked();
+    assert_eq!(notification_count(cx), 1);
+
+    audit.update(cx, |audit, cx| audit.clear_error("conversion", cx));
+    cx.run_until_parked();
+    finish_notification_exit(cx);
+
+    assert_eq!(notification_count(cx), 0);
+    assert!(
+        cx.debug_bounds("error-toast-message:disk was full")
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn errors_from_different_scopes_coexist(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
+    audit.update(cx, |audit, cx| {
+        audit.notify_error("conversion", "Conversion incomplete", "decode failed", cx);
+        audit.notify_error("settings", "Couldn’t save settings", "read-only folder", cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(notification_count(cx), 2);
+    assert!(
+        cx.debug_bounds("error-toast-message:decode failed")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("error-toast-message:read-only folder")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(
+        cx,
+        vec![entry("missing.png", 10, 10, 100, ImageFormat::Png)],
+    );
+    audit.update(cx, |audit, cx| audit.open_preview(0, cx));
+    cx.update(|window, cx| {
+        audit.update(cx, |audit, cx| {
+            audit.install_dataset(
+                scan::Scan {
+                    entries: Vec::new(),
+                    skipped_raw: 0,
+                    skipped_packages: 0,
+                    unreadable: Vec::new(),
+                    walk_errors: Vec::new(),
+                    existing_output: 0,
+                },
+                PathBuf::from("replacement"),
+                false,
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    cx.executor()
+        .advance_clock(PREVIEW_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+
+    assert_eq!(notification_count(cx), 0);
 }
 
 #[gpui::test]

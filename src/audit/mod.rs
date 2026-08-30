@@ -832,6 +832,23 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
 }
 
 impl Audit {
+    fn update_notifications(
+        &self,
+        update: impl FnOnce(&mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let window = self.window;
+        cx.spawn(async move |_, cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                // Focused tests may render Audit without the production Root.
+                if window.root::<gpui_component::Root>().flatten().is_some() {
+                    update(window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Keep the detailed failure beside the work that owns it, and announce it once
     /// where it cannot be missed. A scope replaces its previous toast so a failing
     /// batch never turns into one popup per file.
@@ -848,24 +865,27 @@ impl Audit {
             .id1::<ErrorToast>(scope)
             .title(title)
             .content(move |_, _, _| {
+                let selector = format!("error-toast-message:{message}");
                 div()
-                    .debug_selector(|| "error-toast-message".into())
+                    .debug_selector(move || selector.clone())
                     .text_sm()
                     .child(message.clone())
                     .into_any_element()
             })
             .autohide(false);
-        let window = self.window;
-        cx.spawn(async move |_, cx| {
-            let _ = window.update(cx, |_, window, cx| {
-                // Most focused tests render Audit in a tiny harness. Production always
-                // uses Root, which owns the notification layer.
-                if window.root::<gpui_component::Root>().flatten().is_some() {
-                    window.push_notification(notification, cx);
-                }
-            });
-        })
-        .detach();
+        self.update_notifications(
+            move |window, cx| window.push_notification(notification, cx),
+            cx,
+        );
+    }
+
+    /// A new attempt and a successful completion both make the previous failure
+    /// stale. Remove only that operation's toast; unrelated failures stay visible.
+    pub(crate) fn clear_error(&self, scope: &'static str, cx: &mut Context<Self>) {
+        self.update_notifications(
+            move |window, cx| window.remove_notification1::<ErrorToast>(scope, cx),
+            cx,
+        );
     }
 
     /// Install a completed scan. This is the one state transition that replaces the
@@ -1027,6 +1047,7 @@ impl Audit {
         if !single && !path.is_dir() {
             return;
         }
+        self.clear_error("open-image", cx);
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
         let progressive = !single && (self.root != path || self.sirv_pairing.is_none());
@@ -1075,6 +1096,7 @@ impl Audit {
                     audit.scanning = None;
                     audit.scan_partial = false;
                     if let Some((scanned, root, single)) = result {
+                        audit.clear_error("open-image", cx);
                         audit.install_dataset(scanned, root, single, None, window, cx);
                     } else {
                         audit.notify_error(
@@ -1226,6 +1248,7 @@ impl Audit {
     /// Hand the output folder to the desktop's file manager.
     // ponytail: three names for one idea, and no crate needed for it.
     fn reveal_output(&self, cx: &mut Context<Self>) {
+        self.clear_error("reveal-output", cx);
         let path = self.output.root(&self.root);
         if !path.exists() {
             self.notify_error(
@@ -1240,6 +1263,7 @@ impl Audit {
     }
 
     fn reveal_path(&self, path: &Path, title: &'static str, cx: &mut Context<Self>) {
+        self.clear_error("reveal-path", cx);
         if let Err(error) = crate::reveal_path(path) {
             self.notify_error(
                 "reveal-path",
