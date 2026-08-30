@@ -6,6 +6,7 @@
 
 use std::{
     borrow::Cow,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -55,6 +56,46 @@ const PACKAGE_EXTENSIONS: [&str; 13] = [
 /// spend its win rebuilding the table hundreds of times.
 const FIRST_SCAN_BATCH: usize = 32;
 const NEXT_SCAN_BATCH: usize = 256;
+const PROGRESSIVE_SCAN_BATCHES: [usize; 5] =
+    [FIRST_SCAN_BATCH, NEXT_SCAN_BATCH, 1_024, 4_096, 8_192];
+
+/// Publishes enough rows for the first viewport, then grows each update until the
+/// table has a useful body. Larger scans retain the final size so their callbacks
+/// stay bounded rather than returning to per-row work.
+struct ProductionBatchState {
+    published: usize,
+    next_size: usize,
+    size_index: usize,
+}
+
+impl ProductionBatchState {
+    fn new() -> Self {
+        Self {
+            published: 0,
+            next_size: PROGRESSIVE_SCAN_BATCHES[0],
+            size_index: 0,
+        }
+    }
+
+    fn ready_range(&mut self, completed: usize) -> Option<Range<usize>> {
+        if completed - self.published != self.next_size {
+            return None;
+        }
+        let range = self.published..completed;
+        self.published = completed;
+        self.size_index = (self.size_index + 1).min(PROGRESSIVE_SCAN_BATCHES.len() - 1);
+        self.next_size = PROGRESSIVE_SCAN_BATCHES[self.size_index];
+        Some(range)
+    }
+
+    fn final_tail(&mut self, completed: usize) -> Option<Range<usize>> {
+        (self.published < completed).then(|| {
+            let range = self.published..completed;
+            self.published = completed;
+            range
+        })
+    }
+}
 
 /// True when this directory is one macOS keeps opaque. Packages are a macOS
 /// concept — on other systems these names are just folders, so they keep being
@@ -328,7 +369,7 @@ pub fn scan_progressive(
     let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
     let mut entries = Vec::new();
     let mut unreadable = Vec::new();
-    let mut published = 0;
+    let mut batches = ProductionBatchState::new();
     let summary = std::thread::scope(|scope| {
         enum Probed {
             Entry(Entry),
@@ -453,14 +494,8 @@ pub fn scan_progressive(
             match result {
                 Probed::Entry(entry) => {
                     entries.push(entry);
-                    let batch = if published == 0 {
-                        FIRST_SCAN_BATCH
-                    } else {
-                        NEXT_SCAN_BATCH
-                    };
-                    if entries.len() - published == batch {
-                        publish(&entries[published..]);
-                        published = entries.len();
+                    if let Some(range) = batches.ready_range(entries.len()) {
+                        publish(&entries[range]);
                     }
                 }
                 Probed::Unreadable(path) => unreadable.push(path),
@@ -476,8 +511,8 @@ pub fn scan_progressive(
             Err(panic) => std::panic::resume_unwind(panic),
         }
     });
-    if published < entries.len() {
-        publish(&entries[published..]);
+    if let Some(range) = batches.final_tail(entries.len()) {
+        publish(&entries[range]);
     }
 
     // Heaviest first: the top of the list is the work worth doing.
@@ -998,6 +1033,61 @@ mod tests {
         let elsewhere = scan(&dir, &dir.join("optimized"));
         assert_eq!(elsewhere.entries.len(), 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn production_batches_grow_without_losing_order_or_tail() {
+        let completions: Vec<_> = (0..100_000).collect();
+        let mut batches = ProductionBatchState::new();
+        let mut ranges = Vec::new();
+        let mut published = Vec::new();
+
+        for completed in 1..=completions.len() {
+            if let Some(range) = batches.ready_range(completed) {
+                published.extend_from_slice(&completions[range.clone()]);
+                ranges.push(range);
+            }
+        }
+        if let Some(range) = batches.final_tail(completions.len()) {
+            published.extend_from_slice(&completions[range.clone()]);
+            ranges.push(range);
+        }
+
+        assert_eq!(
+            ranges,
+            [
+                0..32,
+                32..288,
+                288..1_312,
+                1_312..5_408,
+                5_408..13_600,
+                13_600..21_792,
+                21_792..29_984,
+                29_984..38_176,
+                38_176..46_368,
+                46_368..54_560,
+                54_560..62_752,
+                62_752..70_944,
+                70_944..79_136,
+                79_136..87_328,
+                87_328..95_520,
+                95_520..100_000,
+            ]
+        );
+        assert_eq!(ranges.len(), 16);
+        assert_eq!(ranges.last(), Some(&(95_520..100_000)));
+        assert_eq!(published, completions);
+
+        assert_eq!(ProductionBatchState::new().final_tail(0), None);
+
+        let mut exact_first = ProductionBatchState::new();
+        assert_eq!(exact_first.ready_range(32), Some(0..32));
+        assert_eq!(exact_first.final_tail(32), None);
+
+        let mut exact_second = ProductionBatchState::new();
+        assert_eq!(exact_second.ready_range(32), Some(0..32));
+        assert_eq!(exact_second.ready_range(288), Some(32..288));
+        assert_eq!(exact_second.final_tail(288), None);
     }
 
     #[test]
