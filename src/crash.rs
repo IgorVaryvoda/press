@@ -11,6 +11,17 @@ const REPORT_LIMIT: usize = 5;
 const REPORT_EMAIL: &str = "igor@varyvoda.com";
 static REPORT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Debug)]
+struct MissingConfigDirectory;
+
+impl std::fmt::Display for MissingConfigDirectory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("no config directory for crash reports")
+    }
+}
+
+impl std::error::Error for MissingConfigDirectory {}
+
 pub fn install() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -26,14 +37,17 @@ pub fn install() {
 }
 
 pub fn reveal_reports() {
-    let Some(directory) = directory() else {
-        eprintln!("press: no config directory for crash reports");
-        return;
+    let directory = match prepare_reports_directory() {
+        Ok(directory) => directory,
+        Err(error) if is_missing_config_directory(&error) => {
+            eprintln!("press: no config directory for crash reports");
+            return;
+        }
+        Err(error) => {
+            eprintln!("press: could not create crash report folder: {error}");
+            return;
+        }
     };
-    if let Err(error) = std::fs::create_dir_all(&directory) {
-        eprintln!("press: could not create crash report folder: {error}");
-        return;
-    }
     crate::reveal_path(&directory);
 }
 
@@ -49,6 +63,26 @@ fn directory() -> Option<PathBuf> {
     crate::settings::path()?
         .parent()
         .map(|parent| parent.join("crashes"))
+}
+
+fn prepare_reports_directory() -> io::Result<PathBuf> {
+    prepare_directory(directory(), |directory| std::fs::create_dir_all(directory))
+}
+
+fn prepare_directory(
+    directory: Option<PathBuf>,
+    create_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    let directory =
+        directory.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, MissingConfigDirectory))?;
+    create_directory(&directory)?;
+    Ok(directory)
+}
+
+fn is_missing_config_directory(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<MissingConfigDirectory>())
 }
 
 fn render(info: &std::panic::PanicHookInfo<'_>) -> String {
@@ -128,6 +162,43 @@ fn prune_reports(directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct InjectedPreparationError;
+
+    impl std::fmt::Display for InjectedPreparationError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("injected preparation failure")
+        }
+    }
+
+    impl std::error::Error for InjectedPreparationError {}
+
+    #[test]
+    fn directory_preparation_preserves_missing_config_and_error_identity() {
+        let missing = prepare_directory(None, |_| unreachable!()).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert_eq!(missing.to_string(), "no config directory for crash reports");
+        assert!(is_missing_config_directory(&missing));
+
+        let expected = PathBuf::from("reports");
+        let prepared = prepare_directory(Some(expected.clone()), |_| Ok(())).unwrap();
+        assert_eq!(prepared, expected);
+
+        let payload = Arc::new(InjectedPreparationError);
+        let injected = io::Error::new(io::ErrorKind::NotFound, payload.clone());
+        let error =
+            prepare_directory(Some(PathBuf::from("reports")), |_| Err(injected)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "injected preparation failure");
+        assert!(!is_missing_config_directory(&error));
+        let returned_payload = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<Arc<InjectedPreparationError>>())
+            .expect("injected payload should be preserved");
+        assert!(Arc::ptr_eq(&payload, returned_payload));
+    }
 
     #[test]
     fn crash_reports_are_local_and_bounded() {
