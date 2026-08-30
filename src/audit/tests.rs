@@ -11,6 +11,68 @@ use gpui::{HeadlessAppContext, TestAppContext, size};
 use gpui_component::Root;
 use image::ImageFormat;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+#[test]
+fn the_scan_batch_handoff_applies_backpressure() {
+    let (mut handoff, mut batches) = ScanBatchHandoff::new();
+    assert_eq!(
+        futures::executor::block_on(handoff.publish(&[])),
+        ScanBatchPublish::Queued
+    );
+
+    let (second_tx, second_rx) = mpsc::sync_channel(1);
+    let second_thread = thread::spawn(move || {
+        let status = futures::executor::block_on(handoff.publish(&[]));
+        second_tx
+            .send((status, handoff))
+            .expect("the test receives the second handoff");
+    });
+    assert!(matches!(
+        second_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        futures::executor::block_on(batches.next()),
+        Some(Vec::new())
+    );
+    let (status, mut handoff) = second_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the second publish completes after the batch is received");
+    assert_eq!(status, ScanBatchPublish::Queued);
+    second_thread.join().expect("the second publisher joins");
+
+    let (third_started_tx, third_started_rx) = mpsc::sync_channel(0);
+    let (third_tx, third_rx) = mpsc::sync_channel(1);
+    let third_thread = thread::spawn(move || {
+        third_started_tx
+            .send(())
+            .expect("the test waits for the third publisher");
+        let status = futures::executor::block_on(handoff.publish(&[]));
+        third_tx
+            .send((status, handoff))
+            .expect("the test receives the closed handoff");
+    });
+    third_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the third publisher starts");
+    assert!(matches!(
+        third_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(batches);
+    let (status, mut handoff) = third_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("receiver closure wakes the third publish");
+    assert_eq!(status, ScanBatchPublish::Closed);
+    third_thread.join().expect("the third publisher joins");
+    assert_eq!(
+        futures::executor::block_on(handoff.publish(&[])),
+        ScanBatchPublish::AlreadyClosed
+    );
+}
 
 /// Render the audit window to a PNG, so a change to it can actually be looked at.
 ///

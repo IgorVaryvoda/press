@@ -37,7 +37,7 @@ use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
-use futures::{StreamExt, future::select_all};
+use futures::{SinkExt, StreamExt, future::select_all};
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
@@ -76,6 +76,45 @@ const DENSITY_HEAVY: f32 = 1.5;
 /// that to be true.
 const HEAVY_MIN_BYTES: u64 = 32_768;
 const HEAVY_MIN_PIXELS: u64 = 64 * 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScanBatchPublish {
+    Queued,
+    Closed,
+    AlreadyClosed,
+}
+
+/// The scan runs away from GPUI, but its results are applied by the UI task. Keep
+/// that boundary to one queued batch so a fast folder walk cannot retain the whole
+/// scan while the window is busy drawing.
+struct ScanBatchHandoff {
+    sender: futures::channel::mpsc::Sender<Vec<Entry>>,
+    closed: bool,
+}
+
+impl ScanBatchHandoff {
+    fn new() -> (Self, futures::channel::mpsc::Receiver<Vec<Entry>>) {
+        let (sender, receiver) = futures::channel::mpsc::channel(0);
+        (
+            Self {
+                sender,
+                closed: false,
+            },
+            receiver,
+        )
+    }
+
+    async fn publish(&mut self, batch: &[Entry]) -> ScanBatchPublish {
+        if self.closed {
+            return ScanBatchPublish::AlreadyClosed;
+        }
+        if self.sender.feed(batch.to_vec()).await.is_err() {
+            self.closed = true;
+            return ScanBatchPublish::Closed;
+        }
+        ScanBatchPublish::Queued
+    }
+}
 
 /// Shared with the headless audit so its finding is exactly the one shown here.
 pub(super) fn is_heavy(entry: &Entry) -> bool {
@@ -1038,10 +1077,10 @@ impl Audit {
 
             let root = path.clone();
             let output_root = output.root(&path);
-            let (sender, mut batches) = futures::channel::mpsc::unbounded();
+            let (mut handoff, mut batches) = ScanBatchHandoff::new();
             let scan_task = cx.background_executor().spawn(async move {
                 scan::scan_progressive(&path, &output_root, |batch| {
-                    let _ = sender.unbounded_send(batch.to_vec());
+                    let _ = futures::executor::block_on(handoff.publish(batch));
                 })
             });
             let mut installed = false;
