@@ -377,6 +377,7 @@ pub fn scan_files(paths: &[PathBuf]) -> Scan {
 /// The same complete scan, publishing small groups as their headers become ready.
 /// The window can draw those rows while the remaining files are still being probed;
 /// callers that need one final result keep using `scan`.
+#[cfg(test)]
 pub fn scan_progressive(
     root: &Path,
     output_root: &Path,

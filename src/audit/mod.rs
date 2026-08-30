@@ -914,6 +914,15 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
         .then(|| parent.to_path_buf())
 }
 
+fn should_scan_progressively(
+    current_root: &Path,
+    requested_path: &Path,
+    has_sirv_pairing: bool,
+    single: bool,
+) -> bool {
+    !single && (current_root != requested_path || !has_sirv_pairing)
+}
+
 impl Audit {
     pub(super) fn scan_blocks_delivery(&self) -> bool {
         self.scanning.is_some()
@@ -923,6 +932,16 @@ impl Audit {
         if let Some(cancellation) = self.scan_cancellation.as_mut() {
             cancellation.cancel();
         }
+    }
+
+    fn finish_cancelled_folder_scan(&mut self, cx: &mut Context<Self>) {
+        if self.scan_partial {
+            self.scan_interrupted = true;
+        } else {
+            self.scanning = None;
+            self.scan_cancellation = None;
+        }
+        cx.notify();
     }
 
     fn owns_scan_request(&self, request: u64, token: Option<&Arc<AtomicBool>>) -> bool {
@@ -1097,7 +1116,8 @@ impl Audit {
         }
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
-        let progressive = !single && (self.root != path || self.sirv_pairing.is_none());
+        let progressive =
+            should_scan_progressively(&self.root, &path, self.sirv_pairing.is_some(), single);
         if let Some(cancellation) = self.scan_cancellation.as_mut() {
             cancellation.cancel();
         }
@@ -1170,16 +1190,8 @@ impl Audit {
                                 audit.scan_cancellation = None;
                             }
                         }
-                        Some(scan::ScanOutcome::Cancelled) if audit.scan_partial => {
-                            audit.scan_interrupted = true;
-                            cx.notify();
-                        }
                         Some(scan::ScanOutcome::Cancelled) => {
-                            audit.scanning = None;
-                            if !single {
-                                audit.scan_cancellation = None;
-                            }
-                            cx.notify();
+                            audit.finish_cancelled_folder_scan(cx);
                         }
                         None if audit.scan_partial => {
                             audit.scan_interrupted = true;
@@ -1268,14 +1280,8 @@ impl Audit {
                         }
                         audit.scan_cancellation = None;
                     }
-                    scan::ScanOutcome::Cancelled if audit.scan_partial => {
-                        audit.scan_interrupted = true;
-                        cx.notify();
-                    }
                     scan::ScanOutcome::Cancelled => {
-                        audit.scanning = None;
-                        audit.scan_cancellation = None;
-                        cx.notify();
+                        audit.finish_cancelled_folder_scan(cx);
                     }
                 }
             });

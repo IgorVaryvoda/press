@@ -10,7 +10,7 @@ use crate::{
 use gpui::{HeadlessAppContext, TestAppContext, size};
 use gpui_component::Root;
 use image::ImageFormat;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{
     Arc,
@@ -34,6 +34,38 @@ fn retained_scan(audit: &mut Audit) -> Arc<std::sync::atomic::AtomicBool> {
     audit.scan_cancellation = Some(cancellation);
     audit.scanning = Some("old folder".into());
     token
+}
+
+fn scan_fixture(name: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock is after the Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("press-audit-{name}-{nonce}"));
+    std::fs::create_dir_all(&root).expect("the scan fixture folder is created");
+    root
+}
+
+fn write_png(root: &Path, name: &str) -> PathBuf {
+    let path = root.join(name);
+    image::RgbImage::from_pixel(8, 8, image::Rgb([20, 40, 60]))
+        .save(&path)
+        .expect("the scan fixture image is written");
+    path
+}
+
+fn test_pairing() -> SirvPairing {
+    SirvPairing {
+        dir: "/paired".into(),
+        files: Listing::Ready(HashMap::new()),
+        cdn_host: CdnHost::Ready("test.sirv.com".into()),
+        client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+            sirv::Credentials {
+                client_id: String::new(),
+                client_secret: String::new(),
+            },
+        ))),
+    }
 }
 
 #[test]
@@ -62,37 +94,63 @@ fn cancellation_wakes_an_already_pending_batch_feed() {
 }
 
 #[gpui::test]
-fn opening_one_file_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+fn opening_one_file_through_request_paths_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+    let root = scan_fixture("one-file");
+    let file = write_png(&root, "one.png");
     let (audit, cx) = finding_audit(cx);
-    let old = audit.update(cx, |audit, cx| {
+    let old = audit.update_in(cx, |audit, window, cx| {
         let old = retained_scan(audit);
-        audit.request_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
-            cx,
-        );
+        audit.request_paths(vec![file], window, cx);
         old
     });
     assert!(old.load(Ordering::Acquire));
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn opening_one_folder_through_request_paths_cancels_the_active_folder_scan(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("one-folder");
+    write_png(&root, "one.png");
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.request_paths(vec![root.clone()], window, cx);
+        old
+    });
+    assert!(old.load(Ordering::Acquire));
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
 fn opening_many_files_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+    let root = scan_fixture("many-files");
+    let first = write_png(&root, "first.png");
+    let second = write_png(&root, "second.png");
     let (audit, cx) = finding_audit(cx);
-    let old = audit.update(cx, |audit, cx| {
+    let old = audit.update_in(cx, |audit, window, cx| {
         let old = retained_scan(audit);
-        audit.request_files(Vec::new(), PathBuf::new(), cx);
+        audit.request_paths(vec![first, second], window, cx);
         old
     });
     assert!(old.load(Ordering::Acquire));
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
 fn an_invalid_path_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
+    let root = scan_fixture("missing");
     let (audit, cx) = finding_audit(cx);
-    let old = audit.update(cx, |audit, cx| {
+    let (old, generation) = audit.update_in(cx, |audit, window, cx| {
         let old = retained_scan(audit);
-        audit.request_path(PathBuf::from("/not/a/press/image"), cx);
-        old
+        let generation = audit.scan_generation;
+        audit.request_paths(vec![root.join("missing.png")], window, cx);
+        (old, generation)
     });
     audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, generation);
+        assert!(!old.load(Ordering::Acquire));
         assert!(
             audit
                 .scan_cancellation
@@ -100,12 +158,24 @@ fn an_invalid_path_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
                 .is_some_and(|current| Arc::ptr_eq(&current.token, &old))
         )
     });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
 fn a_rejected_mixed_root_selection_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
+    let first_root = scan_fixture("mixed-first");
+    let second_root = scan_fixture("mixed-second");
+    let first = write_png(&first_root, "first.png");
+    let second = write_png(&second_root, "second.png");
     let (audit, cx) = finding_audit(cx);
-    let old = audit.update(cx, |audit, _| retained_scan(audit));
+    let (old, generation) = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        let generation = audit.scan_generation;
+        audit.request_paths(vec![first, second], window, cx);
+        (old, generation)
+    });
     audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, generation);
+        assert!(!old.load(Ordering::Acquire));
         assert!(
             audit
                 .scan_cancellation
@@ -113,6 +183,8 @@ fn a_rejected_mixed_root_selection_keeps_the_active_folder_scan(cx: &mut TestApp
                 .is_some_and(|current| Arc::ptr_eq(&current.token, &old))
         )
     });
+    std::fs::remove_dir_all(first_root).expect("the first scan fixture is removed");
+    std::fs::remove_dir_all(second_root).expect("the second scan fixture is removed");
 }
 #[gpui::test]
 fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
@@ -126,30 +198,39 @@ fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
     });
 }
 #[gpui::test]
-fn same_root_rescan_uses_the_cancellable_core(cx: &mut TestAppContext) {
+fn same_root_rescan_selects_the_cancellable_nonprogressive_core(cx: &mut TestAppContext) {
+    let root = scan_fixture("same-root");
+    write_png(&root, "one.png");
     let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, cx| {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    audit.update_in(cx, |audit, window, cx| {
         audit.root = root.clone();
-        audit.request_path(root, cx);
+        audit.sirv_pairing = Some(test_pairing());
+        assert!(!should_scan_progressively(&audit.root, &root, true, false));
+        audit.request_paths(vec![root.clone()], window, cx);
         assert!(audit.scan_cancellation.is_some());
+        audit.cancel_retained_scan();
     });
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
 fn a_failed_replacement_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
+    let root = scan_fixture("corrupt");
+    let corrupt = root.join("corrupt.png");
+    std::fs::write(&corrupt, b"not a png").expect("the corrupt fixture is written");
     let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, cx| {
+    let old = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
         audit.scan_partial = true;
-        audit.scanning = Some("partial".into());
-        audit.request_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
-            cx,
-        );
+        audit.request_paths(vec![corrupt], window, cx);
+        old
     });
     cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
-        assert!(audit.scan_partial && audit.scanning.is_some() && audit.scan_interrupted)
+        assert!(old.load(Ordering::Acquire));
+        assert!(audit.scan_partial && audit.scanning.is_some() && audit.scan_interrupted);
     });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
 fn a_cancelled_scan_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
@@ -171,41 +252,82 @@ fn an_interrupted_partial_scan_blocks_delivery_actions(cx: &mut TestAppContext) 
 }
 #[gpui::test]
 fn a_successful_retry_clears_incomplete_state(cx: &mut TestAppContext) {
+    let root = scan_fixture("retry");
+    write_png(&root, "retry.png");
     let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, _| {
-        audit.scan_partial = false;
-        audit.scan_interrupted = false;
-        audit.scanning = None;
+    let (old, estimates) = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.scan_partial = true;
+        let estimates = audit.estimate_generation;
+        audit.request_paths(vec![root.clone()], window, cx);
+        (old, estimates)
     });
+    cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
-        assert!(!audit.scan_partial && !audit.scan_interrupted && !audit.scan_blocks_delivery())
+        assert!(old.load(Ordering::Acquire));
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(audit.dataset_generation, 1);
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert!(!audit.scan_partial && !audit.scan_interrupted);
+        assert!(audit.estimate_generation > estimates);
     });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
-fn closing_the_window_cancels_a_retained_silent_scan(cx: &mut TestAppContext) {
+fn closing_the_window_cancels_only_its_retained_scan(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     let token = audit.update(cx, |audit, _| retained_scan(audit));
+    let other = cx.add_empty_window();
+    other.update(|window, _| window.remove_window());
+    other.run_until_parked();
+    assert!(!token.load(Ordering::Acquire));
+    let _ = other;
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
     assert!(token.load(Ordering::Acquire));
 }
 #[gpui::test]
 fn releasing_the_audit_cancels_a_silent_scan(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    let token = audit.update(cx, |audit, _| retained_scan(audit));
-    audit.update(cx, |audit, _| audit.cancel_retained_scan());
+    cx.update(init_theme);
+    let mut weak_audit = None;
+    let mut token = None;
+    let (harness, cx) = cx.add_window_view(|window, cx| {
+        let audit = build_audit(finding_launch(), window, cx);
+        token = Some(audit.update(cx, |audit, _| retained_scan(audit)));
+        weak_audit = Some(audit.downgrade());
+        ReleasingAuditHarness { audit: Some(audit) }
+    });
+    let token = token.expect("the retained scan token is captured");
+    let weak_audit = weak_audit.expect("the audit is weakly held for the release check");
+    harness.update(cx, |harness, cx| {
+        harness.audit = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    assert!(weak_audit.upgrade().is_none());
     assert!(token.load(Ordering::Acquire));
 }
 #[gpui::test]
 fn a_normal_folder_scan_lands_once(cx: &mut TestAppContext) {
+    let root = scan_fixture("normal");
+    write_png(&root, "normal.png");
     let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, cx| {
-        audit.request_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")), cx)
+    audit.update_in(cx, |audit, window, cx| {
+        audit.request_paths(vec![root.clone()], window, cx)
     });
     cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
-        assert!(audit.scan_cancellation.is_none() || audit.scanning.is_some())
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(audit.dataset_generation, 1);
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert!(!audit.scan_partial && !audit.scan_interrupted);
     });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 
 #[test]
@@ -374,6 +496,19 @@ struct AuditHarness {
 impl gpui::Render for AuditHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.audit.clone()
+    }
+}
+
+struct ReleasingAuditHarness {
+    audit: Option<gpui::Entity<Audit>>,
+}
+
+impl gpui::Render for ReleasingAuditHarness {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.audit
+            .clone()
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|| div().into_any_element())
     }
 }
 
@@ -1438,11 +1573,10 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     });
 }
 
-fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
-    cx.update(init_theme);
+fn finding_launch() -> Launch {
     // A PNG named `.webp` is the mislabelled one. The screenshot is 30 bytes per
     // pixel; the photo is a tenth of one.
-    let launch = Launch {
+    Launch {
         root: PathBuf::new(),
         entries: vec![
             entry("photo.jpg", 1000, 1000, 100_000, ImageFormat::Jpeg),
@@ -1461,12 +1595,22 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
         grid: false,
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
-    };
-    let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
-        audit: build_audit(launch, window, cx),
+    }
+}
+
+fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+    cx.update(init_theme);
+    let launch = finding_launch();
+    let mut audit = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let built = build_audit(launch, window, cx);
+        audit = Some(built.clone());
+        Root::new(built, window, cx).bg(cx.theme().background)
     });
-    let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
-    (audit, cx)
+    (
+        audit.expect("the audit is built for the production Root"),
+        cx,
+    )
 }
 
 #[gpui::test]
