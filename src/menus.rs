@@ -17,10 +17,44 @@ actions!(
         Zoom,
         OpenFolder,
         OpenImage,
+        AboutPress,
         ShowCrashReports,
         EmailCrashReport
     ]
 );
+
+fn about_copy() -> String {
+    format!(
+        "Press {}\n\nPress is a local ecommerce-image preflight tool. Ordinary audits and conversions stay on this computer.",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn present_about_press(cx: &mut App) {
+    cx.background_executor()
+        .spawn(async move {
+            rfd::AsyncMessageDialog::new()
+                .set_title("About Press")
+                .set_description(about_copy())
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show()
+                .await;
+        })
+        .detach();
+}
+
+fn register_about_press(presenter: impl Fn(&mut App) + 'static, cx: &mut App) {
+    cx.on_action(move |_: &AboutPress, cx| presenter(cx));
+}
+
+fn help_menu() -> Menu {
+    Menu::new("Help").items(vec![
+        MenuItem::action("About Press", AboutPress),
+        MenuItem::separator(),
+        MenuItem::action("Show Crash Reports", ShowCrashReports),
+        MenuItem::action("Email Crash Report…", EmailCrashReport),
+    ])
+}
 
 pub fn init(audit: Entity<Audit>, cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -53,6 +87,7 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
     cx.on_action(move |_: &OpenImage, cx| {
         audit.update(cx, |audit, cx| audit.pick(false, cx));
     });
+    register_about_press(present_about_press, cx);
     cx.on_action(|_: &ShowCrashReports, _| crate::crash::reveal_reports());
     cx.on_action(|_: &EmailCrashReport, _| crate::crash::email_report());
 
@@ -86,9 +121,67 @@ pub fn init(audit: Entity<Audit>, cx: &mut App) {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
         ]),
-        Menu::new("Help").items(vec![
-            MenuItem::action("Show Crash Reports", ShowCrashReports),
-            MenuItem::action("Email Crash Report…", EmailCrashReport),
-        ]),
+        help_menu(),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{MenuItem, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn about_action_invokes_its_presenter(cx: &mut TestAppContext) {
+        let calls = Rc::new(Cell::new(0));
+        let presented = calls.clone();
+        cx.update(|cx| {
+            register_about_press(move |_| presented.set(presented.get() + 1), cx);
+            cx.dispatch_action(&AboutPress);
+        });
+
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn about_copy_names_press_and_the_installed_version() {
+        let copy = about_copy();
+
+        assert!(copy.contains("Press"));
+        assert!(copy.contains(env!("CARGO_PKG_VERSION")));
+        assert!(copy.contains("ecommerce-image preflight"));
+        assert!(copy.contains("audits and conversions stay on this computer"));
+    }
+
+    #[test]
+    fn help_menu_starts_with_the_about_action() {
+        let menu = help_menu();
+        assert_eq!(menu.name, "Help");
+        assert_eq!(menu.items.len(), 4);
+
+        match &menu.items[0] {
+            MenuItem::Action { name, action, .. } => {
+                assert_eq!(name, "About Press");
+                assert!(action.partial_eq(&AboutPress));
+            }
+            _ => panic!("the first Help item is About Press"),
+        }
+        assert!(matches!(menu.items[1], MenuItem::Separator));
+        match &menu.items[2] {
+            MenuItem::Action { name, action, .. } => {
+                assert_eq!(name, "Show Crash Reports");
+                assert!(action.partial_eq(&ShowCrashReports));
+            }
+            _ => panic!("the third Help item is Show Crash Reports"),
+        }
+        match &menu.items[3] {
+            MenuItem::Action { name, action, .. } => {
+                assert_eq!(name, "Email Crash Report…");
+                assert!(action.partial_eq(&EmailCrashReport));
+            }
+            _ => panic!("the fourth Help item is Email Crash Report"),
+        }
+    }
 }
