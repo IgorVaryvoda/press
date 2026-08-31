@@ -669,10 +669,16 @@ fn raw_segments(path: &OsStr) -> impl Iterator<Item = std::ffi::OsString> {
 fn raw_segments(path: &OsStr) -> impl Iterator<Item = std::ffi::OsString> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-    path.encode_wide()
+    // `encode_wide` is an iterator, and `split` belongs to slices. One owned
+    // buffer per path keeps the raw units exact; this runs once per context,
+    // not once per file.
+    let units: Vec<u16> = path.encode_wide().collect();
+    units
         .split(|unit| *unit == b'/' as u16 || *unit == b'\\' as u16)
         .filter(|segment| !segment.is_empty())
-        .map(|segment| std::ffi::OsString::from_wide(segment))
+        .map(std::ffi::OsString::from_wide)
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 #[cfg(test)]
@@ -690,7 +696,10 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("press-output-{name}-{unique}"));
         fs::create_dir_all(&path).unwrap();
-        path
+        // macOS hands out `/var/folders/...`, and `/var` is a symlink to
+        // `/private/var`. `Context` canonicalizes its roots, so a fixture that
+        // starts from the aliased spelling compares two different names.
+        path.canonicalize().unwrap()
     }
 
     #[test]

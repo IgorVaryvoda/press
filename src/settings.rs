@@ -290,7 +290,9 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("press-settings-{name}-{unique}"));
         std::fs::create_dir_all(&path).unwrap();
-        path
+        // macOS aliases `/var` to `/private/var`; `Context` canonicalizes, so
+        // the fixture has to start from the canonical spelling too.
+        path.canonicalize().unwrap()
     }
 
     #[test]

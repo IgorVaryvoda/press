@@ -3,6 +3,8 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-31 | self | Tagged v0.3.15 after Linux-only gates, although the landed batch's own plan rows said `native CI review pending 1476` and `AWAITING WINDOWS PROOF`. `src/output.rs` had never compiled on Windows, and 17 of its tests failed on macOS | Push to `main` first and require the Windows and macOS CI jobs green before creating any tag. This host proves Linux only, and a plan row that names a pending native proof is a release gate |
+| 2026-08-31 | self | Read the release run as healthy because `workflow-validation` passed on both workflows; the four package jobs were still building and three of them then failed | Judge a run by its terminal job conclusions, never by an early gate. `gh run view <id> --json jobs` is the only status worth reporting |
 | 2026-08-31 | self | Looked for `target/release/imageguide` from this napkin's own Domain Notes; the `[[bin]]` name is `press`, so the binary is `target/release/press` | Read `[[bin]]` in `Cargo.toml` before naming the executable, and correct the stale note in the same session |
 | 2026-08-31 | self | Repeated the documented pkill mistake twice: `pkill -f 'release/press'` and `pgrep -f ... \| xargs kill` both matched the calling shell's own command line and killed it with exit 144 | Read the PIDs in one call, then `kill <pid>` with literal numbers in a separate call; never put the process pattern in the same command that kills |
 | 2026-08-30 | self | Combined `Ok(())` with a guarded `Err(error)` pattern and moved one weak entity out of a reusable `Fn` dropdown builder | Keep guarded bindings in their own match arm, and clone captured handles inside reusable GPUI builders before moving them into action callbacks |
@@ -181,6 +183,9 @@
 - Eight native JPEG thumbnail workers beat Dolphin's cache-write span (117ms for 14 visible files), but pushed two post-startup frames to about 13ms. Keep four native workers; the benchmark win is not worth giving up the frame budget.
 
 ## Domain Notes
+- macOS `std::env::temp_dir()` returns `/var/folders/...`, and `/var` is a symlink to `/private/var`. Any fixture that a canonicalizing API compares against must call `canonicalize()` on its base directory. On Linux this is a no-op; on Windows it returns a `\\?\` verbatim path, which `output::validate_windows_lexical` accepts.
+- `OsStr::encode_wide` returns an `EncodeWide` iterator, not a slice, so `split` does not exist on it. Collect into `Vec<u16>` first, then split the slice. The Unix twin works directly because `OsStrExt::as_bytes` already returns `&[u8]`.
+- `rustup target add x86_64-pc-windows-gnu` plus one standalone `rustc --target ... --emit=metadata` file type-checks a Windows-gated function on this Linux host without building the whole dependency tree. `std::os::windows::ffi` is identical on the gnu and msvc targets.
 - `apt-get install dist/package.deb` parses `dist/package.deb` as an APT package/release selector; pass `./dist/package.deb` or an absolute path. Also read the completed step log before attributing a gate failure to the first new probe.
 - In GitHub Actions, `dpkg-deb --contents | grep -q` fails under `pipefail` when `grep` closes early and `dpkg-deb` gets SIGPIPE. Write each archive listing once, then grep the file.
 - Patch against the paragraph after the generated package list in `PACKAGING.md`; matching only the fenced `PKGBUILD` line failed because another sentence sits before the next heading.
