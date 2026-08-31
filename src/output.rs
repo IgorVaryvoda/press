@@ -147,10 +147,19 @@ impl Context {
         Self::establish_with_current_dir(source, output, std::env::current_dir)
     }
 
-    fn establish_with_current_dir(
+    pub(crate) fn establish_with_current_dir(
         source: &Path,
         output: &Path,
         current_dir: impl FnOnce() -> io::Result<PathBuf>,
+    ) -> Result<Self, Error> {
+        let working_directory = current_dir().map_err(|error| Error::WorkingDirectory { error })?;
+        Self::establish_with_working_directory(source, output, working_directory)
+    }
+
+    pub(crate) fn establish_with_working_directory(
+        source: &Path,
+        output: &Path,
+        working_directory: PathBuf,
     ) -> Result<Self, Error> {
         validate_raw(source)?;
         validate_raw(output)?;
@@ -179,7 +188,57 @@ impl Context {
         if source_root.starts_with(&output_root) {
             return Err(Error::OutputContainsSource);
         }
-        let working_directory = current_dir().map_err(|error| Error::WorkingDirectory { error })?;
+
+        Ok(Self {
+            source_root,
+            lexical_source_root: source.to_path_buf(),
+            working_directory,
+            output_root,
+        })
+    }
+
+    pub(crate) fn establish_default_child_with_working_directory(
+        source: &Path,
+        child: &Path,
+        working_directory: PathBuf,
+    ) -> Result<Self, Error> {
+        Self::establish_default_child_with_hook(source, child, working_directory, || {})
+    }
+
+    fn establish_default_child_with_hook(
+        source: &Path,
+        child: &Path,
+        working_directory: PathBuf,
+        after_source_lookup: impl FnOnce(),
+    ) -> Result<Self, Error> {
+        validate_raw(source)?;
+        if !source.is_absolute() {
+            return Err(Error::SourceNotAbsolute);
+        }
+        validate_existing_windows_components(source, false)?;
+        normal_relative(child)?;
+
+        let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
+            path: source.to_path_buf(),
+            error,
+        })?;
+        let source_metadata = fs::metadata(&source_root).map_err(|error| Error::SourceLookup {
+            path: source_root.clone(),
+            error,
+        })?;
+        if !source_metadata.is_dir() {
+            return Err(Error::SourceNotDirectory);
+        }
+        after_source_lookup();
+
+        validate_raw(&working_directory)?;
+        if !working_directory.is_absolute() {
+            return Err(Error::SourceNotAbsolute);
+        }
+        let output_root = canonical_output_child(&source_root, child)?;
+        if source_root.starts_with(&output_root) {
+            return Err(Error::OutputContainsSource);
+        }
 
         Ok(Self {
             source_root,
@@ -251,6 +310,18 @@ impl Context {
     }
 }
 
+pub(crate) fn lexical_normalize_against(path: &Path, base: &Path) -> Result<PathBuf, Error> {
+    if !base.is_absolute() {
+        return Err(Error::SourceNotAbsolute);
+    }
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    lexical_normalize(&path)
+}
+
 fn lexical_normalize(path: &Path) -> Result<PathBuf, Error> {
     let mut normalized = PathBuf::new();
     let mut prefixed = false;
@@ -284,6 +355,35 @@ fn lexical_normalize(path: &Path) -> Result<PathBuf, Error> {
         return Err(Error::SourceOutsideRoot);
     }
     Ok(normalized)
+}
+
+fn canonical_output_child(parent: &Path, child: &Path) -> Result<PathBuf, Error> {
+    let output = parent.join(child);
+    validate_raw(&output)?;
+    validate_existing_windows_components(&output, true)?;
+    for component in child.components() {
+        let Component::Normal(part) = component else {
+            return Err(Error::RelativePathNotNormal);
+        };
+        let candidate = parent.join(part);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::OutputSymlink { path: candidate });
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(Error::OutputNotDirectory { path: candidate });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(Error::OutputLookup {
+                    path: candidate,
+                    error,
+                });
+            }
+        }
+    }
+    Ok(output)
 }
 
 fn canonical_output(output: &Path) -> Result<PathBuf, Error> {
@@ -712,6 +812,33 @@ mod tests {
             }),
             Err(Error::WorkingDirectory { .. })
         ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_context_keeps_one_source_lookup_during_symlink_retarget() {
+        let base = temp_dir("default-context-retarget");
+        let first = base.join("first");
+        let second = base.join("second");
+        let alias = base.join("alias");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+
+        let context = Context::establish_default_child_with_hook(
+            &alias,
+            Path::new("optimized"),
+            base.clone(),
+            || {
+                fs::remove_file(&alias).unwrap();
+                std::os::unix::fs::symlink(&second, &alias).unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(context.source_root(), first);
+        assert_eq!(context.output_root(), first.join("optimized"));
         fs::remove_dir_all(base).unwrap();
     }
 

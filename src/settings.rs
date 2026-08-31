@@ -6,6 +6,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -36,6 +37,45 @@ impl Output {
             Output::Optimized => audited.join(crate::scan::OUTPUT_DIR),
             Output::Folder(path) => path.clone(),
         }
+    }
+
+    /// Establish the selected output boundary without creating a path or file.
+    #[allow(dead_code)]
+    pub fn context(&self, audited: &Path) -> Result<Arc<crate::output::Context>, String> {
+        let working_directory = std::env::current_dir().map_err(|error| error.to_string())?;
+        self.context_with_working_directory(audited, working_directory)
+    }
+
+    fn context_with_working_directory(
+        &self,
+        audited: &Path,
+        working_directory: PathBuf,
+    ) -> Result<Arc<crate::output::Context>, String> {
+        let audited = if audited.as_os_str().is_empty() {
+            working_directory.clone()
+        } else {
+            crate::output::lexical_normalize_against(audited, &working_directory)
+                .map_err(|error| error.to_string())?
+        };
+        let context = match self {
+            Output::Optimized => {
+                crate::output::Context::establish_default_child_with_working_directory(
+                    &audited,
+                    Path::new(crate::scan::OUTPUT_DIR),
+                    working_directory,
+                )
+            }
+            Output::Folder(output) => {
+                let output = crate::output::lexical_normalize_against(output, &working_directory)
+                    .map_err(|error| error.to_string())?;
+                crate::output::Context::establish_with_working_directory(
+                    &audited,
+                    &output,
+                    working_directory,
+                )
+            }
+        };
+        context.map(Arc::new).map_err(|error| error.to_string())
     }
 
     /// How the destination reads in the window: a name for the default, the
@@ -239,6 +279,81 @@ fn render(settings: &Settings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("press-settings-{name}-{unique}"));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn dot_audit_root_is_normalized_before_context_establishment() {
+        let base = temp_dir("dot-audit-root");
+        let context = Output::Optimized
+            .context_with_working_directory(Path::new("."), base.clone())
+            .unwrap();
+        assert_eq!(context.source_root(), base);
+        assert_eq!(context.output_root(), base.join(crate::scan::OUTPUT_DIR));
+        assert!(!context.output_root().exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn parent_relative_audit_root_is_normalized_before_context_establishment() {
+        let base = temp_dir("parent-relative-audit-root");
+        let working_directory = base.join("working");
+        let source = base.join("folder");
+        std::fs::create_dir(&working_directory).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        let context = Output::Optimized
+            .context_with_working_directory(Path::new("../folder"), working_directory)
+            .unwrap();
+        assert_eq!(context.source_root(), source);
+        assert_eq!(context.output_root(), source.join(crate::scan::OUTPUT_DIR));
+        assert!(!context.output_root().exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_custom_output_uses_the_same_working_directory() {
+        let base = temp_dir("relative-custom-output");
+        let working_directory = base.join("working");
+        let source = base.join("photos");
+        std::fs::create_dir(&working_directory).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        let context = Output::Folder(PathBuf::from("exports"))
+            .context_with_working_directory(Path::new("../photos"), working_directory.clone())
+            .unwrap();
+        assert_eq!(context.source_root(), source);
+        assert_eq!(context.output_root(), working_directory.join("exports"));
+        assert!(!context.output_root().exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_output_for_a_symlinked_audit_uses_the_canonical_root() {
+        let base = temp_dir("symlinked-audit-root");
+        let target = base.join("target");
+        let alias = base.join("alias");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let context = Output::Optimized
+            .context_with_working_directory(&alias, base.clone())
+            .unwrap();
+        assert_eq!(context.source_root(), target);
+        assert_eq!(context.output_root(), target.join(crate::scan::OUTPUT_DIR));
+        assert_eq!(
+            context.relative_source(&alias.join("image.png")).unwrap(),
+            Path::new("image.png")
+        );
+        assert!(!context.output_root().exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn a_saved_file_reads_back_the_same() {
