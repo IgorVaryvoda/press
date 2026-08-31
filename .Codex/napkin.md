@@ -3,6 +3,8 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-31 | self | Looked for `target/release/imageguide` from this napkin's own Domain Notes; the `[[bin]]` name is `press`, so the binary is `target/release/press` | Read `[[bin]]` in `Cargo.toml` before naming the executable, and correct the stale note in the same session |
+| 2026-08-31 | self | Repeated the documented pkill mistake twice: `pkill -f 'release/press'` and `pgrep -f ... \| xargs kill` both matched the calling shell's own command line and killed it with exit 144 | Read the PIDs in one call, then `kill <pid>` with literal numbers in a separate call; never put the process pattern in the same command that kills |
 | 2026-08-30 | self | Combined `Ok(())` with a guarded `Err(error)` pattern and moved one weak entity out of a reusable `Fn` dropdown builder | Keep guarded bindings in their own match arm, and clone captured handles inside reusable GPUI builders before moving them into action callbacks |
 | 2026-08-30 | self | Tested only the notification count; gpui-component `Root` stores notifications but deliberately does not render that overlay itself | Add sheet/dialog/notification layers in the app content view, and require a real-window toast capture because the library exposes no notification debug selector |
 | 2026-08-30 | self | Passed three separate test filters to one `cargo test` command, which accepts only one positional filter | Run the focused test names as separate Cargo invocations, or use one shared substring |
@@ -91,6 +93,10 @@
 
 ## Patterns That Work
 
+- One launch proves both window overlays: plant `crash-<20 digits>-<pid>-<4+ digits>.log`
+  under `$XDG_CONFIG_HOME/imageguide/crashes` and pass a corrupt image as the CLI
+  argument. The crash dialog and the open-image toast then appear together, and the
+  dialog correctly paints above the toast.
 - In GPUI modal-dismissal tests, click below the platform title-bar exclusion and outside the dialog bounds; a magic point inside the ignored title-bar region produces a passing no-op rather than testing the backdrop.
 - Bound gallery overscan to the decoded thumbnail cache. On a wide window, four viewports on both sides can exceed the cache, evict still-active thumbs, and make them blink back in after the next scroll repaint.
 - Studio rail inputs sit under the audit's root shortcuts: wrap prompt and key
@@ -132,10 +138,10 @@
 - `gpui::VisualTestContext` has no `advance_clock`; use `cx.executor().advance_clock(...)` in `#[gpui::test]`, and prove a prefetch by asserting the media is present with no clock advanced after the step.
 - When the settings overlay has only one section, name that task in the title and keep status plus secondary/primary actions in one footer; the old section label and separate Close row made the small form look oversized.
 - `git pull --ff-only` followed by `cargo run --release` updates and launches the GPUI app; Cargo may fetch newly locked crates first.
-- For real UI proof on Hyprland: launch `target/release/imageguide <folder>`, use `hyprctl` to focus/float/resize/move the `imageguide` window, interact with `hyprctl dispatch movecursor` plus `ydotool`/`wtype`, capture exact window geometry with `grim -g`, then inspect the PNG.
+- For real UI proof on Hyprland: launch `target/release/press <folder>`, use `hyprctl` to focus/float/resize/move the window whose class is `press`, interact with `hyprctl dispatch movecursor` plus `ydotool`/`wtype`, capture exact window geometry with `grim -g`, then inspect the PNG. Verified again 2026-08-31 at 1100×720.
 - If the desktop is locked, keep the lock intact: run the release app in headless Gamescope, capture its PipeWire node with GStreamer, and drive its Xwayland seat with `DISPLAY=:2 xdotool`. Use an isolated `XDG_CONFIG_HOME` for requested window sizes.
 - In isolated Gamescope proof, `DISPLAY=:N xdotool key --window <gamescope-window> Down` then `space` verifies the list cursor and keyboard selection without touching the real desktop.
-- The full non-intrusive proof recipe, verified 2026-08-22: `setsid env XDG_CONFIG_HOME=<temp> gamescope --backend headless -W 1100 -H 720 -- ./target/release/imageguide <folder> &`, read the node id from `node ID: N` in its log, then `gst-launch-1.0 -q pipewiresrc path=N num-buffers=10 ! videoconvert ! pngenc ! multifilesink location="f%03d.png"`. Drive it with `DISPLAY=:2 xdotool key/type/mousemove --window <id>`. The flag is `--backend headless`, not `--headless`.
+- The full non-intrusive proof recipe, verified 2026-08-22: `setsid env XDG_CONFIG_HOME=<temp> gamescope --backend headless -W 1100 -H 720 -- ./target/release/press <folder> &`, read the node id from `node ID: N` in its log, then `gst-launch-1.0 -q pipewiresrc path=N num-buffers=10 ! videoconvert ! pngenc ! multifilesink location="f%03d.png"`. Drive it with `DISPLAY=:2 xdotool key/type/mousemove --window <id>`. The flag is `--backend headless`, not `--headless`.
 - Do not `pkill` the app from the same Bash call that relaunches it: the kill takes the calling shell with it. Use one call to stop and a separate `setsid ... & disown` to start.
 - `TableState` caches its column groups; after a viewport/result signature change, update the delegate and call `TableState::refresh` from `Context::defer`, not during `Audit::render`.
 - During conversion, replace the `Slider` entity with the existing `Progress` primitive so the quality control is visibly locked and cannot receive accessibility actions; a 500-image Gamescope run exposed the active rail clearly.
@@ -181,7 +187,7 @@
 - A `.deb` packaged on this Arch host can advertise Ubuntu 24.04 dependencies yet still require GLIBC 2.43/2.44; use local native packages only for structure checks and prove installation with the Ubuntu-built release artifact.
 - `cargo-packager 0.11.8` successfully emits `press_VERSION_amd64.deb` and `press_VERSION_x86_64.tar.gz`, but without `[package].authors` and explicit native metadata their Maintainer and dependency fields are empty and the licence is absent; gate those before publishing.
 - `plans/` is deliberately ignored by `.gitignore`; new plans and index edits are durable local artifacts but do not appear in `git status` or `HEAD` unless explicitly force-added.
-- The desktop app binary is `target/release/imageguide`.
+- The desktop app binary is `target/release/press`; `[[bin]] name = "press"`.
 - The normal baseline is green: 36 tests pass, with the screenshot test ignored; clippy and `cargo fmt --check` also pass at `05384d3`.
 - Benchmark folders: hardlink-mirror `~/Pictures` into `~/.cache/` (`/tmp` is tmpfs, so `ln` fails across filesystems). 5,732 images / 3.0 GB convert to 422.9 MB at WebP q80 full size.
 - Measured on this 16-core host at `52520d2`: WebP conversion 54.3s serial vs 9.3s parallel for 255 MB; AVIF 128s serial, 88s at two files at once, 83s at four. rav1e already spends about 6 cores on a single image, so only WebP wants a worker per core.
