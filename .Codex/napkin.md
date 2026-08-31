@@ -3,6 +3,8 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-08-31 | self | Canonicalized the `output` test fixture base to fix macOS, which on Windows returns a `\\?\` verbatim path. `PathBuf::push` strips `.` and `..` from a verbatim base, so `base.join("missing/./output")` lost the very segment the test rejects | Append to the base `OsString` directly when a fixture must keep a raw dot or parent segment; never build one with `join` on a canonicalized Windows base |
+| 2026-08-31 | self | Scanned raw segments across the whole Windows path, so `\\.\PhysicalDrive0` reported `DotSegment` instead of `WindowsNamespace` | Skip the `Component::Prefix` before scanning raw segments; a Windows prefix spells dots as ordinary text |
 | 2026-08-31 | self | Tagged v0.3.15 after Linux-only gates, although the landed batch's own plan rows said `native CI review pending 1476` and `AWAITING WINDOWS PROOF`. `src/output.rs` had never compiled on Windows, and 17 of its tests failed on macOS | Push to `main` first and require the Windows and macOS CI jobs green before creating any tag. This host proves Linux only, and a plan row that names a pending native proof is a release gate |
 | 2026-08-31 | self | Read the release run as healthy because `workflow-validation` passed on both workflows; the four package jobs were still building and three of them then failed | Judge a run by its terminal job conclusions, never by an early gate. `gh run view <id> --json jobs` is the only status worth reporting |
 | 2026-08-31 | self | Looked for `target/release/imageguide` from this napkin's own Domain Notes; the `[[bin]]` name is `press`, so the binary is `target/release/press` | Read `[[bin]]` in `Cargo.toml` before naming the executable, and correct the stale note in the same session |
@@ -183,6 +185,8 @@
 - Eight native JPEG thumbnail workers beat Dolphin's cache-write span (117ms for 14 visible files), but pushed two post-startup frames to about 13ms. Keep four native workers; the benchmark win is not worth giving up the frame budget.
 
 ## Domain Notes
+- A Rust test thread is named after its module path, so `thread::current().name()` contains `::`. Windows rejects that in a filename with error 123 `InvalidFilename`. Build temp fixture names from a counter or timestamp instead.
+- `conversion_action_label` withholds the Replace wording on Windows on purpose, because std's Windows rename cannot swap a finished file atomically. Any expectation about that label needs the same `cfg!(windows)` split.
 - macOS `std::env::temp_dir()` returns `/var/folders/...`, and `/var` is a symlink to `/private/var`. Any fixture that a canonicalizing API compares against must call `canonicalize()` on its base directory. On Linux this is a no-op; on Windows it returns a `\\?\` verbatim path, which `output::validate_windows_lexical` accepts.
 - `OsStr::encode_wide` returns an `EncodeWide` iterator, not a slice, so `split` does not exist on it. Collect into `Vec<u16>` first, then split the slice. The Unix twin works directly because `OsStrExt::as_bytes` already returns `&[u8]`.
 - `rustup target add x86_64-pc-windows-gnu` plus one standalone `rustc --target ... --emit=metadata` file type-checks a Windows-gated function on this Linux host without building the whole dependency tree. `std::os::windows::ffi` is identical on the gnu and msvc targets.

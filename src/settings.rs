@@ -411,14 +411,10 @@ mod tests {
 
     #[test]
     fn a_save_replaces_the_whole_file_without_leaving_a_partial() {
-        let dir = std::env::temp_dir().join(format!(
-            "imageguide-settings-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        // A Rust test thread is named after its module path, so the old name
+        // carried `::` and Windows rejected the directory outright.
+        let dir = temp_dir("save-replaces-whole-file");
         let path = dir.join("settings");
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, "width=1\ntrailing=old\n").unwrap();
 
         let settings = Settings {

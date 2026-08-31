@@ -669,10 +669,17 @@ fn raw_segments(path: &OsStr) -> impl Iterator<Item = std::ffi::OsString> {
 fn raw_segments(path: &OsStr) -> impl Iterator<Item = std::ffi::OsString> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
+    // A prefix spells dots as ordinary text: `\\.\PhysicalDrive0` is a device
+    // namespace, not a dot segment. Scan only what follows the prefix, so
+    // `validate_windows_lexical` keeps the namespace verdict.
+    let prefix = match Path::new(path).components().next() {
+        Some(Component::Prefix(prefix)) => prefix.as_os_str().encode_wide().count(),
+        _ => 0,
+    };
     // `encode_wide` is an iterator, and `split` belongs to slices. One owned
     // buffer per path keeps the raw units exact; this runs once per context,
     // not once per file.
-    let units: Vec<u16> = path.encode_wide().collect();
+    let units: Vec<u16> = path.encode_wide().skip(prefix).collect();
     units
         .split(|unit| *unit == b'/' as u16 || *unit == b'\\' as u16)
         .filter(|segment| !segment.is_empty())
@@ -702,14 +709,26 @@ mod tests {
         path.canonicalize().unwrap()
     }
 
+    /// `PathBuf::push` strips `.` and `..` when the base is a Windows verbatim
+    /// path, and `temp_dir` canonicalizes into exactly that form. Append the raw
+    /// spelling so the segment under test survives to `validate_raw`.
+    fn raw_join(base: &Path, tail: &str) -> PathBuf {
+        let mut path = base.to_path_buf().into_os_string();
+        for segment in tail.split('/') {
+            path.push(std::path::MAIN_SEPARATOR_STR);
+            path.push(segment);
+        }
+        PathBuf::from(path)
+    }
+
     #[test]
     fn output_path_boundary_rejects_raw_dot_and_parent_segments_without_creating_paths() {
         let base = temp_dir("raw");
         let source = base.join("source");
         fs::create_dir(&source).unwrap();
         for output in [
-            base.join("missing/./output"),
-            base.join("missing/../output"),
+            raw_join(&base, "missing/./output"),
+            raw_join(&base, "missing/../output"),
         ] {
             assert!(matches!(
                 Context::establish(&source, &output),

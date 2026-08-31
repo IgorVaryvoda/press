@@ -1851,6 +1851,17 @@ fn choosing_avif_leaves_lossless_for_the_last_slider_quality(cx: &mut TestAppCon
     });
 }
 
+/// `conversion_action_label` only offers Replace where `write_output` can swap a
+/// finished file atomically. std's Windows rename cannot, so that build keeps
+/// saying Convert and the expectation has to follow the same `cfg`.
+fn replace_label() -> &'static str {
+    if cfg!(windows) {
+        "Convert 2 selected to WEBP"
+    } else {
+        "Replace 2 selected WEBP outputs"
+    }
+}
+
 #[gpui::test]
 fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -1884,17 +1895,14 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
         );
         audit.record_result(2, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
         assert_eq!(audit.converted_totals(), (101_000, 50_500));
-        assert_eq!(
-            audit.conversion_action_label(),
-            "Replace 2 selected WEBP outputs"
-        );
+        assert_eq!(audit.conversion_action_label(), replace_label());
         audit.record_result(0, Format::WebP, 40_000, PathBuf::from("/tmp/out.webp"));
         assert_eq!(audit.converted_totals(), (101_000, 40_500));
         audit.clear_results();
         assert_eq!(audit.converted_totals(), (0, 0));
         assert_eq!(
             audit.conversion_action_label(),
-            "Replace 2 selected WEBP outputs",
+            replace_label(),
             "changing settings clears old measurements, not known output files"
         );
     });
