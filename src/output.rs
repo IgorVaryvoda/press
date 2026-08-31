@@ -214,7 +214,15 @@ impl Context {
         let source = if source.is_absolute() {
             source.to_path_buf()
         } else {
-            self.working_directory.join(source)
+            // `current_dir` follows source-root aliases on Unix. Restore the audited
+            // spelling before resolving a relative source so its output name remains
+            // lexical even when the process was started through that alias.
+            let working_directory = self
+                .working_directory
+                .strip_prefix(&self.source_root)
+                .map(|relative| self.lexical_source_root.join(relative))
+                .unwrap_or_else(|_| self.working_directory.clone());
+            working_directory.join(source)
         };
         let root = lexical_normalize(&self.lexical_source_root)?;
         let source = lexical_normalize(&source)?;
@@ -825,10 +833,12 @@ mod tests {
         let source = base.join("source");
         fs::create_dir(&target).unwrap();
         std::os::unix::fs::symlink(&target, &source).unwrap();
-        let entry = source.join("image.png");
-        let context = Context::establish(&source, &base.join("output")).unwrap();
+        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
+            Ok(target.clone())
+        })
+        .unwrap();
         assert_eq!(
-            context.relative_source(&entry).unwrap(),
+            context.relative_source(Path::new("image.png")).unwrap(),
             Path::new("image.png")
         );
         fs::remove_dir_all(base).unwrap();
