@@ -14,6 +14,7 @@ mod crash;
 mod jxl;
 mod local_ai;
 mod menus;
+mod output;
 mod scan;
 mod settings;
 mod sirv;
@@ -27,7 +28,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use convert::{Format, MaxEdge, Quality};
-use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, Window, WindowBounds, WindowHandle, WindowOptions, prelude::*, px, size};
 use gpui_component::{ActiveTheme, Root};
 use gpui_platform::application;
 use scan::{Entry, format_bytes};
@@ -606,6 +607,7 @@ fn convert_headless(
 }
 
 fn main() {
+    let pending_crash = crash::pending_snapshot();
     crash::install();
     let args = parse_args();
 
@@ -684,6 +686,7 @@ fn main() {
                 output: remembered.output.clone(),
             },
             None,
+            pending_crash,
         );
     };
 
@@ -713,6 +716,7 @@ fn main() {
                 output: remembered.output.clone(),
             },
             Some(target),
+            pending_crash,
         );
     }
 
@@ -986,7 +990,7 @@ impl Render for WindowContent {
     }
 }
 
-fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
+fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Option<PathBuf>) {
     application()
         // Every `IconName` is an SVG loaded through the app's asset source. Without
         // this the icons resolve to nothing and the toolbar renders as bare words.
@@ -1008,23 +1012,25 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
             let (width, height) = restored_window_size(remembered.width, remembered.height);
             let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             let mut audit_slot = None;
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
-                    // Matches the desktop entry cargo-packager derives from
-                    // product-name; a mismatch loses the icon under Wayland.
-                    app_id: Some("press".to_string()),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let audit = audit::build_audit(launch, window, cx);
-                    audit_slot = Some(audit.clone());
-                    let content = cx.new(|_| WindowContent { audit });
-                    cx.new(|cx| Root::new(content, window, cx).bg(cx.theme().background))
-                },
-            )
-            .unwrap();
+            let root = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
+                        // Matches the desktop entry cargo-packager derives from
+                        // product-name; a mismatch loses the icon under Wayland.
+                        app_id: Some("press".to_string()),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        let audit = audit::build_audit(launch, window, cx);
+                        audit_slot = Some(audit.clone());
+                        // Root owns modal state; WindowContent paints its overlays.
+                        let content = cx.new(|_| WindowContent { audit });
+                        cx.new(|cx| Root::new(content, window, cx).bg(cx.theme().background))
+                    },
+                )
+                .unwrap();
             if let Some(audit) = audit_slot {
                 if let Some(path) = startup_path {
                     audit.update(cx, |audit, cx| audit.request_path(path, cx));
@@ -1083,12 +1089,40 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>) {
                 audit::register_quit_flush(audit, cx);
             }
             cx.activate(true);
+            schedule_pending_crash_prompt(&root, cx, pending_crash, crash::defer_prompt);
         });
+}
+
+/// The Root owns the dialog layer, so wait until its window exists before asking
+/// crash reporting to defer its prompt onto that still-open window.
+fn schedule_pending_crash_prompt(
+    root: &WindowHandle<Root>,
+    cx: &mut App,
+    pending_crash: Option<PathBuf>,
+    defer_prompt: impl FnOnce(&Window, &mut App, Option<PathBuf>),
+) {
+    root.update(cx, |_, window, cx| defer_prompt(window, cx, pending_crash))
+        .ok();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, IntoElement, Render, TestAppContext};
+
+    struct CrashWindowHarness;
+
+    impl Render for CrashWindowHarness {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            gpui::div()
+                .size_full()
+                .children(Root::render_dialog_layer(window, cx))
+        }
+    }
 
     fn parse(arguments: &[&str]) -> Result<Args, String> {
         parse_args_from(arguments.iter().map(|argument| (*argument).to_string()))
@@ -1245,5 +1279,23 @@ mod tests {
         assert_eq!(json["summary"]["camera_raw_skipped"], 2);
         assert_eq!(json["files"][0]["path"], "/photos/heavy.png");
         assert_eq!(json["files"][0]["heavy"], true);
+    }
+
+    #[gpui::test]
+    fn windowed_startup_runs_the_crash_prompt_hook(cx: &mut TestAppContext) {
+        cx.update(init_theme);
+        let report = PathBuf::from("crash-00000000000000000001-42-0000.log");
+        let scheduled = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let scheduled_prompt = scheduled.clone();
+        let root = cx.add_window(|window, cx| {
+            let harness = cx.new(|_| CrashWindowHarness);
+            Root::new(harness, window, cx)
+        });
+        cx.update(|cx| {
+            schedule_pending_crash_prompt(&root, cx, Some(report.clone()), move |_, _, actual| {
+                *scheduled_prompt.borrow_mut() = actual
+            });
+        });
+        assert_eq!(*scheduled.borrow(), Some(report));
     }
 }

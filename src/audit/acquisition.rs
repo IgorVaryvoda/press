@@ -244,6 +244,9 @@ impl Audit {
     }
 
     pub(super) fn copy_audit_report(&mut self, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         let report = audit_report(
             &self.root,
             &self.entries,
@@ -257,6 +260,9 @@ impl Audit {
     }
 
     pub(super) fn publish_results(&mut self, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         if self.sirv_pairing.is_none() {
             self.open_sirv_browser(cx);
             return;
@@ -291,6 +297,9 @@ impl Audit {
     }
 
     pub(super) fn publish_spins(&mut self, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         if self.sirv_pairing.is_none() {
             self.open_sirv_browser(cx);
             return;
@@ -405,7 +414,11 @@ impl Audit {
                             .tooltip(self.publish_waiting().unwrap_or_else(|| {
                                 "Upload complete numbered sets; Sirv creates the .spin files".into()
                             }))
-                            .disabled(self.sirv_busy() || self.publish_waiting().is_some())
+                            .disabled(
+                                self.scan_blocks_delivery()
+                                    || self.sirv_busy()
+                                    || self.publish_waiting().is_some(),
+                            )
                             .on_click(cx.listener(|audit, _, _, cx| audit.publish_spins(cx)))
                     } else {
                         Button::new("copy-spin-embed")

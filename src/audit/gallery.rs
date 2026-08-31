@@ -72,7 +72,7 @@ impl Audit {
         let thumb = self.thumbs.get(&index).cloned();
         let ticked = self.selected.contains(&index);
         let has_result = self.result_paths.contains_key(&index);
-        let busy = self.converting || self.local_ai_busy() || self.studio_busy();
+        let busy = self.media_commit_actions_disabled();
         let audit = cx.weak_entity();
         let selection_bounds = self.selection_bounds.clone();
 

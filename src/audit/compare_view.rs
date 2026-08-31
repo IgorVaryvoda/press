@@ -642,7 +642,10 @@ impl Audit {
         let labelled = width >= 900.;
         let index = comparison.index;
         let source_bytes = entry.map_or(0, |entry| entry.bytes);
-        let busy = self.local_ai_busy() || self.studio_busy() || self.converting;
+        let busy = self.local_ai_busy()
+            || self.studio_busy()
+            || self.converting
+            || self.scan_blocks_delivery();
         let previewing = comparison.mode == MediaMode::Preview;
         let showing_result = comparison.written.is_some();
         let upscale_error =

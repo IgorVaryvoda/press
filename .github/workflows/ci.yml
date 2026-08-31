@@ -9,6 +9,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  workflow-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+          cache: false
+      - name: Validate workflows
+        run: scripts/check-workflows.sh
+
   build:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -16,7 +27,7 @@ jobs:
       # One platform failing should not hide the state of the others.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-2022]
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +49,20 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libavif
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: System dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install pkgconfiglite -y --no-progress
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "libavif[aom,dav1d]:x64-windows-static"
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          "VCPKGRS_TRIPLET=x64-windows-static" >> $env:GITHUB_ENV
+          "DAV1D_STATIC=1" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib\pkgconfig" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
 
       # gpui is a git dependency and a large one. Caching it turns a cold ten-minute
       # build into about a minute.

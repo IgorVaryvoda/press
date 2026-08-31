@@ -88,6 +88,10 @@ impl Audit {
         self.notify_error("media", title, format!("{name} {detail}"), cx);
     }
 
+    pub(super) fn media_commit_actions_disabled(&self) -> bool {
+        self.converting || self.local_ai_busy() || self.studio_busy() || self.scan_blocks_delivery()
+    }
+
     fn thumb_edge(&self) -> u32 {
         if self.grid {
             thumbs::THUMB_EDGE
@@ -372,7 +376,7 @@ impl Audit {
     }
 
     pub(super) fn convert_one(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.converting || self.local_ai_busy() || self.studio_busy() {
+        if self.media_commit_actions_disabled() {
             return;
         }
         self.prefetch = None;

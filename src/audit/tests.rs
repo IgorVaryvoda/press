@@ -12,7 +12,384 @@ use crate::{
 use gpui::{HeadlessAppContext, TestAppContext, size};
 use gpui_component::Root;
 use image::ImageFormat;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::{Context as TaskContext, Poll};
+use std::thread;
+use std::time::Duration;
+
+struct WakeCount(AtomicUsize);
+
+impl futures::task::ArcWake for WakeCount {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn retained_scan(audit: &mut Audit) -> Arc<std::sync::atomic::AtomicBool> {
+    let (cancellation, _) = ScanCancellation::new();
+    let token = cancellation.token.clone();
+    audit.scan_cancellation = Some(cancellation);
+    audit.scanning = Some("old folder".into());
+    token
+}
+
+fn scan_fixture(name: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock is after the Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("press-audit-{name}-{nonce}"));
+    std::fs::create_dir_all(&root).expect("the scan fixture folder is created");
+    root
+}
+
+fn write_png(root: &Path, name: &str) -> PathBuf {
+    let path = root.join(name);
+    image::RgbImage::from_pixel(8, 8, image::Rgb([20, 40, 60]))
+        .save(&path)
+        .expect("the scan fixture image is written");
+    path
+}
+
+fn test_pairing() -> SirvPairing {
+    SirvPairing {
+        dir: "/paired".into(),
+        files: Listing::Ready(HashMap::new()),
+        cdn_host: CdnHost::Ready("test.sirv.com".into()),
+        client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+            sirv::Credentials {
+                client_id: String::new(),
+                client_secret: String::new(),
+            },
+        ))),
+    }
+}
+
+#[test]
+fn cancellation_wakes_an_already_pending_batch_feed() {
+    let (mut handoff, mut batches) = ScanBatchHandoff::new();
+    assert_eq!(
+        futures::executor::block_on(handoff.publish(&[])),
+        ScanBatchPublish::Queued
+    );
+    let mut publisher = Box::pin(handoff.publish(&[]));
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = futures::task::waker(wakes.clone());
+    let mut task = TaskContext::from_waker(&waker);
+    assert!(matches!(publisher.as_mut().poll(&mut task), Poll::Pending));
+    let (mut cancellation, mut receiver) = ScanCancellation::new();
+    cancellation.cancel();
+    assert!(
+        futures::executor::block_on(next_scan_batch_or_cancel(&mut batches, &mut receiver))
+            .is_none()
+    );
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        publisher.as_mut().poll(&mut task),
+        Poll::Ready(ScanBatchPublish::Closed)
+    );
+}
+
+#[gpui::test]
+fn opening_one_file_through_request_paths_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+    let root = scan_fixture("one-file");
+    let file = write_png(&root, "one.png");
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.request_paths(vec![file], window, cx);
+        old
+    });
+    assert!(old.load(Ordering::Acquire));
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn opening_one_folder_through_request_paths_cancels_the_active_folder_scan(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("one-folder");
+    write_png(&root, "one.png");
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.request_paths(vec![root.clone()], window, cx);
+        old
+    });
+    assert!(old.load(Ordering::Acquire));
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn opening_many_files_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
+    let root = scan_fixture("many-files");
+    let first = write_png(&root, "first.png");
+    let second = write_png(&root, "second.png");
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.request_paths(vec![first, second], window, cx);
+        old
+    });
+    assert!(old.load(Ordering::Acquire));
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn an_invalid_path_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
+    let root = scan_fixture("missing");
+    let (audit, cx) = finding_audit(cx);
+    let (old, generation) = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        let generation = audit.scan_generation;
+        audit.request_paths(vec![root.join("missing.png")], window, cx);
+        (old, generation)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, generation);
+        assert!(!old.load(Ordering::Acquire));
+        assert!(
+            audit
+                .scan_cancellation
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(&current.token, &old))
+        )
+    });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn a_rejected_mixed_root_selection_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
+    let first_root = scan_fixture("mixed-first");
+    let second_root = scan_fixture("mixed-second");
+    let first = write_png(&first_root, "first.png");
+    let second = write_png(&second_root, "second.png");
+    let (audit, cx) = finding_audit(cx);
+    let (old, generation) = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        let generation = audit.scan_generation;
+        audit.request_paths(vec![first, second], window, cx);
+        (old, generation)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, generation);
+        assert!(!old.load(Ordering::Acquire));
+        assert!(
+            audit
+                .scan_cancellation
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(&current.token, &old))
+        )
+    });
+    std::fs::remove_dir_all(first_root).expect("the first scan fixture is removed");
+    std::fs::remove_dir_all(second_root).expect("the second scan fixture is removed");
+}
+#[gpui::test]
+fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        let old = retained_scan(audit);
+        let request = audit.scan_generation;
+        let (new, _) = ScanCancellation::new();
+        audit.scan_cancellation = Some(new);
+        assert!(!audit.owns_scan_request(request, Some(&old)));
+    });
+}
+#[gpui::test]
+fn same_root_rescan_selects_the_cancellable_nonprogressive_core(cx: &mut TestAppContext) {
+    let root = scan_fixture("same-root");
+    write_png(&root, "one.png");
+    let (audit, cx) = finding_audit(cx);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.root = root.clone();
+        audit.sirv_pairing = Some(test_pairing());
+        assert!(!should_scan_progressively(&audit.root, &root, true, false));
+        audit.request_paths(vec![root.clone()], window, cx);
+        assert!(audit.scan_cancellation.is_some());
+        audit.cancel_retained_scan();
+    });
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn a_failed_replacement_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
+    let root = scan_fixture("corrupt");
+    let corrupt = root.join("corrupt.png");
+    std::fs::write(&corrupt, b"not a png").expect("the corrupt fixture is written");
+    let (audit, cx) = finding_audit(cx);
+    let old = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.scan_partial = true;
+        audit.request_paths(vec![corrupt], window, cx);
+        old
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(old.load(Ordering::Acquire));
+        assert!(audit.scan_partial && audit.scanning.is_some() && audit.scan_interrupted);
+    });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn a_cancelled_scan_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.scan_partial = true;
+        audit.scanning = Some("partial".into());
+        audit.scan_interrupted = true;
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.scan_partial && audit.scan_interrupted && audit.scan_blocks_delivery())
+    });
+}
+#[gpui::test]
+fn an_interrupted_partial_scan_blocks_delivery_actions(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| audit.scanning = Some("partial".into()));
+    audit.read_with(cx, |audit, _| assert!(audit.scan_blocks_delivery()));
+}
+#[gpui::test]
+fn a_successful_retry_clears_incomplete_state(cx: &mut TestAppContext) {
+    let root = scan_fixture("retry");
+    write_png(&root, "retry.png");
+    let (audit, cx) = finding_audit(cx);
+    let (old, estimates) = audit.update_in(cx, |audit, window, cx| {
+        let old = retained_scan(audit);
+        audit.scan_partial = true;
+        let estimates = audit.estimate_generation;
+        audit.request_paths(vec![root.clone()], window, cx);
+        (old, estimates)
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(old.load(Ordering::Acquire));
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(audit.dataset_generation, 1);
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert!(!audit.scan_partial && !audit.scan_interrupted);
+        assert!(audit.estimate_generation > estimates);
+    });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+#[gpui::test]
+fn closing_the_window_cancels_only_its_retained_scan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let token = audit.update(cx, |audit, _| retained_scan(audit));
+    let other = cx.add_empty_window();
+    other.update(|window, _| window.remove_window());
+    other.run_until_parked();
+    assert!(!token.load(Ordering::Acquire));
+    let _ = other;
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    assert!(token.load(Ordering::Acquire));
+}
+#[gpui::test]
+fn releasing_the_audit_cancels_a_silent_scan(cx: &mut TestAppContext) {
+    cx.update(init_theme);
+    let mut weak_audit = None;
+    let mut token = None;
+    let (harness, cx) = cx.add_window_view(|window, cx| {
+        let audit = build_audit(finding_launch(), window, cx);
+        token = Some(audit.update(cx, |audit, _| retained_scan(audit)));
+        weak_audit = Some(audit.downgrade());
+        ReleasingAuditHarness { audit: Some(audit) }
+    });
+    let token = token.expect("the retained scan token is captured");
+    let weak_audit = weak_audit.expect("the audit is weakly held for the release check");
+    harness.update(cx, |harness, cx| {
+        harness.audit = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    assert!(weak_audit.upgrade().is_none());
+    assert!(token.load(Ordering::Acquire));
+}
+#[gpui::test]
+fn a_normal_folder_scan_lands_once(cx: &mut TestAppContext) {
+    let root = scan_fixture("normal");
+    write_png(&root, "normal.png");
+    let (audit, cx) = finding_audit(cx);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.request_paths(vec![root.clone()], window, cx)
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(audit.dataset_generation, 1);
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert!(!audit.scan_partial && !audit.scan_interrupted);
+    });
+    std::fs::remove_dir_all(root).expect("the scan fixture is removed");
+}
+
+#[test]
+fn the_scan_batch_handoff_applies_backpressure() {
+    let (mut handoff, mut batches) = ScanBatchHandoff::new();
+    assert_eq!(
+        futures::executor::block_on(handoff.publish(&[])),
+        ScanBatchPublish::Queued
+    );
+
+    let (second_tx, second_rx) = mpsc::sync_channel(1);
+    let second_thread = thread::spawn(move || {
+        let status = futures::executor::block_on(handoff.publish(&[]));
+        second_tx
+            .send((status, handoff))
+            .expect("the test receives the second handoff");
+    });
+    assert!(matches!(
+        second_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        futures::executor::block_on(batches.next()),
+        Some(Vec::new())
+    );
+    let (status, mut handoff) = second_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the second publish completes after the batch is received");
+    assert_eq!(status, ScanBatchPublish::Queued);
+    second_thread.join().expect("the second publisher joins");
+
+    let (third_started_tx, third_started_rx) = mpsc::sync_channel(0);
+    let (third_tx, third_rx) = mpsc::sync_channel(1);
+    let third_thread = thread::spawn(move || {
+        third_started_tx
+            .send(())
+            .expect("the test waits for the third publisher");
+        let status = futures::executor::block_on(handoff.publish(&[]));
+        third_tx
+            .send((status, handoff))
+            .expect("the test receives the closed handoff");
+    });
+    third_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the third publisher starts");
+    assert!(matches!(
+        third_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(batches);
+    let (status, mut handoff) = third_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("receiver closure wakes the third publish");
+    assert_eq!(status, ScanBatchPublish::Closed);
+    third_thread.join().expect("the third publisher joins");
+    assert_eq!(
+        futures::executor::block_on(handoff.publish(&[])),
+        ScanBatchPublish::AlreadyClosed
+    );
+}
 
 /// Render the audit window to a PNG, so a change to it can actually be looked at.
 ///
@@ -121,6 +498,19 @@ struct AuditHarness {
 impl gpui::Render for AuditHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.audit.clone()
+    }
+}
+
+struct ReleasingAuditHarness {
+    audit: Option<gpui::Entity<Audit>>,
+}
+
+impl gpui::Render for ReleasingAuditHarness {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.audit
+            .clone()
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|| div().into_any_element())
     }
 }
 
@@ -1354,11 +1744,10 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     });
 }
 
-fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
-    cx.update(init_theme);
+fn finding_launch() -> Launch {
     // A PNG named `.webp` is the mislabelled one. The screenshot is 30 bytes per
     // pixel; the photo is a tenth of one.
-    let launch = Launch {
+    Launch {
         root: PathBuf::new(),
         entries: vec![
             entry("photo.jpg", 1000, 1000, 100_000, ImageFormat::Jpeg),
@@ -1377,12 +1766,22 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
         grid: false,
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
-    };
-    let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
-        audit: build_audit(launch, window, cx),
+    }
+}
+
+fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+    cx.update(init_theme);
+    let launch = finding_launch();
+    let mut audit = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let built = build_audit(launch, window, cx);
+        audit = Some(built.clone());
+        Root::new(built, window, cx).bg(cx.theme().background)
     });
-    let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
-    (audit, cx)
+    (
+        audit.expect("the audit is built for the production Root"),
+        cx,
+    )
 }
 
 #[gpui::test]
@@ -2098,6 +2497,7 @@ fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
     audit.update(cx, |audit, cx| {
         audit.selected.extend([0, 1]);
         audit.rail = Rail::Studio;
+        audit.selection_changed(cx);
 
         audit.open_ai_operations(2, None, cx);
 
@@ -2105,6 +2505,167 @@ fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
         assert_eq!(audit.cursor, audit.row_of(2).unwrap());
         assert_eq!(audit.rail, Rail::Studio);
     });
+}
+
+#[gpui::test]
+fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(0);
+        audit.studio_key = Some("sk_live_test".into());
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::AwaitingConfirmation(studio::PreparedUpload::for_test()),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        audit.rail = Rail::Studio;
+        retained_scan(audit);
+        audit.scan_partial = true;
+        assert!(audit.studio_commit_disabled(Some(0), true, false, true));
+        audit.scanning = None;
+        assert!(!audit.studio_commit_disabled(Some(0), true, false, true));
+        retained_scan(audit);
+        audit.scan_partial = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let commit = cx
+        .debug_bounds("studio-commit")
+        .expect("Studio commit is rendered");
+    cx.simulate_click(commit.center(), gpui::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(matches!(
+            audit.studio_job.as_ref().map(|job| &job.state),
+            Some(StudioJobState::AwaitingConfirmation(_))
+        ));
+    });
+    audit.update(cx, |audit, cx| audit.confirm_studio_for_test(cx));
+    audit.read_with(cx, |audit, _| assert!(audit.studio_job.is_none()));
+}
+
+#[gpui::test]
+fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_browser = Some(SirvBrowser {
+            client: test_pairing().client,
+            path: "/photos".into(),
+            needs_credentials: false,
+            nodes: Some(Ok(Vec::new())),
+            generation: 0,
+            session: 1,
+            focused: false,
+            focus: cx.focus_handle(),
+        });
+        retained_scan(audit);
+        audit.scan_partial = true;
+        assert!(audit.sirv_pair_disabled(false, true));
+        audit.scanning = None;
+        assert!(!audit.sirv_pair_disabled(false, true));
+        retained_scan(audit);
+        audit.scan_partial = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let pair = cx.debug_bounds("sirv-pair").expect("Sirv pair is rendered");
+    cx.simulate_click(pair.center(), gpui::Modifiers::none());
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
+    audit.update(cx, |audit, cx| audit.pair_sirv(cx));
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
+}
+
+#[gpui::test]
+fn scan_blocked_gallery_context_actions_are_disabled(cx: &mut TestAppContext) {
+    scan_blocked_context_actions_leave_state_unchanged(true, cx);
+}
+
+#[gpui::test]
+fn scan_blocked_table_context_actions_are_disabled(cx: &mut TestAppContext) {
+    scan_blocked_context_actions_leave_state_unchanged(false, cx);
+}
+
+fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(grid, cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected = HashSet::from([1]);
+        audit.studio_source = Some((1, PathBuf::from("optimized/second.webp")));
+        audit.rail = Rail::Convert;
+        retained_scan(audit);
+        audit.scan_partial = true;
+        assert!(audit.media_commit_actions_disabled());
+        audit.scanning = None;
+        assert!(!audit.media_commit_actions_disabled());
+        retained_scan(audit);
+        audit.scan_partial = true;
+        cx.notify();
+    });
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let target = cx
+        .debug_bounds(if grid {
+            "grid-checkbox-0"
+        } else {
+            "table-checkbox-0"
+        })
+        .expect("the image context-menu trigger is rendered")
+        .center();
+    cx.simulate_mouse_down(target, gpui::MouseButton::Right, gpui::Modifiers::none());
+    cx.simulate_mouse_up(target, gpui::MouseButton::Right, gpui::Modifiers::none());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    cx.simulate_keystrokes("down down down enter");
+
+    audit.update(cx, |audit, cx| {
+        assert_eq!(audit.selected, HashSet::from([1]));
+        let preview = audit
+            .compare
+            .as_ref()
+            .expect("Preview opens for the first image");
+        assert_eq!(preview.index, 0);
+        assert_eq!(preview.mode, MediaMode::Preview);
+        assert_eq!(
+            audit.studio_source,
+            Some((1, PathBuf::from("optimized/second.webp")))
+        );
+        assert_eq!(audit.rail, Rail::Convert);
+        assert!(!audit.converting);
+
+        audit.convert_one(0, cx);
+        audit.open_ai_operations(0, None, cx);
+
+        assert_eq!(audit.selected, HashSet::from([1]));
+        let preview = audit.compare.as_ref().expect("Preview stays open");
+        assert_eq!(preview.index, 0);
+        assert_eq!(preview.mode, MediaMode::Preview);
+        assert_eq!(
+            audit.studio_source,
+            Some((1, PathBuf::from("optimized/second.webp")))
+        );
+        assert_eq!(audit.rail, Rail::Convert);
+        assert!(!audit.converting);
+    });
+}
+
+#[gpui::test]
+fn an_incomplete_scan_cannot_copy_a_report(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+    audit.update(cx, |audit, cx| {
+        audit.report_copied = true;
+        retained_scan(audit);
+        audit.copy_audit_report(cx);
+        assert!(audit.report_copied);
+    });
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|clipboard| clipboard.text()),
+        Some("sentinel".into())
+    );
 }
 
 #[gpui::test]

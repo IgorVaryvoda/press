@@ -423,7 +423,7 @@ impl TableDelegate for AuditTable {
             self.audit.clone(),
             index,
             state.result_paths.contains_key(&index),
-            state.converting || state.local_ai_busy() || state.studio_busy(),
+            state.media_commit_actions_disabled(),
             menu,
         )
     }

@@ -229,6 +229,9 @@ impl Audit {
     /// The pairing exists immediately (the header names it); its diff arrives
     /// when the walk lands.
     pub(super) fn pair_sirv(&mut self, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         let (client, dir) = {
             let Some(browser) = self.sirv_browser.as_ref() else {
                 return;
@@ -540,6 +543,9 @@ impl Audit {
     }
 
     pub(super) fn run_pull(&mut self, differing: bool, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         let Some(pairing) = &self.sirv_pairing else {
             return;
         };
@@ -586,7 +592,11 @@ impl Audit {
                 .await;
             let Some(_) = this
                 .update(cx, |audit, cx| {
-                    if audit.sirv_generation != generation || audit.sirv_busy() || plan.is_empty() {
+                    if audit.scan_blocks_delivery()
+                        || audit.sirv_generation != generation
+                        || audit.sirv_busy()
+                        || plan.is_empty()
+                    {
                         return None;
                     }
                     let total = plan.len();
@@ -746,6 +756,9 @@ impl Audit {
     }
 
     pub(super) fn run_push(&mut self, accept: sirv::SyncState, cx: &mut Context<Self>) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         let Some(pairing) = &self.sirv_pairing else {
             return;
         };
@@ -773,6 +786,9 @@ impl Audit {
         completion: UploadCompletion,
         cx: &mut Context<Self>,
     ) {
+        if self.scan_blocks_delivery() {
+            return;
+        }
         let Some(pairing) = &self.sirv_pairing else {
             return;
         };

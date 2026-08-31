@@ -30,14 +30,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
-use futures::{StreamExt, future::select_all};
+use futures::{FutureExt, SinkExt, StreamExt, future::select_all};
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
@@ -79,6 +82,91 @@ const DENSITY_HEAVY: f32 = 1.5;
 /// that to be true.
 const HEAVY_MIN_BYTES: u64 = 32_768;
 const HEAVY_MIN_PIXELS: u64 = 64 * 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScanBatchPublish {
+    Queued,
+    Closed,
+    AlreadyClosed,
+}
+
+/// The scan runs away from GPUI, but its results are applied by the UI task. Keep
+/// that boundary to one queued batch so a fast folder walk cannot retain the whole
+/// scan while the window is busy drawing.
+struct ScanBatchHandoff {
+    sender: futures::channel::mpsc::Sender<Vec<Entry>>,
+    closed: bool,
+}
+
+/// A folder scan owns one token and one wake-up edge. Keeping the handle in the
+/// audit lets a newer request stop the old handoff without taking terminal
+/// ownership away from the task that must join the scanner.
+struct ScanCancellation {
+    token: Arc<AtomicBool>,
+    wake: Option<futures::channel::oneshot::Sender<()>>,
+}
+
+impl ScanCancellation {
+    fn new() -> (Self, futures::channel::oneshot::Receiver<()>) {
+        let (wake, receiver) = futures::channel::oneshot::channel();
+        (
+            Self {
+                token: Arc::new(AtomicBool::new(false)),
+                wake: Some(wake),
+            },
+            receiver,
+        )
+    }
+
+    fn cancel(&mut self) {
+        self.token.store(true, Ordering::Release);
+        if let Some(wake) = self.wake.take() {
+            let _ = wake.send(());
+        }
+    }
+}
+
+/// Prefer cancellation even when a batch is already ready. Closing the receiver
+/// releases a publisher waiting in `feed`; the caller then joins the scanner.
+async fn next_scan_batch_or_cancel(
+    batches: &mut futures::channel::mpsc::Receiver<Vec<Entry>>,
+    cancelled: &mut futures::channel::oneshot::Receiver<()>,
+) -> Option<Vec<Entry>> {
+    let cancelled = cancelled.fuse();
+    let batch = batches.next().fuse();
+    futures::pin_mut!(cancelled, batch);
+    futures::select_biased! {
+        _ = cancelled => {
+            batches.close();
+            None
+        },
+        entries = batch => entries,
+    }
+}
+
+impl ScanBatchHandoff {
+    fn new() -> (Self, futures::channel::mpsc::Receiver<Vec<Entry>>) {
+        let (sender, receiver) = futures::channel::mpsc::channel(0);
+        (
+            Self {
+                sender,
+                closed: false,
+            },
+            receiver,
+        )
+    }
+
+    async fn publish(&mut self, batch: &[Entry]) -> ScanBatchPublish {
+        if self.closed {
+            return ScanBatchPublish::AlreadyClosed;
+        }
+        if self.sender.feed(batch.to_vec()).await.is_err() {
+            self.closed = true;
+            return ScanBatchPublish::Closed;
+        }
+        ScanBatchPublish::Queued
+    }
+}
 
 /// Shared with the headless audit so its finding is exactly the one shown here.
 pub(super) fn is_heavy(entry: &Entry) -> bool {
@@ -462,9 +550,14 @@ pub(crate) struct Audit {
     scan_generation: u64,
     /// The path currently being scanned, if any.
     scanning: Option<String>,
+    /// The cancellable folder scan currently allowed to publish into this audit.
+    scan_cancellation: Option<ScanCancellation>,
     /// The new folder has published rows already. Until then the old dataset stays
     /// installed behind the scanning screen; once true, those new rows are safe to draw.
     scan_partial: bool,
+    /// A cancelled replacement left its progressive rows on screen. They remain
+    /// readable but cannot be converted or delivered until a complete retry lands.
+    scan_interrupted: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -831,6 +924,15 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
         .then(|| parent.to_path_buf())
 }
 
+fn should_scan_progressively(
+    current_root: &Path,
+    requested_path: &Path,
+    has_sirv_pairing: bool,
+    single: bool,
+) -> bool {
+    !single && (current_root != requested_path || !has_sirv_pairing)
+}
+
 impl Audit {
     fn update_notifications(
         &self,
@@ -886,6 +988,37 @@ impl Audit {
             move |window, cx| window.remove_notification1::<ErrorToast>(scope, cx),
             cx,
         );
+    }
+
+    pub(super) fn scan_blocks_delivery(&self) -> bool {
+        self.scanning.is_some()
+    }
+
+    pub(super) fn cancel_retained_scan(&mut self) {
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+    }
+
+    fn finish_cancelled_folder_scan(&mut self, cx: &mut Context<Self>) {
+        if self.scan_partial {
+            self.scan_interrupted = true;
+        } else {
+            self.scanning = None;
+            self.scan_cancellation = None;
+        }
+        cx.notify();
+    }
+
+    fn owns_scan_request(&self, request: u64, token: Option<&Arc<AtomicBool>>) -> bool {
+        self.scan_generation == request
+            && match token {
+                Some(token) => self
+                    .scan_cancellation
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(&current.token, token)),
+                None => self.scan_cancellation.is_none(),
+            }
     }
 
     /// Install a completed scan. This is the one state transition that replaces the
@@ -1050,13 +1183,26 @@ impl Audit {
         self.clear_error("open-image", cx);
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
-        let progressive = !single && (self.root != path || self.sirv_pairing.is_none());
+        let progressive =
+            should_scan_progressively(&self.root, &path, self.sirv_pairing.is_some(), single);
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+        self.scan_cancellation = None;
+        let (token, mut cancelled) = if single {
+            (None, None)
+        } else {
+            let (cancellation, receiver) = ScanCancellation::new();
+            let token = cancellation.token.clone();
+            self.scan_cancellation = Some(cancellation);
+            (Some(token), Some(receiver))
+        };
         let label = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         self.scanning = Some(label);
-        self.scan_partial = false;
+        self.scan_interrupted = false;
         // A chosen destination follows the audit to the new folder: it is a
         // preference about where output belongs, not about this folder.
         let output = self.output.clone();
@@ -1065,50 +1211,73 @@ impl Audit {
 
         cx.spawn(async move |this, cx| {
             if !progressive {
+                let scan_token = token.clone();
+                let scan_path = path.clone();
                 let result = cx
                     .background_executor()
                     .spawn(async move {
                         if single {
-                            let entry = scan::probe(&path)?;
-                            let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                            Some((
-                                scan::Scan {
+                            scan::probe(&scan_path).map(|entry| {
+                                scan::ScanOutcome::Complete(scan::Scan {
                                     entries: vec![entry],
                                     skipped_raw: 0,
                                     skipped_packages: 0,
                                     unreadable: Vec::new(),
                                     walk_errors: Vec::new(),
                                     existing_output: 0,
-                                },
-                                root,
-                                true,
-                            ))
+                                })
+                            })
                         } else {
-                            Some((scan::scan(&path, &output.root(&path)), path, false))
+                            let token = scan_token.expect("folders own a cancellation token");
+                            Some(scan::scan_progressive_cancellable(
+                                &scan_path,
+                                &output.root(&scan_path),
+                                token,
+                                |_| std::ops::ControlFlow::Continue(()),
+                            ))
                         }
                     })
                     .await;
 
                 let _ = this.update_in(cx, |audit, window, cx| {
-                    if audit.scan_generation != request {
+                    if !audit.owns_scan_request(request, token.as_ref()) {
                         return;
                     }
-                    audit.scanning = None;
-                    audit.scan_partial = false;
-                    if let Some((scanned, root, single)) = result {
-                        audit.clear_error("open-image", cx);
-                        audit.install_dataset(scanned, root, single, None, window, cx);
-                    } else {
-                        audit.notify_error(
-                            "open-image",
-                            "Couldn’t open image",
-                            format!(
-                                "{} is damaged, unsupported, or not an image.",
-                                requested.display()
-                            ),
-                            cx,
-                        );
-                        cx.notify();
+                    match result {
+                        Some(scan::ScanOutcome::Complete(scanned)) => {
+                            audit.scanning = None;
+                            audit.scan_partial = false;
+                            audit.scan_interrupted = false;
+                            let root = if single {
+                                path.parent().unwrap_or(Path::new(".")).to_path_buf()
+                            } else {
+                                path.clone()
+                            };
+                            audit.install_dataset(scanned, root, single, None, window, cx);
+                            if !single {
+                                audit.scan_cancellation = None;
+                            }
+                        }
+                        Some(scan::ScanOutcome::Cancelled) => {
+                            audit.finish_cancelled_folder_scan(cx);
+                        }
+                        None => {
+                            audit.notify_error(
+                                "open-image",
+                                "Couldn’t open image",
+                                format!(
+                                    "{} is damaged, unsupported, or not an image.",
+                                    requested.display()
+                                ),
+                                cx,
+                            );
+                            if audit.scan_partial {
+                                audit.scan_interrupted = true;
+                            } else {
+                                audit.scanning = None;
+                            }
+                            cx.notify();
+                        }
                     }
                 });
                 return;
@@ -1116,19 +1285,30 @@ impl Audit {
 
             let root = path.clone();
             let output_root = output.root(&path);
-            let (sender, mut batches) = futures::channel::mpsc::unbounded();
+            let token = token.expect("progressive folders own a cancellation token");
+            let mut cancelled = cancelled
+                .take()
+                .expect("folder cancellation wakes the handoff");
+            let (mut handoff, mut batches) = ScanBatchHandoff::new();
+            let scan_token = token.clone();
             let scan_task = cx.background_executor().spawn(async move {
-                scan::scan_progressive(&path, &output_root, |batch| {
-                    let _ = sender.unbounded_send(batch.to_vec());
+                scan::scan_progressive_cancellable(&path, &output_root, scan_token, |batch| {
+                    match futures::executor::block_on(handoff.publish(batch)) {
+                        ScanBatchPublish::Queued => std::ops::ControlFlow::Continue(()),
+                        ScanBatchPublish::Closed | ScanBatchPublish::AlreadyClosed => {
+                            std::ops::ControlFlow::Break(())
+                        }
+                    }
                 })
             });
             let mut installed = false;
-            while let Some(entries) = batches.next().await {
+            while let Some(entries) = next_scan_batch_or_cancel(&mut batches, &mut cancelled).await
+            {
                 let first = !installed;
                 let root = root.clone();
                 let accepted = this
                     .update_in(cx, |audit, window, cx| {
-                        if audit.scan_generation != request {
+                        if !audit.owns_scan_request(request, Some(&token)) {
                             return false;
                         }
                         if first {
@@ -1155,21 +1335,31 @@ impl Audit {
                     })
                     .unwrap_or(false);
                 if !accepted {
-                    return;
+                    batches.close();
+                    break;
                 }
                 installed = true;
             }
-            let scanned = scan_task.await;
+            let outcome = scan_task.await;
             let _ = this.update_in(cx, |audit, window, cx| {
-                if audit.scan_generation != request {
+                if !audit.owns_scan_request(request, Some(&token)) {
                     return;
                 }
-                audit.scanning = None;
-                audit.scan_partial = false;
-                if installed {
-                    audit.finish_progressive_scan(scanned, cx);
-                } else {
-                    audit.install_dataset(scanned, root, false, None, window, cx);
+                match outcome {
+                    scan::ScanOutcome::Complete(scanned) => {
+                        audit.scanning = None;
+                        audit.scan_partial = false;
+                        audit.scan_interrupted = false;
+                        if installed {
+                            audit.finish_progressive_scan(scanned, cx);
+                        } else {
+                            audit.install_dataset(scanned, root, false, None, window, cx);
+                        }
+                        audit.scan_cancellation = None;
+                    }
+                    scan::ScanOutcome::Cancelled => {
+                        audit.finish_cancelled_folder_scan(cx);
+                    }
                 }
             });
         })
@@ -1224,8 +1414,12 @@ impl Audit {
     fn request_files(&mut self, paths: Vec<PathBuf>, root: PathBuf, cx: &mut Context<Self>) {
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+        self.scan_cancellation = None;
         self.scanning = Some(format!("{} images", paths.len()));
-        self.scan_partial = false;
+        self.scan_interrupted = false;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1235,10 +1429,12 @@ impl Audit {
                 .await;
             let batch_size = scanned.entries.len();
             let _ = this.update_in(cx, |audit, window, cx| {
-                if audit.scan_generation != request {
+                if !audit.owns_scan_request(request, None) {
                     return;
                 }
                 audit.scanning = None;
+                audit.scan_partial = false;
+                audit.scan_interrupted = false;
                 audit.install_dataset(scanned, root, false, Some(batch_size), window, cx);
             });
         })
@@ -1609,7 +1805,9 @@ pub(crate) fn build_audit(
             dataset_generation: 0,
             scan_generation: 0,
             scanning: None,
+            scan_cancellation: None,
             scan_partial: false,
+            scan_interrupted: false,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),
@@ -1665,6 +1863,23 @@ pub(crate) fn build_audit(
         cx.new(|cx| TableState::new(delegate, window, cx))
     };
     audit.update(cx, |audit, _| audit.table = Some(table));
+
+    audit.update(cx, |_, cx| {
+        cx.on_release(|audit, _| {
+            audit.cancel_retained_scan();
+        })
+        .detach();
+    });
+    let window_id = window.window_handle().window_id();
+    let weak_audit = audit.downgrade();
+    cx.on_window_closed(move |cx, closed_window_id| {
+        if closed_window_id == window_id {
+            let _ = weak_audit.update(cx, |audit, _| {
+                audit.cancel_retained_scan();
+            });
+        }
+    })
+    .detach();
 
     audit
 }

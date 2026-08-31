@@ -23,9 +23,13 @@ pub(super) fn meter(
 }
 
 impl Audit {
+    pub(super) fn sirv_pair_disabled(&self, at_root: bool, listed: bool) -> bool {
+        at_root || !listed || self.scan_blocks_delivery()
+    }
+
     fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let pairing = self.sirv_pairing.as_ref()?;
-        let busy = self.sirv_busy();
+        let busy = self.sirv_busy() || self.scan_blocks_delivery();
         let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
         let ready = matches!(pairing.files, Listing::Ready(_));
         let (to_push, changed, to_pull) = self.sirv_counts.unwrap_or((0, 0, 0));
@@ -456,19 +460,24 @@ impl Audit {
                     })
                     .when(!browser.needs_credentials, |row| {
                         row.child(
-                            Button::new("sirv-pair")
-                                .primary()
-                                .small()
-                                .label(if at_root {
-                                    "Open a folder to pair it"
-                                } else {
-                                    "Pair this folder"
-                                })
-                                .disabled(at_root || !matches!(browser.nodes, Some(Ok(_))))
-                                .on_click(cx.listener(|audit, _, window, cx| {
-                                    audit.pair_sirv(cx);
-                                    Self::restore_audit_focus(window, cx);
-                                })),
+                            div().debug_selector(|| "sirv-pair".into()).child(
+                                Button::new("sirv-pair")
+                                    .primary()
+                                    .small()
+                                    .label(if at_root {
+                                        "Open a folder to pair it"
+                                    } else {
+                                        "Pair this folder"
+                                    })
+                                    .disabled(self.sirv_pair_disabled(
+                                        at_root,
+                                        matches!(browser.nodes, Some(Ok(_))),
+                                    ))
+                                    .on_click(cx.listener(|audit, _, window, cx| {
+                                        audit.pair_sirv(cx);
+                                        Self::restore_audit_focus(window, cx);
+                                    })),
+                            ),
                         )
                     }),
             )
