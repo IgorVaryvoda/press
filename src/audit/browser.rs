@@ -284,10 +284,6 @@ impl Audit {
         let Some(path) = self.tree_paths.get(id).cloned() else {
             return;
         };
-        self.set_tree_expanded(path, expanded, cx);
-    }
-
-    fn set_tree_expanded(&mut self, path: PathBuf, expanded: bool, cx: &mut Context<Self>) {
         if expanded {
             self.tree_expanded.insert(path.clone());
             self.load_tree_children(path, cx);
@@ -434,10 +430,36 @@ impl Audit {
             } else {
                 IconName::ChevronRight
             };
-            let disclosure_path = path.clone();
-            let disclosure_expanded = entry.is_expanded();
-            let disclosure_audit = weak.clone();
-            let mut item = ListItem::new(format!("local-tree-{index}"))
+            let mut navigation = div()
+                .id(format!("folder-open-{index}"))
+                .debug_selector(move || format!("folder-open-{index}"))
+                .flex()
+                .flex_1()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .child(Icon::new(icon).size_4())
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(entry.item().label.clone()),
+                );
+            if let Some(path) = path {
+                let weak = weak.clone();
+                navigation = navigation.on_click(move |_, window, cx| {
+                    if let Some(audit) = weak.upgrade() {
+                        let path = path.clone();
+                        audit.update(cx, |audit, cx| {
+                            audit.close_browser_overlay(window, cx);
+                            audit.request_path(path, cx);
+                        });
+                    }
+                });
+            }
+            ListItem::new(format!("local-tree-{index}"))
                 .w_full()
                 .h(px(28.))
                 .pl(px(8. + entry.depth() as f32 * 12.))
@@ -457,63 +479,12 @@ impl Audit {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .when(entry.is_folder(), |disclosure| {
-                                    disclosure
-                                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            let Some(path) = disclosure_path.clone() else {
-                                                return;
-                                            };
-                                            if let Some(audit) = disclosure_audit.upgrade() {
-                                                audit.update(cx, |audit, cx| {
-                                                    audit.set_tree_expanded(
-                                                        path,
-                                                        !disclosure_expanded,
-                                                        cx,
-                                                    );
-                                                });
-                                            }
-                                            // The tree row also handles mouse-down. Rebuild after
-                                            // dispatch so both handlers see the same item state.
-                                            let audit = disclosure_audit.clone();
-                                            cx.defer(move |cx| {
-                                                if let Some(audit) = audit.upgrade() {
-                                                    audit.update(cx, |audit, cx| {
-                                                        audit.rebuild_tree_preserving_selection(cx);
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            });
-                                        })
-                                        .on_click(|_, _, cx| cx.stop_propagation())
-                                })
                                 .children(
                                     entry.is_folder().then(|| Icon::new(disclosure).size_3()),
                                 ),
                         )
-                        .child(Icon::new(icon).size_4())
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(entry.item().label.clone()),
-                        ),
-                );
-            if let Some(path) = path {
-                let weak = weak.clone();
-                item = item.on_click(move |_, window, cx| {
-                    if let Some(audit) = weak.upgrade() {
-                        let path = path.clone();
-                        audit.update(cx, |audit, cx| {
-                            audit.close_browser_overlay(window, cx);
-                            audit.request_path(path, cx);
-                        });
-                    }
-                });
-            }
-            item
+                        .child(navigation),
+                )
         });
 
         div()

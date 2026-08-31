@@ -3295,6 +3295,27 @@ fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn clicking_a_tree_folder_label_opens_the_folder(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-pointer-navigation");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    let folder = cx
+        .debug_bounds("folder-open-1")
+        .expect("the child folder label is visible");
+    cx.simulate_click(folder.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.root, child));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
 fn expanding_a_tree_folder_keeps_the_keyboard_selection(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-expand-selection");
     let child = root.join("child");
