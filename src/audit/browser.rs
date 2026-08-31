@@ -260,6 +260,22 @@ impl Audit {
         });
     }
 
+    fn rebuild_tree_preserving_selection(&mut self, cx: &mut Context<Self>) {
+        let selected = self
+            .tree_state
+            .read(cx)
+            .selected_item()
+            .map(|item| item.id.clone());
+        self.rebuild_tree(cx);
+        if let Some(selected) = selected {
+            self.tree_state.update(cx, |state, cx| {
+                if let Some(index) = state.index_of(&selected) {
+                    state.set_selected_index(Some(index), cx);
+                }
+            });
+        }
+    }
+
     pub(super) fn tree_event(&mut self, event: &TreeEvent, cx: &mut Context<Self>) {
         let (expanded, id) = match event {
             TreeEvent::Expanded(id) => (true, id.as_str()),
@@ -268,6 +284,10 @@ impl Audit {
         let Some(path) = self.tree_paths.get(id).cloned() else {
             return;
         };
+        self.set_tree_expanded(path, expanded, cx);
+    }
+
+    fn set_tree_expanded(&mut self, path: PathBuf, expanded: bool, cx: &mut Context<Self>) {
         if expanded {
             self.tree_expanded.insert(path.clone());
             self.load_tree_children(path, cx);
@@ -308,7 +328,7 @@ impl Audit {
                         );
                     }
                 }
-                audit.rebuild_tree(cx);
+                audit.rebuild_tree_preserving_selection(cx);
                 cx.notify();
             });
         })
@@ -414,6 +434,9 @@ impl Audit {
             } else {
                 IconName::ChevronRight
             };
+            let disclosure_path = path.clone();
+            let disclosure_expanded = entry.is_expanded();
+            let disclosure_audit = weak.clone();
             let mut item = ListItem::new(format!("local-tree-{index}"))
                 .w_full()
                 .h(px(28.))
@@ -435,7 +458,27 @@ impl Audit {
                                 .items_center()
                                 .justify_center()
                                 .when(entry.is_folder(), |disclosure| {
-                                    disclosure.on_click(|_, _, cx| cx.stop_propagation())
+                                    disclosure
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let Some(path) = disclosure_path.clone() else {
+                                                return;
+                                            };
+                                            if let Some(audit) = disclosure_audit.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.set_tree_expanded(
+                                                        path,
+                                                        !disclosure_expanded,
+                                                        cx,
+                                                    );
+                                                    audit.rebuild_tree_preserving_selection(cx);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        })
                                 })
                                 .children(
                                     entry.is_folder().then(|| Icon::new(disclosure).size_3()),

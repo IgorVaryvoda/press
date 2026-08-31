@@ -1825,7 +1825,13 @@ fn a_desktop_drop_opens_direct_images_from_every_dropped_folder(cx: &mut TestApp
             .iter()
             .map(|index| entry_label(&audit.root, true, &audit.entries[*index]))
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["first/z.png", "second/a.png"]);
+        assert_eq!(
+            labels,
+            [
+                PathBuf::from("first").join("z.png").display().to_string(),
+                PathBuf::from("second").join("a.png").display().to_string(),
+            ]
+        );
     });
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -3289,6 +3295,49 @@ fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn expanding_a_tree_folder_keeps_the_keyboard_selection(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-expand-selection");
+    let child = root.join("child");
+    std::fs::create_dir_all(child.join("grandchild")).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    let child_id: gpui::SharedString = audit.read_with(cx, |audit, _| {
+        audit
+            .tree_paths
+            .iter()
+            .find_map(|(id, path)| (path == &child).then(|| id.clone().into()))
+            .expect("the child is in the tree")
+    });
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        audit.update(cx, |audit, cx| {
+            audit.tree_state.update(cx, |tree, cx| {
+                tree.set_selected_index(tree.index_of(&child_id), cx);
+                tree.focus(window, cx);
+            });
+        });
+    });
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, cx| {
+        assert!(audit.tree_loaded.contains(&child));
+        assert_eq!(
+            audit
+                .tree_state
+                .read(cx)
+                .selected_item()
+                .map(|item| &item.id),
+            Some(&child_id)
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
 fn enter_opens_the_keyboard_selected_tree_folder(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-keyboard");
     let child = root.join("child");
@@ -3496,6 +3545,7 @@ fn relative_navigation_stores_an_absolute_root(cx: &mut TestAppContext) {
     let relative = PathBuf::from("target").join(format!("press-relative-root-{nonce}"));
     let absolute = std::env::current_dir().unwrap().join(&relative);
     std::fs::create_dir_all(&absolute).unwrap();
+    let absolute = std::fs::canonicalize(absolute).unwrap();
     let (audit, cx) = finding_audit(cx);
 
     audit.update(cx, |audit, cx| audit.request_path(relative, cx));
