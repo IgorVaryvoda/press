@@ -145,6 +145,13 @@ pub struct Scan {
     pub existing_output: usize,
 }
 
+/// One file-browser page: direct child folders plus direct image files. Unlike
+/// `scan`, this never walks into a child directory.
+pub struct Browse {
+    pub folders: Vec<PathBuf>,
+    pub scan: Scan,
+}
+
 /// A cancelled scan never exposes its partial facts as a completed audit.
 pub(crate) enum ScanOutcome {
     Complete(Scan),
@@ -372,6 +379,236 @@ pub fn scan_files(paths: &[PathBuf]) -> Scan {
         walk_errors: Vec::new(),
         existing_output: 0,
     }
+}
+
+fn is_hidden_folder(path: &Path) -> bool {
+    cfg!(unix)
+        && path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
+
+fn folder_sort_key(path: &Path) -> (String, std::ffi::OsString) {
+    let name = path.file_name().unwrap_or_default().to_os_string();
+    (name.to_string_lossy().to_lowercase(), name)
+}
+
+fn lexical_boundary(path: &Path) -> std::io::Result<PathBuf> {
+    let base = std::env::current_dir()?;
+    crate::output::lexical_normalize_against(path, &base)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))
+}
+
+pub(crate) fn canonical_boundary(path: &Path) -> std::io::Result<PathBuf> {
+    let normalized = lexical_boundary(path)?;
+    let mut existing = normalized;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(&existing) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(component) = existing.file_name().map(ToOwned::to_owned) else {
+                    return Err(error);
+                };
+                missing.push(component);
+                existing.pop();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn browse_page(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> std::io::Result<Option<Browse>> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Ok(None);
+    }
+    let root = canonical_boundary(root)?;
+    let output = canonical_boundary(output_root).or_else(|_| lexical_boundary(output_root))?;
+    if root.starts_with(output) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the output folder cannot also be an input folder",
+        ));
+    }
+    let mut folders = Vec::new();
+    let mut entries = Vec::new();
+    let mut skipped_raw = 0;
+    let mut skipped_packages = 0;
+    let mut unreadable = Vec::new();
+    let mut walk_errors = Vec::new();
+
+    for item in std::fs::read_dir(&root)? {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Ok(None);
+        }
+        let item = match item {
+            Ok(item) => item,
+            Err(_) => {
+                walk_errors.push(root.to_path_buf());
+                continue;
+            }
+        };
+        let path = item.path();
+        let file_type = match item.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => {
+                walk_errors.push(path);
+                continue;
+            }
+        };
+
+        if file_type.is_dir() {
+            if is_hidden_folder(&path) {
+                continue;
+            }
+            if is_opaque_package(&path) {
+                skipped_packages += 1;
+            } else {
+                folders.push(path);
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        if is_raw(&path) {
+            skipped_raw += 1;
+        } else if let Some(entry) = probe(&path) {
+            entries.push(entry);
+        } else if looks_like_an_image(&path) {
+            unreadable.push(path);
+        }
+    }
+
+    folders.sort_by_cached_key(|path| folder_sort_key(path));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
+    let existing_output = if is_default_output(&root, output_root) {
+        let Some(count) = count_files(output_root, cancelled) else {
+            return Ok(None);
+        };
+        count
+    } else {
+        0
+    };
+    Ok(Some(Browse {
+        folders,
+        scan: Scan {
+            entries,
+            skipped_raw,
+            skipped_packages,
+            unreadable,
+            walk_errors,
+            existing_output,
+        },
+    }))
+}
+
+fn count_files(root: &Path, cancelled: Option<&AtomicBool>) -> Option<usize> {
+    let mut count = 0;
+    for item in WalkDir::new(root).min_depth(1) {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return None;
+        }
+        if item.is_ok_and(|item| item.file_type().is_file()) {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
+fn is_default_output(root: &Path, output_root: &Path) -> bool {
+    matches!(
+        (
+            canonical_boundary(&root.join(OUTPUT_DIR)),
+            canonical_boundary(output_root),
+        ),
+        (Ok(default), Ok(output)) if default == output
+    )
+}
+
+/// Read one directory level for the window's file browser. Header probes keep
+/// the existing audit rows truthful without decoding image pixels or walking the
+/// directory tree.
+#[cfg(test)]
+pub fn browse(root: &Path, output_root: &Path) -> std::io::Result<Browse> {
+    Ok(browse_page(root, output_root, None)?.expect("an uncancellable browse completes"))
+}
+
+pub(crate) fn browse_cancellable(
+    root: &Path,
+    output_root: &Path,
+    cancelled: &AtomicBool,
+) -> std::io::Result<Option<Browse>> {
+    browse_page(root, output_root, Some(cancelled))
+}
+
+pub(crate) fn browse_folders_cancellable(
+    roots: &[PathBuf],
+    output_root: &Path,
+    cancelled: &AtomicBool,
+) -> std::io::Result<Option<Scan>> {
+    browse_folders_inner(roots, output_root, Some(cancelled))
+}
+
+fn browse_folders_inner(
+    roots: &[PathBuf],
+    output_root: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> std::io::Result<Option<Scan>> {
+    let mut scan = Scan {
+        entries: Vec::new(),
+        skipped_raw: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+    };
+    for root in roots {
+        let Some(browsed) = browse_page(root, output_root, cancelled)? else {
+            return Ok(None);
+        };
+        let browsed = browsed.scan;
+        scan.entries.extend(browsed.entries);
+        scan.skipped_raw += browsed.skipped_raw;
+        scan.skipped_packages += browsed.skipped_packages;
+        scan.unreadable.extend(browsed.unreadable);
+        scan.walk_errors.extend(browsed.walk_errors);
+    }
+    if let Some(parent) = roots.first().and_then(|root| root.parent())
+        && roots.iter().all(|root| root.parent() == Some(parent))
+        && is_default_output(parent, output_root)
+    {
+        let Some(count) = count_files(output_root, cancelled) else {
+            return Ok(None);
+        };
+        scan.existing_output = count;
+    }
+    scan.entries
+        .sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
+    Ok(Some(scan))
+}
+
+/// Folder-only listing used when a tree node expands.
+pub(crate) fn child_folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut folders = Vec::new();
+    for item in std::fs::read_dir(canonical_boundary(root)?)? {
+        let item = item?;
+        let path = item.path();
+        if item.file_type()?.is_dir() && !is_hidden_folder(&path) && !is_opaque_package(&path) {
+            folders.push(path);
+        }
+    }
+    folders.sort_by_cached_key(|path| folder_sort_key(path));
+    Ok(folders)
 }
 
 /// The same complete scan, publishing small groups as their headers become ready.
@@ -840,7 +1077,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("imageguide-test-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        std::fs::canonicalize(dir).unwrap()
     }
 
     #[test]
@@ -1024,6 +1261,114 @@ mod tests {
             "heaviest file sorts first"
         );
         assert!(scanned.entries[0].bytes > scanned.entries[1].bytes);
+    }
+
+    #[test]
+    fn browser_lists_child_folders_without_auditing_their_images() {
+        let dir = temp_dir("browse-shallow");
+        let nested = dir.join("nested");
+        let prior_output = dir.join(OUTPUT_DIR).join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&prior_output).unwrap();
+        write_sample(&dir, "direct.png", 8, 8);
+        write_sample(&nested, "descendant.png", 16, 16);
+        write_sample(&prior_output, "direct.webp", 8, 8);
+
+        let browsed = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
+        assert_eq!(browsed.folders, vec![nested, dir.join(OUTPUT_DIR)]);
+        assert_eq!(browsed.scan.entries.len(), 1);
+        assert_eq!(browsed.scan.entries[0].name(), "direct.png");
+        assert_eq!(browsed.scan.existing_output, 1);
+    }
+
+    #[test]
+    fn folder_sorting_breaks_case_folded_ties_by_the_original_name() {
+        let mut folders = vec![PathBuf::from("alpha"), PathBuf::from("Alpha")];
+        folders.sort_by_cached_key(|path| folder_sort_key(path));
+        assert_eq!(
+            folders,
+            vec![PathBuf::from("Alpha"), PathBuf::from("alpha")]
+        );
+    }
+
+    #[test]
+    fn browser_refuses_to_audit_the_output_folder_as_input() {
+        let dir = temp_dir("browse-output-as-input");
+        let output = dir.join("output");
+        let nested = output.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_sample(&nested, "existing.webp", 8, 8);
+
+        let error = browse(&nested, &output).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_cancelled_shallow_browse_starts_no_work() {
+        let dir = temp_dir("browse-cancelled");
+        write_sample(&dir, "direct.png", 8, 8);
+        let cancelled = AtomicBool::new(true);
+
+        assert!(
+            browse_cancellable(&dir, &dir.join(OUTPUT_DIR), &cancelled)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn browser_does_not_walk_an_external_output_tree() {
+        let source = temp_dir("browse-external-source");
+        let output = temp_dir("browse-external-output");
+        std::fs::create_dir_all(output.join("deep")).unwrap();
+        write_sample(&output.join("deep"), "existing.webp", 8, 8);
+
+        let browsed = browse(&source, &output).unwrap();
+        assert_eq!(browsed.scan.existing_output, 0);
+    }
+
+    #[test]
+    fn an_unavailable_output_does_not_block_a_read_only_browse() {
+        let source = temp_dir("browse-unavailable-output");
+        write_sample(&source, "direct.png", 8, 8);
+        let blocker = source.join("not-a-directory");
+        std::fs::write(&blocker, "occupied").unwrap();
+
+        let browsed = browse(&source, &blocker.join("offline-output")).unwrap();
+
+        assert_eq!(browsed.scan.entries.len(), 1);
+        assert_eq!(browsed.scan.entries[0].name(), "direct.png");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_resolves_output_aliases_before_accepting_input() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("browse-output-alias");
+        let output = dir.join("output");
+        let alias = dir.join("alias");
+        std::fs::create_dir_all(&output).unwrap();
+        symlink(&output, &alias).unwrap();
+
+        let error = browse(&output, &alias).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_and_tree_hide_dot_folders_on_unix() {
+        let dir = temp_dir("browse-hidden");
+        let visible = dir.join("visible");
+        let hidden = dir.join(".hidden");
+        let optimized = dir.join(OUTPUT_DIR);
+        std::fs::create_dir_all(&visible).unwrap();
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::create_dir_all(&optimized).unwrap();
+
+        let browsed = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
+        assert_eq!(browsed.folders, vec![optimized.clone(), visible.clone()]);
+        assert_eq!(child_folders(&dir).unwrap(), vec![optimized, visible]);
     }
 
     #[test]

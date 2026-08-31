@@ -1,6 +1,6 @@
 //! Remember where the window was and what you were looking at.
 //!
-//! A tiny key=value file rather than a config crate. There are four values, and a
+//! A tiny key=value file rather than a config crate. There are a handful of values, and a
 //! dependency that walks platform config directories costs more than the ten lines
 //! it would save.
 
@@ -13,9 +13,12 @@ pub struct Settings {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub folder: Option<PathBuf>,
+    pub recent_folders: Vec<PathBuf>,
     pub columns: ColumnPrefs,
     pub output: Output,
 }
+
+pub const MAX_RECENT_FOLDERS: usize = 5;
 
 /// Where converted files and local-model results land.
 ///
@@ -242,6 +245,7 @@ fn parse(text: &str) -> Settings {
             "width" => settings.width = value.trim().parse().ok(),
             "height" => settings.height = value.trim().parse().ok(),
             "folder" => settings.folder = Some(PathBuf::from(value.trim())),
+            "recent_folder" => settings.recent_folders.push(PathBuf::from(value.trim())),
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "output" => {
                 let value = value.trim();
@@ -267,6 +271,9 @@ fn render(settings: &Settings) -> String {
     }
     if let Some(folder) = settings.folder.as_ref() {
         out.push_str(&format!("folder={}\n", folder.display()));
+    }
+    for folder in settings.recent_folders.iter().take(MAX_RECENT_FOLDERS) {
+        out.push_str(&format!("recent_folder={}\n", folder.display()));
     }
     // Always written, including when every column is off: an empty value is a
     // choice, and leaving the line out would restore the defaults next launch.
@@ -366,6 +373,10 @@ mod tests {
             width: Some(1280.),
             height: Some(720.5),
             folder: Some(PathBuf::from("/photos/library")),
+            recent_folders: vec![
+                PathBuf::from("/photos/library"),
+                PathBuf::from("/photos/exports"),
+            ],
             columns: ColumnPrefs::default(),
             output: Output::Folder(PathBuf::from("/exports/web")),
         };

@@ -67,6 +67,9 @@ impl Audit {
     /// Open the remote-folder browser. Credentials come from the Sirv store; a
     /// missing store routes directly to the existing settings form.
     pub(super) fn open_sirv_browser(&mut self, cx: &mut Context<Self>) {
+        if self.batch_folders.is_some() {
+            return;
+        }
         self.clear_error("sirv-browser", cx);
         self.sirv_confirm = None;
         self.sirv_browser_generation = self.sirv_browser_generation.wrapping_add(1);
@@ -225,11 +228,11 @@ impl Audit {
         cx.notify();
     }
 
-    /// Pair the browsed folder, then list it recursively in the background.
+    /// Pair the browsed folder, then list its direct files in the background.
     /// The pairing exists immediately (the header names it); its diff arrives
-    /// when the walk lands.
+    /// when the listing lands.
     pub(super) fn pair_sirv(&mut self, cx: &mut Context<Self>) {
-        if self.scan_blocks_delivery() {
+        if self.batch_folders.is_some() || self.scan_blocks_delivery() {
             return;
         }
         let (client, dir) = {
@@ -266,7 +269,7 @@ impl Audit {
         self.walk_sirv_pairing(cx);
     }
 
-    /// List the paired folder end to end and rebuild its diff. Also the
+    /// List the paired folder's direct files and rebuild its diff. Also the
     /// refresh a push finishes with, so pushed files stop reading as new.
     pub(super) fn walk_sirv_pairing(&mut self, cx: &mut Context<Self>) {
         self.clear_error("sirv-listing", cx);
@@ -296,7 +299,7 @@ impl Audit {
                     let (cdn_host, walked) = {
                         let mut client = client.lock();
                         let cdn_host = client.cdn_host().map_err(|error| error.to_string());
-                        let walked = client.walk(&dir, &cancelled);
+                        let walked = client.readdir_cancellable(&dir, Some(&cancelled));
                         (cdn_host, walked)
                     };
                     let nodes = match walked {
@@ -304,12 +307,7 @@ impl Audit {
                         Ok(None) => return None,
                         Err(error) => return Some((cdn_host, Err(error.to_string()))),
                     };
-                    let files: HashMap<String, sirv::Node> = nodes
-                        .into_iter()
-                        .filter_map(|node| {
-                            sirv::unpair_remote(&walked_dir, &node.filename).map(|key| (key, node))
-                        })
-                        .collect();
+                    let files = sirv::direct_remote_files(&walked_dir, nodes);
                     let presence = sirv::local_sizes_for(&root, files.keys().map(String::as_str))
                         .into_keys()
                         .collect();
@@ -543,7 +541,7 @@ impl Audit {
     }
 
     pub(super) fn run_pull(&mut self, differing: bool, cx: &mut Context<Self>) {
-        if self.scan_blocks_delivery() {
+        if self.batch_folders.is_some() || self.scan_blocks_delivery() {
             return;
         }
         let Some(pairing) = &self.sirv_pairing else {
@@ -756,7 +754,7 @@ impl Audit {
     }
 
     pub(super) fn run_push(&mut self, accept: sirv::SyncState, cx: &mut Context<Self>) {
-        if self.scan_blocks_delivery() {
+        if self.batch_folders.is_some() || self.scan_blocks_delivery() {
             return;
         }
         let Some(pairing) = &self.sirv_pairing else {

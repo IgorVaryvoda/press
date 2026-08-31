@@ -1,6 +1,7 @@
 //! Audit window state, background jobs, rendering, and tests.
 
 mod acquisition;
+mod browser;
 mod compare_view;
 mod convert_job;
 mod gallery;
@@ -40,16 +41,18 @@ use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
-use futures::{FutureExt, SinkExt, StreamExt, future::select_all};
+use futures::future::select_all;
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
     uniform_list,
 };
 use gpui_component::alert::Alert;
+use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
+use gpui_component::list::ListItem;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::popover::Popover;
@@ -59,6 +62,7 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::tag::Tag;
+use gpui_component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_component::{
     ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
 };
@@ -83,88 +87,20 @@ const DENSITY_HEAVY: f32 = 1.5;
 const HEAVY_MIN_BYTES: u64 = 32_768;
 const HEAVY_MIN_PIXELS: u64 = 64 * 64;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ScanBatchPublish {
-    Queued,
-    Closed,
-    AlreadyClosed,
-}
-
-/// The scan runs away from GPUI, but its results are applied by the UI task. Keep
-/// that boundary to one queued batch so a fast folder walk cannot retain the whole
-/// scan while the window is busy drawing.
-struct ScanBatchHandoff {
-    sender: futures::channel::mpsc::Sender<Vec<Entry>>,
-    closed: bool,
-}
-
-/// A folder scan owns one token and one wake-up edge. Keeping the handle in the
-/// audit lets a newer request stop the old handoff without taking terminal
-/// ownership away from the task that must join the scanner.
+/// A folder browse owns one token so a newer request can stop it between files.
 struct ScanCancellation {
     token: Arc<AtomicBool>,
-    wake: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 impl ScanCancellation {
-    fn new() -> (Self, futures::channel::oneshot::Receiver<()>) {
-        let (wake, receiver) = futures::channel::oneshot::channel();
-        (
-            Self {
-                token: Arc::new(AtomicBool::new(false)),
-                wake: Some(wake),
-            },
-            receiver,
-        )
+    fn new() -> Self {
+        Self {
+            token: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn cancel(&mut self) {
         self.token.store(true, Ordering::Release);
-        if let Some(wake) = self.wake.take() {
-            let _ = wake.send(());
-        }
-    }
-}
-
-/// Prefer cancellation even when a batch is already ready. Closing the receiver
-/// releases a publisher waiting in `feed`; the caller then joins the scanner.
-async fn next_scan_batch_or_cancel(
-    batches: &mut futures::channel::mpsc::Receiver<Vec<Entry>>,
-    cancelled: &mut futures::channel::oneshot::Receiver<()>,
-) -> Option<Vec<Entry>> {
-    let cancelled = cancelled.fuse();
-    let batch = batches.next().fuse();
-    futures::pin_mut!(cancelled, batch);
-    futures::select_biased! {
-        _ = cancelled => {
-            batches.close();
-            None
-        },
-        entries = batch => entries,
-    }
-}
-
-impl ScanBatchHandoff {
-    fn new() -> (Self, futures::channel::mpsc::Receiver<Vec<Entry>>) {
-        let (sender, receiver) = futures::channel::mpsc::channel(0);
-        (
-            Self {
-                sender,
-                closed: false,
-            },
-            receiver,
-        )
-    }
-
-    async fn publish(&mut self, batch: &[Entry]) -> ScanBatchPublish {
-        if self.closed {
-            return ScanBatchPublish::AlreadyClosed;
-        }
-        if self.sender.feed(batch.to_vec()).await.is_err() {
-            self.closed = true;
-            return ScanBatchPublish::Closed;
-        }
-        ScanBatchPublish::Queued
     }
 }
 
@@ -390,9 +326,30 @@ fn density_colour(density: f32, cx: &App) -> gpui::Hsla {
 pub(crate) struct Audit {
     window: gpui::AnyWindowHandle,
     root: PathBuf,
+    /// Filesystem identity of the current output, cached outside render so aliases
+    /// and case-folded paths cannot expose the destination as an input folder.
+    browser_output_root: PathBuf,
     /// Present when the dataset is an explicit file batch rather than every image
     /// found under `root`.
     batch_size: Option<usize>,
+    /// Present when that explicit batch came from several sibling folders.
+    batch_folders: Option<usize>,
+    /// Direct child folders shown beside the direct image rows.
+    folders: Vec<PathBuf>,
+    /// File-manager shortcuts, newest first and bounded by settings.
+    recent_folders: Vec<PathBuf>,
+    /// The narrow/work-panel form of the folder browser is an overlay.
+    browser_overlay: bool,
+    /// Backs the loaded-folder search in the browser sidebar.
+    folder_filter_input: gpui::Entity<InputState>,
+    tree_state: gpui::Entity<TreeState>,
+    tree_anchor: PathBuf,
+    tree_children: HashMap<PathBuf, Vec<PathBuf>>,
+    tree_loaded: HashSet<PathBuf>,
+    tree_loading: HashSet<PathBuf>,
+    tree_expanded: HashSet<PathBuf>,
+    tree_paths: HashMap<String, PathBuf>,
+    folder_scroll: UniformListScrollHandle,
     entries: Vec<Entry>,
     skipped_raw: usize,
     /// macOS packages the scan skipped whole, counted like raw: excluded by
@@ -419,7 +376,7 @@ pub(crate) struct Audit {
     /// Drives the quality slider. Its own entity, because that is how the component
     /// reports drags.
     quality_slider: gpui::Entity<SliderState>,
-    /// Rows ticked for conversion. Empty means "all of them".
+    /// Rows explicitly ticked for conversion.
     selected: HashSet<usize>,
     /// Bounds of the rendered rows or tiles. Marquee selection only needs the
     /// visible objects, so virtualised items never get measured eagerly.
@@ -484,8 +441,8 @@ pub(crate) struct Audit {
     /// Names in the paired listing that have no local file. They cannot use `visible`,
     /// whose indices deliberately refer only to immutable local entries.
     sirv_remote_only: Vec<String>,
-    /// A snapshot from the last walk, patched by completed pulls. A file made
-    /// by hand between walks stays stale until the next walk, like the listing.
+    /// A snapshot from the last listing, patched by completed pulls. A file made
+    /// by hand between listings stays stale until the next one, like the remote map.
     sirv_local_presence: HashSet<String>,
     /// A running or finished Sirv transfer, shown in the notices line.
     sirv_job: Option<SirvJob>,
@@ -493,11 +450,11 @@ pub(crate) struct Audit {
     sirv_confirm: Option<SirvJobKind>,
     /// Bumped whenever a running transfer stops being wanted.
     sirv_generation: u64,
-    /// Bumped whenever a pairing changes, so an old recursive listing cannot
+    /// Bumped whenever a pairing changes, so an old paginated listing cannot
     /// land under a newly selected remote folder.
     sirv_pairing_generation: u64,
-    /// Lets a superseded recursive walk stop between pages and directories instead
-    /// of consuming the whole bounded request budget before its result is discarded.
+    /// Lets a superseded listing stop between pages instead of consuming the whole
+    /// bounded request budget before its result is discarded.
     sirv_walk_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Identity of the current browser instance. Per-path request numbers restart
     /// when the overlay reopens, so they cannot identify the instance by themselves.
@@ -552,12 +509,6 @@ pub(crate) struct Audit {
     scanning: Option<String>,
     /// The cancellable folder scan currently allowed to publish into this audit.
     scan_cancellation: Option<ScanCancellation>,
-    /// The new folder has published rows already. Until then the old dataset stays
-    /// installed behind the scanning screen; once true, those new rows are safe to draw.
-    scan_partial: bool,
-    /// A cancelled replacement left its progressive rows on screen. They remain
-    /// readable but cannot be converted or delivered until a complete retry lands.
-    scan_interrupted: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -641,9 +592,13 @@ pub enum Column {
 
 /// Ties fall back to the filename so the order is stable between runs — a list that
 /// reshuffles itself is worse than one sorted badly.
-fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> std::cmp::Ordering {
-    let a_name = a.name_lossy();
-    let b_name = b.name_lossy();
+fn compare_entries(
+    a: &Entry,
+    b: &Entry,
+    sort: Sort,
+    a_name: &str,
+    b_name: &str,
+) -> std::cmp::Ordering {
     let ordering = match sort.column {
         Column::Name => a_name
             .chars()
@@ -659,7 +614,7 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> std::cmp::Ordering {
             .unwrap_or(std::cmp::Ordering::Equal),
         Column::Weight => a.bytes.cmp(&b.bytes),
     }
-    .then_with(|| a_name.as_ref().cmp(b_name.as_ref()));
+    .then_with(|| a_name.cmp(b_name));
 
     if sort.descending {
         ordering.reverse()
@@ -670,12 +625,12 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> std::cmp::Ordering {
 
 /// A paired Sirv folder. `files` maps the relative keys `sirv::relative_key`
 /// produces for local rows onto the remote listing, so the diff column is a
-/// lookup, never a walk. `None` while the recursive listing is in flight —
+/// lookup, never a walk. `None` while the listing is in flight —
 /// a pairing that just happened does not know its diff yet.
 /// What the paired folder's remote listing knows.
 ///
-/// This was an `Option<HashMap<..>>`, so `None` meant both "the walk is running" and
-/// "the walk failed". The window showed the first and reported the second as a pull
+/// This was an `Option<HashMap<..>>`, so `None` meant both "the listing is running"
+/// and "the listing failed". The window showed the first and reported the second as a pull
 /// that transferred nothing — the same confusion the comparison view had between
 /// loading and failed, and the same fix.
 enum Listing {
@@ -924,13 +879,38 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
         .then(|| parent.to_path_buf())
 }
 
-fn should_scan_progressively(
-    current_root: &Path,
-    requested_path: &Path,
-    has_sirv_pairing: bool,
-    single: bool,
-) -> bool {
-    !single && (current_root != requested_path || !has_sirv_pairing)
+fn root_needs_custom_output(root: &Path, output: &Output) -> bool {
+    root.has_root() && root.parent().is_none() && matches!(output, Output::Optimized)
+}
+
+fn entry_label(root: &Path, show_parent: bool, entry: &Entry) -> String {
+    if show_parent {
+        entry
+            .path
+            .strip_prefix(root)
+            .unwrap_or(&entry.path)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        entry.name()
+    }
+}
+
+fn navigation_path(path: PathBuf) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return path;
+    }
+    if let Ok(identity) = scan::canonical_boundary(&path) {
+        return identity;
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|base| crate::output::lexical_normalize_against(&path, &base).ok())
+        .unwrap_or(path)
+}
+
+fn output_identity(output: &Output, root: &Path) -> PathBuf {
+    navigation_path(output.root(root))
 }
 
 impl Audit {
@@ -1000,16 +980,6 @@ impl Audit {
         }
     }
 
-    fn finish_cancelled_folder_scan(&mut self, cx: &mut Context<Self>) {
-        if self.scan_partial {
-            self.scan_interrupted = true;
-        } else {
-            self.scanning = None;
-            self.scan_cancellation = None;
-        }
-        cx.notify();
-    }
-
     fn owns_scan_request(&self, request: u64, token: Option<&Arc<AtomicBool>>) -> bool {
         self.scan_generation == request
             && match token {
@@ -1048,7 +1018,10 @@ impl Audit {
         }
         self.studio_source = None;
         self.root = root;
+        self.browser_output_root = output_identity(&self.output, &self.root);
         self.batch_size = batch_size;
+        self.batch_folders = None;
+        self.folders.clear();
         self.mislabelled = scanned
             .entries
             .iter()
@@ -1134,240 +1107,160 @@ impl Audit {
         }
     }
 
-    /// Add rows whose headers finished while the rest of the folder is still being
-    /// scanned. Existing indices never move, so loaded thumbnails and selection remain
-    /// attached to the files that produced them.
-    fn append_scan_batch(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
-        self.heavy += entries
-            .iter()
-            .filter(|entry| Finding::Heavy.holds(entry))
-            .count();
-        self.mislabelled += entries
-            .iter()
-            .filter(|entry| entry.extension_lies())
-            .count();
-        self.marketplace += entries
-            .iter()
-            .filter(|entry| acquisition::marketplace_fails(entry))
-            .count();
-        self.entries.extend(entries);
-        self.refresh_visible();
-        if let Some(table) = self.table.clone() {
-            cx.defer(move |cx| table.update(cx, |table, cx| table.refresh(cx)));
-        }
-        cx.notify();
-    }
-
-    fn finish_progressive_scan(&mut self, scanned: scan::Scan, cx: &mut Context<Self>) {
-        debug_assert_eq!(self.entries.len(), scanned.entries.len());
-        self.skipped_raw = scanned.skipped_raw;
-        self.skipped_packages = scanned.skipped_packages;
-        self.unreadable = scanned.unreadable;
-        self.walk_errors = scanned.walk_errors;
-        self.existing_output = scanned.existing_output;
-        self.spins = acquisition::detect_spins(&self.root, &self.entries);
-        self.schedule_estimate(cx);
-        cx.notify();
-    }
-
-    /// Scan a requested path away from the UI thread. A newer request wins, while a
-    /// failed current request leaves the last usable dataset in place.
+    /// Open a requested folder or exact file away from the UI thread. A newer
+    /// request wins, while a failed current request leaves the last usable dataset.
     pub(super) fn request_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.converting {
             return;
         }
-        let single = path.is_file();
-        if !single && !path.is_dir() {
+        let path = navigation_path(path);
+        if path.is_dir() {
+            if root_needs_custom_output(&path, &self.output) {
+                self.notify_error(
+                    "open-image",
+                    "Couldn’t open selection",
+                    "Choose a custom output folder before opening an item from the filesystem root.",
+                    cx,
+                );
+                return;
+            }
+            self.request_folder(path, cx);
+            return;
+        }
+        if !path.is_file() {
+            return;
+        }
+        let root = path.parent().unwrap_or(&path).to_path_buf();
+        if root_needs_custom_output(&root, &self.output) {
+            self.notify_error(
+                "open-image",
+                "Couldn’t open selection",
+                "Choose a custom output folder before opening an item from the filesystem root.",
+                cx,
+            );
             return;
         }
         self.clear_error("open-image", cx);
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let request = self.scan_generation;
-        let progressive =
-            should_scan_progressively(&self.root, &path, self.sirv_pairing.is_some(), single);
         if let Some(cancellation) = self.scan_cancellation.as_mut() {
             cancellation.cancel();
         }
         self.scan_cancellation = None;
-        let (token, mut cancelled) = if single {
-            (None, None)
-        } else {
-            let (cancellation, receiver) = ScanCancellation::new();
-            let token = cancellation.token.clone();
-            self.scan_cancellation = Some(cancellation);
-            (Some(token), Some(receiver))
-        };
-        let label = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        self.scanning = Some(label);
-        self.scan_interrupted = false;
-        // A chosen destination follows the audit to the new folder: it is a
-        // preference about where output belongs, not about this folder.
-        let output = self.output.clone();
+        self.scanning = Some(
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+        );
         let requested = path.clone();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            if !progressive {
-                let scan_token = token.clone();
-                let scan_path = path.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        if single {
-                            scan::probe(&scan_path).map(|entry| {
-                                scan::ScanOutcome::Complete(scan::Scan {
-                                    entries: vec![entry],
-                                    skipped_raw: 0,
-                                    skipped_packages: 0,
-                                    unreadable: Vec::new(),
-                                    walk_errors: Vec::new(),
-                                    existing_output: 0,
-                                })
-                            })
-                        } else {
-                            let token = scan_token.expect("folders own a cancellation token");
-                            Some(scan::scan_progressive_cancellable(
-                                &scan_path,
-                                &output.root(&scan_path),
-                                token,
-                                |_| std::ops::ControlFlow::Continue(()),
-                            ))
-                        }
-                    })
-                    .await;
-
-                let _ = this.update_in(cx, |audit, window, cx| {
-                    if !audit.owns_scan_request(request, token.as_ref()) {
-                        return;
-                    }
-                    match result {
-                        Some(scan::ScanOutcome::Complete(scanned)) => {
-                            audit.scanning = None;
-                            audit.scan_partial = false;
-                            audit.scan_interrupted = false;
-                            let root = if single {
-                                path.parent().unwrap_or(Path::new(".")).to_path_buf()
-                            } else {
-                                path.clone()
-                            };
-                            audit.install_dataset(scanned, root, single, None, window, cx);
-                            if !single {
-                                audit.scan_cancellation = None;
-                            }
-                        }
-                        Some(scan::ScanOutcome::Cancelled) => {
-                            audit.finish_cancelled_folder_scan(cx);
-                        }
-                        None => {
-                            audit.notify_error(
-                                "open-image",
-                                "Couldn’t open image",
-                                format!(
-                                    "{} is damaged, unsupported, or not an image.",
-                                    requested.display()
-                                ),
-                                cx,
-                            );
-                            if audit.scan_partial {
-                                audit.scan_interrupted = true;
-                            } else {
-                                audit.scanning = None;
-                            }
-                            cx.notify();
-                        }
-                    }
-                });
-                return;
-            }
-
-            let root = path.clone();
-            let output_root = output.root(&path);
-            let token = token.expect("progressive folders own a cancellation token");
-            let mut cancelled = cancelled
-                .take()
-                .expect("folder cancellation wakes the handoff");
-            let (mut handoff, mut batches) = ScanBatchHandoff::new();
-            let scan_token = token.clone();
-            let scan_task = cx.background_executor().spawn(async move {
-                scan::scan_progressive_cancellable(&path, &output_root, scan_token, |batch| {
-                    match futures::executor::block_on(handoff.publish(batch)) {
-                        ScanBatchPublish::Queued => std::ops::ControlFlow::Continue(()),
-                        ScanBatchPublish::Closed | ScanBatchPublish::AlreadyClosed => {
-                            std::ops::ControlFlow::Break(())
-                        }
-                    }
+            let scan_path = path.clone();
+            let (entry, folders) = cx
+                .background_executor()
+                .spawn(async move {
+                    let folders = scan_path
+                        .parent()
+                        .and_then(|parent| scan::child_folders(parent).ok())
+                        .unwrap_or_default();
+                    (scan::probe(&scan_path), folders)
                 })
-            });
-            let mut installed = false;
-            while let Some(entries) = next_scan_batch_or_cancel(&mut batches, &mut cancelled).await
-            {
-                let first = !installed;
-                let root = root.clone();
-                let accepted = this
-                    .update_in(cx, |audit, window, cx| {
-                        if !audit.owns_scan_request(request, Some(&token)) {
-                            return false;
-                        }
-                        if first {
-                            audit.install_dataset(
-                                scan::Scan {
-                                    entries,
-                                    skipped_raw: 0,
-                                    skipped_packages: 0,
-                                    unreadable: Vec::new(),
-                                    walk_errors: Vec::new(),
-                                    existing_output: 0,
-                                },
-                                root,
-                                false,
-                                None,
-                                window,
-                                cx,
-                            );
-                            audit.scan_partial = true;
-                        } else {
-                            audit.append_scan_batch(entries, cx);
-                        }
-                        true
-                    })
-                    .unwrap_or(false);
-                if !accepted {
-                    batches.close();
-                    break;
-                }
-                installed = true;
-            }
-            let outcome = scan_task.await;
+                .await;
             let _ = this.update_in(cx, |audit, window, cx| {
-                if !audit.owns_scan_request(request, Some(&token)) {
+                if !audit.owns_scan_request(request, None) {
                     return;
                 }
-                match outcome {
-                    scan::ScanOutcome::Complete(scanned) => {
-                        audit.scanning = None;
-                        audit.scan_partial = false;
-                        audit.scan_interrupted = false;
-                        if installed {
-                            audit.finish_progressive_scan(scanned, cx);
-                        } else {
-                            audit.install_dataset(scanned, root, false, None, window, cx);
-                        }
-                        audit.scan_cancellation = None;
-                    }
-                    scan::ScanOutcome::Cancelled => {
-                        audit.finish_cancelled_folder_scan(cx);
-                    }
+                audit.scanning = None;
+                if let Some(entry) = entry {
+                    audit.install_dataset(
+                        scan::Scan {
+                            entries: vec![entry],
+                            skipped_raw: 0,
+                            skipped_packages: 0,
+                            unreadable: Vec::new(),
+                            walk_errors: Vec::new(),
+                            existing_output: 0,
+                        },
+                        root.clone(),
+                        true,
+                        None,
+                        window,
+                        cx,
+                    );
+                    audit.install_browser_page(root, folders, cx);
+                } else {
+                    audit.notify_error(
+                        "open-image",
+                        "Couldn’t open image",
+                        format!(
+                            "{} is damaged, unsupported, or not an image.",
+                            requested.display()
+                        ),
+                        cx,
+                    );
                 }
+                cx.notify();
             });
         })
         .detach();
     }
 
-    /// Accept one folder or an exact batch of files from either a native picker or
-    /// the desktop's external-file drop event.
+    fn request_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.clear_error("open-image", cx);
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let request = self.scan_generation;
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+        let cancellation = ScanCancellation::new();
+        let token = cancellation.token.clone();
+        self.scan_cancellation = Some(cancellation);
+        self.scanning = Some(
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+        );
+        let output_root = self.output.root(&path);
+        let requested = path.clone();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let browse_token = token.clone();
+            let browsed = cx
+                .background_executor()
+                .spawn(async move {
+                    match scan::browse_cancellable(&path, &output_root, &browse_token) {
+                        Ok(Some(browsed)) => Some(Ok(browsed)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .await;
+            let _ = this.update_in(cx, |audit, window, cx| {
+                if !audit.owns_scan_request(request, Some(&token)) {
+                    return;
+                }
+                audit.scanning = None;
+                audit.scan_cancellation = None;
+                match browsed {
+                    Some(Ok(browsed)) => audit.install_browse(browsed, requested, window, cx),
+                    Some(Err(error)) => audit.notify_error(
+                        "open-image",
+                        "Couldn’t open folder",
+                        format!("{}: {error}", requested.display()),
+                        cx,
+                    ),
+                    None => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Accept folders or an exact batch of files from the desktop's external-file
+    /// drop event. Several folders share one parent so one output root remains safe.
     pub(super) fn request_paths(
         &mut self,
         mut paths: Vec<PathBuf>,
@@ -1377,6 +1270,7 @@ impl Audit {
         if self.converting || paths.is_empty() {
             return;
         }
+        paths = paths.into_iter().map(navigation_path).collect();
         paths.sort();
         paths.dedup();
         if paths.len() == 1 {
@@ -1385,16 +1279,38 @@ impl Audit {
                 self.request_path(path, cx);
             } else {
                 window.push_notification(
-                    Notification::warning("Drop one folder or any number of images.")
+                    Notification::warning("Drop one or more folders, or any number of images.")
                         .title("Couldn’t open selection"),
                     cx,
                 );
             }
             return;
         }
+        if paths.iter().all(|path| path.is_dir()) {
+            let Some(root) = batch_root(&paths) else {
+                window.push_notification(
+                    Notification::warning("Choose folders from one parent at a time.")
+                        .title("Couldn’t open selection"),
+                    cx,
+                );
+                return;
+            };
+            if root_needs_custom_output(&root, &self.output) {
+                window.push_notification(
+                    Notification::warning(
+                        "Choose a custom output folder before opening root-level folders.",
+                    )
+                    .title("Couldn’t open selection"),
+                    cx,
+                );
+                return;
+            }
+            self.request_folders(paths, root, cx);
+            return;
+        }
         if !paths.iter().all(|path| path.is_file()) {
             window.push_notification(
-                Notification::warning("Drop one folder or any number of images.")
+                Notification::warning("Drop folders or images, not both.")
                     .title("Couldn’t open selection"),
                 cx,
             );
@@ -1408,7 +1324,70 @@ impl Audit {
             );
             return;
         };
+        if root_needs_custom_output(&root, &self.output) {
+            window.push_notification(
+                Notification::warning(
+                    "Choose a custom output folder before opening root-level images.",
+                )
+                .title("Couldn’t open selection"),
+                cx,
+            );
+            return;
+        }
         self.request_files(paths, root, cx);
+    }
+
+    fn request_folders(&mut self, paths: Vec<PathBuf>, root: PathBuf, cx: &mut Context<Self>) {
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let request = self.scan_generation;
+        if let Some(cancellation) = self.scan_cancellation.as_mut() {
+            cancellation.cancel();
+        }
+        let cancellation = ScanCancellation::new();
+        let token = cancellation.token.clone();
+        self.scan_cancellation = Some(cancellation);
+        self.scanning = Some(format!("{} folders", paths.len()));
+        let folder_count = paths.len();
+        let output_root = self.output.root(&root);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let scan_token = token.clone();
+            let scanned = cx
+                .background_executor()
+                .spawn(async move {
+                    scan::browse_folders_cancellable(&paths, &output_root, &scan_token)
+                })
+                .await;
+            let _ = this.update_in(cx, |audit, window, cx| {
+                if !audit.owns_scan_request(request, Some(&token)) {
+                    return;
+                }
+                audit.scanning = None;
+                audit.scan_cancellation = None;
+                match scanned {
+                    Ok(Some(scanned)) => {
+                        let batch_size = scanned.entries.len();
+                        audit.install_dataset(scanned, root, false, Some(batch_size), window, cx);
+                        audit.batch_folders = Some(folder_count);
+                        if audit.sirv_pairing.is_some() {
+                            audit.unpair_sirv(cx);
+                        }
+                        audit.refresh_visible();
+                        audit.browser_overlay = false;
+                        cx.notify();
+                    }
+                    Ok(None) => {}
+                    Err(error) => audit.notify_error(
+                        "open-image",
+                        "Couldn’t open folders",
+                        error.to_string(),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
     }
 
     fn request_files(&mut self, paths: Vec<PathBuf>, root: PathBuf, cx: &mut Context<Self>) {
@@ -1419,7 +1398,6 @@ impl Audit {
         }
         self.scan_cancellation = None;
         self.scanning = Some(format!("{} images", paths.len()));
-        self.scan_interrupted = false;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1433,8 +1411,6 @@ impl Audit {
                     return;
                 }
                 audit.scanning = None;
-                audit.scan_partial = false;
-                audit.scan_interrupted = false;
                 audit.install_dataset(scanned, root, false, Some(batch_size), window, cx);
             });
         })
@@ -1492,8 +1468,7 @@ impl Audit {
                 .await;
             if let Some(path) = chosen {
                 let _ = this.update_in(cx, |audit, window, cx| {
-                    audit.output = Output::Folder(path);
-                    cx.notify();
+                    audit.set_output(Output::Folder(path), cx);
                     window.refresh();
                 });
             }
@@ -1502,7 +1477,22 @@ impl Audit {
     }
 
     pub(super) fn reset_output(&mut self, cx: &mut Context<Self>) {
-        self.output = Output::Optimized;
+        if root_needs_custom_output(&self.root, &Output::Optimized) {
+            self.notify_error(
+                "output",
+                "Couldn’t reset output",
+                "A filesystem-root selection requires a custom output folder.",
+                cx,
+            );
+            return;
+        }
+        self.set_output(Output::Optimized, cx);
+    }
+
+    fn set_output(&mut self, output: Output, cx: &mut Context<Self>) {
+        self.output = output;
+        self.browser_output_root = output_identity(&self.output, &self.root);
+        self.rebuild_tree(cx);
         cx.notify();
     }
 
@@ -1629,15 +1619,11 @@ fn project_total(slices: &[(u64, Option<(u64, u64)>)]) -> Option<(u64, usize)> {
 }
 
 fn conversion_targets(visible: &[usize], selected: &HashSet<usize>) -> Vec<usize> {
-    if selected.is_empty() {
-        visible.to_vec()
-    } else {
-        visible
-            .iter()
-            .copied()
-            .filter(|index| selected.contains(index))
-            .collect()
-    }
+    visible
+        .iter()
+        .copied()
+        .filter(|index| selected.contains(index))
+        .collect()
 }
 
 fn progress_batch_ready(completed: usize, workers: usize, work_remaining: bool) -> bool {
@@ -1664,9 +1650,16 @@ pub(crate) fn build_audit(
         quality,
         max_edge,
         grid,
+        recent_folders,
         columns: column_prefs,
         output,
     } = launch;
+    let root = navigation_path(root);
+    let recent_folders = recent_folders
+        .into_iter()
+        .map(navigation_path)
+        .collect::<Vec<_>>();
+    let browser_output_root = output_identity(&output, &root);
 
     let audit = cx.new(|cx| {
         let focus = cx.focus_handle();
@@ -1708,6 +1701,26 @@ pub(crate) fn build_audit(
                 .step(1.)
                 .default_value(quality.0.unwrap_or(80.))
         });
+        let folder_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search folders"));
+        cx.subscribe(
+            &folder_filter_input,
+            |audit: &mut Audit, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    audit.rebuild_tree(cx);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        let tree_state = cx.new(|cx| TreeState::new(cx));
+        cx.subscribe(
+            &tree_state,
+            |audit: &mut Audit, _, event: &TreeEvent, cx| {
+                audit.tree_event(event, cx);
+            },
+        )
+        .detach();
         // Dragging the slider is the only thing that changes quality now,
         // so results from the old value stop being true the moment it moves.
         cx.subscribe(
@@ -1745,7 +1758,21 @@ pub(crate) fn build_audit(
             table: None,
             table_signature: None,
             root,
+            browser_output_root,
             batch_size: None,
+            batch_folders: None,
+            folders: Vec::new(),
+            recent_folders,
+            browser_overlay: false,
+            folder_filter_input,
+            tree_state,
+            tree_anchor: PathBuf::new(),
+            tree_children: HashMap::new(),
+            tree_loaded: HashSet::new(),
+            tree_loading: HashSet::new(),
+            tree_expanded: HashSet::new(),
+            tree_paths: HashMap::new(),
+            folder_scroll: UniformListScrollHandle::new(),
             entries,
             skipped_raw,
             skipped_packages,
@@ -1806,8 +1833,6 @@ pub(crate) fn build_audit(
             scan_generation: 0,
             scanning: None,
             scan_cancellation: None,
-            scan_partial: false,
-            scan_interrupted: false,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),
@@ -1845,10 +1870,11 @@ pub(crate) fn build_audit(
             local_ai_job: None,
             column_prefs,
             output,
-            rail: Rail::Convert,
+            rail: Rail::None,
         };
         audit.refresh_visible();
         audit.schedule_estimate(cx);
+        audit.seed_tree_for_current_folder(cx);
         if open_single {
             audit.open_preview(0, cx);
         }

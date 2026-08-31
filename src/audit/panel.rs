@@ -180,48 +180,31 @@ impl Audit {
                 );
         }
         if self.selected.is_empty() {
-            let (headline, detail, tone) = match self.estimate {
-                Some((projected, _)) => {
-                    let source = self.target_bytes();
-                    let growth = projected > source;
-                    let delta = source.abs_diff(projected);
-                    let percent = delta as f32 / source.max(1) as f32 * 100.;
-                    (
-                        format!("\u{2248}{}", format_bytes(delta)),
-                        format!(
-                            "to {} · {}{percent:.0}%",
-                            if growth { "grow" } else { "save" },
-                            if growth { "+" } else { "\u{2212}" }
-                        ),
-                        if growth {
-                            cx.theme().yellow
-                        } else {
-                            cx.theme().green
-                        },
-                    )
-                }
-                None => (
-                    format_bytes(self.target_bytes()),
-                    "on disk".to_string(),
-                    cx.theme().muted_foreground,
-                ),
-            };
             return row
                 .child(
                     div()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(13.))
+                        .text_size(px(12.))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(tone)
+                        .text_color(cx.theme().foreground)
                         .whitespace_nowrap()
-                        .child(headline),
+                        .child("Select images"),
                 )
                 .child(
                     div()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .whitespace_nowrap()
-                        .child(detail),
+                        .child("to analyse"),
+                )
+                .child(
+                    div().debug_selector(|| "bar-select-all".into()).child(
+                        Button::new("bar-select-all")
+                            .small()
+                            .ghost()
+                            .label("Select all")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, _, cx| audit.toggle_select_all(cx))),
+                    ),
                 );
         }
         row.child(
@@ -703,7 +686,10 @@ impl Audit {
                             .ghost()
                             .label("Reset")
                             .tooltip("Write into optimized/ beside the originals again")
-                            .disabled(self.converting)
+                            .disabled(
+                                self.converting
+                                    || root_needs_custom_output(&self.root, &Output::Optimized),
+                            )
                             .on_click(cx.listener(|audit, _, _, cx| audit.reset_output(cx)))
                     }))
                     .child(

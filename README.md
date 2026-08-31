@@ -91,8 +91,10 @@ stays in the toolbar afterwards, so you can change source without restarting.
 Picking a new one drops every thumbnail and result belonging to the old one, because
 a stale saving next to a new file is a lie.
 
-It walks the folder and its subfolders, reads each image's header, and lists what it
-found — heaviest first, because that is where the work is.
+The window reads the current folder only, without scanning subfolders. Breadcrumbs,
+search, and the folder tree make moving between folders quick. Terminal `audit` and
+`convert` commands still walk subfolders. Images list heaviest first, because that is
+where the work is.
 
 | Column | Meaning |
 |---|---|
@@ -162,7 +164,8 @@ local-only, different, or Sirv-only. **Push** uploads all missing local original
 **Pull** downloads all missing remote files. Replacing different files requires a
 second confirming click. Transfer progress names the current file and retains named
 failures; **Stop** prevents the next file from starting. Refresh, change-folder, and
-unpair controls stay in the audit instead of hiding inside the folder browser.
+unpair controls stay in the audit instead of hiding inside the folder browser. Like
+the local audit, pairing compares the current folder only, not its subfolders.
 
 A completed conversion can publish its outputs to `optimized/` in the paired Sirv
 folder and copy responsive image markup. Press also detects numbered image sequences:
@@ -287,9 +290,9 @@ first few filenames, because "3 failed" is not a report.
 
 ### Choosing what to convert
 
-Tick rows to convert only those. With nothing ticked, Convert takes the whole folder,
-so the common case needs no ticking. On a 5,733-image folder you usually want the top
-twenty, which are already at the top.
+Tick rows to convert only those. With nothing ticked, Convert stays disabled; this
+keeps estimates and writes limited to files you explicitly selected. On a large
+folder you usually want the heaviest files, which are already at the top.
 
 ### WebP, AVIF, or JPEG XL
 

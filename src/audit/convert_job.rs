@@ -105,7 +105,13 @@ impl Audit {
                                     let name = audit
                                         .entries
                                         .get(index)
-                                        .map(|entry| entry.name())
+                                        .map(|entry| {
+                                            entry_label(
+                                                &audit.root,
+                                                audit.batch_folders.is_some(),
+                                                entry,
+                                            )
+                                        })
                                         .unwrap_or_default();
                                     audit.failures.push(match error.reason() {
                                         Some(reason) => format!("{name} ({reason})"),

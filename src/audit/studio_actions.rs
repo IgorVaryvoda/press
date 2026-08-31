@@ -196,10 +196,14 @@ impl Audit {
 
         let source = written.unwrap_or_else(|| entry.path.clone());
         let output_source = entry.path.clone();
-        let source_name = source
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| entry.name());
+        let source_name = if self.batch_folders.is_some() {
+            entry_label(&self.root, true, entry)
+        } else {
+            source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry.name())
+        };
         let dataset_generation = self.dataset_generation;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.studio_job = Some(StudioJob {

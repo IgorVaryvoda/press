@@ -24,7 +24,7 @@ pub(super) fn meter(
 
 impl Audit {
     pub(super) fn sirv_pair_disabled(&self, at_root: bool, listed: bool) -> bool {
-        at_root || !listed || self.scan_blocks_delivery()
+        at_root || !listed || self.batch_folders.is_some() || self.scan_blocks_delivery()
     }
 
     fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -518,6 +518,7 @@ impl Render for Audit {
             width: Some(f32::from(viewport.width)),
             height: Some(f32::from(viewport.height)),
             folder: self.root.is_dir().then(|| self.root.clone()),
+            recent_folders: self.recent_folders.clone(),
             columns: self.column_prefs,
             output: self.output.clone(),
         };
@@ -530,7 +531,11 @@ impl Render for Audit {
             // would make every column calculation 300px too wide. A closed rail
             // takes nothing, and the list gets the whole window.
             let (root_left, root_right) = root_horizontal_chrome(window);
-            let width = f32::from(viewport.width) - self.rail_width() - root_left - root_right;
+            let width = f32::from(viewport.width)
+                - self.rail_width()
+                - self.browser_width(window)
+                - root_left
+                - root_right;
             let prefs = self.column_prefs;
             let show_result = !self.results.is_empty();
             let show_sync = self.sirv_counts.is_some();
@@ -552,7 +557,7 @@ impl Render for Audit {
             }
         }
 
-        if let Some(scanning) = self.scanning.as_ref().filter(|_| !self.scan_partial) {
+        if let Some(scanning) = self.scanning.as_ref() {
             let label = scanning.clone();
             return div()
                 .size_full()
@@ -580,7 +585,7 @@ impl Render for Audit {
                                 .text_size(px(18.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(cx.theme().foreground)
-                                .child(format!("Scanning {label}…")),
+                                .child(format!("Opening {label}…")),
                         )
                         .child(
                             div()
@@ -599,20 +604,7 @@ impl Render for Audit {
                 .into_any_element();
         }
 
-        if self.entries.is_empty() {
-            let empty_folder = self.root.is_dir();
-            let folder_name = self
-                .root
-                .file_name()
-                .unwrap_or(self.root.as_os_str())
-                .to_string_lossy()
-                .to_string();
-            let description = if empty_folder {
-                format!("The “{folder_name}” folder has no supported images.")
-            } else {
-                "Nothing is uploaded. Press audits first; Convert writes optimized copies and leaves originals unchanged."
-                    .into()
-            };
+        if self.entries.is_empty() && self.folders.is_empty() && self.root.as_os_str().is_empty() {
             return div()
                 .size_full()
                 .flex()
@@ -641,18 +633,16 @@ impl Render for Audit {
                                 .text_size(px(19.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(cx.theme().foreground)
-                                .child(if empty_folder {
-                                    "No supported images found"
-                                } else {
-                                    "Audit images"
-                                }),
+                                .child("Audit images"),
                         )
                         .child(
                             div()
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
                                 .text_center()
-                                .child(description),
+                                .child(
+                                    "Nothing is uploaded. Press audits first; Convert writes optimized copies and leaves originals unchanged.",
+                                ),
                         )
                         .child(
                             div()
@@ -684,7 +674,7 @@ impl Render for Audit {
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    "Drop one folder or any number of images anywhere in this window",
+                                    "Drop one or more sibling folders, or any number of images anywhere in this window",
                                 ),
                         ),
                 )
@@ -883,8 +873,18 @@ impl Audit {
         // What the list has to itself. The floating bar has to fit inside it,
         // and at the minimum window with a rail open that is 460px.
         let (root_left, root_right) = root_horizontal_chrome(window);
-        let list_width =
-            f32::from(window.viewport_size().width) - self.rail_width() - root_left - root_right;
+        let list_width = f32::from(window.viewport_size().width)
+            - self.rail_width()
+            - self.browser_width(window)
+            - root_left
+            - root_right;
+        let persistent_browser = self.browser_persistent(window);
+        if persistent_browser {
+            self.browser_overlay = false;
+        }
+        let persistent_sidebar = persistent_browser.then(|| self.folder_sidebar(cx));
+        let overlay_sidebar =
+            (!persistent_browser && self.browser_overlay).then(|| self.folder_sidebar(cx));
         div()
             .size_full()
             .flex()
@@ -976,14 +976,16 @@ impl Audit {
                     audit.request_paths(paths.paths().to_vec(), window, cx);
                 }),
             )
-            .child(self.header(count, cx))
+            .child(self.header(count, window, cx))
             // Audit on the left, the output panel on the right: the working
             // area and the settings column split below one shared header.
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .overflow_hidden()
+                    .children(persistent_sidebar)
                     .child(
                         // The list, with the action bar floating over its foot.
                         // The bar is four words wide; reserving a column for it
@@ -1005,11 +1007,49 @@ impl Audit {
                             .children(self.studio_notice(cx))
                             .child(self.audit_content(count, window, cx))
                             .children(
-                                (self.sirv_scope != Some(SirvScope::OnlyRemote))
-                                    .then(|| self.action_bar(list_width, cx)),
+                                (self.sirv_scope != Some(SirvScope::OnlyRemote)
+                                    && !self.visible.is_empty())
+                                .then(|| self.action_bar(list_width, cx)),
                             ),
                     )
-                    .children(self.rail_view(cx)),
+                    .children(self.rail_view(cx))
+                    .children(overlay_sidebar.map(|sidebar| {
+                        div()
+                            .id("folder-overlay")
+                            .absolute()
+                            .inset_0()
+                            .on_key_down(cx.listener(
+                                |audit, event: &gpui::KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "escape" {
+                                        audit.close_browser_overlay(window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(cx.theme().background.opacity(0.55))
+                                    .debug_selector(|| "folder-overlay-backdrop".into())
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|audit, _, window, cx| {
+                                            audit.close_browser_overlay(window, cx);
+                                            cx.stop_propagation();
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(px(browser::SIDEBAR_WIDTH))
+                                    .h_full()
+                                    .shadow_lg()
+                                    .occlude()
+                                    .child(sidebar),
+                            )
+                    })),
             )
             .into_any_element()
     }
@@ -1051,6 +1091,41 @@ impl Audit {
                 .child(self.sirv_remote_only_view(cx))
                 .into_any_element();
         }
+        let has_visible_folders = self.has_visible_folders();
+        if self.entries.is_empty() && !has_visible_folders {
+            let folder = self
+                .root
+                .file_name()
+                .unwrap_or(self.root.as_os_str())
+                .to_string_lossy();
+            return div()
+                .debug_selector(|| "empty-folder-message".into())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(cx.theme().table)
+                .child(
+                    div()
+                        .font_family("SF Pro Display")
+                        .text_size(px(18.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child("No supported images found"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "The “{folder}” folder has no direct supported images."
+                        )),
+                )
+                .into_any_element();
+        }
+        let folder_rows = has_visible_folders.then(|| self.folder_rows(cx));
         // The list runs to the window edge; hairlines above it, not a
         // card floating in padding.
         div()
@@ -1068,13 +1143,16 @@ impl Audit {
             // The action bar floats over this strip rather than over the last
             // row, so every file can be scrolled into the clear.
             .pb(px(panel::BAR_CLEARANCE))
+            .children(folder_rows)
             // Columns take a width, not a share, so the remainder after the
             // fixed ones has to be handed to the name column by hand.
             .child(if self.grid {
                 // One virtualised band is one row of fixed-size tiles.
                 let (root_left, root_right) = root_horizontal_chrome(window);
                 let layout = gallery_layout(
-                    f32::from(window.viewport_size().width) - self.rail_width(),
+                    f32::from(window.viewport_size().width)
+                        - self.rail_width()
+                        - self.browser_width(window),
                     root_left,
                     root_right,
                     count,
@@ -1099,7 +1177,9 @@ impl Audit {
                                 let mut tiles = Vec::new();
                                 let (root_left, root_right) = root_horizontal_chrome(_window);
                                 let layout = gallery_layout(
-                                    f32::from(_window.viewport_size().width) - audit.rail_width(),
+                                    f32::from(_window.viewport_size().width)
+                                        - audit.rail_width()
+                                        - audit.browser_width(_window),
                                     root_left,
                                     root_right,
                                     audit.visible.len(),

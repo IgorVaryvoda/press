@@ -13,25 +13,11 @@ use gpui::{HeadlessAppContext, TestAppContext, size};
 use gpui_component::Root;
 use image::ImageFormat;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-use std::task::{Context as TaskContext, Poll};
-use std::thread;
+use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 
-struct WakeCount(AtomicUsize);
-
-impl futures::task::ArcWake for WakeCount {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
 fn retained_scan(audit: &mut Audit) -> Arc<std::sync::atomic::AtomicBool> {
-    let (cancellation, _) = ScanCancellation::new();
+    let cancellation = ScanCancellation::new();
     let token = cancellation.token.clone();
     audit.scan_cancellation = Some(cancellation);
     audit.scanning = Some("old folder".into());
@@ -45,7 +31,7 @@ fn scan_fixture(name: &str) -> PathBuf {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("press-audit-{name}-{nonce}"));
     std::fs::create_dir_all(&root).expect("the scan fixture folder is created");
-    root
+    std::fs::canonicalize(root).expect("the scan fixture has one filesystem identity")
 }
 
 fn write_png(root: &Path, name: &str) -> PathBuf {
@@ -71,33 +57,70 @@ fn test_pairing() -> SirvPairing {
 }
 
 #[test]
-fn cancellation_wakes_an_already_pending_batch_feed() {
-    let (mut handoff, mut batches) = ScanBatchHandoff::new();
-    assert_eq!(
-        futures::executor::block_on(handoff.publish(&[])),
-        ScanBatchPublish::Queued
-    );
-    let mut publisher = Box::pin(handoff.publish(&[]));
-    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
-    let waker = futures::task::waker(wakes.clone());
-    let mut task = TaskContext::from_waker(&waker);
-    assert!(matches!(publisher.as_mut().poll(&mut task), Poll::Pending));
-    let (mut cancellation, mut receiver) = ScanCancellation::new();
-    cancellation.cancel();
-    assert!(
-        futures::executor::block_on(next_scan_batch_or_cancel(&mut batches, &mut receiver))
-            .is_none()
-    );
-    assert!(wakes.0.load(Ordering::SeqCst) > 0);
-    assert_eq!(
-        publisher.as_mut().poll(&mut task),
-        Poll::Ready(ScanBatchPublish::Closed)
-    );
+fn filesystem_root_needs_a_custom_output() {
+    let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+    assert!(root_needs_custom_output(root, &Output::Optimized));
+    assert!(!root_needs_custom_output(
+        root,
+        &Output::Folder(PathBuf::from("output"))
+    ));
+}
+
+#[test]
+fn home_shortcut_uses_the_navigation_path_identity() {
+    let variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    if let Some(home) = std::env::var_os(variable) {
+        assert_eq!(browser::home_dir(), Some(navigation_path(home.into())));
+    }
+}
+
+#[gpui::test]
+fn direct_navigation_refuses_the_filesystem_root_with_default_output(cx: &mut TestAppContext) {
+    let root = std::env::current_dir()
+        .unwrap()
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_path_buf();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root, cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.root.as_os_str().is_empty());
+        assert!(audit.scanning.is_none());
+    });
+    assert_eq!(notification_count(cx), 1);
+}
+
+#[gpui::test]
+fn filesystem_root_output_cannot_be_reset_to_optimized(cx: &mut TestAppContext) {
+    let root = std::env::current_dir()
+        .unwrap()
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_path_buf();
+    let output = Output::Folder(PathBuf::from("custom-output"));
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root;
+        audit.output = output.clone();
+        audit.reset_output(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.output, output));
+    assert_eq!(notification_count(cx), 1);
 }
 
 #[gpui::test]
 fn opening_one_file_through_request_paths_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
     let root = scan_fixture("one-file");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
     let file = write_png(&root, "one.png");
     let (audit, cx) = finding_audit(cx);
     let old = audit.update_in(cx, |audit, window, cx| {
@@ -107,6 +130,11 @@ fn opening_one_file_through_request_paths_cancels_the_active_folder_scan(cx: &mu
     });
     assert!(old.load(Ordering::Acquire));
     cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.folders, vec![child.clone()]);
+        assert!(audit.tree_paths.values().any(|path| path == &child));
+    });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
@@ -194,20 +222,19 @@ fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
     audit.update(cx, |audit, _| {
         let old = retained_scan(audit);
         let request = audit.scan_generation;
-        let (new, _) = ScanCancellation::new();
+        let new = ScanCancellation::new();
         audit.scan_cancellation = Some(new);
         assert!(!audit.owns_scan_request(request, Some(&old)));
     });
 }
 #[gpui::test]
-fn same_root_rescan_selects_the_cancellable_nonprogressive_core(cx: &mut TestAppContext) {
+fn same_root_rescan_remains_cancellable(cx: &mut TestAppContext) {
     let root = scan_fixture("same-root");
     write_png(&root, "one.png");
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| {
         audit.root = root.clone();
         audit.sirv_pairing = Some(test_pairing());
-        assert!(!should_scan_progressively(&audit.root, &root, true, false));
         audit.request_paths(vec![root.clone()], window, cx);
         assert!(audit.scan_cancellation.is_some());
         audit.cancel_retained_scan();
@@ -216,50 +243,38 @@ fn same_root_rescan_selects_the_cancellable_nonprogressive_core(cx: &mut TestApp
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
-fn a_failed_replacement_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
+fn a_failed_file_replacement_keeps_the_last_dataset(cx: &mut TestAppContext) {
     let root = scan_fixture("corrupt");
     let corrupt = root.join("corrupt.png");
     std::fs::write(&corrupt, b"not a png").expect("the corrupt fixture is written");
     let (audit, cx) = finding_audit(cx);
     let old = audit.update_in(cx, |audit, window, cx| {
         let old = retained_scan(audit);
-        audit.scan_partial = true;
         audit.request_paths(vec![corrupt], window, cx);
         old
     });
     cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
         assert!(old.load(Ordering::Acquire));
-        assert!(audit.scan_partial && audit.scanning.is_some() && audit.scan_interrupted);
+        assert!(audit.scanning.is_none());
+        assert_eq!(audit.dataset_generation, 0);
+        assert_eq!(audit.entries.len(), 3);
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
 #[gpui::test]
-fn a_cancelled_scan_keeps_partial_rows_incomplete(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, _| {
-        audit.scan_partial = true;
-        audit.scanning = Some("partial".into());
-        audit.scan_interrupted = true;
-    });
-    audit.read_with(cx, |audit, _| {
-        assert!(audit.scan_partial && audit.scan_interrupted && audit.scan_blocks_delivery())
-    });
-}
-#[gpui::test]
-fn an_interrupted_partial_scan_blocks_delivery_actions(cx: &mut TestAppContext) {
+fn an_active_scan_blocks_delivery_actions(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| audit.scanning = Some("partial".into()));
     audit.read_with(cx, |audit, _| assert!(audit.scan_blocks_delivery()));
 }
 #[gpui::test]
-fn a_successful_retry_clears_incomplete_state(cx: &mut TestAppContext) {
+fn a_successful_retry_replaces_the_dataset(cx: &mut TestAppContext) {
     let root = scan_fixture("retry");
     write_png(&root, "retry.png");
     let (audit, cx) = finding_audit(cx);
     let (old, estimates) = audit.update_in(cx, |audit, window, cx| {
         let old = retained_scan(audit);
-        audit.scan_partial = true;
         let estimates = audit.estimate_generation;
         audit.request_paths(vec![root.clone()], window, cx);
         (old, estimates)
@@ -272,7 +287,6 @@ fn a_successful_retry_clears_incomplete_state(cx: &mut TestAppContext) {
         assert_eq!(audit.dataset_generation, 1);
         assert!(audit.scanning.is_none());
         assert!(audit.scan_cancellation.is_none());
-        assert!(!audit.scan_partial && !audit.scan_interrupted);
         assert!(audit.estimate_generation > estimates);
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
@@ -327,68 +341,8 @@ fn a_normal_folder_scan_lands_once(cx: &mut TestAppContext) {
         assert_eq!(audit.dataset_generation, 1);
         assert!(audit.scanning.is_none());
         assert!(audit.scan_cancellation.is_none());
-        assert!(!audit.scan_partial && !audit.scan_interrupted);
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
-}
-
-#[test]
-fn the_scan_batch_handoff_applies_backpressure() {
-    let (mut handoff, mut batches) = ScanBatchHandoff::new();
-    assert_eq!(
-        futures::executor::block_on(handoff.publish(&[])),
-        ScanBatchPublish::Queued
-    );
-
-    let (second_tx, second_rx) = mpsc::sync_channel(1);
-    let second_thread = thread::spawn(move || {
-        let status = futures::executor::block_on(handoff.publish(&[]));
-        second_tx
-            .send((status, handoff))
-            .expect("the test receives the second handoff");
-    });
-    assert!(matches!(
-        second_rx.recv_timeout(Duration::from_millis(100)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
-    assert_eq!(
-        futures::executor::block_on(batches.next()),
-        Some(Vec::new())
-    );
-    let (status, mut handoff) = second_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("the second publish completes after the batch is received");
-    assert_eq!(status, ScanBatchPublish::Queued);
-    second_thread.join().expect("the second publisher joins");
-
-    let (third_started_tx, third_started_rx) = mpsc::sync_channel(0);
-    let (third_tx, third_rx) = mpsc::sync_channel(1);
-    let third_thread = thread::spawn(move || {
-        third_started_tx
-            .send(())
-            .expect("the test waits for the third publisher");
-        let status = futures::executor::block_on(handoff.publish(&[]));
-        third_tx
-            .send((status, handoff))
-            .expect("the test receives the closed handoff");
-    });
-    third_started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("the third publisher starts");
-    assert!(matches!(
-        third_rx.recv_timeout(Duration::from_millis(100)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
-    drop(batches);
-    let (status, mut handoff) = third_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("receiver closure wakes the third publish");
-    assert_eq!(status, ScanBatchPublish::Closed);
-    third_thread.join().expect("the third publisher joins");
-    assert_eq!(
-        futures::executor::block_on(handoff.publish(&[])),
-        ScanBatchPublish::AlreadyClosed
-    );
 }
 
 /// Render the audit window to a PNG, so a change to it can actually be looked at.
@@ -453,6 +407,7 @@ fn screenshot() {
                     quality: Quality::lossy(80.),
                     max_edge: MaxEdge::FULL,
                     grid: mode == "grid",
+                    recent_folders: Vec::new(),
                     columns: ColumnPrefs::default(),
                     output: crate::settings::Output::default(),
                 },
@@ -602,7 +557,7 @@ fn compact_results_keep_both_byte_values() {
 #[test]
 fn conversion_targets_follow_visible_order() {
     let visible = [2, 0, 1];
-    assert_eq!(conversion_targets(&visible, &HashSet::new()), vec![2, 0, 1]);
+    assert!(conversion_targets(&visible, &HashSet::new()).is_empty());
 
     let selected = HashSet::from([0, 3]);
     assert_eq!(conversion_targets(&visible, &selected), vec![0]);
@@ -654,6 +609,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         quality: Quality::lossy(80.),
         max_edge: MaxEdge::FULL,
         grid: false,
+        recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
     };
@@ -761,6 +717,7 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         quality: Quality::lossy(80.),
         max_edge: MaxEdge::FULL,
         grid: false,
+        recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
     };
@@ -1149,7 +1106,22 @@ fn table_select_all_follows_the_visible_rows(cx: &mut TestAppContext) {
 /// The app sorts indices into an unmoved `entries`; these tests sort the data
 /// directly, which is the same comparator either way.
 fn sort_entries(entries: &mut [Entry], sort: Sort) {
-    entries.sort_by(|a, b| compare_entries(a, b, sort));
+    entries.sort_by(|a, b| compare_entries(a, b, sort, &a.name_lossy(), &b.name_lossy()));
+}
+
+#[test]
+fn batch_name_sorting_uses_the_displayed_relative_path() {
+    let first = entry("a.png", 1, 1, 1, ImageFormat::Png);
+    let second = entry("z.png", 1, 1, 1, ImageFormat::Png);
+    let sort = Sort {
+        column: Column::Name,
+        descending: false,
+    };
+
+    assert_eq!(
+        compare_entries(&first, &second, sort, "z/a.png", "a/z.png"),
+        std::cmp::Ordering::Greater
+    );
 }
 
 /// `img` will not scale an image past its own size, so a thumbnail smaller than the
@@ -1354,6 +1326,7 @@ fn notification_audit(
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: false,
+                recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
             },
@@ -1677,30 +1650,6 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_progressive_scan_appends_rows_without_replacing_the_dataset(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    let generation = audit.read_with(cx, |audit, _| audit.dataset_generation);
-
-    audit.update(cx, |audit, cx| {
-        audit.scanning = Some("more-images".into());
-        audit.scan_partial = true;
-        audit.schedule_estimate(cx);
-        audit.append_scan_batch(
-            vec![entry("new-heavy.png", 100, 100, 400_000, ImageFormat::Png)],
-            cx,
-        );
-    });
-
-    audit.read_with(cx, |audit, _| {
-        assert_eq!(audit.dataset_generation, generation);
-        assert_eq!(audit.entries.len(), 4);
-        assert_eq!(audit.visible.len(), 4);
-        assert_eq!(audit.entries[audit.visible[0]].name(), "new-heavy.png");
-        assert!(audit.estimate.is_none());
-    });
-}
-
-#[gpui::test]
 fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -1764,6 +1713,7 @@ fn finding_launch() -> Launch {
         quality: Quality::lossy(80.),
         max_edge: MaxEdge::FULL,
         grid: false,
+        recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
     }
@@ -1810,6 +1760,7 @@ fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppCon
         .as_nanos();
     let root = std::env::temp_dir().join(format!("press-multi-drop-{nonce}"));
     std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
     let write = |name: &str, colour: [u8; 3]| {
         let path = root.join(name);
         image::RgbImage::from_pixel(8, 8, image::Rgb(colour))
@@ -1836,6 +1787,82 @@ fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppCon
         assert_eq!(audit.batch_size, Some(2));
         assert_eq!(names(&audit.entries), ["first.png", "second.png"]);
     });
+}
+
+#[gpui::test]
+fn a_desktop_drop_opens_direct_images_from_every_dropped_folder(cx: &mut TestAppContext) {
+    let root = scan_fixture("multi-folder-drop");
+    let first_folder = root.join("first");
+    let second_folder = root.join("second");
+    std::fs::create_dir_all(first_folder.join("nested")).unwrap();
+    std::fs::create_dir_all(&second_folder).unwrap();
+    write_png(&first_folder, "z.png");
+    write_png(&second_folder, "a.png");
+    write_png(&first_folder.join("nested"), "not-direct.png");
+
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.sort = Sort {
+            column: Column::Name,
+            descending: false,
+        };
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let position = cx.debug_bounds("audit-header").unwrap().center();
+    cx.simulate_event(gpui::FileDropEvent::Entered {
+        position,
+        paths: gpui::ExternalPaths([first_folder, second_folder].into_iter().collect()),
+    });
+    cx.simulate_event(gpui::FileDropEvent::Submit { position });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.batch_size, Some(2));
+        assert_eq!(audit.batch_folders, Some(2));
+        let labels = audit
+            .visible
+            .iter()
+            .map(|index| entry_label(&audit.root, true, &audit.entries[*index]))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["first/z.png", "second/a.png"]);
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_symlinked_multi_folder_drop_keeps_one_root_identity(cx: &mut TestAppContext) {
+    use std::os::unix::fs::symlink;
+
+    let fixture = scan_fixture("multi-folder-alias");
+    let root = fixture.join("real");
+    let first = root.join("first");
+    let second = root.join("second");
+    let alias = fixture.join("alias");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    write_png(&first, "one.png");
+    write_png(&second, "two.png");
+    symlink(&root, &alias).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update_in(cx, |audit, window, cx| {
+        audit.request_paths(vec![alias.join("first"), alias.join("second")], window, cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.batch_folders, Some(2));
+        assert!(
+            audit
+                .entries
+                .iter()
+                .all(|entry| entry.path.starts_with(&audit.root))
+        );
+    });
+    std::fs::remove_dir_all(fixture).unwrap();
 }
 
 #[gpui::test]
@@ -1868,9 +1895,9 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
     audit.update(cx, |audit, _| {
         assert_eq!(audit.heavy, 1);
         assert_eq!(audit.mislabelled, 1);
-        assert_eq!(audit.target_count(), 3);
-        assert_eq!(audit.conversion_action_label(), "Convert all 3 to WEBP");
-        assert_eq!(audit.target_bytes(), 401_000);
+        assert_eq!(audit.target_count(), 0);
+        assert_eq!(audit.conversion_action_label(), "Select images to convert");
+        assert_eq!(audit.target_bytes(), 0);
 
         audit.selected.extend([0, 2, 99]);
         audit.refresh_target_summary();
@@ -2261,6 +2288,7 @@ fn pointer_checkbox_audit(
         quality: Quality::lossy(80.),
         max_edge: MaxEdge::FULL,
         grid,
+        recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
     };
@@ -2294,6 +2322,25 @@ fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext
             Some(0)
         );
         assert_eq!(audit.selected, [0, 1].into_iter().collect());
+    });
+}
+
+#[gpui::test]
+fn an_empty_gallery_selection_still_offers_select_all(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(true, cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selection_changed(cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let select_all = cx
+        .debug_bounds("bar-select-all")
+        .expect("the gallery action bar keeps its bulk-selection action");
+    cx.simulate_click(select_all.center(), gpui::Modifiers::none());
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, HashSet::from([0, 1]));
     });
 }
 
@@ -2533,25 +2580,14 @@ fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
         });
         audit.rail = Rail::Studio;
         retained_scan(audit);
-        audit.scan_partial = true;
         assert!(audit.studio_commit_disabled(Some(0), true, false, true));
         audit.scanning = None;
         assert!(!audit.studio_commit_disabled(Some(0), true, false, true));
         retained_scan(audit);
-        audit.scan_partial = true;
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let commit = cx
-        .debug_bounds("studio-commit")
-        .expect("Studio commit is rendered");
-    cx.simulate_click(commit.center(), gpui::Modifiers::none());
-    audit.read_with(cx, |audit, _| {
-        assert!(matches!(
-            audit.studio_job.as_ref().map(|job| &job.state),
-            Some(StudioJobState::AwaitingConfirmation(_))
-        ));
-    });
+    assert!(cx.debug_bounds("studio-commit").is_none());
     audit.update(cx, |audit, cx| audit.confirm_studio_for_test(cx));
     audit.read_with(cx, |audit, _| assert!(audit.studio_job.is_none()));
 }
@@ -2571,18 +2607,19 @@ fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
             focus: cx.focus_handle(),
         });
         retained_scan(audit);
-        audit.scan_partial = true;
         assert!(audit.sirv_pair_disabled(false, true));
         audit.scanning = None;
         assert!(!audit.sirv_pair_disabled(false, true));
+        audit.batch_folders = Some(2);
+        assert!(audit.sirv_pair_disabled(false, true));
+        audit.pair_sirv(cx);
+        assert!(audit.sirv_pairing.is_none());
+        audit.batch_folders = None;
         retained_scan(audit);
-        audit.scan_partial = true;
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let pair = cx.debug_bounds("sirv-pair").expect("Sirv pair is rendered");
-    cx.simulate_click(pair.center(), gpui::Modifiers::none());
-    audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
+    assert!(cx.debug_bounds("sirv-pair").is_none());
     audit.update(cx, |audit, cx| audit.pair_sirv(cx));
     audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
 }
@@ -2604,38 +2641,25 @@ fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestA
         audit.studio_source = Some((1, PathBuf::from("optimized/second.webp")));
         audit.rail = Rail::Convert;
         retained_scan(audit);
-        audit.scan_partial = true;
         assert!(audit.media_commit_actions_disabled());
         audit.scanning = None;
         assert!(!audit.media_commit_actions_disabled());
         retained_scan(audit);
-        audit.scan_partial = true;
         cx.notify();
     });
 
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let target = cx
-        .debug_bounds(if grid {
+    assert!(
+        cx.debug_bounds(if grid {
             "grid-checkbox-0"
         } else {
             "table-checkbox-0"
         })
-        .expect("the image context-menu trigger is rendered")
-        .center();
-    cx.simulate_mouse_down(target, gpui::MouseButton::Right, gpui::Modifiers::none());
-    cx.simulate_mouse_up(target, gpui::MouseButton::Right, gpui::Modifiers::none());
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-
-    cx.simulate_keystrokes("down down down enter");
+        .is_none()
+    );
 
     audit.update(cx, |audit, cx| {
         assert_eq!(audit.selected, HashSet::from([1]));
-        let preview = audit
-            .compare
-            .as_ref()
-            .expect("Preview opens for the first image");
-        assert_eq!(preview.index, 0);
-        assert_eq!(preview.mode, MediaMode::Preview);
         assert_eq!(
             audit.studio_source,
             Some((1, PathBuf::from("optimized/second.webp")))
@@ -2647,9 +2671,6 @@ fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestA
         audit.open_ai_operations(0, None, cx);
 
         assert_eq!(audit.selected, HashSet::from([1]));
-        let preview = audit.compare.as_ref().expect("Preview stays open");
-        assert_eq!(preview.index, 0);
-        assert_eq!(preview.mode, MediaMode::Preview);
         assert_eq!(
             audit.studio_source,
             Some((1, PathBuf::from("optimized/second.webp")))
@@ -2847,7 +2868,10 @@ fn one_ticked_file_is_what_single_image_tools_act_on(cx: &mut TestAppContext) {
 #[gpui::test]
 fn custom_output_and_destination_are_named_in_the_panel(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, _| audit.quality = Quality::lossy(57.));
+    audit.update(cx, |audit, _| {
+        audit.quality = Quality::lossy(57.);
+        audit.rail = Rail::Convert;
+    });
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
     assert!(cx.debug_bounds("output-destination").is_some());
@@ -3054,6 +3078,442 @@ fn gallery_geometry_accounts_for_root_chrome_and_supported_widths() {
     assert_eq!(gallery_layout(3440., 22., 22., 100).columns, 19);
 }
 
+#[gpui::test]
+fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("folder-sidebar").is_some());
+    assert!(cx.debug_bounds("folder-tree-toggle").is_none());
+
+    cx.simulate_resize(size(px(900.), px(720.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("folder-sidebar").is_none());
+    assert!(cx.debug_bounds("folder-tree-toggle").is_some());
+
+    audit.update_in(cx, |audit, window, cx| audit.toggle_browser(window, cx));
+    audit.read_with(cx, |audit, _| assert!(audit.browser_overlay));
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert!(!audit.browser_overlay));
+    cx.simulate_resize(size(px(900.), px(720.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("folder-sidebar").is_none());
+
+    audit.update(cx, |audit, cx| audit.open_rail(Rail::Convert, cx));
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("folder-sidebar").is_none());
+    assert!(cx.debug_bounds("folder-tree-toggle").is_some());
+}
+
+#[gpui::test]
+fn escape_closes_the_folder_overlay_without_clearing_selection(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.selected.insert(0);
+    });
+    cx.simulate_resize(size(px(900.), px(720.)));
+    cx.run_until_parked();
+    audit.update_in(cx, |audit, window, cx| audit.toggle_browser(window, cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert!(audit.browser_overlay));
+    cx.update(|window, cx| {
+        assert!(
+            audit
+                .read(cx)
+                .folder_filter_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.browser_overlay);
+        assert_eq!(audit.selected, HashSet::from([0]));
+    });
+    cx.update(|window, cx| assert!(audit.read(cx).focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn backdrop_closes_the_folder_overlay_and_restores_list_focus(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.simulate_resize(size(px(900.), px(720.)));
+    audit.update_in(cx, |audit, window, cx| audit.toggle_browser(window, cx));
+    cx.run_until_parked();
+
+    let backdrop = cx
+        .debug_bounds("folder-overlay-backdrop")
+        .expect("the narrow folder browser has a backdrop");
+    cx.simulate_click(backdrop.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert!(!audit.browser_overlay));
+    cx.update(|window, cx| assert!(audit.read(cx).focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn a_stale_recent_removes_itself_without_closing_the_browser(cx: &mut TestAppContext) {
+    let stale = std::env::temp_dir().join("press-stale-recent");
+    let _ = std::fs::remove_dir_all(&stale);
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| audit.recent_folders = vec![stale.clone()]);
+    let original_root = audit.read_with(cx, |audit, _| audit.root.clone());
+    cx.simulate_resize(size(px(900.), px(720.)));
+    audit.update_in(cx, |audit, window, cx| audit.toggle_browser(window, cx));
+    cx.run_until_parked();
+
+    let recent = cx
+        .debug_bounds("recent-0")
+        .expect("the saved recent folder is visible");
+    cx.simulate_click(recent.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.recent_folders.is_empty());
+        assert_eq!(audit.root, original_root);
+        assert!(audit.browser_overlay);
+    });
+}
+
+#[gpui::test]
+fn folder_search_filters_the_loaded_tree_case_insensitively(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-search");
+    let alpha = root.join("Alpha");
+    let beta = root.join("Beta");
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    let search = cx
+        .debug_bounds("folder-search")
+        .expect("the folder browser has a search field");
+    cx.simulate_click(search.center(), gpui::Modifiers::none());
+    cx.simulate_input("ALP");
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, cx| {
+        assert_eq!(audit.folder_filter_input.read(cx).value(), "ALP");
+        assert!(audit.tree_paths.values().any(|path| path == &alpha));
+        assert!(!audit.tree_paths.values().any(|path| path == &beta));
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn a_failed_tree_listing_can_be_retried(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-tree-retry");
+    let missing = root.join("later");
+    let child = missing.join("child");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.tree_anchor = root.clone();
+        audit.tree_expanded.insert(missing.clone());
+        audit.load_tree_children(missing.clone(), cx);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.tree_loaded.contains(&missing));
+        assert!(!audit.tree_loading.contains(&missing));
+        assert!(!audit.tree_expanded.contains(&missing));
+    });
+
+    std::fs::create_dir_all(&child).unwrap();
+    audit.update(cx, |audit, cx| {
+        audit.load_tree_children(missing.clone(), cx)
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.tree_loaded.contains(&missing));
+        assert_eq!(audit.tree_children.get(&missing), Some(&vec![child]));
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn changing_output_rebuilds_the_folder_tree(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-output-tree");
+    let child = root.join("generated");
+    std::fs::create_dir_all(&child).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.output = Output::Folder(child.clone());
+        audit.request_path(root.clone(), cx);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.tree_paths.values().any(|path| path == &child));
+    });
+
+    audit.update(cx, |audit, cx| audit.reset_output(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.tree_paths.values().any(|path| path == &child));
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-collapse");
+    std::fs::create_dir_all(root.join("child")).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    let disclosure = cx
+        .debug_bounds("folder-disclosure-0")
+        .expect("the expanded root has a disclosure control");
+    let generation = audit.read_with(cx, |audit, _| audit.dataset_generation);
+    cx.simulate_click(disclosure.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert!(!audit.tree_expanded.contains(&audit.root));
+        assert_eq!(audit.dataset_generation, generation);
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn enter_opens_the_keyboard_selected_tree_folder(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-keyboard");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        audit.update(cx, |audit, cx| {
+            audit.selected.insert(0);
+            audit
+                .tree_state
+                .update(cx, |tree, cx| tree.focus(window, cx));
+        });
+    });
+    cx.simulate_keystrokes("space");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, HashSet::from([0]))
+    });
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.root, child));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn arrow_down_moves_keyboard_focus_from_search_to_the_tree(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-search-keyboard");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(900.), px(720.)));
+    audit.update_in(cx, |audit, window, cx| audit.toggle_browser(window, cx));
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("down down enter");
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.root, child));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn output_aliases_stay_out_of_the_folder_tree(cx: &mut TestAppContext) {
+    use std::os::unix::fs::symlink;
+
+    let root = scan_fixture("folder-output-alias");
+    let output = root.join("generated");
+    let alias = root.join("output-link");
+    std::fs::create_dir_all(&output).unwrap();
+    symlink(&output, &alias).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.output = Output::Folder(alias);
+        audit.request_path(root.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.browser_output_root, output);
+        assert!(!audit.tree_paths.values().any(|path| path == &output));
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_symlinked_source_uses_one_identity_for_its_output(cx: &mut TestAppContext) {
+    use std::os::unix::fs::symlink;
+
+    let fixture = scan_fixture("folder-source-alias");
+    let root = fixture.join("photos");
+    let output = root.join(scan::OUTPUT_DIR);
+    let alias = fixture.join("photos-link");
+    std::fs::create_dir_all(&output).unwrap();
+    symlink(&root, &alias).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(alias, cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.browser_output_root, output);
+        assert!(audit.folders.iter().any(|path| path == &output));
+        assert!(!audit.tree_paths.values().any(|path| path == &output));
+    });
+    std::fs::remove_dir_all(fixture).unwrap();
+}
+
+#[gpui::test]
+fn child_folder_rows_reset_to_the_top_after_navigation(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-row-scroll");
+    for index in 0..12 {
+        std::fs::create_dir_all(root.join(format!("child-{index:02}"))).unwrap();
+    }
+    let (audit, cx) = finding_audit(cx);
+    let browsed = scan::browse(&root, &root.join(scan::OUTPUT_DIR)).unwrap();
+
+    audit.update_in(cx, |audit, window, cx| {
+        audit
+            .folder_scroll
+            .scroll_to_item_strict(8, ScrollStrategy::Top);
+        assert_eq!(
+            audit
+                .folder_scroll
+                .0
+                .borrow()
+                .deferred_scroll_to_item
+                .as_ref()
+                .unwrap()
+                .item_index,
+            8
+        );
+        audit.install_browse(browsed, root.clone(), window, cx);
+        assert_eq!(
+            audit
+                .folder_scroll
+                .0
+                .borrow()
+                .deferred_scroll_to_item
+                .as_ref()
+                .unwrap()
+                .item_index,
+            0
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn folder_navigation_is_shallow_and_clears_file_selection(cx: &mut TestAppContext) {
+    let root = scan_fixture("shallow-navigation");
+    let child = root.join("child");
+    let empty = child.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    write_png(&root, "direct.png");
+    write_png(&child, "nested.png");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        assert_eq!(audit.folders, vec![child.clone()]);
+        assert_eq!(audit.entries.len(), 1);
+        audit.selected.insert(0);
+        audit.selection_changed(cx);
+        audit.request_path(child.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, child.clone());
+        assert_eq!(audit.entries.len(), 1);
+        assert!(audit.selected.is_empty());
+        assert_eq!(audit.recent_folders.first(), Some(&audit.root));
+    });
+    audit.update(cx, |audit, cx| audit.request_path(empty.clone(), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("audit-header").is_some());
+    assert!(cx.debug_bounds("empty-folder-message").is_some());
+    assert!(cx.debug_bounds("action-bar").is_none());
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, empty);
+        assert!(audit.entries.is_empty() && audit.folders.is_empty());
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn a_folder_containing_only_output_uses_the_empty_state(cx: &mut TestAppContext) {
+    let root = scan_fixture("output-only-empty-state");
+    let output = root.join(scan::OUTPUT_DIR);
+    std::fs::create_dir_all(&output).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.entries.is_empty());
+        assert_eq!(audit.folders, vec![output]);
+        assert!(!audit.has_visible_folders());
+    });
+    assert!(cx.debug_bounds("empty-folder-message").is_some());
+    assert!(cx.debug_bounds("child-folders").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn relative_navigation_stores_an_absolute_root(cx: &mut TestAppContext) {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let relative = PathBuf::from("target").join(format!("press-relative-root-{nonce}"));
+    let absolute = std::env::current_dir().unwrap().join(&relative);
+    std::fs::create_dir_all(&absolute).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(relative, cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, absolute);
+        assert_eq!(audit.recent_folders.first(), Some(&absolute));
+        assert!(
+            audit
+                .breadcrumb_parts()
+                .iter()
+                .all(|(_, path)| !path.as_os_str().is_empty())
+        );
+    });
+    std::fs::remove_dir_all(absolute).unwrap();
+}
+
 #[test]
 fn gallery_changes_column_only_at_each_reachable_threshold() {
     let root = 22.;
@@ -3109,6 +3569,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: true,
+                recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
             },
@@ -3218,6 +3679,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: true,
+                recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
             },
@@ -3295,6 +3757,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
                 quality: Quality::lossy(80.),
                 max_edge: MaxEdge::FULL,
                 grid: false,
+                recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
             },

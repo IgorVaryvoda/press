@@ -34,9 +34,9 @@ pub struct Credentials {
 
 /// A hard cap on one transfer, so a confused server cannot grow memory forever.
 pub const MAX_TRANSFER: u64 = 512 * 1024 * 1024;
-/// A walk that finds more files than this is treated as an error rather than
+/// A listing that finds more entries than this is treated as an error rather than
 /// listed forever.
-const WALK_LIMIT: usize = 20_000;
+const LISTING_LIMIT: usize = 20_000;
 /// A broken server can mint unique continuation tokens forever without adding
 /// entries. This stays comfortably above any listing that could fit below the
 /// file limit.
@@ -218,16 +218,15 @@ pub fn unpair_remote(dir: &str, filename: &str) -> Option<String> {
     }
 }
 
-/// Join a readdir entry name onto the folder that was listed. Some account
-/// shapes return absolute names, others names relative to the listed folder;
-/// recursion and diff keys both need the absolute form.
-pub fn join_listing_name(current: &str, name: &str) -> String {
-    let name = name.trim_end_matches('/');
-    if name.starts_with('/') {
-        name.to_string()
-    } else {
-        format!("{}/{name}", current.trim_end_matches('/'))
-    }
+/// Files directly in one paired folder. Folder nodes and nested keys belong to
+/// another shallow page, matching the local browser's one-directory inventory.
+pub(crate) fn direct_remote_files(dir: &str, nodes: Vec<Node>) -> HashMap<String, Node> {
+    nodes
+        .into_iter()
+        .filter(|node| !node.is_folder())
+        .filter_map(|node| unpair_remote(dir, &node.filename).map(|key| (key, node)))
+        .filter(|(key, _)| safe_key(key) && !key.contains('/') && !key.contains('\\'))
+        .collect()
 }
 
 /// True when this continuation token has not been seen before in this
@@ -237,10 +236,10 @@ pub fn continuation_advances(seen: &mut HashSet<String>, token: &str) -> bool {
     seen.insert(token.to_string())
 }
 
-fn walk_limit_error() -> Error {
+fn listing_limit_error() -> Error {
     Error {
         status: 0,
-        message: format!("holds more than {WALK_LIMIT} entries; open or sync a smaller folder"),
+        message: format!("holds more than {LISTING_LIMIT} entries; open or sync a smaller folder"),
     }
 }
 
@@ -586,7 +585,7 @@ impl Client {
             .map(|nodes| nodes.unwrap_or_default())
     }
 
-    fn readdir_cancellable(
+    pub(crate) fn readdir_cancellable(
         &mut self,
         dirname: &str,
         cancelled: Option<&AtomicBool>,
@@ -637,8 +636,8 @@ impl Client {
                 return Ok(None);
             }
             nodes.extend(contents);
-            if nodes.len() > WALK_LIMIT {
-                return Err(walk_limit_error());
+            if nodes.len() > LISTING_LIMIT {
+                return Err(listing_limit_error());
             }
             match next {
                 Some(token) => {
@@ -653,69 +652,6 @@ impl Client {
                 None => return Ok(Some(nodes)),
             }
         }
-    }
-
-    /// Every file below `dir`, flattened, folders walked depth-first. Bounded:
-    /// a tree that exceeds `WALK_LIMIT` files is an error, not an endless walk.
-    ///
-    /// readdir's `filename` fields are relative to the listed folder (the API
-    /// docs' own example lists `/REST%20API%20Examples` and gets back
-    /// `"aurora.jpg"`, not the absolute path). Joining each folder entry onto
-    /// the folder being listed is what keeps the recursion on absolute paths;
-    /// pushing the bare name made the next call ask Sirv for
-    /// `dirname=subfolder` and every nested listing died with a 400.
-    pub fn walk(&mut self, dir: &str, cancelled: &AtomicBool) -> Result<Option<Vec<Node>>, Error> {
-        let root = format!("/{}", dir.trim().trim_start_matches('/'));
-        let root = root.trim_end_matches('/').to_string();
-        if root.is_empty() {
-            return Err(Error {
-                status: 0,
-                message: "pairing folder is empty".into(),
-            });
-        }
-        let mut all = Vec::new();
-        let mut visited = HashSet::from([root.clone()]);
-        let mut stack = vec![root];
-        while let Some(current) = stack.pop() {
-            if cancelled.load(Ordering::Relaxed) {
-                return Ok(None);
-            }
-            // Name the page that failed. The pairing root in the notice is
-            // useless when a subfolder three levels down rejected the call.
-            let Some(nodes) = self
-                .readdir_cancellable(&current, Some(cancelled))
-                .map_err(|mut error| {
-                    if !error.message.contains(&current) {
-                        error.message = format!("{current}: {}", error.message);
-                    }
-                    error
-                })?
-            else {
-                return Ok(None);
-            };
-            for mut node in nodes {
-                let name = node.filename.trim_end_matches('/');
-                if matches!(name, "" | "." | "..") {
-                    continue;
-                }
-                if node.is_folder() {
-                    let child = join_listing_name(&current, name);
-                    if visited.insert(child.clone()) {
-                        if visited.len() > WALK_LIMIT {
-                            return Err(walk_limit_error());
-                        }
-                        stack.push(child);
-                    }
-                } else {
-                    node.filename = join_listing_name(&current, name);
-                    all.push(node);
-                }
-            }
-            if all.len() > WALK_LIMIT {
-                return Err(walk_limit_error());
-            }
-        }
-        Ok(Some(all))
     }
 
     /// One file's bytes.
@@ -1255,26 +1191,35 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_file_name_joins_the_folder_being_listed() {
-        let filename = join_listing_name("/photos/sub", "c.jpg");
-        assert_eq!(filename, "/photos/sub/c.jpg");
-        assert_eq!(
-            unpair_remote("/photos", &filename),
-            Some("sub/c.jpg".into())
+    fn a_shallow_pairing_keeps_only_direct_remote_files() {
+        let files = direct_remote_files(
+            "/photos",
+            vec![
+                Node {
+                    filename: "direct.jpg".into(),
+                    is_directory: false,
+                    kind: None,
+                    size: 10,
+                },
+                Node {
+                    filename: "/photos/sub".into(),
+                    is_directory: true,
+                    kind: None,
+                    size: 0,
+                },
+                Node {
+                    filename: "/photos/sub/nested.jpg".into(),
+                    is_directory: false,
+                    kind: None,
+                    size: 20,
+                },
+            ],
         );
-    }
 
-    #[test]
-    fn an_absolute_file_name_passes_through() {
         assert_eq!(
-            join_listing_name("/photos/sub", "/photos/sub/c.jpg"),
-            "/photos/sub/c.jpg"
+            files.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["direct.jpg"]
         );
-    }
-
-    #[test]
-    fn a_trailing_slash_on_the_folder_does_not_double() {
-        assert_eq!(join_listing_name("/photos/", "sub"), "/photos/sub");
     }
 
     #[test]
@@ -1405,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_walk_makes_no_request() {
+    fn a_cancelled_listing_makes_no_request() {
         let mut client = Client::with_api(
             Credentials {
                 client_id: "id".into(),
@@ -1415,7 +1360,12 @@ mod tests {
         );
         let cancelled = AtomicBool::new(true);
 
-        assert!(client.walk("/photos", &cancelled).unwrap().is_none());
+        assert!(
+            client
+                .readdir_cancellable("/photos", Some(&cancelled))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

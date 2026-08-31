@@ -158,6 +158,7 @@ pub(super) fn spin_embed(url: &str) -> String {
 pub(super) fn audit_report(
     root: &Path,
     entries: &[Entry],
+    show_parent: bool,
     skipped_raw: usize,
     findings: (usize, usize, usize),
     conversion: (usize, (u64, u64)),
@@ -201,7 +202,7 @@ pub(super) fn audit_report(
         for entry in heaviest.into_iter().take(5) {
             report.push_str(&format!(
                 "- {} — {}\n",
-                entry.name(),
+                entry_label(root, show_parent, entry),
                 format_bytes(entry.bytes)
             ));
         }
@@ -250,6 +251,7 @@ impl Audit {
         let report = audit_report(
             &self.root,
             &self.entries,
+            self.batch_folders.is_some(),
             self.skipped_raw,
             (self.heavy, self.mislabelled, self.marketplace),
             (self.results.len(), self.converted_totals),
@@ -477,6 +479,7 @@ mod tests {
         let report = audit_report(
             Path::new("/private/catalog"),
             &[ready, large],
+            false,
             3,
             (0, 0, 1),
             (0, (0, 0)),

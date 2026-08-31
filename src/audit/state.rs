@@ -59,18 +59,14 @@ impl Audit {
         write_settings(&self.settings)
     }
 
-    /// The rows a conversion would touch. An empty selection means the whole folder,
-    /// so the common case needs no ticking.
+    /// The rows a conversion would touch. Browsing never opts files into work:
+    /// only explicit checkboxes or marquee selection can produce targets.
     pub(super) fn targets(&self) -> Vec<usize> {
         conversion_targets(&self.visible, &self.selected)
     }
 
     pub(super) fn target_count(&self) -> usize {
-        if self.selected.is_empty() {
-            self.visible.len()
-        } else {
-            self.selected_target_count
-        }
+        self.selected_target_count
     }
 
     pub(super) fn conversion_action_label(&self) -> String {
@@ -78,11 +74,10 @@ impl Audit {
             return "Converting…".into();
         }
         let target_count = self.target_count();
-        let scope = if self.selected.is_empty() {
-            format!("all {target_count}")
-        } else {
-            format!("{target_count} selected")
-        };
+        if target_count == 0 {
+            return "Select images to convert".into();
+        }
+        let scope = format!("{target_count} selected");
         // `write_output` atomically replaces an existing target on the supported
         // Unix builds; std's Windows rename does not.
         if !cfg!(windows)
@@ -106,11 +101,7 @@ impl Audit {
     }
 
     pub(super) fn target_bytes(&self) -> u64 {
-        if self.selected.is_empty() {
-            self.visible_bytes
-        } else {
-            self.selected_target_bytes
-        }
+        self.selected_target_bytes
     }
 
     /// Bytes before and after, counting only the files actually converted. Comparing
@@ -180,6 +171,9 @@ impl Audit {
     /// Open a rail, or close it when its own verb is clicked again.
     pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
         self.rail = if self.rail == rail { Rail::None } else { rail };
+        if self.rail != Rail::None {
+            self.browser_overlay = false;
+        }
         cx.notify();
     }
 
@@ -231,12 +225,16 @@ impl Audit {
                 Listing::Walking | Listing::Failed(_) => None,
             });
         let root = &self.root;
+        let show_parent = self.batch_folders.is_some();
         let mut visible: Vec<usize> = self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                needle.is_empty() || entry.name_lossy().to_lowercase().contains(&needle)
+                needle.is_empty()
+                    || entry_label(root, show_parent, entry)
+                        .to_lowercase()
+                        .contains(&needle)
             })
             .filter(|(_, entry)| finding.is_none_or(|finding| finding.holds(entry)))
             .filter(|(_, entry)| match sirv_scope {
@@ -262,7 +260,27 @@ impl Audit {
 
         let entries = &self.entries;
         let sort = self.sort;
-        visible.sort_by(|a, b| compare_entries(&entries[*a], &entries[*b], sort));
+        let labels = show_parent.then(|| {
+            entries
+                .iter()
+                .map(|entry| entry_label(root, true, entry))
+                .collect::<Vec<_>>()
+        });
+        visible.sort_by(|a, b| {
+            let a_entry = &entries[*a];
+            let b_entry = &entries[*b];
+            if let Some(labels) = &labels {
+                compare_entries(a_entry, b_entry, sort, &labels[*a], &labels[*b])
+            } else {
+                compare_entries(
+                    a_entry,
+                    b_entry,
+                    sort,
+                    &a_entry.name_lossy(),
+                    &b_entry.name_lossy(),
+                )
+            }
+        });
 
         self.cursor = self.cursor.min(visible.len().saturating_sub(1));
         // Weight bars are drawn against the heaviest file on screen, so filtering

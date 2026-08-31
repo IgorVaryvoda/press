@@ -682,6 +682,7 @@ fn main() {
                 quality: args.quality,
                 max_edge: args.max_edge,
                 grid: args.grid,
+                recent_folders: remembered.recent_folders.clone(),
                 columns: remembered.columns,
                 output: remembered.output.clone(),
             },
@@ -712,6 +713,7 @@ fn main() {
                 quality: args.quality,
                 max_edge: args.max_edge,
                 grid: args.grid,
+                recent_folders: remembered.recent_folders.clone(),
                 columns: remembered.columns,
                 output: remembered.output.clone(),
             },
@@ -962,6 +964,7 @@ struct Launch {
     quality: Quality,
     max_edge: MaxEdge,
     grid: bool,
+    recent_folders: Vec<PathBuf>,
     columns: settings::ColumnPrefs,
     output: settings::Output,
 }
