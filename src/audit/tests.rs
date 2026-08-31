@@ -25,11 +25,15 @@ fn retained_scan(audit: &mut Audit) -> Arc<std::sync::atomic::AtomicBool> {
 }
 
 fn scan_fixture(name: &str) -> PathBuf {
+    scan_fixture_in(&std::env::temp_dir(), name)
+}
+
+fn scan_fixture_in(base: &Path, name: &str) -> PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the system clock is after the Unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("press-audit-{name}-{nonce}"));
+    let root = base.join(format!("press-audit-{name}-{nonce}"));
     std::fs::create_dir_all(&root).expect("the scan fixture folder is created");
     std::fs::canonicalize(root).expect("the scan fixture has one filesystem identity")
 }
@@ -1734,6 +1738,36 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
     )
 }
 
+fn tree_row_bounds(
+    audit: &gpui::Entity<Audit>,
+    path: &Path,
+    selector_prefix: &str,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Bounds<gpui::Pixels> {
+    let index = audit.read_with(cx, |audit, cx| {
+        let id = audit
+            .tree_paths
+            .iter()
+            .find_map(|(id, candidate)| (candidate == path).then(|| id.clone().into()))
+            .expect("the requested path is in the tree");
+        audit
+            .tree_state
+            .read(cx)
+            .index_of(&id)
+            .expect("the requested path is visible")
+    });
+    audit.update(cx, |audit, cx| {
+        audit.tree_state.update(cx, |tree, cx| {
+            tree.scroll_to_item(index, ScrollStrategy::Top);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let selector = Box::leak(format!("{selector_prefix}-{index}").into_boxed_str());
+    cx.debug_bounds(selector)
+        .expect("the requested tree row is rendered")
+}
+
 #[gpui::test]
 fn acquisition_extras_stay_off_the_primary_surface(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -3271,7 +3305,10 @@ fn changing_output_rebuilds_the_folder_tree(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppContext) {
-    let root = scan_fixture("folder-collapse");
+    let root = scan_fixture_in(
+        &browser::home_dir().unwrap_or_else(std::env::temp_dir),
+        "folder-collapse",
+    );
     std::fs::create_dir_all(root.join("child")).unwrap();
     let (audit, cx) = finding_audit(cx);
 
@@ -3279,9 +3316,7 @@ fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppCont
     cx.run_until_parked();
     cx.simulate_resize(size(px(1100.), px(720.)));
     cx.run_until_parked();
-    let disclosure = cx
-        .debug_bounds("folder-disclosure-0")
-        .expect("the expanded root has a disclosure control");
+    let disclosure = tree_row_bounds(&audit, &root, "folder-disclosure", cx);
     let generation = audit.read_with(cx, |audit, _| audit.dataset_generation);
     cx.simulate_click(disclosure.center(), gpui::Modifiers::none());
     cx.run_until_parked();
@@ -3296,7 +3331,10 @@ fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppCont
 
 #[gpui::test]
 fn clicking_a_tree_folder_label_opens_the_folder(cx: &mut TestAppContext) {
-    let root = scan_fixture("folder-pointer-navigation");
+    let root = scan_fixture_in(
+        &browser::home_dir().unwrap_or_else(std::env::temp_dir),
+        "folder-pointer-navigation",
+    );
     let child = root.join("child");
     std::fs::create_dir_all(&child).unwrap();
     let (audit, cx) = finding_audit(cx);
@@ -3305,9 +3343,7 @@ fn clicking_a_tree_folder_label_opens_the_folder(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.simulate_resize(size(px(1100.), px(720.)));
     cx.run_until_parked();
-    let folder = cx
-        .debug_bounds("folder-open-1")
-        .expect("the child folder label is visible");
+    let folder = tree_row_bounds(&audit, &child, "folder-open", cx);
     cx.simulate_click(folder.center(), gpui::Modifiers::none());
     cx.run_until_parked();
 
