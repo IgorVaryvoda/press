@@ -19,6 +19,9 @@ pub enum Error {
     SourceNotAbsolute,
     OutputNotAbsolute,
     SourceNotDirectory,
+    WorkingDirectory {
+        error: io::Error,
+    },
     SourceLookup {
         path: PathBuf,
         error: io::Error,
@@ -34,7 +37,6 @@ pub enum Error {
         path: PathBuf,
     },
     OutputContainsSource,
-    SourceNotCanonical,
     SourceOutsideRoot,
     SourceIsRoot,
     RelativePathEmpty,
@@ -61,6 +63,12 @@ impl fmt::Display for Error {
             Self::SourceNotAbsolute => write!(formatter, "the source directory is not absolute"),
             Self::OutputNotAbsolute => write!(formatter, "the output directory is not absolute"),
             Self::SourceNotDirectory => write!(formatter, "the source path is not a directory"),
+            Self::WorkingDirectory { error } => {
+                write!(
+                    formatter,
+                    "could not determine the working directory: {error}"
+                )
+            }
             Self::SourceLookup { path, error } => {
                 write!(
                     formatter,
@@ -92,7 +100,6 @@ impl fmt::Display for Error {
             Self::OutputContainsSource => {
                 write!(formatter, "the output directory contains the source")
             }
-            Self::SourceNotCanonical => write!(formatter, "the source path is not canonical"),
             Self::SourceOutsideRoot => {
                 write!(formatter, "the source is outside the source directory")
             }
@@ -127,6 +134,8 @@ impl std::error::Error for Error {}
 #[derive(Debug)]
 pub struct Context {
     source_root: PathBuf,
+    lexical_source_root: PathBuf,
+    working_directory: PathBuf,
     output_root: PathBuf,
 }
 
@@ -135,6 +144,14 @@ impl Context {
     // First consumed by plan 1420; plan 1452 adds identity aliases.
     #[allow(dead_code)]
     pub fn establish(source: &Path, output: &Path) -> Result<Self, Error> {
+        Self::establish_with_current_dir(source, output, std::env::current_dir)
+    }
+
+    fn establish_with_current_dir(
+        source: &Path,
+        output: &Path,
+        current_dir: impl FnOnce() -> io::Result<PathBuf>,
+    ) -> Result<Self, Error> {
         validate_raw(source)?;
         validate_raw(output)?;
         if !source.is_absolute() {
@@ -162,9 +179,12 @@ impl Context {
         if source_root.starts_with(&output_root) {
             return Err(Error::OutputContainsSource);
         }
+        let working_directory = current_dir().map_err(|error| Error::WorkingDirectory { error })?;
 
         Ok(Self {
             source_root,
+            lexical_source_root: source.to_path_buf(),
+            working_directory,
             output_root,
         })
     }
@@ -181,29 +201,30 @@ impl Context {
         &self.output_root
     }
 
-    /// Return a source path only when it is already canonical and strictly below root.
+    /// Return a normalized source-relative path from the audited path spelling.
+    ///
+    /// Relative source spellings resolve from the working directory captured when the
+    /// context was established. This is lexical only: the source need not still exist.
     // First consumed by plan 1433 for GUI routing.
     #[allow(dead_code)]
     pub fn relative_source(&self, source: &Path) -> Result<PathBuf, Error> {
-        validate_raw(source)?;
-        if !source.is_absolute() {
-            return Err(Error::SourceNotCanonical);
+        if source.as_os_str().is_empty() {
+            return Err(Error::EmptyPath);
         }
-        validate_existing_windows_components(source, false)?;
-        let canonical = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
-            path: source.to_path_buf(),
-            error,
-        })?;
-        if canonical != source {
-            return Err(Error::SourceNotCanonical);
-        }
+        let source = if source.is_absolute() {
+            source.to_path_buf()
+        } else {
+            self.working_directory.join(source)
+        };
+        let root = lexical_normalize(&self.lexical_source_root)?;
+        let source = lexical_normalize(&source)?;
         let relative = source
-            .strip_prefix(&self.source_root)
+            .strip_prefix(root)
             .map_err(|_| Error::SourceOutsideRoot)?;
         if relative.as_os_str().is_empty() {
             return Err(Error::SourceIsRoot);
         }
-        normal_relative(relative).map_err(|_| Error::SourceNotCanonical)?;
+        normal_relative(relative)?;
         Ok(relative.to_path_buf())
     }
 
@@ -220,6 +241,41 @@ impl Context {
         }
         Ok(final_path)
     }
+}
+
+fn lexical_normalize(path: &Path) -> Result<PathBuf, Error> {
+    let mut normalized = PathBuf::new();
+    let mut prefixed = false;
+    let mut rooted = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                if !normalized.as_os_str().is_empty() {
+                    return Err(Error::SourceOutsideRoot);
+                }
+                normalized.push(prefix.as_os_str());
+                prefixed = true;
+            }
+            Component::RootDir => {
+                if rooted {
+                    return Err(Error::SourceOutsideRoot);
+                }
+                normalized.push(std::path::MAIN_SEPARATOR_STR);
+                rooted = true;
+            }
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(Error::SourceOutsideRoot);
+                }
+            }
+        }
+    }
+    if prefixed && !rooted {
+        return Err(Error::SourceOutsideRoot);
+    }
+    Ok(normalized)
 }
 
 fn canonical_output(output: &Path) -> Result<PathBuf, Error> {
@@ -607,27 +663,12 @@ mod tests {
     }
 
     #[test]
-    fn output_path_boundary_relative_source_and_final_path_are_strict() {
+    fn output_path_boundary_final_path_is_strict() {
         let base = temp_dir("helpers");
         let source = base.join("source");
         let output = base.join("output");
-        let inside = source.join("album/image.png");
-        fs::create_dir_all(inside.parent().unwrap()).unwrap();
-        fs::write(&inside, b"image").unwrap();
+        fs::create_dir(&source).unwrap();
         let context = Context::establish(&source, &output).unwrap();
-        let canonical_inside = fs::canonicalize(&inside).unwrap();
-        assert_eq!(
-            context.relative_source(&canonical_inside).unwrap(),
-            Path::new("album/image.png")
-        );
-        assert!(matches!(
-            context.relative_source(&source),
-            Err(Error::SourceNotCanonical | Error::SourceIsRoot)
-        ));
-        assert!(matches!(
-            context.relative_source(&base),
-            Err(Error::SourceOutsideRoot)
-        ));
         assert_eq!(
             context.final_path(Path::new("album/image.webp")).unwrap(),
             output.join("album/image.webp")
@@ -636,6 +677,191 @@ mod tests {
             context.final_path(Path::new("../escape.webp")),
             Err(Error::RelativePathNotNormal)
         ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn context_rejects_a_relative_source_root() {
+        let base = temp_dir("relative-root");
+        assert!(matches!(
+            Context::establish(Path::new("relative"), &base.join("output")),
+            Err(Error::SourceNotAbsolute)
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn context_reports_a_working_directory_failure() {
+        let base = temp_dir("working-directory");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        assert!(matches!(
+            Context::establish_with_current_dir(&source, &base.join("output"), || {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected failure",
+                ))
+            }),
+            Err(Error::WorkingDirectory { .. })
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_preserves_an_absolute_name() {
+        let base = temp_dir("absolute-source");
+        let source = base.join("source");
+        let entry = source.join("album/image.png");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        let context =
+            Context::establish_with_current_dir(&source, &base.join("output"), || Ok(base.clone()))
+                .unwrap();
+        assert_eq!(
+            context.relative_source(&entry).unwrap(),
+            Path::new("album/image.png")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_preserves_a_bare_relative_file() {
+        let base = temp_dir("bare-relative");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
+            Ok(source.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            context.relative_source(Path::new("image.png")).unwrap(),
+            Path::new("image.png")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_preserves_a_dot_relative_file() {
+        let base = temp_dir("dot-relative");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
+            Ok(source.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            context.relative_source(Path::new("./image.png")).unwrap(),
+            Path::new("image.png")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_preserves_a_parent_relative_folder_entry() {
+        let base = temp_dir("parent-relative");
+        let source = base.join("source");
+        let working_directory = source.join("album");
+        fs::create_dir_all(&working_directory).unwrap();
+        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
+            Ok(working_directory.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            context.relative_source(Path::new("../cover.png")).unwrap(),
+            Path::new("cover.png")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_rejects_an_empty_path() {
+        let base = temp_dir("empty-relative");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let context = Context::establish(&source, &base.join("output")).unwrap();
+        assert!(matches!(
+            context.relative_source(Path::new("")),
+            Err(Error::EmptyPath)
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_rejects_a_lexical_escape() {
+        let base = temp_dir("lexical-escape");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
+            Ok(source.clone())
+        })
+        .unwrap();
+        assert!(matches!(
+            context.relative_source(Path::new("../outside.png")),
+            Err(Error::SourceOutsideRoot)
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn relative_source_does_not_require_the_source_to_still_exist() {
+        let base = temp_dir("removed-source");
+        let source = base.join("source");
+        let entry = source.join("removed/image.png");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        fs::write(&entry, b"image").unwrap();
+        let context = Context::establish(&source, &base.join("output")).unwrap();
+        fs::remove_file(&entry).unwrap();
+        assert_eq!(
+            context.relative_source(&entry).unwrap(),
+            Path::new("removed/image.png")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_source_under_a_symlinked_root_keeps_the_audited_name() {
+        let base = temp_dir("symlinked-source");
+        let target = base.join("target");
+        let source = base.join("source");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+        let entry = source.join("image.png");
+        let context = Context::establish(&source, &base.join("output")).unwrap();
+        assert_eq!(
+            context.relative_source(&entry).unwrap(),
+            Path::new("image.png")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_source_preserves_non_utf8_components() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let base = temp_dir("non-utf8-source");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let name =
+            std::ffi::OsString::from_vec(vec![b'i', b'm', b'g', 0xff, b'.', b'p', b'n', b'g']);
+        let entry = source.join(&name);
+        let context = Context::establish(&source, &base.join("output")).unwrap();
+        assert_eq!(context.relative_source(&entry).unwrap(), Path::new(&name));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_windows_source_spelling_keeps_its_relative_name() {
+        let base = temp_dir("windows-source-spelling");
+        let source = base.join("source");
+        let entry = source.join("album").join("image.png");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        let context = Context::establish(&source, &base.join("output")).unwrap();
+        assert_eq!(
+            context.relative_source(&entry).unwrap(),
+            Path::new(r"album\image.png")
+        );
         fs::remove_dir_all(base).unwrap();
     }
 
