@@ -459,10 +459,7 @@ impl Audit {
                                 .justify_center()
                                 .when(entry.is_folder(), |disclosure| {
                                     disclosure
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(move |_, _, cx| {
+                                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                             cx.stop_propagation();
                                             let Some(path) = disclosure_path.clone() else {
                                                 return;
@@ -479,6 +476,7 @@ impl Audit {
                                                 });
                                             }
                                         })
+                                        .on_click(|_, _, cx| cx.stop_propagation())
                                 })
                                 .children(
                                     entry.is_folder().then(|| Icon::new(disclosure).size_3()),
