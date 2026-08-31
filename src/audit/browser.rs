@@ -471,10 +471,19 @@ impl Audit {
                                                         !disclosure_expanded,
                                                         cx,
                                                     );
-                                                    audit.rebuild_tree_preserving_selection(cx);
-                                                    cx.notify();
                                                 });
                                             }
+                                            // The tree row also handles mouse-down. Rebuild after
+                                            // dispatch so both handlers see the same item state.
+                                            let audit = disclosure_audit.clone();
+                                            cx.defer(move |cx| {
+                                                if let Some(audit) = audit.upgrade() {
+                                                    audit.update(cx, |audit, cx| {
+                                                        audit.rebuild_tree_preserving_selection(cx);
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            });
                                         })
                                         .on_click(|_, _, cx| cx.stop_propagation())
                                 })
