@@ -47,6 +47,9 @@ die() {
 [ "$(uname -m)" = x86_64 ] || die "the AppImage is x86-64 only; build from source on $(uname -m)"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+# The published signature is base64-wrapped, so a missing decoder is a missing
+# tool, not a bad signature.
+command -v base64 >/dev/null 2>&1 || die "base64 is required"
 
 # The /releases/latest URL redirects to the tag, so the version needs no API call
 # and no JSON parsing.
