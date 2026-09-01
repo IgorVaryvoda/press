@@ -17,6 +17,8 @@ impl Audit {
         let dataset_generation = self.dataset_generation;
         self.converting = true;
         self.active_target_count = Some(target_count);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.convert_cancel = Some(cancel.clone());
         self.clear_results();
         self.failures.clear();
         cx.notify();
@@ -53,7 +55,12 @@ impl Audit {
             let mut completed = Vec::with_capacity(workers);
 
             loop {
-                while inflight.len() < workers {
+                // A stop closes the queue, not the window. Abandoning an encode
+                // half way would leave a partial file where the folder expects a
+                // whole one, so the files already in flight are seen through and
+                // nothing after them is started.
+                let stopped = cancel.load(Ordering::Acquire);
+                while !stopped && inflight.len() < workers {
                     let Some((index, source, written)) = queued.next() else {
                         break;
                     };
@@ -80,7 +87,8 @@ impl Audit {
                 // Publishing once per file made a 6,000-image conversion rebuild the
                 // same window 6,000 times. One worker-window keeps progress live while
                 // cutting UI invalidations by 87.5% for WebP.
-                let work_remaining = !inflight.is_empty() || !queued.as_slice().is_empty();
+                let work_remaining =
+                    !inflight.is_empty() || (!stopped && !queued.as_slice().is_empty());
                 if !progress_batch_ready(completed.len(), workers, work_remaining) {
                     continue;
                 }
@@ -132,12 +140,19 @@ impl Audit {
                 if audit.dataset_generation == dataset_generation {
                     audit.converting = false;
                     audit.active_target_count = None;
+                    audit.convert_cancel = None;
+                    let stopped = cancel.load(Ordering::Acquire);
+                    audit.stopped_run = stopped.then_some(target_count);
                     if !audit.failures.is_empty() {
+                        // Counted against what the run actually attempted. A
+                        // stopped run never opened the files it did not start,
+                        // and they are not failures of anything.
+                        let attempted = audit.results.len() + audit.failures.len();
                         audit.notify_error(
                             "conversion",
                             "Conversion incomplete",
                             format!(
-                                "{} of {target_count} failed: {}",
+                                "{} of {attempted} failed: {}",
                                 audit.failures.len(),
                                 named(audit.failures.iter().cloned())
                             ),
@@ -148,8 +163,9 @@ impl Audit {
                     }
                     // A finished run has produced something to look at, and
                     // until now the app said so in a column and left you to
-                    // find it. Open it.
-                    if let Some(first) = audit.result_rows().first().copied() {
+                    // find it. Open it. A stopped run is a request to stop,
+                    // not a request to be taken somewhere.
+                    if !stopped && let Some(first) = audit.result_rows().first().copied() {
                         audit.open_result(first, cx);
                     }
                 }
@@ -157,5 +173,23 @@ impl Audit {
             });
         })
         .detach();
+    }
+
+    /// Ask the running conversion to stop. The loop checks between files, so the
+    /// files in flight finish and nothing after them starts. The run stays busy
+    /// until it acknowledges, which is what keeps the controls it owns disabled
+    /// until the last write is on disk.
+    pub(super) fn cancel_conversion(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.convert_cancel.as_ref() {
+            cancel.store(true, Ordering::Release);
+            cx.notify();
+        }
+    }
+
+    /// A stop has been asked for and the last files are still landing.
+    pub(super) fn convert_stopping(&self) -> bool {
+        self.convert_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire))
     }
 }

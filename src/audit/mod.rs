@@ -396,8 +396,16 @@ pub(crate) struct Audit {
     /// the job advances.
     converted_totals: (u64, u64),
     converting: bool,
+    /// The running conversion's stop flag, read between files. Sirv transfers and
+    /// both AI jobs already owned one; the app's headline verb was the only long
+    /// job with no way out of it.
+    convert_cancel: Option<Arc<AtomicBool>>,
     /// The immutable denominator owned by the active conversion.
     active_target_count: Option<usize>,
+    /// The target count of a run the user stopped, so the summary can say how far
+    /// it got. The files it wrote are real and stay; the ones it never started are
+    /// not failures.
+    stopped_run: Option<usize>,
     /// Names of files a conversion could not read or write. Kept rather than counted,
     /// because "3 failed" without saying which is not a report.
     failures: Vec<String>,
@@ -1008,6 +1016,13 @@ impl Audit {
         self.estimate = None;
         self.converting = false;
         self.active_target_count = None;
+        self.stopped_run = None;
+        // The dataset guard already dropped a stale run's results; now the run
+        // itself stops, rather than writing out the rest of a folder nobody is
+        // looking at any more.
+        if let Some(cancel) = self.convert_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
         if let Some(job) = self.local_ai_job.take() {
             job.cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1847,7 +1862,9 @@ pub(crate) fn build_audit(
             completed_outputs: HashSet::new(),
             converted_totals: (0, 0),
             converting: false,
+            convert_cancel: None,
             active_target_count: None,
+            stopped_run: None,
             failures: Vec::new(),
             unreadable,
             walk_errors,

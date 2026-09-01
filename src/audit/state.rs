@@ -113,6 +113,7 @@ impl Audit {
     pub(super) fn clear_results(&mut self) {
         self.results.clear();
         self.result_paths.clear();
+        self.stopped_run = None;
         self.converted_totals = (0, 0);
         self.published_results.clear();
         self.report_copied = false;

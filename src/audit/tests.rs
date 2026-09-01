@@ -3905,3 +3905,139 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
         0
     );
 }
+
+/// An audit over a folder of real files with every row ticked, so a conversion
+/// has something to decode, encode and write.
+fn convertible_audit(
+    count: usize,
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+    cx.update(init_theme);
+    let root = scan_fixture("convert");
+    let entries: Vec<Entry> = (0..count)
+        .map(|index| {
+            let path = write_png(&root, &format!("shot-{index}.png"));
+            let bytes = std::fs::metadata(&path)
+                .expect("the fixture image is on disk")
+                .len();
+            Entry {
+                path,
+                format: ImageFormat::Png.into(),
+                width: 8,
+                height: 8,
+                bytes,
+            }
+        })
+        .collect();
+    let launch = Launch {
+        root,
+        entries,
+        skipped_raw: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+        open_single: false,
+        format: Format::WebP,
+        quality: Quality::lossy(80.),
+        max_edge: MaxEdge::FULL,
+        grid: false,
+        recent_folders: Vec::new(),
+        columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
+    };
+    let mut built = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let audit = build_audit(launch, window, cx);
+        built = Some(audit.clone());
+        Root::new(audit, window, cx).bg(cx.theme().background)
+    });
+    let audit = built.expect("the audit is built for the production Root");
+    audit.update(cx, |audit, _| {
+        audit.selected.extend(0..count);
+        audit.refresh_target_summary();
+        audit.rail = Rail::Convert;
+    });
+    (audit, cx)
+}
+
+#[gpui::test]
+fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
+    // Three windows of files, so a stop taken at the first batch of results still
+    // leaves a window in flight and a queue that never starts.
+    let total = convert::workers(Format::WebP) * 3;
+    let (audit, cx) = convertible_audit(total, cx);
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    // One task at a time, so the stop lands in the middle of a real run rather
+    // than before it starts or after it is over.
+    while audit.read_with(cx, |audit, _| audit.results.is_empty()) {
+        assert!(
+            cx.executor().tick(),
+            "the conversion reaches its first batch of results"
+        );
+    }
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("convert-stop").is_some(),
+        "a running conversion offers the way out of it"
+    );
+
+    audit.update(cx, |audit, cx| {
+        assert!(!audit.convert_stopping());
+        audit.cancel_conversion(cx);
+        assert!(audit.convert_stopping(), "the stop is acknowledged at once");
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.converting, "the stop ends the run");
+        assert!(audit.convert_cancel.is_none());
+        assert!(
+            audit.automatic_update_can_restart(),
+            "the controls a run owns are handed back"
+        );
+        assert_eq!(audit.stopped_run, Some(total));
+        assert!(
+            audit.failures.is_empty(),
+            "a file that was never started is not a failure"
+        );
+        assert!(
+            !audit.results.is_empty(),
+            "the files the run finished are kept"
+        );
+        assert!(
+            audit.results.len() < total,
+            "the stop left the rest of the queue unconverted"
+        );
+        assert_eq!(audit.result_paths.len(), audit.results.len());
+        for written in audit.result_paths.values() {
+            assert!(
+                written.exists(),
+                "{} was written and stays written",
+                written.display()
+            );
+        }
+        assert!(
+            audit.compare.is_none(),
+            "a stop is a request to stop, not to be taken somewhere"
+        );
+    });
+    assert_eq!(
+        notification_count(cx),
+        0,
+        "a stopped run raises no failure notice"
+    );
+}
+
+#[test]
+fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
+    let stopped = panel::conversion_result_state(Some(36), 12);
+    assert_eq!(stopped, "STOPPED · 12 OF 36 CONVERTED");
+    assert!(!stopped.contains("FAILED"));
+    assert_eq!(
+        panel::conversion_result_state(None, 36),
+        "COMPLETED · ACTUAL RESULT"
+    );
+}
