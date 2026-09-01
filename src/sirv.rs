@@ -769,9 +769,13 @@ fn sirv_error(stage: &'static str) -> impl Fn(ureq::Error) -> Error {
 // ── Credential store ────────────────────────────────────────────────────────
 
 /// Where the Sirv credentials live, resolved like the window settings file.
-/// `IMAGEGUIDE_CONFIG_DIR` overrides the platform base, which is how tests
-/// keep their hands off a real credentials file.
+/// `IMAGEGUIDE_CONFIG_DIR` overrides the platform base, which is how tests keep
+/// their hands off a real credentials file — and only in a test build. Neither
+/// `settings::path` nor `studio::store_path` ever read the variable, so in a
+/// shipped build it did nothing but let whoever set the environment choose where
+/// the Sirv secret was read and written, one folder away from the other two.
 fn store_path() -> Option<PathBuf> {
+    #[cfg(test)]
     if let Ok(dir) = std::env::var("IMAGEGUIDE_CONFIG_DIR") {
         return Some(store_path_in(PathBuf::from(dir)));
     }
