@@ -43,19 +43,32 @@ impl Quality {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Failed,
     AnimatedGif,
     AnimatedJpegXl,
+    OutsideOutput,
+    UnsafeOutputPath,
+    OverwritesSource,
+    StalePartial(PathBuf),
 }
 
 impl Failure {
-    pub fn reason(self) -> Option<&'static str> {
+    pub fn reason(&self) -> Option<String> {
         match self {
             Self::Failed => None,
-            Self::AnimatedGif => Some("animated GIFs are not converted"),
-            Self::AnimatedJpegXl => Some("animated JPEG XL files are not converted"),
+            Self::AnimatedGif => Some("animated GIFs are not converted".into()),
+            Self::AnimatedJpegXl => Some("animated JPEG XL files are not converted".into()),
+            Self::OutsideOutput => Some("the target is outside the output folder".into()),
+            Self::UnsafeOutputPath => {
+                Some("a folder on the way to the target is not a plain folder".into())
+            }
+            Self::OverwritesSource => Some("the output would overwrite a source image".into()),
+            Self::StalePartial(path) => Some(format!(
+                "a leftover partial file is in the way: {}",
+                path.display()
+            )),
         }
     }
 }
@@ -385,7 +398,12 @@ pub fn convert_each(
                     else {
                         return;
                     };
-                    let converted = convert_to(root, source, written, format, quality, max_edge);
+                    let converted = match written {
+                        Ok(written) => {
+                            convert_to(out_dir, source, written, format, quality, max_edge)
+                        }
+                        Err(failure) => Err(failure.clone()),
+                    };
                     let _ordered = reporting.lock();
                     report(source, converted);
                 }
@@ -449,19 +467,25 @@ pub fn ai_output_path(
 /// bytes no longer on disk. A second claim on a name keeps its source extension:
 /// `optimized/shot-jpg.webp`, then `-2`, `-3` if even that is taken. Claims are
 /// assigned in source-path order, independent of the current table sort.
+///
+/// A destination that already holds the batch's own images is refused per file
+/// rather than renamed around: `a.png` landing on the source `a.webp` destroys an
+/// original and the run would report the loss as a saving. Such a source claims no
+/// name and does not stop its siblings.
 pub fn plan_outputs(
     root: &Path,
     sources: &[PathBuf],
     out_dir: &Path,
     format: Format,
-) -> Vec<PathBuf> {
+) -> Vec<Result<PathBuf, Failure>> {
     // Keyed case-insensitively. `Shot.png` and `shot.jpg` are two files on Linux and
     // one on macOS, and renaming one of them needlessly costs a stranger name, while
     // not renaming it costs a lost image.
     let mut taken: HashSet<String> = HashSet::new();
     let key = |path: &Path| path.to_string_lossy().to_lowercase();
+    let sources_taken: HashSet<String> = sources.iter().map(|source| key(source)).collect();
 
-    let mut planned = vec![PathBuf::new(); sources.len()];
+    let mut planned = vec![Err(Failure::OverwritesSource); sources.len()];
     let mut order: Vec<usize> = (0..sources.len()).collect();
     order.sort_by(|left, right| {
         key(&sources[*left])
@@ -472,8 +496,11 @@ pub fn plan_outputs(
     for index in order {
         let source = &sources[index];
         let plain = output_path(root, source, out_dir, format);
+        if sources_taken.contains(&key(&plain)) {
+            continue;
+        }
         if taken.insert(key(&plain)) {
-            planned[index] = plain;
+            planned[index] = Ok(plain);
             continue;
         }
         let extension = source
@@ -491,8 +518,11 @@ pub fn plan_outputs(
             let candidate = parent
                 .join(format!("{stem}-{extension}{suffix}"))
                 .with_extension(format.extension());
+            if sources_taken.contains(&key(&candidate)) {
+                continue;
+            }
             if taken.insert(key(&candidate)) {
-                planned[index] = candidate;
+                planned[index] = Ok(candidate);
                 break;
             }
         }
@@ -500,52 +530,58 @@ pub fn plan_outputs(
     planned
 }
 
-/// Safely install already-encoded bytes inside `root`.
+/// Safely install already-encoded bytes inside `output_root`.
 ///
-/// AI tools and the normal encoder share the same output boundary: no symlinked
-/// ancestor, no half-written final file, and no path outside the audited folder.
-pub fn write_output(root: &Path, written: &Path, encoded: &[u8]) -> Result<(), Failure> {
-    let relative = written.strip_prefix(root).map_err(|_| Failure::Failed)?;
-    let mut ancestor = root.to_path_buf();
-    for component in relative.parent().ok_or(Failure::Failed)?.components() {
+/// The boundary is the destination, not the audited folder. A chosen output folder is
+/// routinely somewhere else entirely — a staging directory, a share, a build tree —
+/// and measuring the target against the source root failed every one of those writes
+/// with nothing to tell the user.
+///
+/// AI tools and the normal encoder share this boundary: no symlinked ancestor, no
+/// half-written final file, and no path outside the output folder.
+pub fn write_output(output_root: &Path, written: &Path, encoded: &[u8]) -> Result<(), Failure> {
+    let relative = written
+        .strip_prefix(output_root)
+        .map_err(|_| Failure::OutsideOutput)?;
+    let mut ancestor = output_root.to_path_buf();
+    // The destination itself is now the first thing that has to be a plain folder;
+    // nothing above it is walked any more, so nothing else would catch a symlink
+    // standing in for it.
+    ensure_directory(&ancestor, || std::fs::create_dir_all(&ancestor))?;
+    for component in relative
+        .parent()
+        .ok_or(Failure::OutsideOutput)?
+        .components()
+    {
         let std::path::Component::Normal(component) = component else {
-            return Err(Failure::Failed);
+            return Err(Failure::OutsideOutput);
         };
         ancestor.push(component);
-        match ancestor.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(Failure::Failed);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::create_dir(&ancestor) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let metadata = ancestor.symlink_metadata().map_err(|_| Failure::Failed)?;
-                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                            return Err(Failure::Failed);
-                        }
-                    }
-                    Err(_) => return Err(Failure::Failed),
-                }
-            }
-            Err(_) => return Err(Failure::Failed),
-        }
+        ensure_directory(&ancestor, || std::fs::create_dir(&ancestor))?;
     }
     // Write beside the target and rename onto it. A crash or a full disk part-way
     // through the write would otherwise leave a short image that looks finished.
+    //
+    // The staging name carries this process id. Without it a killed run's leftover
+    // sat on the one name `create_new` would accept and failed that file on every
+    // later run, for good.
     let mut partial = written.to_path_buf().into_os_string();
-    partial.push(".part");
+    partial.push(format!(".{}.part", std::process::id()));
     let partial = PathBuf::from(partial);
     use std::io::Write;
-    let staged = std::fs::OpenOptions::new()
+    let mut stage = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&partial)
-        .and_then(|mut file| {
-            file.write_all(encoded)?;
-            file.sync_all()
-        });
+    {
+        Ok(file) => file,
+        // Somebody else's file, so name it and leave it alone rather than delete it.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Failure::StalePartial(partial));
+        }
+        Err(_) => return Err(Failure::Failed),
+    };
+    let staged = stage.write_all(encoded).and_then(|()| stage.sync_all());
     if staged.is_err() || std::fs::rename(&partial, written).is_err() {
         let _ = std::fs::remove_file(&partial);
         return Err(Failure::Failed);
@@ -553,9 +589,35 @@ pub fn write_output(root: &Path, written: &Path, encoded: &[u8]) -> Result<(), F
     Ok(())
 }
 
+/// `path` must be a plain directory, creating it with `create` if it is missing.
+fn ensure_directory(
+    path: &Path,
+    create: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), Failure> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(Failure::UnsafeOutputPath)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match create() {
+            Ok(()) => Ok(()),
+            // Another worker got there first; it still has to be a plain folder.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = path.symlink_metadata().map_err(|_| Failure::Failed)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(Failure::UnsafeOutputPath);
+                }
+                Ok(())
+            }
+            Err(_) => Err(Failure::Failed),
+        },
+        Err(_) => Err(Failure::Failed),
+    }
+}
+
 /// Read, encode, and write one file to the path `plan_outputs` chose for it.
 pub fn convert_to(
-    root: &Path,
+    output_root: &Path,
     source: &Path,
     written: &Path,
     format: Format,
@@ -570,7 +632,7 @@ pub fn convert_to(
     let decoded = max_edge.apply(decoded);
     let (width, height) = (decoded.width(), decoded.height());
     let encoded = encode(&decoded, format, quality).ok_or(Failure::Failed)?;
-    write_output(root, written, &encoded)?;
+    write_output(output_root, written, &encoded)?;
 
     Ok(Converted {
         written: written.to_path_buf(),
@@ -838,10 +900,10 @@ mod tests {
         assert_eq!(
             planned,
             [
-                PathBuf::from("/photos/optimized/shot.webp"),
-                PathBuf::from("/photos/optimized/shot-png.webp"),
-                PathBuf::from("/photos/optimized/album/shot.webp"),
-                PathBuf::from("/photos/optimized/shot-webp.webp"),
+                Ok(PathBuf::from("/photos/optimized/shot.webp")),
+                Ok(PathBuf::from("/photos/optimized/shot-png.webp")),
+                Ok(PathBuf::from("/photos/optimized/album/shot.webp")),
+                Ok(PathBuf::from("/photos/optimized/shot-webp.webp")),
             ],
             "the first claim keeps the plain name, a subfolder is not a clash"
         );
@@ -861,7 +923,14 @@ mod tests {
         let planned = plan_outputs(Path::new("/p"), &sources, Path::new("/p/out"), Format::WebP);
         let names: Vec<String> = planned
             .iter()
-            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|path| {
+                path.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         assert_eq!(names, ["a-png-2.webp", "A.webp", "a-png.webp"]);
     }
@@ -940,17 +1009,22 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = temp_dir("part-symlink");
+        let out = dir.join("optimized");
         let source = dir.join("in.png");
-        let output = dir.join("optimized/in.webp");
+        let output = out.join("in.webp");
         let victim = dir.join("victim");
         photo(32, 32).save(&source).unwrap();
-        std::fs::create_dir(dir.join("optimized")).unwrap();
+        std::fs::create_dir(&out).unwrap();
         std::fs::write(&victim, b"keep me").unwrap();
-        symlink(&victim, dir.join("optimized/in.webp.part")).unwrap();
+        symlink(
+            &victim,
+            out.join(format!("in.webp.{}.part", std::process::id())),
+        )
+        .unwrap();
 
         assert!(
             convert_to(
-                &dir,
+                &out,
                 &source,
                 &output,
                 Format::WebP,
@@ -960,6 +1034,108 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    }
+
+    /// The destination people actually choose is somewhere else entirely — a staging
+    /// directory, a share, a build tree. Measuring the target against the audited root
+    /// refused every one of those files and had no reason to give for it.
+    #[test]
+    fn conversion_into_a_folder_outside_the_audited_root_writes_every_file() {
+        let root = temp_dir("external-source");
+        let outside = temp_dir("external-output");
+        std::fs::create_dir(root.join("album")).unwrap();
+        let sources = [root.join("one.png"), root.join("album/two.png")];
+        for source in &sources {
+            photo(48, 48).save(source).unwrap();
+        }
+
+        let context = crate::settings::Output::Folder(outside)
+            .context(&root)
+            .expect("an external output folder establishes");
+        assert!(!context.output_root().starts_with(&root));
+
+        let written = parking_lot::Mutex::new(Vec::new());
+        convert_each(
+            &root,
+            &sources,
+            context.output_root(),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            |_, converted| {
+                written
+                    .lock()
+                    .push(converted.expect("the file converts").written);
+            },
+        );
+
+        let mut written = written.into_inner();
+        written.sort();
+        assert_eq!(
+            written,
+            [
+                context.output_root().join("album/two.webp"),
+                context.output_root().join("one.webp"),
+            ]
+        );
+        assert!(written.iter().all(|path| path.is_file()));
+    }
+
+    /// A `.part` left behind by a killed run used to sit on the one staging name
+    /// `create_new` accepts and fail that file for good, with nothing on the toast to
+    /// say which file was in the way.
+    #[test]
+    fn a_partial_file_this_run_did_not_create_is_named_and_left_alone() {
+        let dir = temp_dir("stale-part");
+        let out = dir.join("optimized");
+        let source = dir.join("in.png");
+        photo(32, 32).save(&source).unwrap();
+        std::fs::create_dir(&out).unwrap();
+        let blocker = out.join(format!("in.webp.{}.part", std::process::id()));
+        std::fs::write(&blocker, b"from a run that died").unwrap();
+
+        let failure = convert_to(
+            &out,
+            &source,
+            &out.join("in.webp"),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect_err("a partial file this run did not create blocks the write");
+
+        assert_eq!(failure, Failure::StalePartial(blocker.clone()));
+        assert!(
+            failure
+                .reason()
+                .expect("the failure is named")
+                .contains(&blocker.display().to_string())
+        );
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"from a run that died");
+    }
+
+    /// Writing into a folder that holds the batch let `a.png` land on the source
+    /// `a.webp`, and the run reported the destroyed original as a saving.
+    #[test]
+    fn a_planned_output_never_claims_a_source_of_the_batch() {
+        let root = Path::new("/photos");
+        let sources = [
+            PathBuf::from("/photos/a.png"),
+            PathBuf::from("/photos/a.webp"),
+            PathBuf::from("/photos/b.png"),
+        ];
+
+        let planned = plan_outputs(root, &sources, root, Format::WebP);
+
+        assert_eq!(
+            planned,
+            [
+                Err(Failure::OverwritesSource),
+                Err(Failure::OverwritesSource),
+                Ok(PathBuf::from("/photos/b.webp")),
+            ],
+            "a refused source claims no name and does not stop its siblings"
+        );
     }
 
     #[test]

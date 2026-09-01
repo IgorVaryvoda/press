@@ -291,6 +291,23 @@ impl Audit {
         let Some(key) = self.studio_key.clone() else {
             return;
         };
+        // Prove the destination before the request is paid for: a result that cannot
+        // be written is worse than one that was never asked for.
+        let out_dir = match self.output.context(&self.root) {
+            Ok(context) => context.output_root().to_path_buf(),
+            Err(message) => {
+                let message = format!(
+                    "the output folder {} is unusable: {message}",
+                    self.output.label()
+                );
+                if let Some(job) = self.studio_job.as_mut() {
+                    job.state = StudioJobState::Failed(message.clone());
+                }
+                self.notify_error("studio-job", "AI operation failed", message, cx);
+                cx.notify();
+                return;
+            }
+        };
         let Some(job) = self.studio_job.as_mut() else {
             return;
         };
@@ -302,7 +319,6 @@ impl Audit {
         let output_source = job.output_source.clone();
         let cancelled = job.cancelled.clone();
         let root = self.root.clone();
-        let out_dir = self.output.root(&self.root);
         cx.notify();
 
         cx.spawn(async move |this, cx| {

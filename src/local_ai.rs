@@ -183,8 +183,12 @@ pub fn process(
         .map_err(|error| format!("could not read the local AI result: {error}"))?;
     let written = output_path(root, out_dir, source, prepared.tool)?;
     check_cancelled(cancelled)?;
-    convert::write_output(root, &written, &encoded)
-        .map_err(|_| "could not safely write the local AI result".to_string())?;
+    convert::write_output(out_dir, &written, &encoded).map_err(|failure| {
+        match failure.reason() {
+            Some(reason) => format!("the local AI result was not written: {reason}"),
+            None => "could not safely write the local AI result".to_string(),
+        }
+    })?;
     Ok(written)
 }
 

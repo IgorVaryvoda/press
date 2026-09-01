@@ -1,8 +1,9 @@
 //! Lexical and canonical boundaries for conversion output.
 //!
-//! The conversion callers still use their legacy relative path handling. This module
-//! defines the stricter contract they will adopt once source capture and writing move
-//! together, so validation itself never creates a path or follows an output symlink.
+//! Every producer — normal conversion, local AI, Studio — establishes one context per
+//! run and writes inside the output root it proves. Establishing never creates a path
+//! and never follows an output symlink, so a destination can be refused before any
+//! state moves and before any file is written.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -254,8 +255,6 @@ impl Context {
         &self.source_root
     }
 
-    // First consumed by plan 1434 when CLI conversion adopts this boundary.
-    #[allow(dead_code)]
     pub fn output_root(&self) -> &Path {
         &self.output_root
     }
