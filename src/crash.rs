@@ -296,7 +296,21 @@ fn directory() -> Option<PathBuf> {
 }
 
 fn prepare_reports_directory() -> io::Result<PathBuf> {
-    prepare_directory(directory(), |directory| std::fs::create_dir_all(directory))
+    prepare_directory(directory(), create_private_directory)
+}
+
+/// Create the reports folder, owner-only. A crash report holds a backtrace and
+/// the paths the process was working on, so it gets the same treatment as the
+/// credential stores in `sirv.rs`: the usual umask would leave it 0755, and
+/// tightening an existing folder catches the ones an older Press created.
+fn create_private_directory(directory: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 fn prepare_directory(
@@ -351,7 +365,7 @@ fn render(info: &std::panic::PanicHookInfo<'_>) -> String {
 }
 
 fn write_report(directory: &Path, report: &str) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(directory)?;
+    create_private_directory(directory)?;
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -361,10 +375,14 @@ fn write_report(directory: &Path, report: &str) -> io::Result<PathBuf> {
         "crash-{time:020}-{}-{sequence:04}.log",
         std::process::id()
     ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
     file.write_all(report.as_bytes())?;
     file.sync_all()?;
     prune_reports(directory);
@@ -649,6 +667,20 @@ mod tests {
             "panic and backtrace"
         );
         assert!(directory.join("keep.txt").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_crash_report_and_its_folder_stay_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        // The helper leaves the folder at the umask default, the way an older
+        // Press did, so this also covers tightening one that already exists.
+        let directory = test_directory("owner-only");
+        let report = write_report(&directory, "panic and backtrace").unwrap();
+        let mode = |path: &Path| path.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&directory), 0o700, "others can list {directory:?}");
+        assert_eq!(mode(&report), 0o600, "others can read {report:?}");
         std::fs::remove_dir_all(directory).unwrap();
     }
 
