@@ -17,7 +17,8 @@ use std::{
 
 use image::{
     AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader,
-    codecs::gif::GifDecoder, metadata::Orientation,
+    codecs::{gif::GifDecoder, png::PngDecoder, webp::WebPDecoder},
+    metadata::Orientation,
 };
 use walkdir::WalkDir;
 
@@ -293,13 +294,17 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
 pub enum ConversionDecodeError {
     Failed,
     AnimatedGif,
+    AnimatedPng,
+    AnimatedWebP,
     AnimatedJpegXl,
 }
 
 /// Decode one still image for conversion, with the source's ICC profile beside it.
-/// GIF is the exception to the generic decoder: it exposes only the first frame as a
-/// `DynamicImage`, so accepting an animation here would silently replace it with a
-/// still.
+///
+/// GIF, APNG and animated WebP all have to be refused by name. Each of their
+/// decoders hands back a single frame as a `DynamicImage` — frame zero for WebP, the
+/// default image for APNG — so accepting one here would report "converted, -80%" and
+/// quietly return a still.
 ///
 /// The profile travels with the pixels because it is the only thing that says these
 /// pixels are Display P3 or Adobe RGB rather than sRGB. Written without it, a wide
@@ -321,6 +326,24 @@ pub fn decode_for_conversion(
                 return Err(ConversionDecodeError::AnimatedGif);
             }
             return Ok((DynamicImage::ImageRgba8(first.into_buffer()), None));
+        }
+
+        if reader.format() == Some(ImageFormat::Png) {
+            let decoder =
+                PngDecoder::new(reader.into_inner()).map_err(|_| ConversionDecodeError::Failed)?;
+            if decoder.is_apng().unwrap_or(false) {
+                return Err(ConversionDecodeError::AnimatedPng);
+            }
+            return still(decoder);
+        }
+
+        if reader.format() == Some(ImageFormat::WebP) {
+            let decoder =
+                WebPDecoder::new(reader.into_inner()).map_err(|_| ConversionDecodeError::Failed)?;
+            if decoder.has_animation() {
+                return Err(ConversionDecodeError::AnimatedWebP);
+            }
+            return still(decoder);
         }
 
         if let Ok(decoder) = reader.into_decoder() {
@@ -1195,6 +1218,142 @@ mod tests {
             decode_for_conversion(&path),
             Err(ConversionDecodeError::AnimatedGif)
         );
+    }
+
+    /// An APNG is a PNG with an `acTL` chunk in front of the still the image crate
+    /// hands back, so the fixture is exactly that: a real PNG with the chunk spliced
+    /// in after IHDR. Nothing here writes APNGs, and only the chunk is read.
+    fn write_animated_png(path: &Path) {
+        let still = {
+            let mut bytes = Vec::new();
+            DynamicImage::ImageRgb8(ImageBuffer::from_fn(4, 4, |x, y| {
+                Rgb([(x * 60) as u8, (y * 60) as u8, 20])
+            }))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+            bytes
+        };
+        // Two frames, looping forever.
+        let mut actl = Vec::new();
+        actl.extend_from_slice(&8u32.to_be_bytes());
+        actl.extend_from_slice(b"acTL");
+        actl.extend_from_slice(&2u32.to_be_bytes());
+        actl.extend_from_slice(&0u32.to_be_bytes());
+        let mut crc = flate2::Crc::new();
+        crc.update(&actl[4..]);
+        actl.extend_from_slice(&crc.sum().to_be_bytes());
+
+        // 8 signature bytes, then IHDR: 4 length + 4 name + 13 payload + 4 CRC.
+        let after_ihdr = 8 + 25;
+        let mut animated = still[..after_ihdr].to_vec();
+        animated.extend_from_slice(&actl);
+        animated.extend_from_slice(&still[after_ihdr..]);
+        std::fs::write(path, animated).unwrap();
+    }
+
+    /// An animated WebP is the extended container with the animation flag, an ANIM
+    /// chunk and one ANMF frame per still. libwebp will write one but the crate's
+    /// bindings stop at the still encoder, so the container is assembled by hand
+    /// around a still this app just produced.
+    fn write_animated_webp(path: &Path, width: u32, height: u32) {
+        fn chunk(name: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut chunk = name.to_vec();
+            chunk.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            chunk.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                chunk.push(0);
+            }
+            chunk
+        }
+        fn u24(value: u32) -> [u8; 3] {
+            let bytes = value.to_le_bytes();
+            [bytes[0], bytes[1], bytes[2]]
+        }
+
+        let still = crate::convert::encode(
+            &DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| {
+                Rgb([(x * 7) as u8, (y * 11) as u8, 90])
+            })),
+            crate::convert::Format::WebP,
+            crate::convert::Quality::lossy(80.),
+            None,
+        )
+        .expect("the still frame encodes");
+        // Everything after "RIFF<size>WEBP" is the image chunk, header included.
+        let image_chunk = &still[12..];
+
+        let mut vp8x = vec![0b0000_0010, 0, 0, 0];
+        vp8x.extend_from_slice(&u24(width - 1));
+        vp8x.extend_from_slice(&u24(height - 1));
+
+        let mut anim = vec![0, 0, 0, 0];
+        anim.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&u24(0));
+        frame.extend_from_slice(&u24(0));
+        frame.extend_from_slice(&u24(width - 1));
+        frame.extend_from_slice(&u24(height - 1));
+        frame.extend_from_slice(&u24(100));
+        frame.push(0);
+        frame.extend_from_slice(image_chunk);
+
+        let mut body = b"WEBP".to_vec();
+        body.extend_from_slice(&chunk(b"VP8X", &vp8x));
+        body.extend_from_slice(&chunk(b"ANIM", &anim));
+        body.extend_from_slice(&chunk(b"ANMF", &frame));
+        body.extend_from_slice(&chunk(b"ANMF", &frame));
+
+        let mut animated = b"RIFF".to_vec();
+        animated.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        animated.extend_from_slice(&body);
+        std::fs::write(path, animated).unwrap();
+    }
+
+    #[test]
+    fn an_animated_png_is_not_decoded_as_a_still_for_conversion() {
+        let dir = temp_dir("animated-png");
+        let path = dir.join("moving.png");
+        write_animated_png(&path);
+
+        assert_eq!(
+            decode_for_conversion(&path),
+            Err(ConversionDecodeError::AnimatedPng)
+        );
+    }
+
+    #[test]
+    fn an_animated_webp_is_not_decoded_as_a_still_for_conversion() {
+        let dir = temp_dir("animated-webp");
+        let path = dir.join("moving.webp");
+        write_animated_webp(&path, 16, 16);
+
+        assert_eq!(
+            decode_for_conversion(&path),
+            Err(ConversionDecodeError::AnimatedWebP)
+        );
+    }
+
+    /// The refusal has to be about the animation, not about the format: a still WebP
+    /// and a still PNG both still convert.
+    #[test]
+    fn a_still_webp_and_a_still_png_are_still_decoded_for_conversion() {
+        let dir = temp_dir("still-webp-and-png");
+        let png = write_sample(&dir, "still.png", 12, 9);
+        let webp = dir.join("still.webp");
+        let encoded = crate::convert::encode(
+            &decode(&png).unwrap(),
+            crate::convert::Format::WebP,
+            crate::convert::Quality::lossy(80.),
+            None,
+        )
+        .unwrap();
+        std::fs::write(&webp, encoded).unwrap();
+
+        for path in [png, webp] {
+            let (image, _) = decode_for_conversion(&path).expect("a still decodes");
+            assert_eq!((image.width(), image.height()), (12, 9));
+        }
     }
 
     #[test]

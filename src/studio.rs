@@ -389,6 +389,14 @@ fn prepare_upload_using(
                 "this animated GIF is too large for Studio without dropping its animation"
                     .to_string()
             }
+            scan::ConversionDecodeError::AnimatedPng => {
+                "this animated PNG is too large for Studio without dropping its animation"
+                    .to_string()
+            }
+            scan::ConversionDecodeError::AnimatedWebP => {
+                "this animated WebP is too large for Studio without dropping its animation"
+                    .to_string()
+            }
             scan::ConversionDecodeError::AnimatedJpegXl => {
                 "this animated JPEG XL is too large for Studio without dropping its animation"
                     .to_string()

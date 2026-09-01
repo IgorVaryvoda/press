@@ -48,6 +48,8 @@ impl Quality {
 pub enum Failure {
     Failed,
     AnimatedGif,
+    AnimatedPng,
+    AnimatedWebP,
     AnimatedJpegXl,
 }
 
@@ -56,6 +58,8 @@ impl Failure {
         match self {
             Self::Failed => None,
             Self::AnimatedGif => Some("animated GIFs are not converted"),
+            Self::AnimatedPng => Some("animated PNG files are not converted"),
+            Self::AnimatedWebP => Some("animated WebP files are not converted"),
             Self::AnimatedJpegXl => Some("animated JPEG XL files are not converted"),
         }
     }
@@ -629,6 +633,8 @@ pub fn convert_to(
         crate::scan::decode_for_conversion(source).map_err(|error| match error {
             crate::scan::ConversionDecodeError::Failed => Failure::Failed,
             crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+            crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
+            crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
             crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
         })?;
     let decoded = max_edge.apply(decoded);

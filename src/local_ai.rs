@@ -130,6 +130,12 @@ pub fn process(
     check_cancelled(cancelled)?;
     let (decoded, _profile) = scan::decode_for_conversion(source).map_err(|error| match error {
         scan::ConversionDecodeError::AnimatedGif => "animated GIFs cannot use local AI".to_string(),
+        scan::ConversionDecodeError::AnimatedPng => {
+            "animated PNG files cannot use local AI".to_string()
+        }
+        scan::ConversionDecodeError::AnimatedWebP => {
+            "animated WebP files cannot use local AI".to_string()
+        }
         scan::ConversionDecodeError::AnimatedJpegXl => {
             "animated JPEG XL files cannot use local AI".to_string()
         }
