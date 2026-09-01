@@ -383,22 +383,29 @@ fn prepare_upload_using(
     }
 
     check_cancelled(cancelled)?;
-    let mut image = scan::decode_for_conversion(source).map_err(|error| match error {
-        scan::ConversionDecodeError::AnimatedGif => {
-            "this animated GIF is too large for Studio without dropping its animation".to_string()
-        }
-        scan::ConversionDecodeError::AnimatedJpegXl => {
-            "this animated JPEG XL is too large for Studio without dropping its animation"
-                .to_string()
-        }
-        scan::ConversionDecodeError::Failed => {
-            "Press could not decode this image to prepare it for Studio".to_string()
-        }
-    })?;
+    let (mut image, _profile) =
+        scan::decode_for_conversion(source).map_err(|error| match error {
+            scan::ConversionDecodeError::AnimatedGif => {
+                "this animated GIF is too large for Studio without dropping its animation"
+                    .to_string()
+            }
+            scan::ConversionDecodeError::AnimatedJpegXl => {
+                "this animated JPEG XL is too large for Studio without dropping its animation"
+                    .to_string()
+            }
+            scan::ConversionDecodeError::Failed => {
+                "Press could not decode this image to prepare it for Studio".to_string()
+            }
+        })?;
     check_cancelled(cancelled)?;
 
-    let lossless = convert::encode(&image, convert::Format::WebP, convert::Quality::LOSSLESS)
-        .ok_or_else(|| "Press could not prepare a lossless Studio upload copy".to_string())?;
+    let lossless = convert::encode(
+        &image,
+        convert::Format::WebP,
+        convert::Quality::LOSSLESS,
+        None,
+    )
+    .ok_or_else(|| "Press could not prepare a lossless Studio upload copy".to_string())?;
     if lossless.len() as u64 <= max_upload {
         return Ok(Preflight::Ready(PreparedUpload {
             bytes: lossless,
@@ -410,8 +417,13 @@ fn prepare_upload_using(
     }
 
     check_cancelled(cancelled)?;
-    let mut encoded = convert::encode(&image, convert::Format::WebP, convert::Quality::lossy(90.))
-        .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
+    let mut encoded = convert::encode(
+        &image,
+        convert::Format::WebP,
+        convert::Quality::lossy(90.),
+        None,
+    )
+    .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
     for _ in 0..8 {
         if encoded.len() as u64 <= max_upload {
             return Ok(Preflight::NeedsConfirmation(PreparedUpload {
@@ -430,8 +442,13 @@ fn prepare_upload_using(
         let ratio = (max_upload as f64 / encoded.len() as f64).sqrt() * 0.95;
         let next = ((edge as f64 * ratio.min(0.9)).floor() as u32).max(1);
         image = convert::MaxEdge(Some(next)).apply(image);
-        encoded = convert::encode(&image, convert::Format::WebP, convert::Quality::lossy(90.))
-            .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
+        encoded = convert::encode(
+            &image,
+            convert::Format::WebP,
+            convert::Quality::lossy(90.),
+            None,
+        )
+        .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
     }
     Err("Press could not prepare this image under Studio's 20 MB upload limit".into())
 }

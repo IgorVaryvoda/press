@@ -81,7 +81,7 @@ pub fn preview(path: &Path) -> Option<Preview> {
 /// the delivered resolution; only one of them has been through the encoder.
 pub fn build(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -> Option<Pair> {
     let original = max_edge.apply(crate::scan::decode(path)?);
-    let encoded = convert::encode(&original, format, quality)?;
+    let encoded = convert::encode(&original, format, quality, None)?;
     let decoded = crate::scan::decode_bytes(&encoded)?;
 
     let (width, height) = (original.width(), original.height());

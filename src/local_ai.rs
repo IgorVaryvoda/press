@@ -128,7 +128,7 @@ pub fn process(
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
     check_cancelled(cancelled)?;
-    let decoded = scan::decode_for_conversion(source).map_err(|error| match error {
+    let (decoded, _profile) = scan::decode_for_conversion(source).map_err(|error| match error {
         scan::ConversionDecodeError::AnimatedGif => "animated GIFs cannot use local AI".to_string(),
         scan::ConversionDecodeError::AnimatedJpegXl => {
             "animated JPEG XL files cannot use local AI".to_string()

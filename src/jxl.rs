@@ -3,7 +3,7 @@
 use std::io::Read as _;
 use std::path::Path;
 
-use image::DynamicImage;
+use image::{DynamicImage, ImageDecoder as _};
 use jxl_oxide::integration::JxlDecoder;
 use jxl_oxide::{InitializeResult, JxlImage};
 
@@ -51,16 +51,24 @@ pub fn probe(path: &Path) -> Option<Info> {
     }
 }
 
-pub fn decode_path(path: &Path) -> Option<DynamicImage> {
+/// Decoded pixels and the file's ICC profile, which conversion has to carry into the
+/// output for the colours to survive the trip.
+pub fn decode_path(path: &Path) -> Option<(DynamicImage, Option<Vec<u8>>)> {
     decode(std::fs::File::open(path).ok()?)
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
-    decode(std::io::Cursor::new(bytes))
+    decode(std::io::Cursor::new(bytes)).map(|(image, _)| image)
 }
 
-fn decode(reader: impl std::io::Read) -> Option<DynamicImage> {
-    DynamicImage::from_decoder(JxlDecoder::new(reader).ok()?).ok()
+fn decode(reader: impl std::io::Read) -> Option<(DynamicImage, Option<Vec<u8>>)> {
+    let mut decoder = JxlDecoder::new(reader).ok()?;
+    let profile = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .filter(|profile| !profile.is_empty());
+    Some((DynamicImage::from_decoder(decoder).ok()?, profile))
 }
 
 pub fn encode(
@@ -69,14 +77,18 @@ pub fn encode(
     height: u32,
     has_alpha: bool,
     quality: Option<f32>,
+    profile: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
-    let config = match quality {
+    let mut config = match quality {
         Some(quality) if quality.is_finite() => {
             jixel::EncodeConfig::default().with_quality(quality)
         }
         Some(_) => return None,
         None => jixel::EncodeConfig::default().with_lossless(true),
     };
+    if let Some(profile) = profile {
+        config = config.with_icc_profile(profile.to_vec());
+    }
     let (width, height) = (usize::try_from(width).ok()?, usize::try_from(height).ok()?);
     if has_alpha {
         jixel::encode_image_with_alpha(pixels, width, height, &config).ok()

@@ -280,7 +280,7 @@ pub fn decode(path: &Path) -> Option<DynamicImage> {
             return Some(image);
         }
     }
-    crate::jxl::decode_path(path)
+    crate::jxl::decode_path(path).map(|(image, _)| image)
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
@@ -296,10 +296,17 @@ pub enum ConversionDecodeError {
     AnimatedJpegXl,
 }
 
-/// Decode one still image for conversion. GIF is the exception to the generic
-/// decoder: it exposes only the first frame as a `DynamicImage`, so accepting an
-/// animation here would silently replace it with a still.
-pub fn decode_for_conversion(path: &Path) -> Result<DynamicImage, ConversionDecodeError> {
+/// Decode one still image for conversion, with the source's ICC profile beside it.
+/// GIF is the exception to the generic decoder: it exposes only the first frame as a
+/// `DynamicImage`, so accepting an animation here would silently replace it with a
+/// still.
+///
+/// The profile travels with the pixels because it is the only thing that says these
+/// pixels are Display P3 or Adobe RGB rather than sRGB. Written without it, a wide
+/// gamut photo is rendered as sRGB by every browser and its colours shift.
+pub fn decode_for_conversion(
+    path: &Path,
+) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format) {
         if reader.format() == Some(ImageFormat::Gif) {
             let file = std::fs::File::open(path).map_err(|_| ConversionDecodeError::Failed)?;
@@ -313,15 +320,11 @@ pub fn decode_for_conversion(path: &Path) -> Result<DynamicImage, ConversionDeco
             if frames.next().is_some() {
                 return Err(ConversionDecodeError::AnimatedGif);
             }
-            return Ok(DynamicImage::ImageRgba8(first.into_buffer()));
+            return Ok((DynamicImage::ImageRgba8(first.into_buffer()), None));
         }
 
-        if let Ok(mut decoder) = reader.into_decoder() {
-            let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-            if let Ok(mut image) = DynamicImage::from_decoder(decoder) {
-                image.apply_orientation(orientation);
-                return Ok(image);
-            }
+        if let Ok(decoder) = reader.into_decoder() {
+            return still(decoder);
         }
     }
 
@@ -330,6 +333,23 @@ pub fn decode_for_conversion(path: &Path) -> Result<DynamicImage, ConversionDeco
         return Err(ConversionDecodeError::AnimatedJpegXl);
     }
     crate::jxl::decode_path(path).ok_or(ConversionDecodeError::Failed)
+}
+
+/// Orientation and colour profile both have to be read off the decoder before
+/// `from_decoder` consumes it.
+fn still<D: ImageDecoder>(
+    mut decoder: D,
+) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let profile = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .filter(|profile| !profile.is_empty());
+    let mut image =
+        DynamicImage::from_decoder(decoder).map_err(|_| ConversionDecodeError::Failed)?;
+    image.apply_orientation(orientation);
+    Ok((image, profile))
 }
 
 fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
@@ -1145,6 +1165,7 @@ mod tests {
             &image,
             crate::convert::Format::JpegXl,
             crate::convert::Quality::lossy(80.),
+            None,
         )
         .expect("JPEG XL encodes");
         std::fs::write(&path, encoded).unwrap();

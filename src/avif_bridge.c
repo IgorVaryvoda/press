@@ -12,7 +12,9 @@ ImageGuideAvifData *imageguide_avif_encode(const uint8_t *pixels,
                                            int has_alpha,
                                            int quality,
                                            int speed,
-                                           int threads) {
+                                           int threads,
+                                           const uint8_t *profile,
+                                           size_t profile_size) {
     const uint32_t channels = has_alpha ? 4 : 3;
     if (!pixels || !width || !height || width > UINT32_MAX / channels) {
         return NULL;
@@ -20,6 +22,14 @@ ImageGuideAvifData *imageguide_avif_encode(const uint8_t *pixels,
 
     avifImage *image = avifImageCreate(width, height, 8, AVIF_PIXEL_FORMAT_YUV444);
     if (!image) {
+        return NULL;
+    }
+
+    /* Without the source profile the file claims nothing, and a browser reads
+       untagged AVIF as sRGB — the wrong answer for every wide gamut photo. */
+    if (profile && profile_size &&
+        avifImageSetProfileICC(image, profile, profile_size) != AVIF_RESULT_OK) {
+        avifImageDestroy(image);
         return NULL;
     }
 

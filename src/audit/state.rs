@@ -405,7 +405,7 @@ impl Audit {
                     inflight.push(cx.background_executor().spawn(async move {
                         let encoded = scan::decode(&path)
                             .map(|image| max_edge.apply(image))
-                            .and_then(|image| convert::encode(&image, format, quality))
+                            .and_then(|image| convert::encode(&image, format, quality, None))
                             .map(|encoded| encoded.len() as u64);
                         (slice_bytes, bytes, encoded)
                     }));

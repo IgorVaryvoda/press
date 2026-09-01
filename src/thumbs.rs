@@ -315,6 +315,7 @@ fn write_cached(file: &Path, thumbnail: &DynamicImage) {
         thumbnail,
         crate::convert::Format::WebP,
         crate::convert::Quality::lossy(80.),
+        None,
     ) else {
         return;
     };

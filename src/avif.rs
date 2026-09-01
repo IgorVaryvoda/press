@@ -16,6 +16,8 @@ unsafe extern "C" {
         quality: c_int,
         speed: c_int,
         threads: c_int,
+        profile: *const c_uchar,
+        profile_size: usize,
     ) -> *mut ImageGuideAvifData;
     fn imageguide_avif_data(encoded: *const ImageGuideAvifData) -> *const c_uchar;
     fn imageguide_avif_size(encoded: *const ImageGuideAvifData) -> usize;
@@ -29,6 +31,7 @@ pub fn encode(
     has_alpha: bool,
     quality: u8,
     threads: usize,
+    profile: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
     let channels = if has_alpha { 4 } else { 3 };
     let expected = usize::try_from(width)
@@ -39,8 +42,9 @@ pub fn encode(
         return None;
     }
 
-    // SAFETY: the validated pixel slice remains alive for the synchronous encode.
-    // The bridge owns its output and is always asked to free it after the copy.
+    // SAFETY: the validated pixel slice and the profile remain alive for the
+    // synchronous encode, which copies the profile. The bridge owns its output and is
+    // always asked to free it after the copy.
     unsafe {
         let encoded = imageguide_avif_encode(
             pixels.as_ptr(),
@@ -50,6 +54,8 @@ pub fn encode(
             c_int::from(quality),
             6,
             c_int::try_from(threads).ok()?,
+            profile.map_or(std::ptr::null(), <[u8]>::as_ptr),
+            profile.map_or(0, <[u8]>::len),
         );
         if encoded.is_null() {
             return None;
