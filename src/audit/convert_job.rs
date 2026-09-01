@@ -48,7 +48,15 @@ impl Audit {
         // Two sources can want one output name, so the whole run picks its names
         // together before any of it writes.
         let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
-        let planned = convert::plan_outputs(&root, &paths, &out_dir, format);
+        // Every audited image is protected, not only the ticked ones: writing into a
+        // subfolder of the audited tree would otherwise land on an original nobody
+        // selected, and this run would never see it.
+        let audited: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        let planned = convert::plan_outputs(&root, &paths, &audited, &out_dir, format);
         let sources: Vec<(usize, PathBuf, Result<PathBuf, convert::Failure>)> = sources
             .into_iter()
             .zip(planned)

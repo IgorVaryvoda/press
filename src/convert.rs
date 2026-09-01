@@ -383,7 +383,7 @@ pub fn convert_each(
     max_edge: MaxEdge,
     report: impl Fn(&Path, Result<Converted, Failure>) + Sync,
 ) {
-    let planned = &plan_outputs(root, sources, out_dir, format);
+    let planned = &plan_outputs(root, sources, sources, out_dir, format);
     // A shared cursor rather than a slice per thread: files in one folder differ in
     // size by a hundred times, so a fixed split leaves most threads finished early.
     let next = &AtomicUsize::new(0);
@@ -468,13 +468,18 @@ pub fn ai_output_path(
 /// `optimized/shot-jpg.webp`, then `-2`, `-3` if even that is taken. Claims are
 /// assigned in source-path order, independent of the current table sort.
 ///
-/// A destination that already holds the batch's own images is refused per file
-/// rather than renamed around: `a.png` landing on the source `a.webp` destroys an
-/// original and the run would report the loss as a saving. Such a source claims no
-/// name and does not stop its siblings.
+/// A destination that already holds audited images is refused per file rather than
+/// renamed around: `a.png` landing on the original `a.webp` destroys it and the run
+/// would report the loss as a saving. Such a source claims no name and does not stop
+/// its siblings.
+///
+/// `audited` is every image in the folder, not just the ones being converted. Ticking
+/// one file and writing into a subfolder full of untouched originals is the same
+/// destruction, and the run that does it never had those files in `sources`.
 pub fn plan_outputs(
     root: &Path,
     sources: &[PathBuf],
+    audited: &[PathBuf],
     out_dir: &Path,
     format: Format,
 ) -> Vec<Result<PathBuf, Failure>> {
@@ -483,7 +488,7 @@ pub fn plan_outputs(
     // not renaming it costs a lost image.
     let mut taken: HashSet<String> = HashSet::new();
     let key = |path: &Path| path.to_string_lossy().to_lowercase();
-    let sources_taken: HashSet<String> = sources.iter().map(|source| key(source)).collect();
+    let originals: HashSet<String> = audited.iter().map(|path| key(path)).collect();
 
     let mut planned = vec![Err(Failure::OverwritesSource); sources.len()];
     let mut order: Vec<usize> = (0..sources.len()).collect();
@@ -496,7 +501,7 @@ pub fn plan_outputs(
     for index in order {
         let source = &sources[index];
         let plain = output_path(root, source, out_dir, format);
-        if sources_taken.contains(&key(&plain)) {
+        if originals.contains(&key(&plain)) {
             continue;
         }
         if taken.insert(key(&plain)) {
@@ -518,7 +523,7 @@ pub fn plan_outputs(
             let candidate = parent
                 .join(format!("{stem}-{extension}{suffix}"))
                 .with_extension(format.extension());
-            if sources_taken.contains(&key(&candidate)) {
+            if originals.contains(&key(&candidate)) {
                 continue;
             }
             if taken.insert(key(&candidate)) {
@@ -651,7 +656,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("imageguide-convert-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // macOS hands out `/var/folders/...`, and `/var` is a symlink to
+        // `/private/var`. `Context` canonicalizes its roots, so a fixture that
+        // starts from the aliased spelling compares two different names.
+        dir.canonicalize().unwrap()
     }
 
     /// Deterministic noise. A flat colour compresses to nothing, and so does a smooth
@@ -896,7 +904,7 @@ mod tests {
             PathBuf::from("/photos/shot.webp"),
         ];
 
-        let planned = plan_outputs(root, &sources, out, Format::WebP);
+        let planned = plan_outputs(root, &sources, &sources, out, Format::WebP);
         assert_eq!(
             planned,
             [
@@ -920,7 +928,13 @@ mod tests {
             PathBuf::from("/p/a.PNG"),
         ];
 
-        let planned = plan_outputs(Path::new("/p"), &sources, Path::new("/p/out"), Format::WebP);
+        let planned = plan_outputs(
+            Path::new("/p"),
+            &sources,
+            &sources,
+            Path::new("/p/out"),
+            Format::WebP,
+        );
         let names: Vec<String> = planned
             .iter()
             .map(|path| {
@@ -943,9 +957,15 @@ mod tests {
             PathBuf::from("/photos/shot.png"),
             PathBuf::from("/photos/shot.jpg"),
         ];
-        let forward = plan_outputs(root, &sources, out, Format::WebP);
+        let forward = plan_outputs(root, &sources, &sources, out, Format::WebP);
         let reversed_sources = [sources[1].clone(), sources[0].clone()];
-        let reversed = plan_outputs(root, &reversed_sources, out, Format::WebP);
+        let reversed = plan_outputs(
+            root,
+            &reversed_sources,
+            &reversed_sources,
+            out,
+            Format::WebP,
+        );
 
         assert_eq!(forward[0], reversed[1]);
         assert_eq!(forward[1], reversed[0]);
@@ -1044,7 +1064,7 @@ mod tests {
         let root = temp_dir("external-source");
         let outside = temp_dir("external-output");
         std::fs::create_dir(root.join("album")).unwrap();
-        let sources = [root.join("one.png"), root.join("album/two.png")];
+        let sources = [root.join("one.png"), root.join("album").join("two.png")];
         for source in &sources {
             photo(48, 48).save(source).unwrap();
         }
@@ -1074,16 +1094,16 @@ mod tests {
         assert_eq!(
             written,
             [
-                context.output_root().join("album/two.webp"),
+                context.output_root().join("album").join("two.webp"),
                 context.output_root().join("one.webp"),
             ]
         );
         assert!(written.iter().all(|path| path.is_file()));
     }
 
-    /// A `.part` left behind by a killed run used to sit on the one staging name
-    /// `create_new` accepts and fail that file for good, with nothing on the toast to
-    /// say which file was in the way.
+    /// A `.part` on the staging name used to fail that file for good, with nothing on
+    /// the toast to say what was in the way. The staging name now carries this process
+    /// id, so anything already sitting on it belongs to someone else.
     #[test]
     fn a_partial_file_this_run_did_not_create_is_named_and_left_alone() {
         let dir = temp_dir("stale-part");
@@ -1092,7 +1112,7 @@ mod tests {
         photo(32, 32).save(&source).unwrap();
         std::fs::create_dir(&out).unwrap();
         let blocker = out.join(format!("in.webp.{}.part", std::process::id()));
-        std::fs::write(&blocker, b"from a run that died").unwrap();
+        std::fs::write(&blocker, b"not written by this run").unwrap();
 
         let failure = convert_to(
             &out,
@@ -1111,7 +1131,7 @@ mod tests {
                 .expect("the failure is named")
                 .contains(&blocker.display().to_string())
         );
-        assert_eq!(std::fs::read(&blocker).unwrap(), b"from a run that died");
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"not written by this run");
     }
 
     /// Writing into a folder that holds the batch let `a.png` land on the source
@@ -1125,7 +1145,7 @@ mod tests {
             PathBuf::from("/photos/b.png"),
         ];
 
-        let planned = plan_outputs(root, &sources, root, Format::WebP);
+        let planned = plan_outputs(root, &sources, &sources, root, Format::WebP);
 
         assert_eq!(
             planned,
@@ -1136,6 +1156,29 @@ mod tests {
             ],
             "a refused source claims no name and does not stop its siblings"
         );
+    }
+
+    /// Ticking one file and pointing the output at a subfolder of the same audit is
+    /// how an original nobody selected gets overwritten: this run never had it in
+    /// `sources`, so only the audited set can protect it.
+    #[test]
+    fn a_planned_output_never_claims_an_audited_file_left_unselected() {
+        let root = Path::new("/photos");
+        let selected = [PathBuf::from("/photos/x.png")];
+        let audited = [
+            PathBuf::from("/photos/x.png"),
+            PathBuf::from("/photos/album/x.webp"),
+        ];
+
+        let planned = plan_outputs(
+            root,
+            &selected,
+            &audited,
+            Path::new("/photos/album"),
+            Format::WebP,
+        );
+
+        assert_eq!(planned, [Err(Failure::OverwritesSource)]);
     }
 
     #[test]

@@ -1489,9 +1489,11 @@ impl Audit {
         self.set_output(Output::Optimized, cx);
     }
 
-    /// Take the destination only if it can actually hold output. Refusing a folder
-    /// that is, contains, or holds the images being audited is the whole point: it
-    /// would re-encode originals onto themselves and report the loss as a saving.
+    /// Take the destination only if it can actually hold output. This refuses a folder
+    /// that is or contains the audited one, which would re-encode originals onto
+    /// themselves and report the loss as a saving. A folder *inside* the audited tree
+    /// is still allowed — `optimized/` is one — so the run also refuses, per file, any
+    /// output that would land on an audited original.
     fn set_output(&mut self, output: Output, cx: &mut Context<Self>) {
         self.clear_error("output", cx);
         if let Err(message) = output.context(&self.root) {

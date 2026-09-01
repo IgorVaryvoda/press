@@ -3969,3 +3969,46 @@ fn choosing_the_audited_folder_as_the_output_is_refused(cx: &mut TestAppContext)
     assert_eq!(notification_count(cx), 1);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Only one file is ticked, and the destination is a subfolder of the same audit. The
+/// original sitting there was never in this run's source list, so nothing but the
+/// audited set can stop the conversion landing on it.
+#[gpui::test]
+fn converting_into_a_subfolder_refuses_to_overwrite_an_unselected_original(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("unselected-original");
+    let album = root.join("album");
+    std::fs::create_dir(&album).expect("the album fixture folder is created");
+    write_png(&root, "x.png");
+    let original = album.join("x.webp");
+    std::fs::write(&original, b"an audited original").unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![
+            entry(
+                root.join("x.png").to_str().unwrap(),
+                8,
+                8,
+                256,
+                ImageFormat::Png,
+            ),
+            entry(original.to_str().unwrap(), 8, 8, 19, ImageFormat::WebP),
+        ];
+        audit.visible = vec![0, 1];
+        audit.selected = HashSet::from([0]);
+        audit.set_output(Output::Folder(album.clone()), cx);
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.failures.len(), 1);
+        assert!(audit.failures[0].contains("x.png"), "{:?}", audit.failures);
+        assert!(audit.results.is_empty());
+    });
+    assert_eq!(std::fs::read(&original).unwrap(), b"an audited original");
+    std::fs::remove_dir_all(root).unwrap();
+}

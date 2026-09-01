@@ -1275,6 +1275,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("press-headless-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        // macOS hands out `/var/folders/...`, and `/var` is a symlink to
+        // `/private/var`. `Context` canonicalizes its roots, so a fixture that
+        // starts from the aliased spelling compares two different names.
+        let root = root.canonicalize().unwrap();
         let source = root.join("photo.png");
         image::RgbImage::from_fn(64, 64, |x, y| {
             let hash = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
