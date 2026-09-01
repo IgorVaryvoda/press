@@ -587,9 +587,16 @@ pub fn plan_outputs(
 ) -> Vec<Result<PathBuf, Failure>> {
     // Keyed case-insensitively. `Shot.png` and `shot.jpg` are two files on Linux and
     // one on macOS, and renaming one of them needlessly costs a stranger name, while
-    // not renaming it costs a lost image.
+    // not renaming it costs a lost image. Keyed by component, not by string: on
+    // Windows a planned path joins with `\` while the audited one may carry `/`,
+    // and the two spellings are one file.
     let mut taken: HashSet<String> = HashSet::new();
-    let key = |path: &Path| path.to_string_lossy().to_lowercase();
+    let key = |path: &Path| {
+        path.components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
     let originals: HashSet<String> = audited.iter().map(|path| key(path)).collect();
 
     let mut planned = vec![Err(Failure::OverwritesSource); sources.len()];

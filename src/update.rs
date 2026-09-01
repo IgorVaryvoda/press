@@ -260,8 +260,9 @@ mod tests {
             .nth(1)
             .expect("a minisign key file is a comment then the key");
         assert!(!key.is_empty(), "assets/updater.pub has no key on line 2");
+        // `lines()` rather than a substring: a Windows checkout may carry CRLF.
         assert!(
-            script.contains(&format!("\npubkey={key}\n")),
+            script.lines().any(|line| line == format!("pubkey={key}")),
             "scripts/install.sh does not carry the key {key}"
         );
     }
