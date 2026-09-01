@@ -3991,6 +3991,7 @@ fn convertible_audit(
         root,
         entries,
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),
