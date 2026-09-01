@@ -35,8 +35,11 @@ its icon under `~/.local`:
 curl -fsSL https://raw.githubusercontent.com/IgorVaryvoda/press/main/scripts/install.sh | sh
 ```
 
-It checks the download against the release's `SHA256SUMS` and installs nothing on a
-mismatch. Read it first if you prefer: [`scripts/install.sh`](scripts/install.sh).
+With `minisign` (or `rsign`) installed, it verifies the release's minisign
+signature against the same public key the updater trusts, and installs nothing if
+that fails. Without one, it falls back to the release's `SHA256SUMS`, says so, and
+still installs nothing on a mismatch. Read it first if you prefer:
+[`scripts/install.sh`](scripts/install.sh).
 Remove Press by deleting `~/.local/bin/press`,
 `~/.local/share/applications/press.desktop`, and
 `~/.local/share/icons/hicolor/512x512/apps/press.png`.
