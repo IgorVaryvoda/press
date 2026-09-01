@@ -13,12 +13,16 @@ env:
   CARGO_TERM_COLOR: always
   NO_STRIP: 1
 
+# Third-party actions are pinned to a commit, never a tag: a tag moves, and the
+# package job below hands the updater's signing key and the Apple identity to
+# whatever those steps happen to be. The trailing comment records which tag the
+# commit was; move both together.
 jobs:
   workflow-validation:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.0'
           cache: false
@@ -67,7 +71,7 @@ jobs:
             artifact: windows-x86_64
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: System dependencies (Linux)
         if: runner.os == 'Linux'
@@ -103,14 +107,14 @@ jobs:
           "DAV1D_STATIC=1" >> $env:GITHUB_ENV
           "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib\pkgconfig" >> $env:GITHUB_ENV
 
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Check out vision.cpp for macOS local AI
         if: runner.os == 'macOS'
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Acly/vision.cpp
           ref: b766b0acc30f6706f1bfe46769635e361172ce96
@@ -230,7 +234,7 @@ jobs:
           }));
           NODE
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
@@ -255,8 +259,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: release-assets
           merge-multiple: true
