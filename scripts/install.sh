@@ -87,6 +87,17 @@ if [ -n "$verifier" ]; then
 	# cargo-packager base64-wraps the minisign signature file; both tools want it raw.
 	base64 -d <"$tmp/$asset.sig" >"$tmp/$asset.minisig" ||
 		die "$asset.sig is not the published signature format; nothing was installed"
+
+	# cargo-packager signs a trusted comment of `timestamp:<secs><TAB>file:<name>`,
+	# and the signature covers it. Without this check a genuine signature over an
+	# older AppImage passes when that AppImage is served under a newer version
+	# number. The comment is only worth anything once the verifier below has
+	# checked it, so it takes both: this reads the claim, the verifier proves it.
+	tab=$(printf '\t')
+	signed=$(sed -n "s/^trusted comment:.*${tab}file://p" "$tmp/$asset.minisig" | head -n 1)
+	[ "$signed" = "$asset" ] ||
+		die "the signature is for ${signed:-no named file}, not $asset; nothing was installed"
+
 	case $verifier in
 	minisign) minisign -V -q -m "$tmp/$asset" -x "$tmp/$asset.minisig" -P "$pubkey" ;;
 	rsign) rsign verify -P "$pubkey" -x "$tmp/$asset.minisig" "$tmp/$asset" ;;
