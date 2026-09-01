@@ -135,6 +135,7 @@ fn sample_size(format: Format) -> usize {
         Format::Avif | Format::JpegXl => 3,
     }
 }
+
 /// The decoded pixels behind the estimate's sample, keyed by the dataset, the source
 /// path and the max edge: the three things that change what a decode produces.
 type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), Arc<DynamicImage>>>>;
@@ -1047,12 +1048,10 @@ impl Audit {
             cancel.store(true, Ordering::Release);
         }
         if let Some(job) = self.local_ai_job.take() {
-            job.cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            job.cancelled.store(true, Ordering::Relaxed);
         }
         if let Some(job) = self.studio_job.take() {
-            job.cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            job.cancelled.store(true, Ordering::Relaxed);
         }
         self.studio_source = None;
         self.root = root;

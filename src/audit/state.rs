@@ -375,9 +375,9 @@ impl Audit {
             })
             .collect();
 
-        // Prune to the sample about to be taken. The strata are at most `sample_size`
-        // files, so this is the whole bound on the cache, and pixels belonging to a
-        // folder or an output size the window has left behind go with it.
+        // Prune to the sample about to be taken, so pixels belonging to a folder or
+        // an output size the window has left behind go with it. That caps the count
+        // at `sample_size`; what bounds the memory is the byte budget below.
         let decodes = self.estimate_decodes.clone();
         decodes.lock().retain(|(generation, path, edge), _| {
             *generation == dataset_generation
@@ -425,9 +425,8 @@ impl Audit {
                             None => scan::decode(&path).map(|image| {
                                 let image = Arc::new(max_edge.apply(image));
                                 let mut cache = decodes.lock();
-                                if cache.values().map(decoded_bytes).sum::<u64>()
-                                    < ESTIMATE_DECODE_BYTES
-                                {
+                                let held: u64 = cache.values().map(decoded_bytes).sum();
+                                if held + decoded_bytes(&image) <= ESTIMATE_DECODE_BYTES {
                                     cache.insert(key, image.clone());
                                 }
                                 image

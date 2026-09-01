@@ -340,15 +340,21 @@ impl Audit {
                                 .child(title),
                         )
                         .child(
-                            Button::new("close-rail")
-                                .small()
-                                .ghost()
-                                .icon(IconName::Close)
-                                .tooltip("Close")
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.rail = Rail::None;
-                                    cx.notify();
-                                })),
+                            // Closing the rail mid-run would take Stop away with
+                            // it, and the tab that reopens the rail is disabled
+                            // while converting: there would be no way back.
+                            div().debug_selector(|| "close-rail".into()).child(
+                                Button::new("close-rail")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .tooltip("Close")
+                                    .disabled(self.converting)
+                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                        audit.rail = Rail::None;
+                                        cx.notify();
+                                    })),
+                            ),
                         ),
                 )
                 .child(body)

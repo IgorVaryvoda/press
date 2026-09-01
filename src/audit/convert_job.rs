@@ -19,6 +19,9 @@ impl Audit {
         self.active_target_count = Some(target_count);
         let cancel = Arc::new(AtomicBool::new(false));
         self.convert_cancel = Some(cancel.clone());
+        // The run wants every byte the samples are sitting on: it holds a decoded
+        // image per worker of its own.
+        self.estimate_decodes.lock().clear();
         self.clear_results();
         self.failures.clear();
         cx.notify();
@@ -141,7 +144,10 @@ impl Audit {
                     audit.converting = false;
                     audit.active_target_count = None;
                     audit.convert_cancel = None;
-                    let stopped = cancel.load(Ordering::Acquire);
+                    // A stop clicked as the last file lands converted everything
+                    // it was asked to, so it reports like any other finished run.
+                    let stopped = cancel.load(Ordering::Acquire)
+                        && audit.results.len() + audit.failures.len() < target_count;
                     audit.stopped_run = stopped.then_some(target_count);
                     if !audit.failures.is_empty() {
                         // Counted against what the run actually attempted. A

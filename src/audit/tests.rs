@@ -3916,7 +3916,10 @@ fn convertible_audit(
     let root = scan_fixture("convert");
     let entries: Vec<Entry> = (0..count)
         .map(|index| {
-            let path = write_png(&root, &format!("shot-{index}.png"));
+            let path = root.join(format!("shot-{index}.png"));
+            crate::convert::tests::photo(8, 8)
+                .save(&path)
+                .expect("the fixture photo is written");
             let bytes = std::fs::metadata(&path)
                 .expect("the fixture image is on disk")
                 .len();
@@ -4111,4 +4114,33 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
             "the resized sample projected a real total"
         );
     });
+}
+
+#[gpui::test]
+fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext) {
+    // A real run would end inside the click that simulates the close, so the state
+    // a run installs is set directly here.
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    audit.update(cx, |audit, cx| {
+        audit.rail = Rail::Convert;
+        audit.converting = true;
+        audit.active_target_count = Some(2);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("convert-stop").is_some());
+    let close = cx
+        .debug_bounds("close-rail")
+        .expect("the open rail has its close control");
+    cx.simulate_click(close.center(), gpui::Modifiers::none());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.rail, Rail::Convert));
+    assert!(
+        cx.debug_bounds("convert-stop").is_some(),
+        "the way out of a run cannot be closed away: the tab that reopens the rail \
+         is disabled while it runs"
+    );
+    audit.update(cx, |audit, _| audit.converting = false);
 }
