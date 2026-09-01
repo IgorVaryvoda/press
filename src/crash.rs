@@ -308,7 +308,18 @@ fn create_private_directory(directory: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        // A mount with no POSIX modes behind it — a FAT stick, some network
+        // shares — must not turn a crash into a lost report. Having the folder
+        // is what matters; refusing the mode is not a reason to give up.
+        if let Err(error) =
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            && !matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+            )
+        {
+            return Err(error);
+        }
     }
     Ok(())
 }
