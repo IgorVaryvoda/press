@@ -65,7 +65,7 @@ impl Failure {
 /// This is where most of the weight actually is. Re-encoding a 6400px photo as AVIF
 /// still hands back a 6400px photo, which is the wrong image for a web page however
 /// well it is compressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct MaxEdge(pub Option<u32>);
 
 impl MaxEdge {

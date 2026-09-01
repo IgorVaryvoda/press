@@ -375,6 +375,16 @@ impl Audit {
             })
             .collect();
 
+        // Prune to the sample about to be taken. The strata are at most `sample_size`
+        // files, so this is the whole bound on the cache, and pixels belonging to a
+        // folder or an output size the window has left behind go with it.
+        let decodes = self.estimate_decodes.clone();
+        decodes.lock().retain(|(generation, path, edge), _| {
+            *generation == dataset_generation
+                && *edge == max_edge
+                && strata.iter().any(|stratum| stratum.path == *path)
+        });
+
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ESTIMATE_DELAY).await;
             if this
@@ -403,9 +413,27 @@ impl Audit {
                     };
                     let path = stratum.path.clone();
                     let (slice_bytes, bytes) = (stratum.slice_bytes, stratum.bytes);
+                    let decodes = decodes.clone();
                     inflight.push(cx.background_executor().spawn(async move {
-                        let encoded = scan::decode(&path)
-                            .map(|image| max_edge.apply(image))
+                        // Only the encode depends on quality, so a slider stop
+                        // re-encodes the pixels the last one decoded rather than
+                        // reading and decoding the same file again.
+                        let key = (dataset_generation, path.clone(), max_edge);
+                        let cached = decodes.lock().get(&key).cloned();
+                        let decoded = match cached {
+                            Some(image) => Some(image),
+                            None => scan::decode(&path).map(|image| {
+                                let image = Arc::new(max_edge.apply(image));
+                                let mut cache = decodes.lock();
+                                if cache.values().map(decoded_bytes).sum::<u64>()
+                                    < ESTIMATE_DECODE_BYTES
+                                {
+                                    cache.insert(key, image.clone());
+                                }
+                                image
+                            }),
+                        };
+                        let encoded = decoded
                             .and_then(|image| convert::encode(&image, format, quality))
                             .map(|encoded| encoded.len() as u64);
                         (slice_bytes, bytes, encoded)
