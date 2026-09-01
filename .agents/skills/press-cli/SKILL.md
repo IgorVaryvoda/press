@@ -33,6 +33,10 @@ Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF.
 
 Treat exit status `1` as a partial result, not as proof that nothing was written. Read each file's `status`, report named failures, and use each successful `output` path as the source of truth. Never claim savings from the requested settings alone; use `summary.source_bytes` and `summary.output_bytes` from the completed run.
 
+Exit status `2` means the destination itself was refused before any file was converted, and no JSON is written. The reason is one line on stderr — usually that `optimized` already exists as a file or a symlink. Report that line; nothing was written.
+
+The report's `output` field is the canonical path of the folder that was written, so it can differ from the spelling of the target you passed when that path was reached through a link.
+
 ## Update Press
 
 Run `press update` to install the latest signed release. Self-updating works for the Press AppImage, macOS app, and Windows installer; use the package manager for other installs.

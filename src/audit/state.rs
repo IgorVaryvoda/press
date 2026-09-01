@@ -758,8 +758,15 @@ impl Audit {
             return;
         };
         self.clear_error("discard-output", cx);
-        // Only ever inside the destination this audit writes to.
-        if !written.starts_with(self.output.root(&self.root)) {
+        // Only ever inside the destination this audit writes to. `written` came from
+        // the established context, which canonicalizes; on Windows that is spelled
+        // `\\?\C:\...` and never has the lexical root as a prefix.
+        let output_root = self
+            .output
+            .context(&self.root)
+            .map(|context| context.output_root().to_path_buf())
+            .unwrap_or_else(|_| self.output.root(&self.root));
+        if !written.starts_with(&output_root) {
             self.notify_error(
                 "discard-output",
                 "Press refused to discard this file",

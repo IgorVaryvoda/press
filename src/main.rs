@@ -495,13 +495,13 @@ struct ConversionReport {
 /// Convert without opening a window, so the same work is scriptable and testable.
 fn convert_headless(
     root: &std::path::Path,
+    out_dir: &std::path::Path,
     entries: &[Entry],
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
     json: bool,
 ) -> ConversionRun {
-    let out_dir = root.join(scan::OUTPUT_DIR);
     let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
     let by_path: HashMap<&Path, &Entry> = entries
         .iter()
@@ -519,7 +519,7 @@ fn convert_headless(
     convert::convert_each(
         root,
         &sources,
-        &out_dir,
+        out_dir,
         format,
         quality,
         max_edge,
@@ -575,7 +575,11 @@ fn convert_headless(
                         output_bytes: None,
                         width: None,
                         height: None,
-                        error: Some(error.reason().unwrap_or("conversion failed").to_string()),
+                        error: Some(
+                            error
+                                .reason()
+                                .unwrap_or_else(|| "conversion failed".to_string()),
+                        ),
                     });
                 }
             }
@@ -786,8 +790,19 @@ fn main() {
             many => println!("{many} macOS packages skipped"),
         }
     }
+    // Headless always writes the default `optimized/`, but it still has to be a usable
+    // folder. Refusing here names the reason once instead of failing every file.
+    let context = match settings::Output::Optimized.context(&root) {
+        Ok(context) => context,
+        Err(message) => {
+            eprintln!("press: {message}");
+            std::process::exit(2);
+        }
+    };
+    let out_dir = context.output_root().to_path_buf();
     let run = convert_headless(
         &root,
+        &out_dir,
         &scanned.entries,
         args.format,
         args.quality,
@@ -800,7 +815,7 @@ fn main() {
             schema_version: 1,
             command: "convert",
             target: path_text(&target),
-            output: path_text(&root.join(scan::OUTPUT_DIR)),
+            output: path_text(&out_dir),
             options: ConversionOptions {
                 format: args.format.label(),
                 quality: args.quality.0,
@@ -1265,6 +1280,46 @@ mod tests {
         assert!(parse(&["audit", "/photos", "--quality", "80"]).is_err());
         assert!(parse(&["convert", "one", "two"]).is_err());
         assert!(parse(&["--json", "/photos"]).is_err());
+    }
+
+    /// Headless conversion establishes the same output context as the window, so the
+    /// default destination has to keep working through it.
+    #[test]
+    fn headless_conversion_writes_into_the_established_default_output() {
+        let root = std::env::temp_dir().join(format!("press-headless-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // macOS hands out `/var/folders/...`, and `/var` is a symlink to
+        // `/private/var`. `Context` canonicalizes its roots, so a fixture that
+        // starts from the aliased spelling compares two different names.
+        let root = root.canonicalize().unwrap();
+        let source = root.join("photo.png");
+        image::RgbImage::from_fn(64, 64, |x, y| {
+            let hash = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
+            image::Rgb([(hash >> 8) as u8, (hash >> 16) as u8, (hash >> 24) as u8])
+        })
+        .save(&source)
+        .unwrap();
+        let entries = vec![scan::probe(&source).expect("the fixture is an image")];
+
+        let context = settings::Output::Optimized
+            .context(&root)
+            .expect("the default output establishes");
+        let run = convert_headless(
+            &root,
+            context.output_root(),
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+
+        assert_eq!(run.failed, 0);
+        assert_eq!(run.files.len(), 1);
+        assert_eq!(run.files[0].status, "converted");
+        assert!(root.join(scan::OUTPUT_DIR).join("photo.webp").is_file());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

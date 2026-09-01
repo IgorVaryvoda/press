@@ -13,6 +13,21 @@ impl Audit {
             return;
         }
         self.clear_error("conversion", cx);
+        // Prove the destination before anything moves. A refused output leaves the
+        // previous run's results on screen instead of clearing them for a run that
+        // was never going to write a file.
+        let context = match self.output.context(&self.root) {
+            Ok(context) => context,
+            Err(message) => {
+                self.notify_error(
+                    "conversion",
+                    "Couldn’t use the output folder",
+                    format!("{}: {message}", self.output.label()),
+                    cx,
+                );
+                return;
+            }
+        };
         let target_count = targets.len();
         let dataset_generation = self.dataset_generation;
         self.converting = true;
@@ -27,7 +42,7 @@ impl Audit {
         cx.notify();
 
         let root = self.root.clone();
-        let out_dir = self.output.root(&self.root);
+        let out_dir = context.output_root().to_path_buf();
         let quality = self.quality;
         let format = self.format;
         let max_edge = self.max_edge;
@@ -38,8 +53,16 @@ impl Audit {
         // Two sources can want one output name, so the whole run picks its names
         // together before any of it writes.
         let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
-        let planned = convert::plan_outputs(&root, &paths, &out_dir, format);
-        let sources: Vec<(usize, PathBuf, PathBuf)> = sources
+        // Every audited image is protected, not only the ticked ones: writing into a
+        // subfolder of the audited tree would otherwise land on an original nobody
+        // selected, and this run would never see it.
+        let audited: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        let planned = convert::plan_outputs(&root, &paths, &audited, &out_dir, format);
+        let sources: Vec<(usize, PathBuf, Result<PathBuf, convert::Failure>)> = sources
             .into_iter()
             .zip(planned)
             .map(|((index, source), written)| (index, source, written))
@@ -68,14 +91,15 @@ impl Audit {
                         break;
                     };
                     let (index, source, written) = (*index, source.clone(), written.clone());
-                    let root = root.clone();
+                    let out_dir = out_dir.clone();
                     inflight.push(cx.background_executor().spawn(async move {
-                        (
-                            index,
-                            convert::convert_to(
-                                &root, &source, &written, format, quality, max_edge,
+                        let converted = match written {
+                            Ok(written) => convert::convert_to(
+                                &out_dir, &source, &written, format, quality, max_edge,
                             ),
-                        )
+                            Err(failure) => Err(failure),
+                        };
+                        (index, converted)
                     }));
                 }
                 if inflight.is_empty() {

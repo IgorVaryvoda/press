@@ -350,8 +350,10 @@ fn process_prepared_with_api(
         tool.output_suffix(),
         extension,
     )?;
-    convert::write_output(root, &written, &bytes)
-        .map_err(|_| "could not safely write the Studio result".to_string())?;
+    convert::write_output(out_dir, &written, &bytes).map_err(|failure| match failure.reason() {
+        Some(reason) => format!("the Studio result was not written: {reason}"),
+        None => "could not safely write the Studio result".to_string(),
+    })?;
     Ok(written)
 }
 

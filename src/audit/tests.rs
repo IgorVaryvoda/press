@@ -4200,3 +4200,110 @@ fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext
     );
     audit.update(cx, |audit, _| audit.converting = false);
 }
+
+/// A chosen destination is routinely somewhere else entirely — a staging directory, a
+/// share, a build tree. Measuring each target against the audited root failed every
+/// one of those files and put nothing but their names on the toast.
+#[gpui::test]
+fn converting_into_an_output_folder_outside_the_root_writes_every_file(cx: &mut TestAppContext) {
+    let root = scan_fixture("gui-external-source");
+    let outside = scan_fixture("gui-external-output");
+    write_png(&root, "one.png");
+    write_png(&root, "two.png");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![
+            entry(
+                root.join("one.png").to_str().unwrap(),
+                8,
+                8,
+                256,
+                ImageFormat::Png,
+            ),
+            entry(
+                root.join("two.png").to_str().unwrap(),
+                8,
+                8,
+                256,
+                ImageFormat::Png,
+            ),
+        ];
+        audit.visible = vec![0, 1];
+        audit.selected = HashSet::from([0, 1]);
+        audit.set_output(Output::Folder(outside.clone()), cx);
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(audit.results.len(), 2);
+    });
+    assert!(outside.join("one.webp").is_file());
+    assert!(outside.join("two.webp").is_file());
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+/// The folder being audited cannot also be the destination: `a.png` would land on the
+/// source `a.webp`, and the run would report the destroyed original as a saving.
+#[gpui::test]
+fn choosing_the_audited_folder_as_the_output_is_refused(cx: &mut TestAppContext) {
+    let root = scan_fixture("output-is-the-source");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.set_output(Output::Folder(root.clone()), cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.output, Output::Optimized));
+    assert_eq!(notification_count(cx), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Only one file is ticked, and the destination is a subfolder of the same audit. The
+/// original sitting there was never in this run's source list, so nothing but the
+/// audited set can stop the conversion landing on it.
+#[gpui::test]
+fn converting_into_a_subfolder_refuses_to_overwrite_an_unselected_original(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("unselected-original");
+    let album = root.join("album");
+    std::fs::create_dir(&album).expect("the album fixture folder is created");
+    write_png(&root, "x.png");
+    let original = album.join("x.webp");
+    std::fs::write(&original, b"an audited original").unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![
+            entry(
+                root.join("x.png").to_str().unwrap(),
+                8,
+                8,
+                256,
+                ImageFormat::Png,
+            ),
+            entry(original.to_str().unwrap(), 8, 8, 19, ImageFormat::WebP),
+        ];
+        audit.visible = vec![0, 1];
+        audit.selected = HashSet::from([0]);
+        audit.set_output(Output::Folder(album.clone()), cx);
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.failures.len(), 1);
+        assert!(audit.failures[0].contains("x.png"), "{:?}", audit.failures);
+        assert!(audit.results.is_empty());
+    });
+    assert_eq!(std::fs::read(&original).unwrap(), b"an audited original");
+    std::fs::remove_dir_all(root).unwrap();
+}

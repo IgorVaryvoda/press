@@ -1531,7 +1531,22 @@ impl Audit {
         self.set_output(Output::Optimized, cx);
     }
 
+    /// Take the destination only if it can actually hold output. This refuses a folder
+    /// that is or contains the audited one, which would re-encode originals onto
+    /// themselves and report the loss as a saving. A folder *inside* the audited tree
+    /// is still allowed — `optimized/` is one — so the run also refuses, per file, any
+    /// output that would land on an audited original.
     fn set_output(&mut self, output: Output, cx: &mut Context<Self>) {
+        self.clear_error("output", cx);
+        if let Err(message) = output.context(&self.root) {
+            self.notify_error(
+                "output",
+                "Couldn’t use that output folder",
+                format!("{}: {message}", output.label()),
+                cx,
+            );
+            return;
+        }
         self.output = output;
         self.browser_output_root = output_identity(&self.output, &self.root);
         self.rebuild_tree(cx);

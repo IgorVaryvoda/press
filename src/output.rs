@@ -1,8 +1,9 @@
 //! Lexical and canonical boundaries for conversion output.
 //!
-//! The conversion callers still use their legacy relative path handling. This module
-//! defines the stricter contract they will adopt once source capture and writing move
-//! together, so validation itself never creates a path or follows an output symlink.
+//! Every producer — normal conversion, local AI, Studio — establishes one context per
+//! run and writes inside the output root it proves. Establishing never creates a path
+//! and never follows an output symlink, so a destination can be refused before any
+//! state moves and before any file is written.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -254,8 +255,6 @@ impl Context {
         &self.source_root
     }
 
-    // First consumed by plan 1434 when CLI conversion adopts this boundary.
-    #[allow(dead_code)]
     pub fn output_root(&self) -> &Path {
         &self.output_root
     }
@@ -410,8 +409,20 @@ fn canonical_output(output: &Path) -> Result<PathBuf, Error> {
             continue;
         }
         let candidate = ancestor.join(part);
-        match fs::symlink_metadata(&candidate) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+        // Only the destination itself may not be a symlink. Ordinary places are
+        // routinely reached through one — macOS spells `/var` as a link to
+        // `/private/var`, so every temporary folder has an aliased ancestor — and
+        // refusing those left the person who picked one with no way to proceed.
+        // Canonicalizing the surviving prefix below still binds the boundary to the
+        // real directory, whatever it was reached through.
+        let last = index + 1 == normal.len();
+        let observed = if last {
+            fs::symlink_metadata(&candidate)
+        } else {
+            fs::metadata(&candidate)
+        };
+        match observed {
+            Ok(metadata) if last && metadata.file_type().is_symlink() => {
                 return Err(Error::OutputSymlink { path: candidate });
             }
             Ok(metadata) if !metadata.is_dir() => {
@@ -791,10 +802,30 @@ mod tests {
         {
             std::os::unix::fs::symlink(&target, base.join("link")).unwrap();
             assert!(matches!(
-                Context::establish(&source, &base.join("link/output")),
+                Context::establish(&source, &base.join("link")),
                 Err(Error::OutputSymlink { .. })
             ));
         }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Temporary and home folders are routinely reached through a link — macOS
+    /// spells `/var` as one — so an aliased ancestor has to resolve rather than
+    /// leave the chosen folder unusable.
+    #[cfg(unix)]
+    #[test]
+    fn an_output_under_a_symlinked_ancestor_establishes_at_its_canonical_path() {
+        let base = temp_dir("symlinked-ancestor");
+        let source = base.join("source");
+        let target = base.join("target");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, base.join("link")).unwrap();
+
+        let context = Context::establish(&source, &base.join("link").join("output")).unwrap();
+
+        assert_eq!(context.output_root(), target.join("output"));
+        assert!(!context.output_root().exists());
         fs::remove_dir_all(base).unwrap();
     }
 

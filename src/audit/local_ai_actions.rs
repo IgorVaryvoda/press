@@ -107,7 +107,18 @@ impl Audit {
         let source = entry.path.clone();
         let source_name = entry_label(&self.root, self.batch_folders.is_some(), entry);
         let root = self.root.clone();
-        let out_dir = self.output.root(&self.root);
+        let out_dir = match self.output.context(&self.root) {
+            Ok(context) => context.output_root().to_path_buf(),
+            Err(message) => {
+                self.notify_error(
+                    "local-ai",
+                    "Couldn’t use the output folder",
+                    format!("{}: {message}", self.output.label()),
+                    cx,
+                );
+                return;
+            }
+        };
         let dataset_generation = self.dataset_generation;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.local_ai_job = Some(LocalAiJob {

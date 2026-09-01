@@ -43,7 +43,6 @@ impl Output {
     }
 
     /// Establish the selected output boundary without creating a path or file.
-    #[allow(dead_code)]
     pub fn context(&self, audited: &Path) -> Result<Arc<crate::output::Context>, String> {
         let working_directory = std::env::current_dir().map_err(|error| error.to_string())?;
         self.context_with_working_directory(audited, working_directory)
