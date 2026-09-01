@@ -3602,9 +3602,20 @@ fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
         );
     });
     assert!(cx.debug_bounds("empty-folder-message").is_some());
+    // The empty state draws this sentence for this folder. gpui's test context can look
+    // up bounds by selector but not read drawn text, so the sentence is asserted from
+    // the audit's own state rather than off the screen.
+    let folder = root
+        .file_name()
+        .expect("the fixture folder is named")
+        .to_string_lossy()
+        .into_owned();
+    let detail = audit.read_with(cx, |audit, _| {
+        view::empty_folder_detail(&folder, audit.skipped_heic)
+    });
     assert_eq!(
-        view::empty_folder_detail("shoot", 1),
-        "The “shoot” folder has 1 HEIC file, not supported yet."
+        detail,
+        format!("The “{folder}” folder has 1 HEIC file, not supported yet.")
     );
     assert_eq!(
         view::empty_folder_detail("shoot", 12),

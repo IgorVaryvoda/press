@@ -124,6 +124,11 @@ as a 160x120 TIFF and every derived number becomes a lie. They are also not web
 delivery candidates. The header says how many were skipped rather than quietly
 shortening the total.
 
+**HEIC and HEIF are counted, not listed.** `.heic`, `.heif`, `.hif`, `.avci` and
+`.heix` — what a recent iPhone writes by default — have no decoder here yet, so
+nothing can be measured about them. They are counted like raw, so a folder straight
+off a phone says how many it holds instead of opening empty.
+
 On macOS, nested packages such as Photos libraries and application bundles are
 counted and skipped for the same reason: their internal assets are not web-delivery
 images. Pointing Press directly at a package still scans it.
