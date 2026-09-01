@@ -47,6 +47,7 @@ impl Quality {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
     Failed,
+    LosslessNeedsEightBit,
     AnimatedGif,
     AnimatedPng,
     AnimatedWebP,
@@ -57,6 +58,9 @@ impl Failure {
     pub fn reason(self) -> Option<&'static str> {
         match self {
             Self::Failed => None,
+            Self::LosslessNeedsEightBit => {
+                Some("lossless WebP cannot keep more than 8 bits per colour channel")
+            }
             Self::AnimatedGif => Some("animated GIFs are not converted"),
             Self::AnimatedPng => Some("animated PNG files are not converted"),
             Self::AnimatedWebP => Some("animated WebP files are not converted"),
@@ -369,6 +373,21 @@ fn encode_jpeg_xl(
     profile: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
+    if is_high_depth(image) {
+        let pixels = if has_alpha {
+            image.to_rgba16().into_raw()
+        } else {
+            image.to_rgb16().into_raw()
+        };
+        return crate::jxl::encode_16bit(
+            &pixels,
+            image.width(),
+            image.height(),
+            has_alpha,
+            quality.0,
+            profile,
+        );
+    }
     let pixels = if has_alpha {
         image.to_rgba8().into_raw()
     } else {
@@ -382,6 +401,14 @@ fn encode_jpeg_xl(
         quality.0,
         profile,
     )
+}
+
+/// True when the source carries more than eight bits per channel. Only JPEG XL can
+/// keep them here: libwebp is an eight-bit encoder and the AVIF bridge writes
+/// eight-bit planes.
+fn is_high_depth(image: &DynamicImage) -> bool {
+    let colour = image.color();
+    colour.bits_per_pixel() / u16::from(colour.channel_count()) > 8
 }
 
 fn aom_quality(quality: Quality) -> u8 {
@@ -638,6 +665,12 @@ pub fn convert_to(
             crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
         })?;
     let decoded = max_edge.apply(decoded);
+    // "lossless" is a promise of unchanged pixels. WebP cannot carry more than eight
+    // bits per channel, so over a 16-bit source it would keep the label and quietly
+    // throw half the depth away; JPEG XL keeps it, and lossy quality promises nothing.
+    if format == Format::WebP && quality == Quality::LOSSLESS && is_high_depth(&decoded) {
+        return Err(Failure::LosslessNeedsEightBit);
+    }
     let (width, height) = (decoded.width(), decoded.height());
     let encoded = encode(&decoded, format, quality, profile.as_deref()).ok_or(Failure::Failed)?;
     write_output(root, written, &encoded)?;
@@ -840,6 +873,67 @@ mod tests {
         let decoded = crate::jxl::decode_bytes(&encoded).expect("lossless JPEG XL decodes");
 
         assert_eq!(decoded.into_rgba8(), image.into_rgba8());
+    }
+
+    /// Deterministic 16-bit noise, for the same reason `photo` is noisy: the low byte
+    /// of every channel has to actually carry something, or losing it proves nothing.
+    fn deep_photo(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb16(ImageBuffer::from_fn(width, height, |x, y| {
+            let mut hash = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
+            hash ^= hash >> 13;
+            hash = hash.wrapping_mul(3_266_489_917);
+            image::Rgb([hash as u16, (hash >> 11) as u16, (hash >> 19) as u16])
+        }))
+    }
+
+    /// JPEG XL is the one format here that can hold 16 bits, so lossless has to mean
+    /// what it says: the samples come back untouched, not halved to eight bits.
+    #[test]
+    fn lossless_jpeg_xl_keeps_sixteen_bit_samples() {
+        let image = deep_photo(24, 16);
+        assert!(is_high_depth(&image), "the fixture is a 16-bit source");
+
+        let encoded = encode(&image, Format::JpegXl, Quality::LOSSLESS, None)
+            .expect("16-bit JPEG XL encodes");
+        let decoded = crate::jxl::decode_bytes(&encoded).expect("16-bit JPEG XL decodes");
+
+        assert_eq!(decoded.to_rgb16(), image.to_rgb16());
+    }
+
+    /// WebP has nowhere to put the extra bits, so a lossless run over a 16-bit source
+    /// is refused by name rather than labelled lossless and quietly truncated.
+    #[test]
+    fn lossless_webp_refuses_a_sixteen_bit_source_by_name() {
+        let dir = temp_dir("sixteen-bit-webp");
+        let source = dir.join("deep.png");
+        deep_photo(24, 16).save(&source).unwrap();
+        let out = dir.join("optimised");
+
+        let refused = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &out, Format::WebP),
+            Format::WebP,
+            Quality::LOSSLESS,
+            MaxEdge::FULL,
+        );
+        assert_eq!(refused, Err(Failure::LosslessNeedsEightBit));
+        assert_eq!(
+            Failure::LosslessNeedsEightBit.reason(),
+            Some("lossless WebP cannot keep more than 8 bits per colour channel")
+        );
+
+        // Nothing was promised at a quality setting, so that conversion still runs.
+        let lossy = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &out, Format::WebP),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("a quality setting still converts a 16-bit source");
+        assert!(lossy.bytes > 0);
     }
 
     #[test]

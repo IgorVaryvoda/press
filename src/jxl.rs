@@ -79,6 +79,36 @@ pub fn encode(
     quality: Option<f32>,
     profile: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
+    let config = config(quality, profile)?;
+    let (width, height) = (usize::try_from(width).ok()?, usize::try_from(height).ok()?);
+    if has_alpha {
+        jixel::encode_image_with_alpha(pixels, width, height, &config).ok()
+    } else {
+        jixel::encode_image(pixels, width, height, &config).ok()
+    }
+}
+
+/// The same encode from 16-bit samples. JPEG XL is the only format here that can
+/// hold them, so this is the one path on which a lossless run over a 16-bit source
+/// is actually lossless.
+pub fn encode_16bit(
+    pixels: &[u16],
+    width: u32,
+    height: u32,
+    has_alpha: bool,
+    quality: Option<f32>,
+    profile: Option<&[u8]>,
+) -> Option<Vec<u8>> {
+    let config = config(quality, profile)?;
+    let (width, height) = (usize::try_from(width).ok()?, usize::try_from(height).ok()?);
+    if has_alpha {
+        jixel::encode_image_with_alpha_16bit(pixels, width, height, &config).ok()
+    } else {
+        jixel::encode_image_16bit(pixels, width, height, &config).ok()
+    }
+}
+
+fn config(quality: Option<f32>, profile: Option<&[u8]>) -> Option<jixel::EncodeConfig> {
     let mut config = match quality {
         Some(quality) if quality.is_finite() => {
             jixel::EncodeConfig::default().with_quality(quality)
@@ -89,10 +119,5 @@ pub fn encode(
     if let Some(profile) = profile {
         config = config.with_icc_profile(profile.to_vec());
     }
-    let (width, height) = (usize::try_from(width).ok()?, usize::try_from(height).ok()?);
-    if has_alpha {
-        jixel::encode_image_with_alpha(pixels, width, height, &config).ok()
-    } else {
-        jixel::encode_image(pixels, width, height, &config).ok()
-    }
+    Some(config)
 }
