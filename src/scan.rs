@@ -355,7 +355,9 @@ pub fn decode_for_conversion(
     if info.animated {
         return Err(ConversionDecodeError::AnimatedJpegXl);
     }
-    crate::jxl::decode_path(path).ok_or(ConversionDecodeError::Failed)
+    crate::jxl::decode_path(path)
+        .map(|(image, profile)| (image, rgb_profile(profile)))
+        .ok_or(ConversionDecodeError::Failed)
 }
 
 /// Orientation and colour profile both have to be read off the decoder before
@@ -364,15 +366,28 @@ fn still<D: ImageDecoder>(
     mut decoder: D,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let profile = decoder
-        .icc_profile()
-        .ok()
-        .flatten()
-        .filter(|profile| !profile.is_empty());
+    let profile = rgb_profile(decoder.icc_profile().ok().flatten());
     let mut image =
         DynamicImage::from_decoder(decoder).map_err(|_| ConversionDecodeError::Failed)?;
     image.apply_orientation(orientation);
     Ok((image, profile))
+}
+
+/// Keep a profile only when it describes the pixels the encoders are handed.
+///
+/// A decoder answers with the profile the *file* carried, not the one its pixels come
+/// back in: the JPEG decoder converts CMYK and YCCK to RGB and still reports the CMYK
+/// profile, and a grayscale source keeps a GRAY profile that the encoders' `to_rgb8`
+/// then contradicts. Every encoder here is handed RGB or RGBA, so anything else
+/// describes the wrong thing, and a wrong profile is worse than none.
+fn rgb_profile(profile: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    let profile = profile?;
+    // ICC header: profile size big-endian at 0, data colour space at 16, 128 bytes
+    // before the tag table starts. A header that disagrees with the bytes around it
+    // is not a profile anyone should copy forward.
+    let size = u32::from_be_bytes(profile.get(0..4)?.try_into().ok()?) as usize;
+    (profile.len() >= 128 && size == profile.len() && &profile[16..20] == b"RGB ")
+        .then_some(profile)
 }
 
 fn orientation_swaps_dimensions(orientation: Orientation) -> bool {
