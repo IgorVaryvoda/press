@@ -217,6 +217,55 @@ mod tests {
         assert!(!public_key().bytes().any(|byte| byte.is_ascii_whitespace()));
     }
 
+    /// Just enough base64 for one small key file. The crate has no base64
+    /// dependency and one test is not a reason to add one.
+    fn decode_base64(text: &str) -> Vec<u8> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits = 0u32;
+        let mut held = 0;
+        let mut out = Vec::new();
+        for byte in text
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace() && *byte != b'=')
+        {
+            let value = ALPHABET
+                .iter()
+                .position(|candidate| *candidate == byte)
+                .expect("the key file is standard base64") as u32;
+            bits = (bits << 6) | value;
+            held += 6;
+            if held >= 8 {
+                held -= 8;
+                out.push((bits >> held) as u8);
+            }
+        }
+        out
+    }
+
+    /// `scripts/install.sh` verifies the AppImage against a copy of this key
+    /// written out as a shell literal, because a shell script cannot
+    /// `include_str!` anything. Nothing but this test keeps the two in step, and
+    /// a stale copy makes the installer reject every genuine release.
+    #[test]
+    fn the_install_script_carries_the_embedded_public_key() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let encoded = std::fs::read_to_string(manifest.join("assets/updater.pub")).unwrap();
+        let script = std::fs::read_to_string(manifest.join("scripts/install.sh")).unwrap();
+        assert!(!encoded.trim().is_empty(), "assets/updater.pub is empty");
+        assert!(!script.trim().is_empty(), "scripts/install.sh is empty");
+
+        let decoded = String::from_utf8(decode_base64(&encoded)).unwrap();
+        let key = decoded
+            .lines()
+            .nth(1)
+            .expect("a minisign key file is a comment then the key");
+        assert!(!key.is_empty(), "assets/updater.pub has no key on line 2");
+        assert!(
+            script.contains(&format!("\npubkey={key}\n")),
+            "scripts/install.sh does not carry the key {key}"
+        );
+    }
+
     #[test]
     fn a_bundled_mac_path_is_updatable() {
         assert!(mac_bundle_path(std::path::Path::new(
