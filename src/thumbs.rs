@@ -311,7 +311,7 @@ fn write_cached(file: &Path, thumbnail: &DynamicImage) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let Some(encoded) = crate::convert::encode(
+    let Ok(encoded) = crate::convert::encode(
         thumbnail,
         crate::convert::Format::WebP,
         crate::convert::Quality::lossy(80.),

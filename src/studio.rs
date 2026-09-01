@@ -413,6 +413,7 @@ fn prepare_upload_using(
         convert::Quality::LOSSLESS,
         None,
     )
+    .ok()
     .ok_or_else(|| "Press could not prepare a lossless Studio upload copy".to_string())?;
     if lossless.len() as u64 <= max_upload {
         return Ok(Preflight::Ready(PreparedUpload {
@@ -431,6 +432,7 @@ fn prepare_upload_using(
         convert::Quality::lossy(90.),
         None,
     )
+    .ok()
     .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
     for _ in 0..8 {
         if encoded.len() as u64 <= max_upload {
@@ -456,6 +458,7 @@ fn prepare_upload_using(
             convert::Quality::lossy(90.),
             None,
         )
+        .ok()
         .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
     }
     Err("Press could not prepare this image under Studio's 20 MB upload limit".into())

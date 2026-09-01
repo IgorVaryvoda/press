@@ -403,9 +403,19 @@ impl Audit {
                     let path = stratum.path.clone();
                     let (slice_bytes, bytes) = (stratum.slice_bytes, stratum.bytes);
                     inflight.push(cx.background_executor().spawn(async move {
-                        let encoded = scan::decode(&path)
-                            .map(|image| max_edge.apply(image))
-                            .and_then(|image| convert::encode(&image, format, quality, None))
+                        // Estimating without the profile under-reports every output by
+                        // the size of the profile the writer will attach.
+                        let encoded = scan::decode_for_conversion(&path)
+                            .ok()
+                            .and_then(|(image, profile)| {
+                                convert::encode(
+                                    &max_edge.apply(image),
+                                    format,
+                                    quality,
+                                    profile.as_deref(),
+                                )
+                                .ok()
+                            })
                             .map(|encoded| encoded.len() as u64);
                         (slice_bytes, bytes, encoded)
                     }));
