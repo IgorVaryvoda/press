@@ -18,10 +18,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use image::DynamicImage;
 use libwebp_sys::{
-    WEBP_ENCODER_ABI_VERSION, WebPConfig, WebPConfigInitInternal, WebPEncode, WebPMemoryWrite,
-    WebPMemoryWriter, WebPMemoryWriterClear, WebPMemoryWriterInit, WebPPicture, WebPPictureFree,
-    WebPPictureImportRGB, WebPPictureImportRGBA, WebPPictureInitInternal, WebPPreset,
-    WebPValidateConfig,
+    WEBP_ENCODER_ABI_VERSION, WebPConfig, WebPConfigInitInternal, WebPData, WebPDataClear,
+    WebPEncode, WebPMemoryWrite, WebPMemoryWriter, WebPMemoryWriterClear, WebPMemoryWriterInit,
+    WebPMuxAssemble, WebPMuxDelete, WebPMuxError, WebPMuxNew, WebPMuxSetChunk, WebPMuxSetImage,
+    WebPPicture, WebPPictureFree, WebPPictureImportRGB, WebPPictureImportRGBA,
+    WebPPictureInitInternal, WebPPreset, WebPValidateConfig,
 };
 
 /// Encoder quality, 1 to 100. `None` means lossless.
@@ -46,7 +47,12 @@ impl Quality {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Failed,
+    LosslessNeedsEightBit,
+    LosslessNeedsIntegerSamples,
+    ProfileNotAttached,
     AnimatedGif,
+    AnimatedPng,
+    AnimatedWebP,
     AnimatedJpegXl,
     OutsideOutput,
     UnsafeOutputPath,
@@ -58,7 +64,16 @@ impl Failure {
     pub fn reason(&self) -> Option<String> {
         match self {
             Self::Failed => None,
+            Self::LosslessNeedsEightBit => {
+                Some("lossless WebP cannot keep more than 8 bits per colour channel".into())
+            }
+            Self::LosslessNeedsIntegerSamples => {
+                Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
+            }
+            Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
             Self::AnimatedGif => Some("animated GIFs are not converted".into()),
+            Self::AnimatedPng => Some("animated PNG files are not converted".into()),
+            Self::AnimatedWebP => Some("animated WebP files are not converted".into()),
             Self::AnimatedJpegXl => Some("animated JPEG XL files are not converted".into()),
             Self::OutsideOutput => Some("the target is outside the output folder".into()),
             Self::UnsafeOutputPath => {
@@ -156,11 +171,62 @@ pub struct Converted {
 }
 
 /// Encode `image` in `format`. Returns the encoded bytes.
-pub fn encode(image: &DynamicImage, format: Format, quality: Quality) -> Option<Vec<u8>> {
+///
+/// `profile` is the source's ICC profile, which every output format here can carry.
+/// Previews pass `None`; a file being written to disk passes what it was decoded
+/// with, or the colours it was tagged with are lost on the way out.
+pub fn encode(
+    image: &DynamicImage,
+    format: Format,
+    quality: Quality,
+    profile: Option<&[u8]>,
+) -> Result<Vec<u8>, Failure> {
+    let profile = profile.filter(|profile| !profile.is_empty());
     match format {
-        Format::WebP => encode_webp(image, quality),
-        Format::Avif => encode_avif(image, quality),
-        Format::JpegXl => encode_jpeg_xl(image, quality),
+        Format::WebP => {
+            let encoded = encode_webp(image, quality).ok_or(Failure::Failed)?;
+            match profile {
+                Some(profile) => {
+                    attach_webp_profile(&encoded, profile).ok_or(Failure::ProfileNotAttached)
+                }
+                None => Ok(encoded),
+            }
+        }
+        Format::Avif => encode_avif(image, quality, profile).ok_or(Failure::Failed),
+        Format::JpegXl => encode_jpeg_xl(image, quality, profile).ok_or(Failure::Failed),
+    }
+}
+
+/// Rewrap an encoded bitstream in WebP's extended container so it can carry an ICCP
+/// chunk. The simple container libwebp writes has nowhere to put a profile at all.
+fn attach_webp_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
+    let bitstream = WebPData {
+        bytes: encoded.as_ptr(),
+        size: encoded.len(),
+    };
+    let profile = WebPData {
+        bytes: profile.as_ptr(),
+        size: profile.len(),
+    };
+    // SAFETY: both slices outlive the calls, which are told to copy what they read.
+    // The mux and the assembled data are released on every path out.
+    unsafe {
+        let mux = WebPMuxNew();
+        if mux.is_null() {
+            return None;
+        }
+        let mut assembled = WebPData::default();
+        let assembled_ok = WebPMuxSetImage(mux, &bitstream, 1) == WebPMuxError::WEBP_MUX_OK
+            && WebPMuxSetChunk(mux, c"ICCP".as_ptr(), &profile, 1) == WebPMuxError::WEBP_MUX_OK
+            && WebPMuxAssemble(mux, &mut assembled) == WebPMuxError::WEBP_MUX_OK;
+        WebPMuxDelete(mux);
+        let output = if assembled_ok && !assembled.bytes.is_null() {
+            Some(std::slice::from_raw_parts(assembled.bytes, assembled.size).to_vec())
+        } else {
+            None
+        };
+        WebPDataClear(&mut assembled);
+        output
     }
 }
 
@@ -291,7 +357,7 @@ fn encode_webp_pixels(
 /// AVIF keeps alpha in a separate plane, so transparency needs no special case here.
 /// libaom and rav1e calibrate their 1-100 scales differently; 75% matches the former
 /// rav1e output size and measured PSNR on the real corpus.
-fn encode_avif(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
+fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
     let quality = aom_quality(quality);
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
@@ -306,6 +372,7 @@ fn encode_avif(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
             true,
             quality,
             threads,
+            profile,
         )
     } else {
         let rgb = image.to_rgb8();
@@ -316,18 +383,53 @@ fn encode_avif(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
             false,
             quality,
             threads,
+            profile,
         )
     }
 }
 
-fn encode_jpeg_xl(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
+fn encode_jpeg_xl(
+    image: &DynamicImage,
+    quality: Quality,
+    profile: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
+    if is_high_depth(image) {
+        let pixels = if has_alpha {
+            image.to_rgba16().into_raw()
+        } else {
+            image.to_rgb16().into_raw()
+        };
+        return crate::jxl::encode_16bit(
+            &pixels,
+            image.width(),
+            image.height(),
+            has_alpha,
+            quality.0,
+            profile,
+        );
+    }
     let pixels = if has_alpha {
         image.to_rgba8().into_raw()
     } else {
         image.to_rgb8().into_raw()
     };
-    crate::jxl::encode(&pixels, image.width(), image.height(), has_alpha, quality.0)
+    crate::jxl::encode(
+        &pixels,
+        image.width(),
+        image.height(),
+        has_alpha,
+        quality.0,
+        profile,
+    )
+}
+
+/// True when the source carries more than eight bits per channel. Only JPEG XL can
+/// keep them here: libwebp is an eight-bit encoder and the AVIF bridge writes
+/// eight-bit planes.
+fn is_high_depth(image: &DynamicImage) -> bool {
+    let colour = image.color();
+    colour.bits_per_pixel() / u16::from(colour.channel_count()) > 8
 }
 
 fn aom_quality(quality: Quality) -> u8 {
@@ -629,14 +731,34 @@ pub fn convert_to(
     quality: Quality,
     max_edge: MaxEdge,
 ) -> Result<Converted, Failure> {
-    let decoded = crate::scan::decode_for_conversion(source).map_err(|error| match error {
-        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
-        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
-        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
-    })?;
+    let (decoded, profile) =
+        crate::scan::decode_for_conversion(source).map_err(|error| match error {
+            crate::scan::ConversionDecodeError::Failed => Failure::Failed,
+            crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+            crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
+            crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
+            crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
+        })?;
     let decoded = max_edge.apply(decoded);
+    // "lossless" is a promise of unchanged pixels. WebP cannot carry more than eight
+    // bits per channel, and JPEG XL's 16-bit path cannot carry float samples, so over
+    // those sources the label would survive and half the depth would not. Lossy
+    // quality promises nothing and is left alone.
+    if quality == Quality::LOSSLESS {
+        if format == Format::WebP && is_high_depth(&decoded) {
+            return Err(Failure::LosslessNeedsEightBit);
+        }
+        if format == Format::JpegXl
+            && matches!(
+                decoded,
+                DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+            )
+        {
+            return Err(Failure::LosslessNeedsIntegerSamples);
+        }
+    }
     let (width, height) = (decoded.width(), decoded.height());
-    let encoded = encode(&decoded, format, quality).ok_or(Failure::Failed)?;
+    let encoded = encode(&decoded, format, quality, profile.as_deref())?;
     write_output(output_root, written, &encoded)?;
 
     Ok(Converted {
@@ -674,13 +796,180 @@ pub(crate) mod tests {
         }))
     }
 
+    /// A stand-in for a Display P3 profile, in the given data colour space. Nothing on
+    /// the way through reads a profile's contents, so this only has to carry the header
+    /// the checks read and come back byte for byte.
+    fn colour_profile(space: &[u8; 4]) -> Vec<u8> {
+        let mut profile = vec![0u8; 132];
+        let size = profile.len() as u32;
+        profile[0..4].copy_from_slice(&size.to_be_bytes());
+        profile[12..16].copy_from_slice(b"mntr");
+        profile[16..20].copy_from_slice(space);
+        profile[20..24].copy_from_slice(b"XYZ ");
+        profile[36..40].copy_from_slice(b"acsp");
+        profile
+    }
+
+    fn write_tagged_png(path: &Path, image: &DynamicImage, profile: &[u8]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = image::codecs::png::PngEncoder::new(file);
+        image::ImageEncoder::set_icc_profile(&mut encoder, profile.to_vec()).unwrap();
+        image::ImageEncoder::write_image(
+            encoder,
+            image.as_bytes(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+    }
+
+    /// The profile a written file actually carries, read back the way a browser
+    /// would rather than from whatever this process still holds in memory.
+    fn embedded_profile(bytes: &[u8]) -> Option<Vec<u8>> {
+        if bytes.starts_with(&[0xff, 0x0a]) {
+            // `rendered_icc` answers with the profile the pixels are handed back in,
+            // which is a synthesized sRGB one when the file carries nothing.
+            return jxl_oxide::JxlImage::builder()
+                .read(std::io::Cursor::new(bytes))
+                .unwrap()
+                .original_icc()
+                .map(<[u8]>::to_vec);
+        }
+        let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .unwrap()
+            .into_decoder()
+            .unwrap();
+        image::ImageDecoder::icc_profile(&mut decoder).unwrap()
+    }
+
+    /// A Display P3 photo written untagged is a photo a browser renders as sRGB, and
+    /// the run still calls it converted. The profile has to reach the file.
+    #[test]
+    fn a_source_colour_profile_reaches_the_converted_file() {
+        let dir = temp_dir("colour-profile");
+        let profile = colour_profile(b"RGB ");
+        assert!(!profile.is_empty(), "the fixture carries a real profile");
+        let source = dir.join("wide.png");
+        write_tagged_png(&source, &photo(48, 48), &profile);
+
+        let (_, read_back) =
+            crate::scan::decode_for_conversion(&source).expect("the tagged PNG decodes");
+        assert_eq!(
+            read_back.as_deref(),
+            Some(profile.as_slice()),
+            "the decoder did not hand back the source profile"
+        );
+
+        for format in [Format::WebP, Format::Avif, Format::JpegXl] {
+            let out = dir.join(format.label());
+            let written = output_path(&dir, &source, &out, format);
+            convert_to(
+                &dir,
+                &source,
+                &written,
+                format,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+            )
+            .unwrap_or_else(|error| panic!("{format:?} conversion failed: {error:?}"));
+
+            let bytes = std::fs::read(&written).unwrap();
+            assert_eq!(
+                embedded_profile(&bytes).as_deref(),
+                Some(profile.as_slice()),
+                "{format:?} dropped the colour profile"
+            );
+        }
+    }
+
+    /// Transparency forces WebP down the lossless path and AVIF keeps alpha in its own
+    /// plane, so both reach the encoders by a different route than an opaque photo.
+    /// Neither route may drop the profile.
+    #[test]
+    fn a_colour_profile_survives_the_transparent_paths() {
+        let profile = colour_profile(b"RGB ");
+        assert!(!profile.is_empty(), "the fixture carries a real profile");
+        let mut buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(24, 24, Rgba([200u8, 30, 40, 255]));
+        buffer.put_pixel(0, 0, Rgba([200, 30, 40, 0]));
+        let image = DynamicImage::ImageRgba8(buffer);
+        assert!(
+            has_transparency(&image),
+            "the fixture is really see-through"
+        );
+
+        for format in [Format::WebP, Format::Avif] {
+            let encoded = encode(&image, format, Quality::lossy(80.), Some(&profile))
+                .unwrap_or_else(|error| panic!("{format:?} encode failed: {error:?}"));
+            assert_eq!(
+                embedded_profile(&encoded).as_deref(),
+                Some(profile.as_slice()),
+                "{format:?} dropped the colour profile"
+            );
+        }
+    }
+
+    /// A decoder answers with the profile the file carried, not the one its pixels came
+    /// back in. A GRAY or CMYK profile on pixels the encoders take as RGB describes the
+    /// wrong thing, and a profile whose own header disagrees with its length describes
+    /// nothing. All of them are worse than writing no profile at all.
+    #[test]
+    fn a_profile_that_does_not_describe_the_encoded_pixels_is_dropped() {
+        let dir = temp_dir("mismatched-profile");
+        let out = dir.join("optimised");
+        for (name, profile) in [
+            ("gray.png", colour_profile(b"GRAY")),
+            ("cmyk.png", colour_profile(b"CMYK")),
+            ("truncated.png", colour_profile(b"RGB ")[..130].to_vec()),
+        ] {
+            assert!(!profile.is_empty(), "{name} carries a profile at all");
+            let source = dir.join(name);
+            write_tagged_png(&source, &photo(16, 16), &profile);
+
+            let (_, read_back) =
+                crate::scan::decode_for_conversion(&source).expect("the tagged PNG decodes");
+            assert_eq!(read_back, None, "{name} kept a profile it should not have");
+
+            let written = output_path(&dir, &source, &out, Format::WebP);
+            convert_to(
+                &dir,
+                &source,
+                &written,
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+            )
+            .unwrap_or_else(|error| panic!("{name} did not convert: {error:?}"));
+            assert_eq!(
+                embedded_profile(&std::fs::read(&written).unwrap()),
+                None,
+                "{name} put the wrong profile in the output"
+            );
+        }
+    }
+
+    /// The extended container the profile needs is still a WebP the app can read
+    /// back, which the comparison view does for every converted file.
+    #[test]
+    fn a_tagged_webp_still_decodes_to_pixels() {
+        let profile = colour_profile(b"RGB ");
+        let image = photo(32, 32);
+        let encoded = encode(&image, Format::WebP, Quality::lossy(80.), Some(&profile))
+            .expect("webp encodes");
+
+        let decoded = crate::scan::decode_bytes(&encoded).expect("the tagged webp decodes");
+        assert_eq!((decoded.width(), decoded.height()), (32, 32));
+    }
+
     /// The quality number has to actually reach libwebp. If it were dropped on the
     /// floor both encodes would come back the same size and nobody would notice.
     #[test]
     fn lower_quality_produces_fewer_bytes() {
         let image = photo(256, 256);
-        let low = encode(&image, Format::WebP, Quality::lossy(20.)).expect("q20 encodes");
-        let high = encode(&image, Format::WebP, Quality::lossy(95.)).expect("q95 encodes");
+        let low = encode(&image, Format::WebP, Quality::lossy(20.), None).expect("q20 encodes");
+        let high = encode(&image, Format::WebP, Quality::lossy(95.), None).expect("q95 encodes");
 
         assert!(
             low.len() < high.len(),
@@ -692,7 +981,7 @@ pub(crate) mod tests {
 
     #[test]
     fn output_is_a_real_webp() {
-        let encoded = encode(&photo(32, 32), Format::WebP, Quality::lossy(80.)).unwrap();
+        let encoded = encode(&photo(32, 32), Format::WebP, Quality::lossy(80.), None).unwrap();
         assert_eq!(&encoded[0..4], b"RIFF");
         assert_eq!(&encoded[8..12], b"WEBP");
     }
@@ -706,7 +995,7 @@ pub(crate) mod tests {
 
     #[test]
     fn output_is_a_real_avif() {
-        let encoded = encode(&photo(32, 32), Format::Avif, Quality::lossy(80.)).unwrap();
+        let encoded = encode(&photo(32, 32), Format::Avif, Quality::lossy(80.), None).unwrap();
         // ISO base media file format: a 'ftyp' box naming the AVIF brand.
         assert_eq!(&encoded[4..8], b"ftyp");
         assert_eq!(&encoded[8..12], b"avif");
@@ -715,7 +1004,7 @@ pub(crate) mod tests {
     #[test]
     fn jpeg_xl_round_trips_through_the_rust_decoder() {
         let image = photo(32, 32);
-        let encoded = encode(&image, Format::JpegXl, Quality::lossy(80.)).unwrap();
+        let encoded = encode(&image, Format::JpegXl, Quality::lossy(80.), None).unwrap();
         assert_eq!(&encoded[..2], &[0xff, 0x0a]);
 
         let decoded = crate::jxl::decode_bytes(&encoded).expect("JPEG XL decodes");
@@ -735,10 +1024,100 @@ pub(crate) mod tests {
                 ((x * 19 + y * 7) % 256) as u8,
             ])
         }));
-        let encoded = encode(&image, Format::JpegXl, Quality::LOSSLESS).unwrap();
+        let encoded = encode(&image, Format::JpegXl, Quality::LOSSLESS, None).unwrap();
         let decoded = crate::jxl::decode_bytes(&encoded).expect("lossless JPEG XL decodes");
 
         assert_eq!(decoded.into_rgba8(), image.into_rgba8());
+    }
+
+    /// Deterministic 16-bit noise, for the same reason `photo` is noisy: the low byte
+    /// of every channel has to actually carry something, or losing it proves nothing.
+    fn deep_photo(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb16(ImageBuffer::from_fn(width, height, |x, y| {
+            let mut hash = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
+            hash ^= hash >> 13;
+            hash = hash.wrapping_mul(3_266_489_917);
+            image::Rgb([hash as u16, (hash >> 11) as u16, (hash >> 19) as u16])
+        }))
+    }
+
+    /// JPEG XL is the one format here that can hold 16 bits, so lossless has to mean
+    /// what it says: the samples come back untouched, not halved to eight bits.
+    #[test]
+    fn lossless_jpeg_xl_keeps_sixteen_bit_samples() {
+        let image = deep_photo(24, 16);
+        assert!(is_high_depth(&image), "the fixture is a 16-bit source");
+
+        let encoded = encode(&image, Format::JpegXl, Quality::LOSSLESS, None)
+            .expect("16-bit JPEG XL encodes");
+        let decoded = crate::jxl::decode_bytes(&encoded).expect("16-bit JPEG XL decodes");
+
+        assert_eq!(decoded.to_rgb16(), image.to_rgb16());
+    }
+
+    /// JPEG XL's 16-bit path is the deepest one here, so a float source is truncated on
+    /// the way in. Lossless must not promise otherwise.
+    #[test]
+    fn lossless_jpeg_xl_refuses_a_float_source_by_name() {
+        let dir = temp_dir("float-jxl");
+        let source = dir.join("float.tiff");
+        let deep = deep_photo(16, 12).to_rgb32f();
+        DynamicImage::ImageRgb32F(deep)
+            .save_with_format(&source, image::ImageFormat::Tiff)
+            .unwrap();
+        let out = dir.join("optimised");
+
+        assert_eq!(
+            convert_to(
+                &dir,
+                &source,
+                &output_path(&dir, &source, &out, Format::JpegXl),
+                Format::JpegXl,
+                Quality::LOSSLESS,
+                MaxEdge::FULL,
+            ),
+            Err(Failure::LosslessNeedsIntegerSamples)
+        );
+        assert_eq!(
+            Failure::LosslessNeedsIntegerSamples.reason(),
+            Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
+        );
+    }
+
+    /// WebP has nowhere to put the extra bits, so a lossless run over a 16-bit source
+    /// is refused by name rather than labelled lossless and quietly truncated.
+    #[test]
+    fn lossless_webp_refuses_a_sixteen_bit_source_by_name() {
+        let dir = temp_dir("sixteen-bit-webp");
+        let source = dir.join("deep.png");
+        deep_photo(24, 16).save(&source).unwrap();
+        let out = dir.join("optimised");
+
+        let refused = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &out, Format::WebP),
+            Format::WebP,
+            Quality::LOSSLESS,
+            MaxEdge::FULL,
+        );
+        assert_eq!(refused, Err(Failure::LosslessNeedsEightBit));
+        assert_eq!(
+            Failure::LosslessNeedsEightBit.reason(),
+            Some("lossless WebP cannot keep more than 8 bits per colour channel".into())
+        );
+
+        // Nothing was promised at a quality setting, so that conversion still runs.
+        let lossy = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &out, Format::WebP),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("a quality setting still converts a 16-bit source");
+        assert!(lossy.bytes > 0);
     }
 
     #[test]
@@ -749,8 +1128,8 @@ pub(crate) mod tests {
     #[test]
     fn lower_jpeg_xl_quality_produces_fewer_bytes() {
         let image = photo(128, 128);
-        let low = encode(&image, Format::JpegXl, Quality::lossy(20.)).unwrap();
-        let high = encode(&image, Format::JpegXl, Quality::lossy(95.)).unwrap();
+        let low = encode(&image, Format::JpegXl, Quality::lossy(20.), None).unwrap();
+        let high = encode(&image, Format::JpegXl, Quality::lossy(95.), None).unwrap();
         assert!(low.len() < high.len());
     }
 
@@ -771,6 +1150,7 @@ pub(crate) mod tests {
             &DynamicImage::ImageRgba8(buffer),
             Format::Avif,
             Quality::lossy(90.),
+            None,
         )
         .expect("avif encodes");
         let decoded = image::load_from_memory(&encoded).expect("avif decodes");
@@ -791,7 +1171,7 @@ pub(crate) mod tests {
         let image = DynamicImage::ImageRgba8(buffer);
         assert!(has_transparency(&image), "one see-through pixel is enough");
 
-        let encoded = encode(&image, Format::WebP, Quality::lossy(20.)).unwrap();
+        let encoded = encode(&image, Format::WebP, Quality::lossy(20.), None).unwrap();
         let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
         assert_eq!(decoded.get_pixel(1, 1), &Rgba([10, 20, 30, 255]));
         assert_eq!(decoded.get_pixel(0, 0)[3], 0);

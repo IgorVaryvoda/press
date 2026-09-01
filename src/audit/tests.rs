@@ -4103,7 +4103,7 @@ fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
 
 /// The one decoded sample the estimate is holding on to, with its key. Anything
 /// else in there would mean the cache outgrew the sample it was taken for.
-fn sampled_decode(audit: &Audit) -> ((u64, PathBuf, MaxEdge), Arc<DynamicImage>) {
+fn sampled_decode(audit: &Audit) -> ((u64, PathBuf, MaxEdge), SampledDecode) {
     let cache = audit.estimate_decodes.lock();
     assert_eq!(
         cache.len(),
@@ -4130,7 +4130,7 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
     audit.update(cx, |audit, cx| audit.schedule_estimate(cx));
     settle_estimate(cx);
     let (key, decoded) = audit.read_with(cx, |audit, _| sampled_decode(audit));
-    assert_eq!(decoded.width(), 8);
+    assert_eq!(decoded.0.width(), 8);
     audit.read_with(cx, |audit, _| {
         assert!(
             audit
@@ -4163,7 +4163,7 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
         !Arc::ptr_eq(&decoded, &redecoded),
         "a max edge change is a different image and has to be decoded again"
     );
-    assert_eq!(redecoded.width(), 4);
+    assert_eq!(redecoded.0.width(), 4);
     audit.read_with(cx, |audit, _| {
         assert!(
             audit.estimate.is_some_and(|(projected, _)| projected > 0),

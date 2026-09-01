@@ -80,8 +80,11 @@ pub fn preview(path: &Path) -> Option<Preview> {
 /// compression, and the resize is not the part you need to eyeball. Both sides are
 /// the delivered resolution; only one of them has been through the encoder.
 pub fn build(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -> Option<Pair> {
-    let original = max_edge.apply(crate::scan::decode(path)?);
-    let encoded = convert::encode(&original, format, quality)?;
+    // The same decode and the same profile the writer uses, so the size shown beside
+    // the comparison is the size the file would actually be.
+    let (decoded, profile) = crate::scan::decode_for_conversion(path).ok()?;
+    let original = max_edge.apply(decoded);
+    let encoded = convert::encode(&original, format, quality, profile.as_deref()).ok()?;
     let decoded = crate::scan::decode_bytes(&encoded)?;
 
     let (width, height) = (original.width(), original.height());

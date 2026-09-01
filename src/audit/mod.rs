@@ -138,7 +138,9 @@ fn sample_size(format: Format) -> usize {
 
 /// The decoded pixels behind the estimate's sample, keyed by the dataset, the source
 /// path and the max edge: the three things that change what a decode produces.
-type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), Arc<DynamicImage>>>>;
+type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), SampledDecode>>>;
+/// One decoded sample: its pixels and the colour profile the writer will attach.
+type SampledDecode = Arc<(DynamicImage, Option<Vec<u8>>)>;
 
 /// The most decoded sample the estimate may hold on to. A sample is at most 32
 /// images, and re-decoding one costs a fraction of a second, so past this the cache
@@ -146,7 +148,8 @@ type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), Ar
 const ESTIMATE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Resident cost of one decoded sample.
-fn decoded_bytes(image: &Arc<DynamicImage>) -> u64 {
+fn decoded_bytes(sample: &SampledDecode) -> u64 {
+    let image = &sample.0;
     u64::from(image.width())
         * u64::from(image.height())
         * u64::from(image.color().bytes_per_pixel())

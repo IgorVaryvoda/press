@@ -417,23 +417,31 @@ impl Audit {
                     inflight.push(cx.background_executor().spawn(async move {
                         // Only the encode depends on quality, so a slider stop
                         // re-encodes the pixels the last one decoded rather than
-                        // reading and decoding the same file again.
+                        // reading and decoding the same file again. The profile
+                        // travels with them: estimating without it under-reports
+                        // every output by the size the writer will attach.
                         let key = (dataset_generation, path.clone(), max_edge);
                         let cached = decodes.lock().get(&key).cloned();
-                        let decoded = match cached {
-                            Some(image) => Some(image),
-                            None => scan::decode(&path).map(|image| {
-                                let image = Arc::new(max_edge.apply(image));
-                                let mut cache = decodes.lock();
-                                let held: u64 = cache.values().map(decoded_bytes).sum();
-                                if held + decoded_bytes(&image) <= ESTIMATE_DECODE_BYTES {
-                                    cache.insert(key, image.clone());
-                                }
-                                image
-                            }),
-                        };
+                        let decoded =
+                            match cached {
+                                Some(sample) => Some(sample),
+                                None => scan::decode_for_conversion(&path).ok().map(
+                                    |(image, profile)| {
+                                        let sample = Arc::new((max_edge.apply(image), profile));
+                                        let mut cache = decodes.lock();
+                                        let held: u64 = cache.values().map(decoded_bytes).sum();
+                                        if held + decoded_bytes(&sample) <= ESTIMATE_DECODE_BYTES {
+                                            cache.insert(key, sample.clone());
+                                        }
+                                        sample
+                                    },
+                                ),
+                            };
                         let encoded = decoded
-                            .and_then(|image| convert::encode(&image, format, quality))
+                            .and_then(|sample| {
+                                convert::encode(&sample.0, format, quality, sample.1.as_deref())
+                                    .ok()
+                            })
                             .map(|encoded| encoded.len() as u64);
                         (slice_bytes, bytes, encoded)
                     }));
