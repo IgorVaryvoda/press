@@ -12,8 +12,11 @@ use std::time::Duration;
 
 use crate::{convert, scan, settings, sirv};
 
-const API: &str = "https://dev.sirv.studio";
-pub const API_KEYS_URL: &str = "https://dev.sirv.studio/settings/api?utm_source=press&utm_medium=desktop&utm_campaign=studio-api-key";
+// Production Studio. A shipped build carries a live `sk_live_` key and the
+// user's image bytes, so the host has to be the one the key belongs to; the
+// tests reach their own loopback server through `process_with_api` instead.
+const API: &str = "https://www.sirv.studio";
+pub const API_KEYS_URL: &str = "https://www.sirv.studio/settings/api?utm_source=press&utm_medium=desktop&utm_campaign=studio-api-key";
 const MAX_UPLOAD: u64 = 20 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(360);

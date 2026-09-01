@@ -142,7 +142,7 @@ Image, Background Removal, Background Replace, Image Upscale 2×, and Product
 Lifestyle. The prompt field appears only for tools that need one.
 
 Choose **AI operations** while previewing an image or a completed local result, then
-create a key in [Studio API settings](https://dev.sirv.studio/settings/api?utm_source=github&utm_medium=readme&utm_campaign=press-studio), paste it into the rail, and run the tool. Press verifies and
+create a key in [Studio API settings](https://www.sirv.studio/settings/api?utm_source=github&utm_medium=readme&utm_campaign=press-studio), paste it into the rail, and run the tool. Press verifies and
 saves the key owner-only on Unix. It uploads accepted images unchanged. If Studio
 does not accept the container, Press prepares an in-memory lossless WebP copy. If
 meeting Studio's 20 MB limit needs lossy compression or smaller dimensions, Press
