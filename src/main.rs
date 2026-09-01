@@ -292,6 +292,7 @@ struct ScanSummary {
     heavy: usize,
     mislabelled: usize,
     camera_raw_skipped: usize,
+    heic_skipped: usize,
     macos_packages_skipped: usize,
     unreadable: usize,
     walk_errors: usize,
@@ -314,6 +315,7 @@ impl ScanSummary {
                 .filter(|entry| entry.extension_lies())
                 .count(),
             camera_raw_skipped: scanned.skipped_raw,
+            heic_skipped: scanned.skipped_heic,
             macos_packages_skipped: scanned.skipped_packages,
             unreadable: scanned.unreadable.len(),
             walk_errors: scanned.walk_errors.len(),
@@ -403,6 +405,11 @@ fn print_audit(target: &Path, scanned: &scan::Scan) {
         summary.heavy,
         summary.mislabelled
     );
+    // A phone folder is all HEIC, so the line above is four zeroes and the report
+    // reads as a failure. The skipped count is the finding there.
+    if summary.heic_skipped > 0 {
+        println!("{} HEIC skipped (not supported yet)", summary.heic_skipped);
+    }
     for entry in &scanned.entries {
         let relative = entry.path.strip_prefix(target).unwrap_or(&entry.path);
         let mut findings = Vec::new();
@@ -673,6 +680,7 @@ fn main() {
                 root: PathBuf::new(),
                 entries: Vec::new(),
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -704,6 +712,7 @@ fn main() {
                 root: PathBuf::new(),
                 entries: Vec::new(),
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -732,6 +741,7 @@ fn main() {
             scan::Scan {
                 entries: vec![entry],
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -767,6 +777,9 @@ fn main() {
             format_bytes(scanned.entries.iter().map(|entry| entry.bytes).sum()),
             scanned.skipped_raw
         );
+        if scanned.skipped_heic > 0 {
+            println!("{} HEIC skipped (not supported yet)", scanned.skipped_heic);
+        }
         match scanned.skipped_packages {
             0 => {}
             1 => println!("1 macOS package skipped"),
@@ -955,6 +968,7 @@ struct Launch {
     root: PathBuf,
     entries: Vec<Entry>,
     skipped_raw: usize,
+    skipped_heic: usize,
     skipped_packages: usize,
     unreadable: Vec<PathBuf>,
     walk_errors: Vec<PathBuf>,
@@ -1270,6 +1284,7 @@ mod tests {
                 bytes: 40_000,
             }],
             skipped_raw: 2,
+            skipped_heic: 0,
             skipped_packages: 0,
             unreadable: vec![],
             walk_errors: vec![],
@@ -1282,6 +1297,25 @@ mod tests {
         assert_eq!(json["summary"]["camera_raw_skipped"], 2);
         assert_eq!(json["files"][0]["path"], "/photos/heavy.png");
         assert_eq!(json["files"][0]["heavy"], true);
+    }
+
+    #[test]
+    fn a_heic_only_folder_reports_its_count_in_the_json_summary() {
+        let scanned = scan::Scan {
+            entries: vec![],
+            skipped_raw: 0,
+            skipped_heic: 4,
+            skipped_packages: 0,
+            unreadable: vec![],
+            walk_errors: vec![],
+            existing_output: 0,
+        };
+
+        let json = serde_json::to_value(audit_report(Path::new("/photos"), &scanned)).unwrap();
+        // The whole point: zero images is not the whole story, and a caller that
+        // reads only `images` would call an iPhone folder empty.
+        assert_eq!(json["summary"]["images"], 0);
+        assert_eq!(json["summary"]["heic_skipped"], 4);
     }
 
     #[gpui::test]

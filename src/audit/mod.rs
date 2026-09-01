@@ -352,6 +352,9 @@ pub(crate) struct Audit {
     folder_scroll: UniformListScrollHandle,
     entries: Vec<Entry>,
     skipped_raw: usize,
+    /// HEIC/HEIF files the scan counted but could not read, for the same reason:
+    /// no decoder is linked, and a phone folder that lists nothing looks broken.
+    skipped_heic: usize,
     /// macOS packages the scan skipped whole, counted like raw: excluded by
     /// design, so the total says so.
     skipped_packages: usize,
@@ -1050,6 +1053,7 @@ impl Audit {
             });
         }
         self.skipped_raw = scanned.skipped_raw;
+        self.skipped_heic = scanned.skipped_heic;
         self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
         self.walk_errors = scanned.walk_errors;
@@ -1177,6 +1181,7 @@ impl Audit {
                         scan::Scan {
                             entries: vec![entry],
                             skipped_raw: 0,
+                            skipped_heic: 0,
                             skipped_packages: 0,
                             unreadable: Vec::new(),
                             walk_errors: Vec::new(),
@@ -1641,6 +1646,7 @@ pub(crate) fn build_audit(
         root,
         entries,
         skipped_raw,
+        skipped_heic,
         skipped_packages,
         unreadable,
         walk_errors,
@@ -1775,6 +1781,7 @@ pub(crate) fn build_audit(
             folder_scroll: UniformListScrollHandle::new(),
             entries,
             skipped_raw,
+            skipped_heic,
             skipped_packages,
             heaviest: 0,
             visible_bytes: 0,

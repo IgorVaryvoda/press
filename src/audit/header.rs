@@ -3,6 +3,56 @@
 use super::*;
 
 impl Audit {
+    /// The counts beside the breadcrumb. A string rather than inline elements: what
+    /// a scan left out is as much a fact as what it found, and both are asserted on.
+    pub(super) fn stats_line(&self, count: usize) -> String {
+        let mut stats = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+            format!("{count} files only on Sirv")
+        } else if let Some(folders) = self.batch_folders {
+            format!(
+                "{folders} folders · {count} images · {}",
+                format_bytes(self.visible_bytes())
+            )
+        } else if self.batch_size.is_some() && count == self.entries.len() {
+            format_bytes(self.visible_bytes())
+        } else if count == self.entries.len() {
+            format!("{count} images · {}", format_bytes(self.visible_bytes()))
+        } else {
+            format!(
+                "{count} of {} images · {}",
+                self.entries.len(),
+                format_bytes(self.visible_bytes())
+            )
+        };
+        if self.skipped_raw > 0 {
+            stats.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
+        }
+        // Named as unsupported rather than merely skipped: raw is a deliberate
+        // exclusion, HEIC is a gap, and the difference is the user's next move.
+        if self.skipped_heic > 0 {
+            stats.push_str(&format!(
+                " · {} HEIC skipped (not supported yet)",
+                self.skipped_heic
+            ));
+        }
+        if self.skipped_packages > 0 {
+            stats.push_str(&match self.skipped_packages {
+                1 => " · 1 macOS package skipped".to_string(),
+                many => format!(" · {many} macOS packages skipped"),
+            });
+        }
+        // Information, not a warning: a previous run's output sitting in
+        // optimized/ is normal life, and a yellow banner made it look like
+        // something had gone wrong.
+        if self.existing_output > 0 {
+            stats.push_str(&match self.existing_output {
+                1 => format!(" · 1 file in {}/", scan::OUTPUT_DIR),
+                many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
+            });
+        }
+        stats
+    }
+
     /// Which folder this is, how to get to another one, and the two controls
     /// that narrow the list. One row: the second strip was carrying a filter box
     /// and two chips across the whole window, and cost the list forty pixels.
@@ -55,42 +105,7 @@ impl Audit {
         let reveal_root = self.root.clone();
         let can_reveal = reveal_root.is_dir();
 
-        let mut stats = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
-            format!("{count} files only on Sirv")
-        } else if let Some(folders) = self.batch_folders {
-            format!(
-                "{folders} folders · {count} images · {}",
-                format_bytes(self.visible_bytes())
-            )
-        } else if self.batch_size.is_some() && count == self.entries.len() {
-            format_bytes(self.visible_bytes())
-        } else if count == self.entries.len() {
-            format!("{count} images · {}", format_bytes(self.visible_bytes()))
-        } else {
-            format!(
-                "{count} of {} images · {}",
-                self.entries.len(),
-                format_bytes(self.visible_bytes())
-            )
-        };
-        if self.skipped_raw > 0 {
-            stats.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
-        }
-        if self.skipped_packages > 0 {
-            stats.push_str(&match self.skipped_packages {
-                1 => " · 1 macOS package skipped".to_string(),
-                many => format!(" · {many} macOS packages skipped"),
-            });
-        }
-        // Information, not a warning: a previous run's output sitting in
-        // optimized/ is normal life, and a yellow banner made it look like
-        // something had gone wrong.
-        if self.existing_output > 0 {
-            stats.push_str(&match self.existing_output {
-                1 => format!(" · 1 file in {}/", scan::OUTPUT_DIR),
-                many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
-            });
-        }
+        let stats = self.stats_line(count);
         div()
             .debug_selector(|| "audit-header".into())
             .flex()

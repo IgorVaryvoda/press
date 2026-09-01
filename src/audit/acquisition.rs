@@ -160,6 +160,7 @@ pub(super) fn audit_report(
     entries: &[Entry],
     show_parent: bool,
     skipped_raw: usize,
+    skipped_heic: usize,
     findings: (usize, usize, usize),
     conversion: (usize, (u64, u64)),
 ) -> String {
@@ -180,6 +181,11 @@ pub(super) fn audit_report(
     if skipped_raw > 0 {
         report.push_str(&format!(
             "- {skipped_raw} camera RAW sources present (not decoded)\n"
+        ));
+    }
+    if skipped_heic > 0 {
+        report.push_str(&format!(
+            "- {skipped_heic} HEIC skipped (not supported yet)\n"
         ));
     }
     if converted > 0 {
@@ -253,6 +259,7 @@ impl Audit {
             &self.entries,
             self.batch_folders.is_some(),
             self.skipped_raw,
+            self.skipped_heic,
             (self.heavy, self.mislabelled, self.marketplace),
             (self.results.len(), self.converted_totals),
         );
@@ -481,10 +488,12 @@ mod tests {
             &[ready, large],
             false,
             3,
+            2,
             (0, 0, 1),
             (0, (0, 0)),
         );
         assert!(report.contains("camera RAW sources present (not decoded)"));
+        assert!(report.contains("2 HEIC skipped (not supported yet)"));
         assert!(report.contains("review the background visually"));
         assert!(report.contains("Sirv Studio"));
         assert!(!report.contains("/private/catalog"));

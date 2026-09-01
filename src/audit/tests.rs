@@ -402,6 +402,7 @@ fn screenshot() {
                     root: root.clone(),
                     entries: scanned.entries,
                     skipped_raw: scanned.skipped_raw,
+                    skipped_heic: scanned.skipped_heic,
                     skipped_packages: scanned.skipped_packages,
                     unreadable: scanned.unreadable,
                     walk_errors: scanned.walk_errors,
@@ -604,6 +605,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         root: folder.clone(),
         entries: scanned.entries,
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),
@@ -712,6 +714,7 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         root: folder.clone(),
         entries: scanned.entries,
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),
@@ -1321,6 +1324,7 @@ fn notification_audit(
                 root: PathBuf::new(),
                 entries,
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -1439,6 +1443,7 @@ fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAp
                 scan::Scan {
                     entries: Vec::new(),
                     skipped_raw: 0,
+                    skipped_heic: 0,
                     skipped_packages: 0,
                     unreadable: Vec::new(),
                     walk_errors: Vec::new(),
@@ -1633,6 +1638,7 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
                 scan::Scan {
                     entries: vec![entry("new.png", 10, 10, 100, ImageFormat::Png)],
                     skipped_raw: 0,
+                    skipped_heic: 0,
                     skipped_packages: 0,
                     unreadable: Vec::new(),
                     walk_errors: Vec::new(),
@@ -1677,6 +1683,7 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
                 scan::Scan {
                     entries: vec![entry("new.png", 10, 10, 100, ImageFormat::Png)],
                     skipped_raw: 0,
+                    skipped_heic: 0,
                     unreadable: Vec::new(),
                     walk_errors: Vec::new(),
                     existing_output: 0,
@@ -1708,6 +1715,7 @@ fn finding_launch() -> Launch {
             entry("liar.webp", 100, 100, 1_000, ImageFormat::Png),
         ],
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),
@@ -2319,6 +2327,7 @@ fn pointer_checkbox_audit(
             entry("second.png", 10, 10, 200, ImageFormat::Png),
         ],
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),
@@ -3574,6 +3583,37 @@ fn folder_navigation_is_shallow_and_clears_file_selection(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
+    let root = scan_fixture("heic-only");
+    std::fs::write(root.join("IMG_0001.heic"), b"not really a heic")
+        .expect("the fixture HEIC is written");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.entries.is_empty(), "no HEIC is decoded");
+        assert_eq!(audit.skipped_heic, 1);
+        let stats = audit.stats_line(0);
+        assert!(
+            stats.contains("1 HEIC skipped (not supported yet)"),
+            "the header owes the user the count: {stats}"
+        );
+    });
+    assert!(cx.debug_bounds("empty-folder-message").is_some());
+    assert_eq!(
+        view::empty_folder_detail("shoot", 1),
+        "The “shoot” folder has 1 HEIC file, not supported yet."
+    );
+    assert_eq!(
+        view::empty_folder_detail("shoot", 12),
+        "The “shoot” folder has 12 HEIC files, not supported yet."
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
 fn a_folder_containing_only_output_uses_the_empty_state(cx: &mut TestAppContext) {
     let root = scan_fixture("output-only-empty-state");
     let output = root.join(scan::OUTPUT_DIR);
@@ -3667,6 +3707,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 root: PathBuf::new(),
                 entries,
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -3777,6 +3818,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 root: PathBuf::new(),
                 entries: Vec::new(),
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -3855,6 +3897,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
                 root: PathBuf::from("old"),
                 entries,
                 skipped_raw: 0,
+                skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
                 walk_errors: Vec::new(),
@@ -3888,6 +3931,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
             .map(|index| entry(&format!("new-{index}.png"), 1, 1, 1, ImageFormat::Png))
             .collect(),
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),

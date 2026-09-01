@@ -28,10 +28,24 @@ const RAW_EXTENSIONS: [&str; 9] = [
     "nef", "cr2", "cr3", "arw", "dng", "orf", "rw2", "raf", "srw",
 ];
 
-pub fn is_raw(path: &Path) -> bool {
+/// Apple's HEIC and the HEIF family it sits in — what every recent iPhone writes by
+/// default, and what mirrorless bodies increasingly offer. Nothing here links a HEIC
+/// decoder, so these cannot be measured. Counted like raw rather than dropped: a
+/// folder straight off a phone otherwise audits as empty and the app looks broken.
+const HEIC_EXTENSIONS: [&str; 5] = ["heic", "heif", "hif", "avci", "heix"];
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| RAW_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+        .is_some_and(|extension| extensions.contains(&extension.to_ascii_lowercase().as_str()))
+}
+
+pub fn is_raw(path: &Path) -> bool {
+    has_extension(path, &RAW_EXTENSIONS)
+}
+
+pub fn is_heic(path: &Path) -> bool {
+    has_extension(path, &HEIC_EXTENSIONS)
 }
 
 /// Converted files land here, inside the folder being audited. A second run would
@@ -109,11 +123,7 @@ fn is_opaque_package(path: &Path) -> bool {
     if !cfg!(target_os = "macos") {
         return false;
     }
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            PACKAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
-        })
+    has_extension(path, &PACKAGE_EXTENSIONS)
 }
 
 /// What a folder holds.
@@ -123,6 +133,9 @@ pub struct Scan {
     /// A count, not names: raw is excluded by design and a photographer knows they
     /// have it. Nothing in the window would act on the list.
     pub skipped_raw: usize,
+    /// HEIC/HEIF files left out of the list for want of a decoder, counted like raw
+    /// so an iPhone folder says what it holds instead of showing nothing.
+    pub skipped_heic: usize,
     /// macOS packages the walk never entered, counted like raw for the same
     /// reason: they are excluded by design and the total says so.
     pub skipped_packages: usize,
@@ -360,10 +373,13 @@ pub fn scan(root: &Path, output_root: &Path) -> Scan {
 pub fn scan_files(paths: &[PathBuf]) -> Scan {
     let mut entries = Vec::new();
     let mut skipped_raw = 0;
+    let mut skipped_heic = 0;
     let mut unreadable = Vec::new();
     for path in paths {
         if is_raw(path) {
             skipped_raw += 1;
+        } else if is_heic(path) {
+            skipped_heic += 1;
         } else if let Some(entry) = probe(path) {
             entries.push(entry);
         } else {
@@ -374,6 +390,7 @@ pub fn scan_files(paths: &[PathBuf]) -> Scan {
     Scan {
         entries,
         skipped_raw,
+        skipped_heic,
         skipped_packages: 0,
         unreadable,
         walk_errors: Vec::new(),
@@ -442,6 +459,7 @@ fn browse_page(
     let mut folders = Vec::new();
     let mut entries = Vec::new();
     let mut skipped_raw = 0;
+    let mut skipped_heic = 0;
     let mut skipped_packages = 0;
     let mut unreadable = Vec::new();
     let mut walk_errors = Vec::new();
@@ -482,6 +500,8 @@ fn browse_page(
         }
         if is_raw(&path) {
             skipped_raw += 1;
+        } else if is_heic(&path) {
+            skipped_heic += 1;
         } else if let Some(entry) = probe(&path) {
             entries.push(entry);
         } else if looks_like_an_image(&path) {
@@ -504,6 +524,7 @@ fn browse_page(
         scan: Scan {
             entries,
             skipped_raw,
+            skipped_heic,
             skipped_packages,
             unreadable,
             walk_errors,
@@ -567,6 +588,7 @@ fn browse_folders_inner(
     let mut scan = Scan {
         entries: Vec::new(),
         skipped_raw: 0,
+        skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
         walk_errors: Vec::new(),
@@ -579,6 +601,7 @@ fn browse_folders_inner(
         let browsed = browsed.scan;
         scan.entries.extend(browsed.entries);
         scan.skipped_raw += browsed.skipped_raw;
+        scan.skipped_heic += browsed.skipped_heic;
         scan.skipped_packages += browsed.skipped_packages;
         scan.unreadable.extend(browsed.unreadable);
         scan.walk_errors.extend(browsed.walk_errors);
@@ -719,6 +742,7 @@ fn scan_progressive_cancellable_inner(
         #[derive(Default)]
         struct WalkSummary {
             skipped_raw: usize,
+            skipped_heic: usize,
             skipped_packages: usize,
             walk_errors: Vec<PathBuf>,
             existing_output: usize,
@@ -805,6 +829,10 @@ fn scan_progressive_cancellable_inner(
                 }
                 if is_raw(file.path()) {
                     summary.skipped_raw += 1;
+                    continue;
+                }
+                if is_heic(file.path()) {
+                    summary.skipped_heic += 1;
                     continue;
                 }
                 if walker_cancelled.load(Ordering::Acquire) {
@@ -972,6 +1000,7 @@ fn scan_progressive_cancellable_inner(
     ScanOutcome::Complete(Scan {
         entries,
         skipped_raw: summary.skipped_raw,
+        skipped_heic: summary.skipped_heic,
         skipped_packages: summary.skipped_packages,
         unreadable,
         walk_errors: summary.walk_errors,
@@ -1439,6 +1468,29 @@ mod tests {
             scanned.skipped_raw, 2,
             "raw is counted, not silently dropped"
         );
+    }
+
+    #[test]
+    fn heic_is_counted_but_not_listed() {
+        let dir = temp_dir("heic");
+        write_sample(&dir, "keep.png", 8, 8);
+        // Nothing here decodes HEIC, so the files are skipped on their name like raw.
+        // Bytes that no decoder will read still have to be admitted to.
+        std::fs::write(dir.join("IMG_0001.HEIC"), b"not really a heic").unwrap();
+        std::fs::write(dir.join("IMG_0002.heif"), b"nor this").unwrap();
+
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
+        assert_eq!(scanned.entries.len(), 1);
+        assert_eq!(
+            scanned.skipped_heic, 2,
+            "HEIC is counted, not silently dropped"
+        );
+        assert!(
+            scanned.unreadable.is_empty(),
+            "a format we never claimed to read is not a read failure"
+        );
+        assert!(is_heic(Path::new("a/IMG_1.HIF")));
+        assert!(!is_heic(Path::new("a/b.png")));
     }
 
     /// The walk streams files to one worker per core, so every count and the sort order
