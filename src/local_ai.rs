@@ -13,7 +13,7 @@ use std::time::Duration;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use flate2::read::GzDecoder;
-use image::ImageDecoder as _;
+use image::{ImageDecoder as _, ImageEncoder as _};
 use sha2::{Digest, Sha256};
 
 use crate::{convert, scan};
@@ -128,7 +128,7 @@ pub fn process(
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
     check_cancelled(cancelled)?;
-    let (decoded, _profile) = scan::decode_for_conversion(source).map_err(|error| match error {
+    let (decoded, profile) = scan::decode_for_conversion(source).map_err(|error| match error {
         scan::ConversionDecodeError::AnimatedGif => "animated GIFs cannot use local AI".to_string(),
         scan::ConversionDecodeError::AnimatedPng => {
             "animated PNG files cannot use local AI".to_string()
@@ -150,8 +150,19 @@ pub fn process(
     let input = scratch.0.join("input.png");
     let result = scratch.0.join("result.png");
     let mask = scratch.0.join("mask.png");
-    decoded
-        .save_with_format(&input, image::ImageFormat::Png)
+    // The scratch PNG is what the engine reads and, for the tools that copy metadata,
+    // what the result inherits. Handing it untagged pixels describes a wide gamut
+    // source as sRGB before inference even starts.
+    let scratch_png =
+        File::create(&input).map_err(|error| format!("could not prepare the image: {error}"))?;
+    let mut encoder = image::codecs::png::PngEncoder::new(scratch_png);
+    if let Some(profile) = profile {
+        encoder
+            .set_icc_profile(profile)
+            .map_err(|error| format!("could not prepare the image: {error}"))?;
+    }
+    encoder
+        .write_image(decoded.as_bytes(), width, height, decoded.color().into())
         .map_err(|error| format!("could not prepare the image: {error}"))?;
     check_cancelled(cancelled)?;
 
