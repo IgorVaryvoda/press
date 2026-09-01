@@ -3960,3 +3960,242 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
         0
     );
 }
+
+/// An audit over a folder of real files with every row ticked, so a conversion
+/// has something to decode, encode and write.
+fn convertible_audit(
+    count: usize,
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+    cx.update(init_theme);
+    let root = scan_fixture("convert");
+    let entries: Vec<Entry> = (0..count)
+        .map(|index| {
+            let path = root.join(format!("shot-{index}.png"));
+            crate::convert::tests::photo(8, 8)
+                .save(&path)
+                .expect("the fixture photo is written");
+            let bytes = std::fs::metadata(&path)
+                .expect("the fixture image is on disk")
+                .len();
+            Entry {
+                path,
+                format: ImageFormat::Png.into(),
+                width: 8,
+                height: 8,
+                bytes,
+            }
+        })
+        .collect();
+    let launch = Launch {
+        root,
+        entries,
+        skipped_raw: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+        open_single: false,
+        format: Format::WebP,
+        quality: Quality::lossy(80.),
+        max_edge: MaxEdge::FULL,
+        grid: false,
+        recent_folders: Vec::new(),
+        columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
+    };
+    let mut built = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let audit = build_audit(launch, window, cx);
+        built = Some(audit.clone());
+        Root::new(audit, window, cx).bg(cx.theme().background)
+    });
+    let audit = built.expect("the audit is built for the production Root");
+    audit.update(cx, |audit, _| {
+        audit.selected.extend(0..count);
+        audit.refresh_target_summary();
+        audit.rail = Rail::Convert;
+    });
+    (audit, cx)
+}
+
+#[gpui::test]
+fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
+    // Three windows of files, so a stop taken at the first batch of results still
+    // leaves a window in flight and a queue that never starts.
+    let total = convert::workers(Format::WebP) * 3;
+    let (audit, cx) = convertible_audit(total, cx);
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    // One task at a time, so the stop lands in the middle of a real run rather
+    // than before it starts or after it is over.
+    while audit.read_with(cx, |audit, _| audit.results.is_empty()) {
+        assert!(
+            cx.executor().tick(),
+            "the conversion reaches its first batch of results"
+        );
+    }
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("convert-stop").is_some(),
+        "a running conversion offers the way out of it"
+    );
+
+    audit.update(cx, |audit, cx| {
+        assert!(!audit.convert_stopping());
+        audit.cancel_conversion(cx);
+        assert!(audit.convert_stopping(), "the stop is acknowledged at once");
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.converting, "the stop ends the run");
+        assert!(audit.convert_cancel.is_none());
+        assert!(
+            audit.automatic_update_can_restart(),
+            "the controls a run owns are handed back"
+        );
+        assert_eq!(audit.stopped_run, Some(total));
+        assert!(
+            audit.failures.is_empty(),
+            "a file that was never started is not a failure"
+        );
+        assert!(
+            !audit.results.is_empty(),
+            "the files the run finished are kept"
+        );
+        assert!(
+            audit.results.len() < total,
+            "the stop left the rest of the queue unconverted"
+        );
+        assert_eq!(audit.result_paths.len(), audit.results.len());
+        for written in audit.result_paths.values() {
+            assert!(
+                written.exists(),
+                "{} was written and stays written",
+                written.display()
+            );
+        }
+        assert!(
+            audit.compare.is_none(),
+            "a stop is a request to stop, not to be taken somewhere"
+        );
+    });
+    assert_eq!(
+        notification_count(cx),
+        0,
+        "a stopped run raises no failure notice"
+    );
+}
+
+#[test]
+fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
+    let stopped = panel::conversion_result_state(Some(36), 12);
+    assert_eq!(stopped, "STOPPED · 12 OF 36 CONVERTED");
+    assert!(!stopped.contains("FAILED"));
+    assert_eq!(
+        panel::conversion_result_state(None, 36),
+        "COMPLETED · ACTUAL RESULT"
+    );
+}
+
+/// The one decoded sample the estimate is holding on to, with its key. Anything
+/// else in there would mean the cache outgrew the sample it was taken for.
+fn sampled_decode(audit: &Audit) -> ((u64, PathBuf, MaxEdge), Arc<DynamicImage>) {
+    let cache = audit.estimate_decodes.lock();
+    assert_eq!(
+        cache.len(),
+        1,
+        "the estimate holds exactly the sample it just took"
+    );
+    let (key, image) = cache.iter().next().expect("the sample decoded its image");
+    (key.clone(), image.clone())
+}
+
+fn settle_estimate(cx: &mut gpui::VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(ESTIMATE_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_them(
+    cx: &mut TestAppContext,
+) {
+    let (audit, cx) = convertible_audit(1, cx);
+
+    audit.update(cx, |audit, cx| audit.schedule_estimate(cx));
+    settle_estimate(cx);
+    let (key, decoded) = audit.read_with(cx, |audit, _| sampled_decode(audit));
+    assert_eq!(decoded.width(), 8);
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit
+                .estimate
+                .is_some_and(|(projected, counted)| projected > 0 && counted == 1),
+            "the sample projected a real total"
+        );
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.quality = Quality::lossy(40.);
+        audit.schedule_estimate(cx);
+    });
+    settle_estimate(cx);
+    let (unchanged, reused) = audit.read_with(cx, |audit, _| sampled_decode(audit));
+    assert_eq!(unchanged, key);
+    assert!(
+        Arc::ptr_eq(&decoded, &reused),
+        "a quality change re-encodes the pixels the last estimate decoded"
+    );
+
+    audit.update(cx, |audit, cx| {
+        audit.max_edge = MaxEdge(Some(4));
+        audit.schedule_estimate(cx);
+    });
+    settle_estimate(cx);
+    let (resized, redecoded) = audit.read_with(cx, |audit, _| sampled_decode(audit));
+    assert_eq!(resized.2, MaxEdge(Some(4)));
+    assert!(
+        !Arc::ptr_eq(&decoded, &redecoded),
+        "a max edge change is a different image and has to be decoded again"
+    );
+    assert_eq!(redecoded.width(), 4);
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.estimate.is_some_and(|(projected, _)| projected > 0),
+            "the resized sample projected a real total"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext) {
+    // A real run would end inside the click that simulates the close, so the state
+    // a run installs is set directly here.
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    audit.update(cx, |audit, cx| {
+        audit.rail = Rail::Convert;
+        audit.converting = true;
+        audit.active_target_count = Some(2);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("convert-stop").is_some());
+    let close = cx
+        .debug_bounds("close-rail")
+        .expect("the open rail has its close control");
+    cx.simulate_click(close.center(), gpui::Modifiers::none());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    audit.read_with(cx, |audit, _| assert_eq!(audit.rail, Rail::Convert));
+    assert!(
+        cx.debug_bounds("convert-stop").is_some(),
+        "the way out of a run cannot be closed away: the tab that reopens the rail \
+         is disabled while it runs"
+    );
+    audit.update(cx, |audit, _| audit.converting = false);
+}

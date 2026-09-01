@@ -66,6 +66,7 @@ use gpui_component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_component::{
     ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
 };
+use image::DynamicImage;
 
 struct ErrorToast;
 
@@ -134,6 +135,23 @@ fn sample_size(format: Format) -> usize {
         Format::Avif | Format::JpegXl => 3,
     }
 }
+
+/// The decoded pixels behind the estimate's sample, keyed by the dataset, the source
+/// path and the max edge: the three things that change what a decode produces.
+type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), Arc<DynamicImage>>>>;
+
+/// The most decoded sample the estimate may hold on to. A sample is at most 32
+/// images, and re-decoding one costs a fraction of a second, so past this the cache
+/// would buy a slider stop with a gigabyte of resident pixels.
+const ESTIMATE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Resident cost of one decoded sample.
+fn decoded_bytes(image: &Arc<DynamicImage>) -> u64 {
+    u64::from(image.width())
+        * u64::from(image.height())
+        * u64::from(image.color().bytes_per_pixel())
+}
+
 /// Settling time before sampling, so dragging the slider does not start a run per pixel.
 const ESTIMATE_DELAY: Duration = Duration::from_millis(400);
 /// Settling time before building a comparison, so a held arrow key does not queue one
@@ -399,8 +417,16 @@ pub(crate) struct Audit {
     /// the job advances.
     converted_totals: (u64, u64),
     converting: bool,
+    /// The running conversion's stop flag, read between files. Sirv transfers and
+    /// both AI jobs already owned one; the app's headline verb was the only long
+    /// job with no way out of it.
+    convert_cancel: Option<Arc<AtomicBool>>,
     /// The immutable denominator owned by the active conversion.
     active_target_count: Option<usize>,
+    /// The target count of a run the user stopped, so the summary can say how far
+    /// it got. The files it wrote are real and stay; the ones it never started are
+    /// not failures.
+    stopped_run: Option<usize>,
     /// Names of files a conversion could not read or write. Kept rather than counted,
     /// because "3 failed" without saying which is not a report.
     failures: Vec<String>,
@@ -504,6 +530,11 @@ pub(crate) struct Audit {
     /// Bumped on every settings change so a slow sample can tell it is stale. Dragging
     /// the quality slider fires dozens of these.
     estimate_generation: u64,
+    /// The sample's decoded pixels, kept between runs. Only the encode depends on
+    /// quality, and decoding the whole sample again for each one made dragging
+    /// q80 → q60 → q80 decode 96 full images to answer a question about 32. Pruned
+    /// to the sample being taken now, so it holds at most `sample_size` of them.
+    estimate_decodes: SampledDecodes,
     /// Invalidates detached work when a new folder or file is installed.
     dataset_generation: u64,
     /// Invalidates older folder-open requests while a newer scan is pending.
@@ -1009,15 +1040,21 @@ impl Audit {
         self.dataset_generation = self.dataset_generation.wrapping_add(1);
         self.estimate_generation = self.estimate_generation.wrapping_add(1);
         self.estimate = None;
+        self.estimate_decodes.lock().clear();
         self.converting = false;
         self.active_target_count = None;
+        self.stopped_run = None;
+        // The dataset guard already dropped a stale run's results; now the run
+        // itself stops, rather than writing out the rest of a folder nobody is
+        // looking at any more.
+        if let Some(cancel) = self.convert_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
         if let Some(job) = self.local_ai_job.take() {
-            job.cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            job.cancelled.store(true, Ordering::Relaxed);
         }
         if let Some(job) = self.studio_job.take() {
-            job.cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            job.cancelled.store(true, Ordering::Relaxed);
         }
         self.studio_source = None;
         self.root = root;
@@ -1836,6 +1873,7 @@ pub(crate) fn build_audit(
             gallery_visible: 0..0,
             estimate: None,
             estimate_generation: 0,
+            estimate_decodes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             dataset_generation: 0,
             scan_generation: 0,
             scanning: None,
@@ -1854,7 +1892,9 @@ pub(crate) fn build_audit(
             completed_outputs: HashSet::new(),
             converted_totals: (0, 0),
             converting: false,
+            convert_cancel: None,
             active_target_count: None,
+            stopped_run: None,
             failures: Vec::new(),
             unreadable,
             walk_errors,

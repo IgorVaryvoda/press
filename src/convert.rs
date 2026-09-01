@@ -65,7 +65,7 @@ impl Failure {
 /// This is where most of the weight actually is. Re-encoding a 6400px photo as AVIF
 /// still hands back a 6400px photo, which is the wrong image for a web page however
 /// well it is compressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct MaxEdge(pub Option<u32>);
 
 impl MaxEdge {
@@ -581,7 +581,7 @@ pub fn convert_to(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb, Rgba};
 
@@ -595,7 +595,7 @@ mod tests {
     /// Deterministic noise. A flat colour compresses to nothing, and so does a smooth
     /// gradient — lossless WebP squeezed one to 90 bytes and made an earlier version of
     /// these tests assert something false. Real photographs are noisy; this is too.
-    fn photo(width: u32, height: u32) -> DynamicImage {
+    pub(crate) fn photo(width: u32, height: u32) -> DynamicImage {
         DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| {
             let mut hash = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
             hash ^= hash >> 13;

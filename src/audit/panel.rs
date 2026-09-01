@@ -59,6 +59,16 @@ pub(super) fn active_preset(format: Format, quality: Quality, edge: MaxEdge) -> 
         })
 }
 
+/// What the summary calls a run that has ended. A run the user stopped kept every
+/// file it wrote, so it says how far it got: the files it never started are not
+/// failures, and the ones it finished are as real as any other result.
+pub(super) fn conversion_result_state(stopped_total: Option<usize>, converted: usize) -> String {
+    match stopped_total {
+        Some(total) => format!("STOPPED · {converted} OF {total} CONVERTED"),
+        None => "COMPLETED · ACTUAL RESULT".into(),
+    }
+}
+
 pub(super) fn sampling_note(sampled: usize, total: usize) -> String {
     if sampled < total {
         format!(" · {sampled}\u{a0}of\u{a0}{total}\u{a0}sampled")
@@ -330,15 +340,21 @@ impl Audit {
                                 .child(title),
                         )
                         .child(
-                            Button::new("close-rail")
-                                .small()
-                                .ghost()
-                                .icon(IconName::Close)
-                                .tooltip("Close")
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.rail = Rail::None;
-                                    cx.notify();
-                                })),
+                            // Closing the rail mid-run would take Stop away with
+                            // it, and the tab that reopens the rail is disabled
+                            // while converting: there would be no way back.
+                            div().debug_selector(|| "close-rail".into()).child(
+                                Button::new("close-rail")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .tooltip("Close")
+                                    .disabled(self.converting)
+                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                        audit.rail = Rail::None;
+                                        cx.notify();
+                                    })),
+                            ),
                         ),
                 )
                 .child(body)
@@ -886,7 +902,7 @@ impl Audit {
             let done = self.results.len() + self.failures.len();
             let total = self.active_target_count.unwrap_or(target_count);
             (
-                Some(("CONVERTING", cx.theme().foreground)),
+                Some(("CONVERTING".to_string(), cx.theme().foreground)),
                 format!("{done} of {total}"),
                 cx.theme().foreground,
                 format!(
@@ -903,7 +919,14 @@ impl Audit {
             let delta = before.abs_diff(after);
             let percent = delta as f32 / before.max(1) as f32 * 100.;
             (
-                Some(("COMPLETED · ACTUAL RESULT", cx.theme().green)),
+                Some((
+                    conversion_result_state(self.stopped_run, self.results.len()),
+                    if self.stopped_run.is_some() {
+                        cx.theme().muted_foreground
+                    } else {
+                        cx.theme().green
+                    },
+                )),
                 format!(
                     "{} {}",
                     format_bytes(delta),
@@ -935,7 +958,7 @@ impl Audit {
             let delta = source.abs_diff(projected);
             let percent = delta as f32 / source.max(1) as f32 * 100.;
             (
-                Some(("ESTIMATE", cx.theme().muted_foreground)),
+                Some(("ESTIMATE".to_string(), cx.theme().muted_foreground)),
                 format!("≈{} output", format_bytes(projected)),
                 if growth {
                     cx.theme().yellow
@@ -1012,6 +1035,22 @@ impl Audit {
                                 } else {
                                     format!("−{percent:.0}%")
                                 })
+                            }))
+                            // A run disables every other control in the window,
+                            // by design, so the way out of it has to sit beside
+                            // the count that says how long it has left.
+                            .children(self.converting.then(|| {
+                                let stopping = self.convert_stopping();
+                                div().debug_selector(|| "convert-stop".into()).child(
+                                    Button::new("convert-stop")
+                                        .small()
+                                        .outline()
+                                        .label(if stopping { "Stopping…" } else { "Stop" })
+                                        .disabled(stopping)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            audit.cancel_conversion(cx)
+                                        })),
+                                )
                             })),
                     )
                     .child(
