@@ -196,7 +196,7 @@ impl Audit {
 
         let source = written.unwrap_or_else(|| entry.path.clone());
         let output_source = entry.path.clone();
-        let source_name = if self.batch_folders.is_some() {
+        let source_name = if self.show_parent() {
             entry_label(&self.root, true, entry)
         } else {
             source

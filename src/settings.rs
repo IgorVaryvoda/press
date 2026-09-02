@@ -16,6 +16,9 @@ pub struct Settings {
     pub recent_folders: Vec<PathBuf>,
     pub columns: ColumnPrefs,
     pub output: Output,
+    /// Whether the window walks the whole tree like the command line does. Off
+    /// by default so a folder opens exactly as it did before the choice existed.
+    pub include_subfolders: bool,
 }
 
 pub const MAX_RECENT_FOLDERS: usize = 5;
@@ -246,6 +249,7 @@ fn parse(text: &str) -> Settings {
             "folder" => settings.folder = Some(PathBuf::from(value.trim())),
             "recent_folder" => settings.recent_folders.push(PathBuf::from(value.trim())),
             "columns" => settings.columns = ColumnPrefs::parse(value),
+            "subfolders" => settings.include_subfolders = value.trim() == "1",
             "output" => {
                 let value = value.trim();
                 settings.output = if value.is_empty() {
@@ -281,6 +285,11 @@ fn render(settings: &Settings) -> String {
     // output goes until somebody chooses somewhere else.
     if let Output::Folder(path) = &settings.output {
         out.push_str(&format!("output={}\n", path.display()));
+    }
+    // Same shape as `output`: the default writes nothing, so a file from before the
+    // choice existed keeps opening one level at a time.
+    if settings.include_subfolders {
+        out.push_str("subfolders=1\n");
     }
     out
 }
@@ -378,6 +387,7 @@ mod tests {
             ],
             columns: ColumnPrefs::default(),
             output: Output::Folder(PathBuf::from("/exports/web")),
+            include_subfolders: true,
         };
         assert_eq!(parse(&render(&settings)), settings);
     }
@@ -408,6 +418,21 @@ mod tests {
         assert_eq!(settings.width, None);
         assert_eq!(settings.height, Some(600.));
         assert_eq!(settings.folder, None);
+    }
+
+    #[test]
+    fn the_subfolders_choice_round_trips() {
+        let on = Settings {
+            include_subfolders: true,
+            ..Settings::default()
+        };
+        assert!(render(&on).contains("subfolders=1\n"));
+        assert!(parse(&render(&on)).include_subfolders);
+
+        let default = Settings::default();
+        assert!(!render(&default).contains("subfolders="));
+        assert!(!parse(&render(&default)).include_subfolders);
+        assert!(!parse("subfolders=maybe\n").include_subfolders);
     }
 
     #[test]

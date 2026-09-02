@@ -543,11 +543,7 @@ impl TableDelegate for AuditTable {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_color(cx.theme().foreground)
-                            .child(entry_label(
-                                &audit.root,
-                                audit.batch_folders.is_some(),
-                                entry,
-                            )),
+                            .child(entry_label(&audit.root, audit.show_parent(), entry)),
                     )
                     .children(heavy.then(|| finding_chip("heavy", cx)))
                     .children(lies.then(|| finding_chip("mislabelled", cx)))

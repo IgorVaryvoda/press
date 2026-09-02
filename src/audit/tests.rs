@@ -415,6 +415,7 @@ fn screenshot() {
                     recent_folders: Vec::new(),
                     columns: ColumnPrefs::default(),
                     output: crate::settings::Output::default(),
+                    include_subfolders: false,
                 },
                 window,
                 cx,
@@ -618,6 +619,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -727,6 +729,7 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -1337,6 +1340,7 @@ fn notification_audit(
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -1728,6 +1732,7 @@ fn finding_launch() -> Launch {
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     }
 }
 
@@ -2340,6 +2345,7 @@ fn pointer_checkbox_audit(
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| {
         let built = build_audit(launch, window, cx);
@@ -3583,6 +3589,87 @@ fn folder_navigation_is_shallow_and_clears_file_selection(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestAppContext) {
+    let root = scan_fixture("subfolders-toggle");
+    let child = root.join("child");
+    let grandchild = child.join("grandchild");
+    std::fs::create_dir_all(&grandchild).unwrap();
+    write_png(&root, "direct.png");
+    write_png(&child, "nested.png");
+    write_png(&grandchild, "deep.png");
+    let whole = scan::scan(&root, &root.join(scan::OUTPUT_DIR))
+        .entries
+        .len();
+    assert_eq!(whole, 3);
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.include_subfolders);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(audit.folders, vec![child.clone()]);
+    });
+
+    let chip = cx
+        .debug_bounds("include-subfolders")
+        .expect("the header offers the scope chip");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.include_subfolders);
+        assert!(
+            audit.settings.include_subfolders,
+            "the choice is remembered"
+        );
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), whole);
+        assert_eq!(
+            audit.folders,
+            vec![child.clone()],
+            "the tree still navigates"
+        );
+        assert!(audit.tree_paths.values().any(|path| path == &child));
+        let mut labels: Vec<String> = audit
+            .entries
+            .iter()
+            .map(|entry| entry_label(&audit.root, audit.show_parent(), entry))
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                Path::new("child")
+                    .join("grandchild")
+                    .join("deep.png")
+                    .to_string_lossy()
+                    .into_owned(),
+                Path::new("child")
+                    .join("nested.png")
+                    .to_string_lossy()
+                    .into_owned(),
+                "direct.png".to_string(),
+            ]
+        );
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+    });
+
+    audit.update(cx, |audit, cx| audit.toggle_subfolders(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.include_subfolders);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(
+            entry_label(&audit.root, audit.show_parent(), &audit.entries[0]),
+            "direct.png"
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
 fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
     let root = scan_fixture("heic-only");
     std::fs::write(root.join("IMG_0001.heic"), b"not really a heic")
@@ -3731,6 +3818,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -3842,6 +3930,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -3921,6 +4010,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -4004,6 +4094,7 @@ fn convertible_audit(
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let mut built = None;
     let (_, cx) = cx.add_window_view(|window, cx| {

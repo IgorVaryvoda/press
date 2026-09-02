@@ -531,6 +531,7 @@ impl Render for Audit {
             recent_folders: self.recent_folders.clone(),
             columns: self.column_prefs,
             output: self.output.clone(),
+            include_subfolders: self.include_subfolders,
         };
         if current != self.settings {
             self.remember_settings(current, cx);

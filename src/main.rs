@@ -697,6 +697,7 @@ fn main() {
                 recent_folders: remembered.recent_folders.clone(),
                 columns: remembered.columns,
                 output: remembered.output.clone(),
+                include_subfolders: remembered.include_subfolders,
             },
             None,
             pending_crash,
@@ -729,6 +730,7 @@ fn main() {
                 recent_folders: remembered.recent_folders.clone(),
                 columns: remembered.columns,
                 output: remembered.output.clone(),
+                include_subfolders: remembered.include_subfolders,
             },
             Some(target),
             pending_crash,
@@ -996,6 +998,7 @@ struct Launch {
     recent_folders: Vec<PathBuf>,
     columns: settings::ColumnPrefs,
     output: settings::Output,
+    include_subfolders: bool,
 }
 
 /// `Root` owns these overlays but leaves their placement to the app's content view.

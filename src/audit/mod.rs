@@ -546,6 +546,9 @@ pub(crate) struct Audit {
     scanning: Option<String>,
     /// The cancellable folder scan currently allowed to publish into this audit.
     scan_cancellation: Option<ScanCancellation>,
+    /// Walk the whole tree when a folder opens, as `press audit` does. Off, the
+    /// window reads one level and the tree is how you reach the rest.
+    include_subfolders: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -1011,6 +1014,27 @@ impl Audit {
         self.scanning.is_some()
     }
 
+    /// Rows are named relative to the root whenever one list can hold files from
+    /// more than one folder: a dropped batch, or a folder walked with its subfolders.
+    /// The same label sorts the list, so what you read is what you sorted by.
+    pub(super) fn show_parent(&self) -> bool {
+        self.batch_folders.is_some() || self.include_subfolders
+    }
+
+    /// Flip the scope and read the current folder again under it. A dropped batch
+    /// keeps its exact set; the choice applies to the next folder opened.
+    pub(super) fn toggle_subfolders(&mut self, cx: &mut Context<Self>) {
+        if self.converting {
+            return;
+        }
+        self.include_subfolders = !self.include_subfolders;
+        if self.batch_size.is_none() && self.root.is_dir() {
+            self.request_folder(self.root.clone(), cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     pub(super) fn cancel_retained_scan(&mut self) {
         if let Some(cancellation) = self.scan_cancellation.as_mut() {
             cancellation.cancel();
@@ -1268,6 +1292,7 @@ impl Audit {
         );
         let output_root = self.output.root(&path);
         let requested = path.clone();
+        let include_subfolders = self.include_subfolders;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1275,11 +1300,14 @@ impl Audit {
             let browsed = cx
                 .background_executor()
                 .spawn(async move {
-                    match scan::browse_cancellable(&path, &output_root, &browse_token) {
-                        Ok(Some(browsed)) => Some(Ok(browsed)),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error)),
+                    if include_subfolders {
+                        scan::browse_tree_cancellable(&path, &output_root, browse_token, |_| {
+                            std::ops::ControlFlow::Continue(())
+                        })
+                    } else {
+                        scan::browse_cancellable(&path, &output_root, &browse_token)
                     }
+                    .transpose()
                 })
                 .await;
             let _ = this.update_in(cx, |audit, window, cx| {
@@ -1714,6 +1742,7 @@ pub(crate) fn build_audit(
         recent_folders,
         columns: column_prefs,
         output,
+        include_subfolders,
     } = launch;
     let root = navigation_path(root);
     let recent_folders = recent_folders
@@ -1896,6 +1925,7 @@ pub(crate) fn build_audit(
             scan_generation: 0,
             scanning: None,
             scan_cancellation: None,
+            include_subfolders,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),

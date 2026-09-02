@@ -498,14 +498,9 @@ pub(crate) fn canonical_boundary(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-fn browse_page(
-    root: &Path,
-    output_root: &Path,
-    cancelled: Option<&AtomicBool>,
-) -> std::io::Result<Option<Browse>> {
-    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-        return Ok(None);
-    }
+/// The one identity a browsed folder has, refused when it sits inside the output:
+/// auditing last run's WebPs offers them back as candidates for conversion.
+fn input_root(root: &Path, output_root: &Path) -> std::io::Result<PathBuf> {
     let root = canonical_boundary(root)?;
     let output = canonical_boundary(output_root).or_else(|_| lexical_boundary(output_root))?;
     if root.starts_with(output) {
@@ -514,6 +509,18 @@ fn browse_page(
             "the output folder cannot also be an input folder",
         ));
     }
+    Ok(root)
+}
+
+fn browse_page(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> std::io::Result<Option<Browse>> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Ok(None);
+    }
+    let root = input_root(root, output_root)?;
     let mut folders = Vec::new();
     let mut entries = Vec::new();
     let mut skipped_raw = 0;
@@ -676,6 +683,25 @@ fn browse_folders_inner(
     scan.entries
         .sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
     Ok(Some(scan))
+}
+
+/// The window's whole-tree page: the same walk the command line does, with the
+/// direct child folders kept beside it so the folder tree still navigates. Batches
+/// reach `publish` as headers are probed, which is how the window shows a count.
+pub(crate) fn browse_tree_cancellable(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Arc<AtomicBool>,
+    publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+) -> std::io::Result<Option<Browse>> {
+    let root = input_root(root, output_root)?;
+    let folders = child_folders(&root)?;
+    Ok(
+        match scan_progressive_cancellable(&root, output_root, cancelled, publish) {
+            ScanOutcome::Complete(scan) => Some(Browse { folders, scan }),
+            ScanOutcome::Cancelled => None,
+        },
+    )
 }
 
 /// Folder-only listing used when a tree node expands.
@@ -1959,6 +1985,39 @@ mod tests {
             .collect();
         complete.sort();
         assert_eq!(published, complete);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_tree_browse_finds_what_the_whole_folder_scan_finds() {
+        let dir = temp_dir("tree-browse");
+        let child = dir.join("child");
+        let grandchild = child.join("grandchild");
+        std::fs::create_dir_all(&grandchild).unwrap();
+        write_sample(&dir, "direct.png", 8, 8);
+        write_sample(&child, "nested.png", 8, 8);
+        write_sample(&grandchild, "deep.png", 8, 8);
+        let mut published = 0;
+
+        let browsed = browse_tree_cancellable(
+            &dir,
+            &dir.join(OUTPUT_DIR),
+            Arc::new(AtomicBool::new(false)),
+            |batch| {
+                published += batch.len();
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap()
+        .expect("an uncancelled tree browse completes");
+
+        let whole = scan(&dir, &dir.join(OUTPUT_DIR));
+        assert_eq!(browsed.scan.entries.len(), 3);
+        assert_eq!(browsed.scan.entries.len(), whole.entries.len());
+        assert_eq!(published, 3);
+        assert_eq!(browsed.folders, vec![child]);
+        let flat = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
+        assert_eq!(flat.scan.entries.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

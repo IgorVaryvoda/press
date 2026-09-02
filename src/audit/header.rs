@@ -249,6 +249,28 @@ impl Audit {
                         )
                     }),
             )
+            // The one scope choice, beside the counts it changes. A lit chip rather
+            // than a checkbox: the header is a row of chips, and a checkbox here
+            // would also need the Space/Enter ownership wrapper the list rows carry.
+            .child(
+                div().debug_selector(|| "include-subfolders".into()).child(
+                    Button::new("include-subfolders")
+                        .small()
+                        .icon(IconName::Network)
+                        .label("Subfolders")
+                        .tooltip(if self.include_subfolders {
+                            "Every folder below this one is in the list, as on the \
+                             command line. Click to read this folder only."
+                        } else {
+                            "This folder only. Click to include every folder below it, \
+                             as the command line does."
+                        })
+                        .selected(self.include_subfolders)
+                        .when(!self.include_subfolders, |button| button.ghost())
+                        .disabled(self.converting)
+                        .on_click(cx.listener(|audit, _, _, cx| audit.toggle_subfolders(cx))),
+                ),
+            )
             // The audit reads bytes per pixel for every row and then asks you to
             // find the heavy ones yourself. These are that answer, as the control
             // that narrows the list to them.
