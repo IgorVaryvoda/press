@@ -375,22 +375,18 @@ impl Audit {
 
         let (format, quality, max_edge) = (self.format, self.quality, self.max_edge);
         let slices = sample_size(format).min(targets.len());
-        // One sample per slice of the list, taken from the middle of it. The list is
-        // weight-sorted, so the first file of a slice is its heaviest and the least
-        // like the rest of it.
-        let strata: Vec<Stratum> = (0..slices)
-            .filter_map(|slice| {
-                let start = slice * targets.len() / slices;
-                let end = (slice + 1) * targets.len() / slices;
-                let entry = self.entries.get(*targets.get((start + end) / 2)?)?;
+        let weights: Vec<u64> = targets
+            .iter()
+            .map(|index| self.entries.get(*index).map_or(0, |entry| entry.bytes))
+            .collect();
+        let samples: Vec<Stratum> = strata(&weights, slices)
+            .into_iter()
+            .filter_map(|(sample, slice_bytes)| {
+                let entry = self.entries.get(*targets.get(sample)?)?;
                 Some(Stratum {
                     path: entry.path.clone(),
                     bytes: entry.bytes,
-                    slice_bytes: targets[start..end]
-                        .iter()
-                        .filter_map(|index| self.entries.get(*index))
-                        .map(|entry| entry.bytes)
-                        .sum(),
+                    slice_bytes,
                 })
             })
             .collect();
@@ -402,7 +398,7 @@ impl Audit {
         decodes.lock().retain(|(generation, path, edge), _| {
             *generation == dataset_generation
                 && *edge == max_edge
-                && strata.iter().any(|stratum| stratum.path == *path)
+                && samples.iter().any(|sample| sample.path == *path)
         });
 
         cx.spawn(async move |this, cx| {
@@ -423,8 +419,8 @@ impl Audit {
             // bar already shows as "Sizing it up…".
             let concurrency = convert::workers(format);
             let mut inflight: Vec<gpui::Task<(u64, u64, Option<u64>)>> = Vec::new();
-            let mut queued = strata.iter();
-            let mut sampled = Vec::with_capacity(strata.len());
+            let mut queued = samples.iter();
+            let mut sampled = Vec::with_capacity(samples.len());
 
             loop {
                 // Every folder click starts a burst of these. Re-checking here stops a

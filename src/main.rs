@@ -69,6 +69,7 @@ const HELP: &str = concat!(
     "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
     "  -o, --output <dir>        Write converted files here instead of optimized/\n",
     "  --skip-existing           Leave a file whose output is already current\n",
+    "  --dry-run                 Plan and project a conversion, write nothing\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -125,6 +126,8 @@ struct Args {
     output: Option<PathBuf>,
     /// Leave a source alone when its planned output is already current.
     skip_existing: bool,
+    /// Plan and project the conversion without writing anything.
+    dry_run: bool,
     unknown: Vec<String>,
 }
 
@@ -149,6 +152,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut subfolders = true;
     let mut output = None;
     let mut skip_existing = false;
+    let mut dry_run = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
 
@@ -221,6 +225,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 skip_existing = true;
             }
+            "--dry-run" => {
+                conversion_option = true;
+                dry_run = true;
+            }
             "--grid" => grid = true,
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
@@ -269,6 +277,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             subfolders,
             output,
             skip_existing,
+            dry_run,
             unknown,
         });
     }
@@ -312,6 +321,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Window && skip_existing {
         return Err("--skip-existing needs convert".into());
     }
+    if command == Command::Window && dry_run {
+        return Err("--dry-run needs convert".into());
+    }
     if !format.supports_lossless() && quality == Quality::LOSSLESS {
         return Err("--lossless is available only with --webp or --jxl".into());
     }
@@ -327,6 +339,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         subfolders,
         output,
         skip_existing,
+        dry_run,
         unknown,
     })
 }
@@ -543,6 +556,9 @@ struct ConversionRun {
     after: u64,
     failed: usize,
     files: Vec<ConversionFile>,
+    /// What a dry run projects the whole queue would write, and how many real encodes
+    /// stand behind that number. `None` on a run that actually wrote.
+    projected: Option<(u64, usize)>,
 }
 
 #[derive(Serialize)]
@@ -563,6 +579,10 @@ struct ConversionSummary {
     output_bytes: u64,
     grew: bool,
     changed_bytes: u64,
+    /// What a `--dry-run` projects the whole run would write, and how many real
+    /// encodes stand behind that number. `null` on a run that actually wrote.
+    projected_bytes: Option<u64>,
+    projected_samples: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -571,6 +591,9 @@ struct ConversionReport {
     command: &'static str,
     target: String,
     output: String,
+    /// Whether this run planned only. A dry run writes nothing and reports what it
+    /// would have written.
+    dry_run: bool,
     subfolders: Option<bool>,
     options: ConversionOptions,
     scan: ScanSummary,
@@ -666,6 +689,134 @@ fn queue_run<'a>(
     queued
 }
 
+/// Project what a run would write, by encoding a sample of it in memory.
+///
+/// The same sampling and the same projection the window's estimate uses, so a dry run
+/// and the window cannot quote two different numbers for one folder. Nothing is
+/// written: the samples are encoded and their lengths thrown away.
+fn project_run(
+    entries: &[&Entry],
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+) -> Option<(u64, usize)> {
+    let weights: Vec<u64> = entries.iter().map(|entry| entry.bytes).collect();
+    let slices = audit::sample_size(format).min(weights.len());
+    let sampled: Vec<(u64, Option<(u64, u64)>)> = audit::strata(&weights, slices)
+        .into_iter()
+        .map(|(sample, slice_bytes)| {
+            let entry = entries[sample];
+            let encoded = scan::decode_for_conversion(&entry.path)
+                .ok()
+                .zip(format.resolve(&entry.path).ok())
+                .and_then(|((image, profile), format)| {
+                    convert::encode(&max_edge.apply(image), format, quality, profile.as_deref())
+                        .ok()
+                })
+                .map(|encoded| encoded.len() as u64);
+            (slice_bytes, encoded.map(|encoded| (entry.bytes, encoded)))
+        })
+        .collect();
+    audit::project_total(&sampled)
+}
+
+/// Say what a conversion would do and what it would cost, without writing anything.
+///
+/// The plan is the real one, so the names reported here are the names a run would
+/// write; a source whose plan was refused is named with its reason rather than
+/// counted.
+fn dry_run_headless(
+    queued: &Queued,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    json: bool,
+) -> ConversionRun {
+    let mut run = ConversionRun {
+        before: 0,
+        after: 0,
+        failed: 0,
+        files: Vec::with_capacity(queued.entries.len()),
+        projected: None,
+    };
+    let mut writable: Vec<&Entry> = Vec::new();
+    for (entry, plan) in queued.entries.iter().zip(&queued.planned) {
+        let (status, planned_output, error) = match plan {
+            Ok(written) => {
+                run.before += entry.bytes;
+                writable.push(entry);
+                if !json {
+                    println!(
+                        "{:<52} {:>9} -> {}",
+                        entry.name(),
+                        format_bytes(entry.bytes),
+                        written.display()
+                    );
+                }
+                ("planned", Some(path_text(written)), None)
+            }
+            Err(failure) => {
+                run.failed += 1;
+                let reason = failure.reason();
+                if !json {
+                    println!(
+                        "{:<52} failed{}",
+                        entry.name(),
+                        reason
+                            .as_deref()
+                            .map(|reason| format!(": {reason}"))
+                            .unwrap_or_default()
+                    );
+                }
+                (
+                    "failed",
+                    None,
+                    Some(reason.unwrap_or_else(|| "conversion failed".to_string())),
+                )
+            }
+        };
+        run.files.push(ConversionFile {
+            source: path_text(&entry.path),
+            status,
+            output: None,
+            planned_output,
+            source_bytes: entry.bytes,
+            output_bytes: None,
+            width: None,
+            height: None,
+            error,
+            skipped: false,
+            reason: None,
+        });
+    }
+    run.projected = project_run(&writable, format, quality, max_edge);
+    run.files
+        .sort_by(|left, right| left.source.cmp(&right.source));
+
+    if !json {
+        let projection = match run.projected {
+            Some((bytes, samples)) => format!(
+                "projected {} from {samples} {} ({:+.0}%)",
+                format_bytes(bytes),
+                if samples == 1 { "sample" } else { "samples" },
+                (bytes as f64 - run.before as f64) / run.before.max(1) as f64 * 100.
+            ),
+            None => "nothing encoded, so nothing to project".to_string(),
+        };
+        println!(
+            "\n{} to convert to {} at {} ({}): {}, {projection}{}",
+            writable.len(),
+            format.label(),
+            quality.label(),
+            max_edge.label(),
+            format_bytes(run.before),
+            run_tail(queued.skipped.len(), run.failed)
+        );
+        println!("nothing written (dry run)");
+    }
+    run
+}
+
 /// Convert without opening a window, so the same work is scriptable and testable.
 ///
 /// Only `queued.entries` are converted, each to the name `queue_run` kept for it. The
@@ -694,6 +845,7 @@ fn convert_headless(
         after: 0,
         failed: 0,
         files: Vec::with_capacity(entries.len()),
+        projected: None,
     });
     convert::convert_each(
         &sources,
@@ -1017,16 +1169,31 @@ fn main() {
     let queued = queue_run(&audited, &planned, args.skip_existing, args.json);
     let skipped = queued.skipped.len();
 
-    let mut run = convert_headless(
-        &queued,
-        &out_dir,
-        args.format,
-        args.quality,
-        args.max_edge,
-        args.json,
-    );
+    let mut run = if args.dry_run {
+        dry_run_headless(&queued, args.format, args.quality, args.max_edge, args.json)
+    } else {
+        convert_headless(
+            &queued,
+            &out_dir,
+            args.format,
+            args.quality,
+            args.max_edge,
+            args.json,
+        )
+    };
     let failed = run.failed;
-    let converted = queued.entries.len() - failed;
+    let converted = if args.dry_run {
+        0
+    } else {
+        queued.entries.len() - failed
+    };
+    // A dry run wrote nothing, so its output and change totals are zero. What it read
+    // and what it projects are the numbers that mean anything.
+    let (output_bytes, changed_bytes) = if args.dry_run {
+        (0, 0)
+    } else {
+        (run.after, run.before.abs_diff(run.after))
+    };
     run.files.extend(queued.skipped);
     run.files
         .sort_by(|left, right| left.source.cmp(&right.source));
@@ -1036,6 +1203,7 @@ fn main() {
             command: "convert",
             target: path_text(&target),
             output: path_text(&out_dir),
+            dry_run: args.dry_run,
             subfolders: scope,
             options: ConversionOptions {
                 format: args.format.label(),
@@ -1049,9 +1217,11 @@ fn main() {
                 failed,
                 skipped,
                 source_bytes: run.before,
-                output_bytes: run.after,
+                output_bytes,
                 grew: run.after > run.before,
-                changed_bytes: run.before.abs_diff(run.after),
+                changed_bytes,
+                projected_bytes: run.projected.map(|(bytes, _)| bytes),
+                projected_samples: run.projected.map(|(_, samples)| samples),
             },
             files: run.files,
             unreadable: sorted_paths(&scanned.unreadable),
@@ -1750,6 +1920,108 @@ mod tests {
         assert_eq!(queued.entries.len(), 1);
         assert_eq!(run_tail(0, 0), "");
         assert_eq!(run_tail(2, 1), ", 2 skipped, 1 failed");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn dry_run_is_a_conversion_option() {
+        assert!(parse(&["convert", "/photos", "--dry-run"]).unwrap().dry_run);
+        assert!(!parse(&["convert", "/photos"]).unwrap().dry_run);
+        assert!(
+            parse(&["convert", "/photos", "--dry-run", "--json"])
+                .unwrap()
+                .json
+        );
+        assert!(
+            parse(&["convert", "/photos", "--dry-run", "--skip-existing"])
+                .unwrap()
+                .skip_existing
+        );
+        assert!(parse(&["audit", "/photos", "--dry-run"]).is_err());
+        assert!(parse(&["/photos", "--dry-run"]).is_err());
+        assert!(parse(&["update", "--dry-run"]).is_err());
+    }
+
+    /// A dry run has to be worth reading and cost nothing: real planned names, a
+    /// projection off real encodes, and not one byte on disk.
+    #[test]
+    fn a_dry_run_plans_and_projects_without_writing_anything() {
+        let base = temp_root("dry");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        write_photo(&root.join("one.png"), 96, 96);
+        write_photo(&root.join("two.png"), 96, 96);
+        let entries = probe_all(&[root.join("one.png"), root.join("two.png")]);
+        let queued = plan_run(&root, &out_dir, &entries, Format::WebP, false);
+
+        let run = dry_run_headless(
+            &queued,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+
+        assert_eq!(run.failed, 0);
+        assert_eq!(run.files.len(), 2);
+        assert!(run.files.iter().all(|file| file.status == "planned"));
+        assert!(run.files.iter().all(|file| file.output.is_none()));
+        assert_eq!(
+            run.files[0].planned_output,
+            Some(path_text(&out_dir.join("one.webp")))
+        );
+        assert!(run.before > 0);
+        assert_eq!(run.after, 0);
+        let (projected, samples) = run.projected.expect("real encodes stand behind this");
+        assert!(projected > 0, "a dry run projects a size");
+        assert_eq!(samples, 2);
+        assert!(!out_dir.exists(), "a dry run writes nothing");
+
+        let report = ConversionReport {
+            schema_version: 1,
+            command: "convert",
+            target: path_text(&root),
+            output: path_text(&out_dir),
+            dry_run: true,
+            subfolders: Some(true),
+            options: ConversionOptions {
+                format: Format::WebP.label(),
+                quality: Some(80.),
+                max_edge: None,
+            },
+            scan: ScanSummary::from_scan(&scan::Scan {
+                entries: entries.clone(),
+                skipped_raw: 0,
+                skipped_heic: 0,
+                skipped_packages: 0,
+                unreadable: vec![],
+                walk_errors: vec![],
+                existing_output: 0,
+            }),
+            summary: ConversionSummary {
+                attempted: entries.len(),
+                converted: 0,
+                failed: 0,
+                skipped: 0,
+                source_bytes: run.before,
+                output_bytes: 0,
+                grew: false,
+                changed_bytes: 0,
+                projected_bytes: Some(projected),
+                projected_samples: Some(samples),
+            },
+            files: run.files,
+            unreadable: vec![],
+            walk_errors: vec![],
+        };
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["summary"]["converted"], 0);
+        assert_eq!(json["summary"]["projected_bytes"], projected);
+        assert_eq!(json["files"][0]["status"], "planned");
+        assert!(json["files"][0]["planned_output"].is_string());
         std::fs::remove_dir_all(&base).unwrap();
     }
 

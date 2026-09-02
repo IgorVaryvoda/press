@@ -33,11 +33,14 @@ press convert <file-or-folder> --format jpeg --quality 85 --json
 press convert <file-or-folder> --format same --max-edge 1600 --json
 press convert <file-or-folder> --output <dir> --json
 press convert <file-or-folder> --skip-existing --json
+press convert <file-or-folder> --dry-run --json
 ```
 
 `--output <dir>` (short `-o`) writes the mirrored tree into that folder instead of `optimized/`. It is refused, with the reason on stderr and exit status `2`, when it is or contains the source folder or ends in a symlink.
 
 `--skip-existing` leaves a source alone when its planned output already exists and is not older than the source. Those files come back with `status` `skipped`, `skipped: true`, a named `reason`, and the size already on disk in `output_bytes`; they are counted in `summary.skipped` and never in `converted` or `failed`.
+
+`--dry-run` writes nothing. Every file comes back with `status` `planned` and the `planned_output` it would be written to, `summary.converted` is `0`, and `summary.projected_bytes` holds the projected size of the whole run with `summary.projected_samples` real encodes behind it. The document carries `dry_run: true`. Report a projection as a projection, never as a measured saving.
 
 Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF, JPEG, or `same`. `--max-edge` only downscales.
 
@@ -46,6 +49,8 @@ Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF,
 Treat exit status `1` as a partial result, not as proof that nothing was written. Read each file's `status`, report named failures, and use each successful `output` path as the source of truth. Never claim savings from the requested settings alone; use `summary.source_bytes` and `summary.output_bytes` from the completed run.
 
 Exit status `2` means the destination itself was refused before any file was converted, and no JSON is written. The reason is one line on stderr — usually that `optimized` already exists as a file or a symlink. Report that line; nothing was written.
+
+Every file also carries `planned_output`, the name the plan gave it, whether or not this run wrote it.
 
 The report's `output` field is the canonical path of the folder that was written, so it can differ from the spelling of the target you passed when that path was reached through a link.
 
