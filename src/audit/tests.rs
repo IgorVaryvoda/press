@@ -46,6 +46,18 @@ fn write_png(root: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// A folder of real photographs on disk. Noise, because a flat colour compresses
+/// to nothing and would let a projection of zero pass for a saving.
+fn photo_fixture(name: &str, count: usize) -> PathBuf {
+    let root = scan_fixture(name);
+    for index in 0..count {
+        crate::convert::tests::photo(64, 64)
+            .save(root.join(format!("shot-{index}.png")))
+            .expect("the fixture photo is written");
+    }
+    root
+}
+
 fn test_pairing() -> SirvPairing {
     SirvPairing {
         dir: "/paired".into(),
@@ -1087,6 +1099,9 @@ fn table_select_all_follows_the_visible_rows(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         audit.visible = vec![2, 0];
+        // A folder now opens fully ticked, and this test is about the control
+        // itself, so it starts from nothing ticked.
+        audit.selected.clear();
         assert!(matches!(
             audit.selection_state(),
             table::SelectionState::None
@@ -1943,6 +1958,10 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
     audit.update(cx, |audit, _| {
         assert_eq!(audit.heavy, 1);
         assert_eq!(audit.mislabelled, 1);
+        // A folder now opens fully ticked, so reaching the empty-selection label
+        // means unticking everything.
+        audit.selected.clear();
+        audit.refresh_target_summary();
         assert_eq!(audit.target_count(), 0);
         assert_eq!(audit.conversion_action_label(), "Select images to convert");
         assert_eq!(audit.target_bytes(), 0);
@@ -2750,6 +2769,8 @@ fn an_incomplete_scan_cannot_copy_a_report(cx: &mut TestAppContext) {
 fn studio_prompt_typing_does_not_toggle_the_audit_selection(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
+        // A folder opens fully ticked; Studio acts on one file, so narrow to one.
+        audit.selected.clear();
         audit.selected.insert(0);
         audit.rail = Rail::Studio;
         audit.selection_changed(cx);
@@ -2895,6 +2916,12 @@ fn dragging_a_column_changes_and_keeps_its_display_order(cx: &mut TestAppContext
 #[gpui::test]
 fn one_ticked_file_is_what_single_image_tools_act_on(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
+    // A folder opens fully ticked, which is already more than one file; this
+    // test walks up from nothing ticked.
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selection_changed(cx);
+    });
     audit.read_with(cx, |audit, _| assert_eq!(audit.single_target(), None));
 
     let first = audit.read_with(cx, |audit, _| audit.visible[0]);
@@ -3161,6 +3188,9 @@ fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAp
 fn escape_closes_the_folder_overlay_without_clearing_selection(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
+        // A folder opens fully ticked; narrow it so the assertion below proves the
+        // overlay left the user's own selection alone.
+        audit.selected.clear();
         audit.selected.insert(0);
     });
     cx.simulate_resize(size(px(900.), px(720.)));
@@ -3544,7 +3574,7 @@ fn child_folder_rows_reset_to_the_top_after_navigation(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn folder_navigation_is_shallow_and_clears_file_selection(cx: &mut TestAppContext) {
+fn folder_navigation_is_shallow_and_replaces_the_file_selection(cx: &mut TestAppContext) {
     let root = scan_fixture("shallow-navigation");
     let child = root.join("child");
     let empty = child.join("empty");
@@ -3567,7 +3597,9 @@ fn folder_navigation_is_shallow_and_clears_file_selection(cx: &mut TestAppContex
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.root, child.clone());
         assert_eq!(audit.entries.len(), 1);
-        assert!(audit.selected.is_empty());
+        // The new folder's own row is ticked; the tick from the old folder is gone
+        // rather than carried over.
+        assert_eq!(audit.selected, HashSet::from([0]));
         assert_eq!(audit.recent_folders.first(), Some(&audit.root));
     });
     audit.update(cx, |audit, cx| audit.request_path(empty.clone(), cx));
@@ -3961,8 +3993,8 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
     );
 }
 
-/// An audit over a folder of real files with every row ticked, so a conversion
-/// has something to decode, encode and write.
+/// An audit over a folder of real files, so a conversion has something to decode,
+/// encode and write. Opening the folder is what ticks every row.
 fn convertible_audit(
     count: usize,
     cx: &mut TestAppContext,
@@ -4013,8 +4045,7 @@ fn convertible_audit(
     });
     let audit = built.expect("the audit is built for the production Root");
     audit.update(cx, |audit, _| {
-        audit.selected.extend(0..count);
-        audit.refresh_target_summary();
+        assert_eq!(audit.selected.len(), count);
         audit.rail = Rail::Convert;
     });
     (audit, cx)
@@ -4170,6 +4201,91 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
             "the resized sample projected a real total"
         );
     });
+}
+
+#[gpui::test]
+fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContext) {
+    let root = photo_fixture("select-all-open", 3);
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    settle_estimate(cx);
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.entries.len(), 3);
+        assert_eq!(audit.selected.len(), audit.entries.len());
+        assert_eq!(audit.target_count(), 3);
+        assert!(
+            audit
+                .estimate
+                .is_some_and(|(projected, counted)| projected > 0 && counted > 0),
+            "an untouched folder already projects what a run would write"
+        );
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Convert 3 selected to WEBP"
+        );
+    });
+    std::fs::remove_dir_all(root).expect("the fixture folder is removed");
+}
+
+#[gpui::test]
+fn unticking_a_row_narrows_the_conversion_targets(cx: &mut TestAppContext) {
+    let root = photo_fixture("select-all-untick", 3);
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        let dropped = audit.visible[0];
+        audit.selected.remove(&dropped);
+        audit.selection_changed(cx);
+        assert_eq!(audit.target_count(), 2);
+        assert_eq!(audit.targets().len(), 2);
+        assert!(!audit.targets().contains(&dropped));
+    });
+    std::fs::remove_dir_all(root).expect("the fixture folder is removed");
+}
+
+#[gpui::test]
+fn an_empty_folder_still_asks_for_a_selection(cx: &mut TestAppContext) {
+    let root = photo_fixture("select-all-empty", 0);
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.entries.is_empty());
+        assert!(audit.selected.is_empty());
+        assert_eq!(audit.target_count(), 0);
+        assert_eq!(audit.conversion_action_label(), "Select images to convert");
+    });
+    std::fs::remove_dir_all(root).expect("the fixture folder is removed");
+}
+
+#[gpui::test]
+fn opening_another_folder_replaces_the_selection(cx: &mut TestAppContext) {
+    let first = photo_fixture("select-all-first", 3);
+    let second = photo_fixture("select-all-second", 2);
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(first.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert_eq!(audit.selected.len(), 3));
+
+    audit.update(cx, |audit, cx| audit.request_path(second.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.entries.len(), 2);
+        assert_eq!(
+            audit.selected,
+            HashSet::from([0, 1]),
+            "the new folder's rows are ticked and the old folder's are gone"
+        );
+        assert_eq!(audit.target_count(), 2);
+    });
+    std::fs::remove_dir_all(first).expect("the fixture folder is removed");
+    std::fs::remove_dir_all(second).expect("the fixture folder is removed");
 }
 
 #[gpui::test]

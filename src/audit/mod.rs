@@ -1126,6 +1126,7 @@ impl Audit {
         self.cursor = 0;
         self.anchor = 0;
         self.refresh_visible();
+        self.select_all_visible();
         // A pairing maps one local root to one remote folder. A rescan of that root
         // keeps it; replacing the root retires it before the new rows can be pushed.
         if root_changed {
@@ -1938,6 +1939,7 @@ pub(crate) fn build_audit(
             rail: Rail::None,
         };
         audit.refresh_visible();
+        audit.select_all_visible();
         audit.schedule_estimate(cx);
         audit.seed_tree_for_current_folder(cx);
         if open_single {

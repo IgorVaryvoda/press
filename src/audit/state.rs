@@ -59,8 +59,9 @@ impl Audit {
         write_settings(&self.settings)
     }
 
-    /// The rows a conversion would touch. Browsing never opts files into work:
-    /// only explicit checkboxes or marquee selection can produce targets.
+    /// The rows a conversion would touch. Opening a folder ticks every row in it;
+    /// after that the ticks are the user's. A filter only hides rows, so a tick the
+    /// filter is hiding is not a target and becomes one again when it widens.
     pub(super) fn targets(&self) -> Vec<usize> {
         conversion_targets(&self.visible, &self.selected)
     }
@@ -147,6 +148,16 @@ impl Audit {
                 self.converted_totals.1 += bytes;
             }
         }
+    }
+
+    /// A freshly installed folder opens fully ticked. The savings projection and the
+    /// Convert button both read the selection, so an untouched folder would otherwise
+    /// show a greyed button and no number until the user guessed they must tick rows.
+    /// Narrowing is the explicit act: untick a row, or use the select-all control.
+    pub(super) fn select_all_visible(&mut self) {
+        self.selected.clear();
+        self.selected.extend(self.visible.iter().copied());
+        self.refresh_target_summary();
     }
 
     pub(super) fn refresh_target_summary(&mut self) {
