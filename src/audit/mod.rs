@@ -551,8 +551,16 @@ pub(crate) struct Audit {
     /// The cancellable folder scan currently allowed to publish into this audit.
     scan_cancellation: Option<ScanCancellation>,
     /// Walk the whole tree when a folder opens, as `press audit` does. Off, the
-    /// window reads one level and the tree is how you reach the rest.
+    /// window reads one level and the tree is how you reach the rest. This is the
+    /// chip; `dataset_subfolders` is the list, and the two agree except while a
+    /// walk is running.
     include_subfolders: bool,
+    /// Whether the installed rows came from a tree walk. Labels and sort order
+    /// follow this, not the chip, so a cancelled walk cannot relabel the list.
+    dataset_subfolders: bool,
+    /// The list is one file opened straight into its comparison. Changing scope
+    /// there would replace the file with its whole folder.
+    single_file: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -1022,13 +1030,13 @@ impl Audit {
     /// more than one folder: a dropped batch, or a folder walked with its subfolders.
     /// The same label sorts the list, so what you read is what you sorted by.
     pub(super) fn show_parent(&self) -> bool {
-        self.batch_folders.is_some() || self.include_subfolders
+        self.batch_folders.is_some() || self.dataset_subfolders
     }
 
     /// Flip the scope and read the current folder again under it. A dropped batch
     /// keeps its exact set; the choice applies to the next folder opened.
     pub(super) fn toggle_subfolders(&mut self, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.single_file {
             return;
         }
         self.include_subfolders = !self.include_subfolders;
@@ -1047,13 +1055,16 @@ impl Audit {
 
     /// Stop the running scan and keep what was on screen. The request is disowned
     /// before the token is raised: a completion racing the click then fails the
-    /// ownership check, and no partial dataset is ever installed.
+    /// ownership check, and no partial dataset is ever installed. The chip goes
+    /// back to the scope the list still has, so it claims nothing the rows lack
+    /// and the settings write remembers the truth.
     pub(super) fn cancel_scan(&mut self, cx: &mut Context<Self>) {
         self.scan_generation = self.scan_generation.wrapping_add(1);
         self.cancel_retained_scan();
         self.scan_cancellation = None;
         self.scanning = None;
         self.scan_found = None;
+        self.include_subfolders = self.dataset_subfolders;
         cx.notify();
     }
 
@@ -1104,6 +1115,8 @@ impl Audit {
         self.browser_output_root = output_identity(&self.output, &self.root);
         self.batch_size = batch_size;
         self.batch_folders = None;
+        self.dataset_subfolders = false;
+        self.single_file = single;
         self.folders.clear();
         self.mislabelled = scanned
             .entries
@@ -1358,14 +1371,27 @@ impl Audit {
                 audit.scanning = None;
                 audit.scan_cancellation = None;
                 match browsed {
-                    Some(Ok(browsed)) => audit.install_browse(browsed, requested, window, cx),
-                    Some(Err(error)) => audit.notify_error(
-                        "open-image",
-                        "Couldn’t open folder",
-                        format!("{}: {error}", requested.display()),
-                        cx,
-                    ),
-                    None => {}
+                    Some(Ok(browsed)) => {
+                        audit.install_browse(browsed, requested, window, cx);
+                        // Installed like `batch_folders`: the install clears batch
+                        // context, and the scope that labelled these rows goes back
+                        // before the list is sorted by it.
+                        if include_subfolders {
+                            audit.dataset_subfolders = true;
+                            audit.refresh_visible();
+                        }
+                    }
+                    Some(Err(error)) => {
+                        audit.include_subfolders = audit.dataset_subfolders;
+                        audit.notify_error(
+                            "open-image",
+                            "Couldn’t open folder",
+                            format!("{}: {error}", requested.display()),
+                            cx,
+                        )
+                    }
+                    // Stopped from outside the button, so the chip is put back here.
+                    None => audit.include_subfolders = audit.dataset_subfolders,
                 }
                 cx.notify();
             });
@@ -1970,6 +1996,8 @@ pub(crate) fn build_audit(
             scan_found: None,
             scan_cancellation: None,
             include_subfolders,
+            dataset_subfolders: false,
+            single_file: open_single,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),

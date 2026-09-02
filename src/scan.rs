@@ -746,13 +746,17 @@ pub(crate) fn scan_progressive_cancellable(
     cancelled: Arc<AtomicBool>,
     publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
 ) -> ScanOutcome {
-    scan_progressive_cancellable_with_hooks(
-        root,
-        output_root,
-        cancelled,
-        publish,
-        ScanHooks::default(),
-    )
+    let hooks = TEST_HOOKS.with(|hooks| hooks.borrow().clone().unwrap_or_default());
+    scan_progressive_cancellable_with_hooks(root, output_root, cancelled, publish, hooks)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Seams for a window test that reaches the walk through its production entry
+    /// point. Thread-local because gpui's test executor runs the walk on the test's
+    /// own thread, and tests run in parallel.
+    pub(crate) static TEST_HOOKS: std::cell::RefCell<Option<ScanHooks>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(not(test))]
@@ -766,13 +770,14 @@ pub(crate) fn scan_progressive_cancellable(
 }
 
 #[cfg(test)]
-struct ScanHooks {
+#[derive(Clone)]
+pub(crate) struct ScanHooks {
     queue_capacity: Option<usize>,
     before_walk_next: Arc<dyn Fn() + Send + Sync>,
     before_probe: Arc<dyn Fn(&Path) + Send + Sync>,
     before_callback: Arc<dyn Fn() + Send + Sync>,
     before_path_receive: Arc<dyn Fn() + Send + Sync>,
-    before_path_send: Arc<dyn Fn() + Send + Sync>,
+    pub(crate) before_path_send: Arc<dyn Fn() + Send + Sync>,
     before_result_receive: Arc<dyn Fn() + Send + Sync>,
     before_result_send: Arc<dyn Fn() + Send + Sync>,
 }

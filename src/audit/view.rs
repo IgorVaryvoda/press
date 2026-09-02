@@ -10,20 +10,12 @@ pub(super) fn empty_folder_detail(folder: &str, skipped_heic: usize) -> String {
     }
 }
 
-/// The line under "Opening…" while a tree walk runs. A grouped figure: a shoot is
-/// tens of thousands of files, and "12480" reads as a code, not a count.
+/// The line under "Opening…" while a tree walk runs. The same plain figure as the
+/// header's count, so the number does not change shape when the walk ends.
 pub(super) fn scan_progress_line(found: usize) -> String {
-    let digits = found.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
     match found {
         1 => "Found 1 image…".to_string(),
-        _ => format!("Found {grouped} images…"),
+        _ => format!("Found {found} images…"),
     }
 }
 

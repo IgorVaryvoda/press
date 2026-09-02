@@ -267,7 +267,7 @@ impl Audit {
                         })
                         .selected(self.include_subfolders)
                         .when(!self.include_subfolders, |button| button.ghost())
-                        .disabled(self.converting)
+                        .disabled(self.converting || self.single_file)
                         .on_click(cx.listener(|audit, _, _, cx| audit.toggle_subfolders(cx))),
                 ),
             )

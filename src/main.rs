@@ -360,8 +360,9 @@ struct AuditReport {
     command: &'static str,
     target: String,
     /// Whether the walk went below the target. The window reads one level by
-    /// default, so a report has to say which job it describes.
-    subfolders: bool,
+    /// default, so a report has to say which job it describes. `null` for one
+    /// file, which has no scope, rather than a `false` that reads as a choice.
+    subfolders: Option<bool>,
     summary: ScanSummary,
     files: Vec<AuditFile>,
     unreadable: Vec<String>,
@@ -398,7 +399,7 @@ fn audit_files(entries: &[Entry]) -> Vec<AuditFile> {
     files
 }
 
-fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: bool) -> AuditReport {
+fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) -> AuditReport {
     AuditReport {
         schema_version: 1,
         command: "audit",
@@ -517,7 +518,7 @@ struct ConversionReport {
     command: &'static str,
     target: String,
     output: String,
-    subfolders: bool,
+    subfolders: Option<bool>,
     options: ConversionOptions,
     scan: ScanSummary,
     summary: ConversionSummary,
@@ -809,12 +810,11 @@ fn main() {
     };
     print_scan_errors(&scanned);
     let scope = (!open_single).then_some(args.subfolders);
-    let walked_subfolders = scope.unwrap_or(false);
     let unread = scanned.unreadable.len() + scanned.walk_errors.len();
 
     if args.command == Command::Audit {
         let written = if args.json {
-            write_json(&audit_report(&target, &scanned, walked_subfolders))
+            write_json(&audit_report(&target, &scanned, scope))
         } else {
             print_audit(&root, &scanned, scope);
             Ok(())
@@ -869,7 +869,7 @@ fn main() {
             command: "convert",
             target: path_text(&target),
             output: path_text(&out_dir),
-            subfolders: walked_subfolders,
+            subfolders: scope,
             options: ConversionOptions {
                 format: args.format.label(),
                 quality: args.quality.0,
@@ -1422,7 +1422,7 @@ mod tests {
         };
 
         let json =
-            serde_json::to_value(audit_report(Path::new("/photos"), &scanned, true)).unwrap();
+            serde_json::to_value(audit_report(Path::new("/photos"), &scanned, Some(true))).unwrap();
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["subfolders"], true);
         assert_eq!(json["summary"]["heavy"], 1);
@@ -1443,9 +1443,15 @@ mod tests {
             existing_output: 0,
         };
 
-        let json =
-            serde_json::to_value(audit_report(Path::new("/photos"), &scanned, false)).unwrap();
+        let json = serde_json::to_value(audit_report(Path::new("/photos"), &scanned, Some(false)))
+            .unwrap();
         assert_eq!(json["subfolders"], false);
+        let single =
+            serde_json::to_value(audit_report(Path::new("/photo.png"), &scanned, None)).unwrap();
+        assert!(
+            single["subfolders"].is_null(),
+            "one file has no scope to claim"
+        );
         // The whole point: zero images is not the whole story, and a caller that
         // reads only `images` would call an iPhone folder empty.
         assert_eq!(json["summary"]["images"], 0);
