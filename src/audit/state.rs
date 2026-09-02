@@ -132,6 +132,7 @@ impl Audit {
         // about the run that said it, not about the same folder aimed at WebP, and a
         // badge left over from settings nobody is using any more is a lie.
         self.failures.clear();
+        self.failure_summary.clear();
         // Whatever narrowed the list to them has to go too: a filter with no chip
         // left to turn it off is a list gone empty for no stated reason.
         if self.finding == Some(Finding::Failed) {

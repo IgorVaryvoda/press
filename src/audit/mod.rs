@@ -446,6 +446,9 @@ pub(crate) struct Audit {
     /// is not a report — and keyed rather than listed, because the row itself is
     /// where a reader looks for the reason once the toast is gone.
     failures: HashMap<usize, String>,
+    /// The first few of those, named, as the notices line says them. Built when the
+    /// map changes rather than per frame: that line is on screen for the whole run.
+    failure_summary: String,
     /// Files in the folder that claim to be images and will not decode, by name. A
     /// count alone says a folder has a problem and gives you nowhere to look.
     unreadable: Vec<PathBuf>,
@@ -2207,6 +2210,7 @@ pub(crate) fn build_audit(
             active_target_count: None,
             stopped_run: None,
             failures: HashMap::new(),
+            failure_summary: String::new(),
             unreadable,
             walk_errors,
             existing_output,

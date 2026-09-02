@@ -252,14 +252,6 @@ impl Audit {
                     // The same word the list uses. A tile showing `0.14 B/px`
                     // asked you to know the bands by heart, and it was taking
                     // the room the file size needed to print in full.
-                    // A tile has no result column, so the run's verdict for this
-                    // file goes where its size does. Only the word fits here; the
-                    // reason is on hover.
-                    .children(
-                        self.failures
-                            .get(&index)
-                            .map(|reason| failure_badge(index, reason, false, cx)),
-                    )
                     .children(
                         Finding::Heavy
                             .holds(entry)
@@ -269,6 +261,14 @@ impl Audit {
                         entry
                             .extension_lies()
                             .then(|| finding_chip("mislabelled", cx)),
+                    )
+                    // A tile has no result column, so the run's verdict for this
+                    // file goes where its size does. Only the word fits here; the
+                    // reason is on hover.
+                    .children(
+                        self.failures
+                            .get(&index)
+                            .map(|reason| failure_badge(index, reason, false, cx)),
                     ),
             )
             .context_menu(move |menu, _, _| {

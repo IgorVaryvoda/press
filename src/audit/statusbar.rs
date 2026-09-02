@@ -147,7 +147,7 @@ impl Audit {
             parts.push(format!(
                 "{} failed: {}",
                 self.failures.len(),
-                named(self.failure_names().into_iter())
+                self.failure_summary
             ));
         }
         // Behind the `updater` feature, this is what tells a windowed user their
@@ -193,6 +193,9 @@ impl Audit {
             .icon(icon)
             .label(label)
             .tooltip(tooltip)
+            // `set_finding` refuses to move the list under a running conversion, so
+            // the chip that asks for it says so rather than looking dead.
+            .disabled(self.converting)
             .selected(active)
             .when(!active, |button| button.ghost())
             .when(active, |button| button.warning())

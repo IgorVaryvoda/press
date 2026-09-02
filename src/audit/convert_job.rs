@@ -195,6 +195,9 @@ impl Audit {
                                 }
                             }
                         }
+                        if !audit.failures.is_empty() {
+                            audit.failure_summary = named(audit.failure_names().into_iter());
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -242,7 +245,7 @@ impl Audit {
                             format!(
                                 "{} of {attempted} failed: {}{rest}",
                                 audit.failures.len(),
-                                named(audit.failure_names().into_iter())
+                                audit.failure_summary
                             ),
                             cx,
                         );

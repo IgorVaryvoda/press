@@ -5096,3 +5096,45 @@ fn a_failed_tile_carries_the_badge_the_list_row_does(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("failed-0").is_none());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// The result column is only laid out when there is something to put in it, and a
+/// run where every file failed has exactly one thing: the badge saying so.
+#[gpui::test]
+fn a_run_that_converted_nothing_still_lays_out_the_column_holding_its_failures(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("failure-badge-only");
+    let liar = root.join("liar.jpg");
+    crate::convert::tests::photo(8, 8)
+        .save_with_format(&liar, ImageFormat::Png)
+        .expect("the lying fixture is written");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![entry(liar.to_str().unwrap(), 8, 8, 256, ImageFormat::Png)];
+        audit.visible = vec![0];
+        audit.selected = HashSet::from([0]);
+        audit.format = Format::Same;
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.results.is_empty(), "nothing landed");
+        assert_eq!(audit.failures.len(), 1);
+        assert!(
+            audit.failure_summary.contains("liar.jpg"),
+            "{}",
+            audit.failure_summary
+        );
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("failed-0").is_some(),
+        "the list still shows the row its run failed"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -634,7 +634,7 @@ impl TableDelegate for AuditTable {
                 .justify_end()
                 .whitespace_nowrap()
                 .when_some(audit.failures.get(&index), |slot, reason| {
-                    slot.child(failure_badge(index, reason, !narrow_result, cx))
+                    slot.child(failure_badge(index, reason, narrow_result, cx))
                 })
                 .when_some(audit.results.get(&index), |slot, converted| {
                     let saved = entry.bytes.saturating_sub(*converted);
