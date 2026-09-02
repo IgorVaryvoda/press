@@ -284,6 +284,21 @@ impl Audit {
                     cx,
                 )
             }))
+            // What the last run could not convert. Only here while there is
+            // something to show: a chip that is always present would be a filter
+            // for an empty list on every folder that converted cleanly.
+            .children((!self.failures.is_empty()).then(|| {
+                div().debug_selector(|| "finding-failed".into()).child(
+                    self.finding_button(
+                        Finding::Failed,
+                        IconName::CircleX,
+                        format!("{} failed", self.failures.len()),
+                        "Files the last run could not convert. Click to show only \
+                         them, then convert them again once the cause is fixed.",
+                        cx,
+                    ),
+                )
+            }))
             .children((self.mislabelled > 0).then(|| {
                 self.finding_button(
                     Finding::Mislabelled,

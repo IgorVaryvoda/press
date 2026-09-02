@@ -48,7 +48,6 @@ impl Audit {
         // image per worker of its own.
         self.estimate_decodes.lock().clear();
         self.clear_results();
-        self.failures.clear();
         cx.notify();
 
         let root = self.root.clone();
@@ -184,19 +183,20 @@ impl Audit {
                                     );
                                 }
                                 Err(error) => {
-                                    let name = audit
-                                        .entries
-                                        .get(index)
-                                        .map(|entry| {
-                                            entry_label(&audit.root, audit.show_parent(), entry)
-                                        })
-                                        .unwrap_or_default();
-                                    audit.failures.push(match error.reason() {
-                                        Some(reason) => format!("{name} ({reason})"),
-                                        None => name,
-                                    });
+                                    // Keyed by row, so the badge, the Failed chip and
+                                    // the report all read one map. The fallback is the
+                                    // word `--json` uses for a failure with no reason.
+                                    audit.failures.insert(
+                                        index,
+                                        error
+                                            .reason()
+                                            .unwrap_or_else(|| "conversion failed".to_string()),
+                                    );
                                 }
                             }
+                        }
+                        if !audit.failures.is_empty() {
+                            audit.failure_summary = named(audit.failure_names().into_iter());
                         }
                         cx.notify();
                     })
@@ -232,13 +232,20 @@ impl Audit {
                         // stopped run never opened the files it did not start,
                         // and they are not failures of anything.
                         let attempted = audit.results.len() + audit.failures.len();
+                        // The toast has room for three names. Once there are more
+                        // than that, it has to say where the rest of them are.
+                        let rest = if audit.failures.len() > 3 {
+                            " · the Failed chip shows them all"
+                        } else {
+                            ""
+                        };
                         audit.notify_error(
                             "conversion",
                             "Conversion incomplete",
                             format!(
-                                "{} of {attempted} failed: {}",
+                                "{} of {attempted} failed: {}{rest}",
                                 audit.failures.len(),
-                                named(audit.failures.iter().cloned())
+                                audit.failure_summary
                             ),
                             cx,
                         );

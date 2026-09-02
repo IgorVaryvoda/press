@@ -144,7 +144,11 @@ impl Audit {
             ));
         }
         if !self.failures.is_empty() {
-            parts.push(format!("failed: {}", named(self.failures.iter().cloned())));
+            parts.push(format!(
+                "{} failed: {}",
+                self.failures.len(),
+                self.failure_summary
+            ));
         }
         // Behind the `updater` feature, this is what tells a windowed user their
         // next launch will be different. Nothing renders while the updater is idle.
@@ -189,6 +193,9 @@ impl Audit {
             .icon(icon)
             .label(label)
             .tooltip(tooltip)
+            // `set_finding` refuses to move the list under a running conversion, so
+            // the chip that asks for it says so rather than looking dead.
+            .disabled(self.converting)
             .selected(active)
             .when(!active, |button| button.ghost())
             .when(active, |button| button.warning())

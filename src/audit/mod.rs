@@ -63,6 +63,7 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::tag::Tag;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_component::{
     ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
@@ -440,9 +441,14 @@ pub(crate) struct Audit {
     /// it got. The files it wrote are real and stay; the ones it never started are
     /// not failures.
     stopped_run: Option<usize>,
-    /// Names of files a conversion could not read or write. Kept rather than counted,
-    /// because "3 failed" without saying which is not a report.
-    failures: Vec<String>,
+    /// Why a conversion could not read or write a row, keyed by that row like
+    /// `results`. Kept rather than counted, because "3 failed" without saying which
+    /// is not a report — and keyed rather than listed, because the row itself is
+    /// where a reader looks for the reason once the toast is gone.
+    failures: HashMap<usize, String>,
+    /// The first few of those, named, as the notices line says them. Built when the
+    /// map changes rather than per frame: that line is on screen for the whole run.
+    failure_summary: String,
     /// Files in the folder that claim to be images and will not decode, by name. A
     /// count alone says a folder has a problem and gives you nowhere to look.
     unreadable: Vec<PathBuf>,
@@ -1226,7 +1232,6 @@ impl Audit {
         self.selection_bounds.borrow_mut().clear();
         self.clear_results();
         self.completed_outputs.clear();
-        self.failures.clear();
         self.compare = None;
         self.cached = None;
         self.ahead = None;
@@ -1853,16 +1858,23 @@ enum Finding {
     Heavy,
     /// Objective marketplace file checks. Background colour remains a visual check.
     Marketplace,
+    /// Rows the last run could not convert. The only finding about the run rather
+    /// than the file, so a folder of 6,000 images with 40 failures has somewhere to
+    /// put them instead of three names on a toast nobody kept.
+    Failed,
 }
 
 impl Finding {
-    /// The one place either finding is decided, so the count in the toolbar,
-    /// the filter it applies, and the chip in the row can never disagree.
+    /// The one place a finding about a file is decided, so the count in the toolbar,
+    /// the filter it applies, and the chip in the row can never disagree. `Failed`
+    /// is not one of those: it is keyed by row, and `refresh_visible` answers it
+    /// from the failure map instead.
     pub(super) fn holds(self, entry: &Entry) -> bool {
         match self {
             Finding::Mislabelled => entry.extension_lies(),
             Finding::Heavy => is_heavy(entry),
             Finding::Marketplace => acquisition::marketplace_fails(entry),
+            Finding::Failed => false,
         }
     }
 }
@@ -2215,7 +2227,8 @@ pub(crate) fn build_audit(
             convert_cancel: None,
             active_target_count: None,
             stopped_run: None,
-            failures: Vec::new(),
+            failures: HashMap::new(),
+            failure_summary: String::new(),
             unreadable,
             walk_errors,
             existing_output,

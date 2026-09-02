@@ -566,7 +566,9 @@ impl Render for Audit {
                 - root_left
                 - root_right;
             let prefs = self.column_prefs;
-            let show_result = !self.results.is_empty();
+            // A failure lives in the result cell too. A run where nothing landed
+            // would otherwise drop the column that carries its only marker.
+            let show_result = !self.results.is_empty() || !self.failures.is_empty();
             let show_sync = self.sirv_counts.is_some();
             let signature = (width.round().max(0.) as u32, prefs, show_result, show_sync);
             if self.table_signature != Some(signature) {

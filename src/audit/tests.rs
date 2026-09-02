@@ -4924,9 +4924,219 @@ fn converting_into_a_subfolder_refuses_to_overwrite_an_unselected_original(
 
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.failures.len(), 1);
-        assert!(audit.failures[0].contains("x.png"), "{:?}", audit.failures);
+        let named = audit.failure_names();
+        assert!(named[0].contains("x.png"), "{named:?}");
         assert!(audit.results.is_empty());
     });
     assert_eq!(std::fs::read(&original).unwrap(), b"an audited original");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Forty failures used to be three names on a toast you could dismiss, and rows that
+/// looked exactly like the ones nobody converted. The run keeps its reason per row:
+/// the row wears it, the chip collects them, the report names them, and converting
+/// the failed rows again is what clears them.
+#[gpui::test]
+fn a_failed_row_wears_its_reason_and_the_failed_chip_collects_it(cx: &mut TestAppContext) {
+    let root = scan_fixture("failure-badge");
+    let keeper = root.join("keeper.png");
+    crate::convert::tests::photo(8, 8)
+        .save(&keeper)
+        .expect("the fixture photo is written");
+    // A PNG under a `.jpg` name. Keeping its format is refused by name, so one row
+    // of this run fails while the row beside it converts.
+    let liar = root.join("liar.jpg");
+    crate::convert::tests::photo(8, 8)
+        .save_with_format(&liar, ImageFormat::Png)
+        .expect("the lying fixture is written");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![
+            entry(keeper.to_str().unwrap(), 8, 8, 256, ImageFormat::Png),
+            entry(liar.to_str().unwrap(), 8, 8, 256, ImageFormat::Png),
+        ];
+        audit.visible = vec![0, 1];
+        audit.selected = HashSet::from([0, 1]);
+        audit.format = Format::Same;
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.update(cx, |audit, cx| {
+        assert_eq!(audit.results.len(), 1, "the readable file still converted");
+        assert_eq!(
+            audit.failures.get(&1).map(String::as_str),
+            Some("named .jpg but the bytes are PNG; convert it explicitly"),
+            "{:?}",
+            audit.failures
+        );
+        assert_eq!(
+            audit.failure_names(),
+            vec!["liar.jpg (named .jpg but the bytes are PNG; convert it explicitly)".to_string()]
+        );
+        // A finished run opens its first result; the list is what this asserts on.
+        audit.compare = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("failed-1").is_some(),
+        "the failed row is marked where its result would have been"
+    );
+    assert!(
+        cx.debug_bounds("failed-0").is_none(),
+        "the row that converted is not marked"
+    );
+    assert!(
+        cx.debug_bounds("finding-failed").is_some(),
+        "the failures have a chip to reach them by"
+    );
+
+    audit.update(cx, |audit, cx| {
+        audit.copy_audit_report(cx);
+        assert!(audit.report_copied);
+    });
+    let report = cx
+        .read_from_clipboard()
+        .and_then(|clipboard| clipboard.text())
+        .expect("the report reaches the clipboard");
+    assert!(
+        report.contains("Could not convert (1):")
+            && report
+                .contains("- liar.jpg (named .jpg but the bytes are PNG; convert it explicitly)"),
+        "{report}"
+    );
+
+    audit.update(cx, |audit, cx| {
+        audit.set_finding(Finding::Failed, cx);
+        assert_eq!(
+            audit.visible,
+            vec![1],
+            "the chip narrows the list to the failed row"
+        );
+    });
+
+    // Fix the cause, then convert exactly what the chip is showing.
+    crate::convert::tests::photo(8, 8)
+        .save_with_format(&liar, ImageFormat::Jpeg)
+        .expect("the file becomes the JPEG its name claims");
+    audit.update(cx, |audit, cx| {
+        audit.selected = HashSet::from([1]);
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.update(cx, |audit, cx| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert!(
+            audit.results.contains_key(&1),
+            "the retry converted the row that had failed"
+        );
+        assert_eq!(audit.finding, None, "the filter goes with its chip");
+        assert_eq!(audit.visible.len(), 2, "and the list widens back out");
+        audit.compare = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("failed-1").is_none(),
+        "a row that converted carries no failure"
+    );
+    assert!(cx.debug_bounds("finding-failed").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The same run seen from the gallery: a tile has no result column, so the badge has
+/// to be in the tile itself or the grid is the view that hides the failures.
+#[gpui::test]
+fn a_failed_tile_carries_the_badge_the_list_row_does(cx: &mut TestAppContext) {
+    let root = scan_fixture("failure-badge-grid");
+    let liar = root.join("liar.jpg");
+    crate::convert::tests::photo(8, 8)
+        .save_with_format(&liar, ImageFormat::Png)
+        .expect("the lying fixture is written");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![entry(liar.to_str().unwrap(), 8, 8, 256, ImageFormat::Png)];
+        audit.visible = vec![0];
+        audit.selected = HashSet::from([0]);
+        audit.format = Format::Same;
+        audit.grid = true;
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.failures.len(),
+            1,
+            "the run failed the only file it had"
+        );
+        assert!(audit.results.is_empty());
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("failed-0").is_some(),
+        "the tile says the file failed"
+    );
+
+    // The reason belongs to the settings that produced it. Aimed somewhere else,
+    // the badge would be claiming a refusal this folder has not been given.
+    audit.update(cx, |audit, cx| {
+        audit.set_finding(Finding::Failed, cx);
+        audit.apply_format(Format::WebP, cx);
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(audit.finding, None, "the filter goes with its chip");
+        assert_eq!(audit.visible, vec![0]);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("failed-0").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The result column is only laid out when there is something to put in it, and a
+/// run where every file failed has exactly one thing: the badge saying so.
+#[gpui::test]
+fn a_run_that_converted_nothing_still_lays_out_the_column_holding_its_failures(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("failure-badge-only");
+    let liar = root.join("liar.jpg");
+    crate::convert::tests::photo(8, 8)
+        .save_with_format(&liar, ImageFormat::Png)
+        .expect("the lying fixture is written");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.root = root.clone();
+        audit.entries = vec![entry(liar.to_str().unwrap(), 8, 8, 256, ImageFormat::Png)];
+        audit.visible = vec![0];
+        audit.selected = HashSet::from([0]);
+        audit.format = Format::Same;
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.results.is_empty(), "nothing landed");
+        assert_eq!(audit.failures.len(), 1);
+        assert!(
+            audit.failure_summary.contains("liar.jpg"),
+            "{}",
+            audit.failure_summary
+        );
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("failed-0").is_some(),
+        "the list still shows the row its run failed"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

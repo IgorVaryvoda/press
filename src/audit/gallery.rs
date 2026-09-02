@@ -2,7 +2,7 @@
 
 use super::toolbar::segment;
 use super::*;
-use table::finding_chip;
+use table::{failure_badge, finding_chip};
 
 const GALLERY_SORTS: [(Column, &str); 5] = [
     (Column::Name, "Name"),
@@ -261,6 +261,14 @@ impl Audit {
                         entry
                             .extension_lies()
                             .then(|| finding_chip("mislabelled", cx)),
+                    )
+                    // A tile has no result column, so the run's verdict for this
+                    // file goes where its size does. Only the word fits here; the
+                    // reason is on hover.
+                    .children(
+                        self.failures
+                            .get(&index)
+                            .map(|reason| failure_badge(index, reason, false, cx)),
                     ),
             )
             .context_menu(move |menu, _, _| {
