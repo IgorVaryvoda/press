@@ -59,7 +59,9 @@ const HELP: &str = concat!(
     "  version    Print the version\n\n",
     "Options:\n",
     "  --json                    Write one schema-versioned JSON document\n",
-    "  --format <webp|avif|jxl>  Output format (default: webp)\n",
+    "  --format <webp|avif|jxl|jpeg|same>\n",
+    "                            Output format (default: webp); same keeps each\n",
+    "                            source's own format and name\n",
     "  --quality <1..100>        Lossy quality (default: 80)\n",
     "  --lossless                Lossless WebP or JPEG XL\n",
     "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
@@ -67,7 +69,7 @@ const HELP: &str = concat!(
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
     "Compatibility:\n",
-    "  --webp, --avif, --jxl and PATH --convert remain supported.\n\n",
+    "  --webp, --avif, --jxl, --jpeg and PATH --convert remain supported.\n\n",
     "Exit status:\n",
     "  0  Complete success\n",
     "  1  The requested operation failed or was incomplete\n",
@@ -149,12 +151,18 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 let value = rest
                     .next()
-                    .ok_or_else(|| "--format needs webp, avif, or jxl".to_string())?;
+                    .ok_or_else(|| "--format needs webp, avif, jxl, jpeg, or same".to_string())?;
                 format = match value.as_str() {
                     "webp" => Format::WebP,
                     "avif" => Format::Avif,
                     "jxl" => Format::JpegXl,
-                    _ => return Err(format!("--format needs webp, avif, or jxl, got {value:?}")),
+                    "jpeg" | "jpg" => Format::Jpeg,
+                    "same" => Format::Same,
+                    _ => {
+                        return Err(format!(
+                            "--format needs webp, avif, jxl, jpeg, or same, got {value:?}"
+                        ));
+                    }
                 };
             }
             "--avif" => {
@@ -164,6 +172,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--jxl" => {
                 conversion_option = true;
                 format = Format::JpegXl;
+            }
+            "--jpeg" => {
+                conversion_option = true;
+                format = Format::Jpeg;
             }
             "--max-edge" => {
                 conversion_option = true;
@@ -1204,6 +1216,27 @@ mod tests {
             assert_eq!(args.grid, grid);
             assert_eq!(args.json, json);
             assert_eq!(args.root, Some(PathBuf::from(root)));
+        }
+    }
+
+    #[test]
+    fn the_jpeg_and_same_formats_parse_and_refuse_lossless() {
+        assert_eq!(parse(&["--jpeg", "x"]).unwrap().format, Format::Jpeg);
+        assert_eq!(
+            parse(&["--format", "jpeg", "x"]).unwrap().format,
+            Format::Jpeg
+        );
+        assert_eq!(
+            parse(&["convert", "x", "--format", "same", "--max-edge", "1600"])
+                .unwrap()
+                .format,
+            Format::Same
+        );
+        assert!(parse(&["--jpeg", "--lossless"]).is_err());
+        assert!(parse(&["--format", "same", "--lossless"]).is_err());
+        match parse(&["--format", "bmp"]) {
+            Err(error) => assert!(error.contains("same"), "{error}"),
+            Ok(_) => panic!("an unknown format must be an error"),
         }
     }
 

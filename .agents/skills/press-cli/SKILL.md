@@ -1,6 +1,6 @@
 ---
 name: press-cli
-description: Audit or convert local image files with the Press CLI. Use when an agent needs structured image metadata, optimization findings, or explicitly authorized local WebP, AVIF, or JPEG XL conversion.
+description: Audit or convert local image files with the Press CLI. Use when an agent needs structured image metadata, optimization findings, or explicitly authorized local WebP, AVIF, JPEG XL, or JPEG conversion, or a resize that keeps each file's own format.
 ---
 
 # Press CLI
@@ -27,9 +27,13 @@ Conversion writes into `optimized/` under the input folder and can replace outpu
 press convert <file-or-folder> --format webp --quality 80 --json
 press convert <file-or-folder> --format avif --quality 70 --max-edge 1600 --json
 press convert <file-or-folder> --format jxl --lossless --json
+press convert <file-or-folder> --format jpeg --quality 85 --json
+press convert <file-or-folder> --format same --max-edge 1600 --json
 ```
 
-Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF. `--max-edge` only downscales.
+Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF, JPEG, or `same`. `--max-edge` only downscales.
+
+`--format jpeg` refuses a source with real transparency by name; JPEG has no alpha channel. `--format same` re-encodes each JPEG, PNG, WebP, AVIF, or JPEG XL source in its own format and keeps its file name and extension, so existing references keep working; use it with `--max-edge` for a resize-only run. Other formats, such as BMP or GIF, are refused by name under `same`.
 
 Treat exit status `1` as a partial result, not as proof that nothing was written. Read each file's `status`, report named failures, and use each successful `output` path as the source of truth. Never claim savings from the requested settings alone; use `summary.source_bytes` and `summary.output_bytes` from the completed run.
 
