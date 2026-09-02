@@ -53,6 +53,11 @@ pub fn is_heic(path: &Path) -> bool {
 /// otherwise list its own output and offer to convert it again.
 pub const OUTPUT_DIR: &str = "optimized";
 
+/// Replace mode moves every original here, mirroring the audited tree. Skipped by
+/// the walk like `OUTPUT_DIR`: these are the files the folder used to hold, and
+/// offering to convert them again would undo the run that put them here.
+pub const BACKUP_DIR: &str = "press-originals";
+
 /// Extensions macOS keeps as opaque packages. Some are permission-walled, and the
 /// rest are directory trees whose internal images are not web-delivery candidates.
 /// Skipped by design like camera raw, counted for the same reason.
@@ -597,7 +602,11 @@ fn count_files(root: &Path, cancelled: Option<&AtomicBool>) -> Option<usize> {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return None;
         }
-        if item.is_ok_and(|item| item.file_type().is_file()) {
+        // The run record sits with the outputs and is not one of them, so a folder
+        // holding one converted image still reports one file.
+        if item.is_ok_and(|item| {
+            item.file_type().is_file() && item.file_name() != crate::manifest::NAME
+        }) {
             count += 1;
         }
     }
@@ -834,6 +843,15 @@ fn scan_progressive_cancellable_inner(
                     if entry.depth() == 0 {
                         return true;
                     }
+                    // Pruned rather than walked: the backup is not output this run
+                    // could replace, it is the originals themselves.
+                    if entry
+                        .path()
+                        .components()
+                        .any(|part| part.as_os_str() == BACKUP_DIR)
+                    {
+                        return false;
+                    }
                     // Output is excluded below, but still walked so its count remains
                     // truthful. A package there is not skipped input.
                     if entry
@@ -880,7 +898,8 @@ fn scan_progressive_cancellable_inner(
                         .components()
                         .any(|part| part.as_os_str() == OUTPUT_DIR)
                 {
-                    if in_output {
+                    // The run record is not an image the next run would replace.
+                    if in_output && file.file_name() != crate::manifest::NAME {
                         summary.existing_output += 1;
                     }
                     continue;
@@ -1593,6 +1612,43 @@ mod tests {
         let browsed = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
         assert_eq!(browsed.folders, vec![optimized.clone(), visible.clone()]);
         assert_eq!(child_folders(&dir).unwrap(), vec![optimized, visible]);
+    }
+
+    /// Replace mode leaves two things in the audited folder that are not input: the
+    /// originals it moved aside, and the record of what it wrote. Listing either one
+    /// would offer to convert a backup, or count a JSON file as an output image.
+    #[test]
+    fn the_walk_never_lists_the_backup_tree_or_the_run_record() {
+        let dir = temp_dir("backup-tree");
+        write_sample(&dir, "shot.webp", 16, 16);
+        let backups = dir.join(BACKUP_DIR).join("album");
+        std::fs::create_dir_all(&backups).unwrap();
+        write_sample(&backups, "shot.png", 16, 16);
+        write_sample(&dir.join(BACKUP_DIR), "loose.png", 8, 8);
+        std::fs::write(dir.join(crate::manifest::NAME), b"{\"version\":1}").unwrap();
+        std::fs::create_dir_all(dir.join(OUTPUT_DIR)).unwrap();
+        std::fs::write(
+            dir.join(OUTPUT_DIR).join(crate::manifest::NAME),
+            b"{\"version\":1}",
+        )
+        .unwrap();
+
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
+
+        assert_eq!(
+            scanned
+                .entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["shot.webp".to_string()],
+            "only the folder's own images are listed"
+        );
+        assert!(scanned.unreadable.is_empty(), "the record is not an image");
+        assert_eq!(
+            scanned.existing_output, 0,
+            "the record is not an output waiting to be replaced"
+        );
     }
 
     #[test]

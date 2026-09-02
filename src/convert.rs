@@ -57,6 +57,9 @@ pub enum Failure {
     OutsideOutput,
     UnsafeOutputPath,
     OverwritesSource,
+    ClaimedByAnotherSource(PathBuf),
+    BackupOccupied(PathBuf),
+    BackupFailed,
     StalePartial(PathBuf),
 }
 
@@ -80,6 +83,17 @@ impl Failure {
                 Some("a folder on the way to the target is not a plain folder".into())
             }
             Self::OverwritesSource => Some("the output would overwrite a source image".into()),
+            Self::ClaimedByAnotherSource(source) => Some(format!(
+                "an earlier run wrote this file from {}",
+                source.display()
+            )),
+            Self::BackupOccupied(path) => Some(format!(
+                "an earlier run already backed up an original here: {}",
+                path.display()
+            )),
+            Self::BackupFailed => {
+                Some("the original could not be moved into the backup folder".into())
+            }
             Self::StalePartial(path) => Some(format!(
                 "a leftover partial file is in the way: {}",
                 path.display()
@@ -479,13 +493,14 @@ pub fn workers(format: Format) -> usize {
 pub fn convert_each(
     root: &Path,
     sources: &[PathBuf],
-    out_dir: &Path,
+    destination: &Destination,
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
     report: impl Fn(&Path, Result<Converted, Failure>) + Sync,
 ) {
-    let planned = &plan_outputs(root, sources, sources, out_dir, format);
+    let out_dir = destination.out_dir;
+    let planned = &plan_outputs(root, sources, sources, destination, format);
     // A shared cursor rather than a slice per thread: files in one folder differ in
     // size by a hundred times, so a fixed split leaves most threads finished early.
     let next = &AtomicUsize::new(0);
@@ -500,10 +515,17 @@ pub fn convert_each(
                     else {
                         return;
                     };
+                    let backup = destination.backup(root, source);
                     let converted = match written {
-                        Ok(written) => {
-                            convert_to(out_dir, source, written, format, quality, max_edge)
-                        }
+                        Ok(written) => convert_to(
+                            out_dir,
+                            source,
+                            written,
+                            backup.as_deref(),
+                            format,
+                            quality,
+                            max_edge,
+                        ),
                         Err(failure) => Err(failure.clone()),
                     };
                     let _ordered = reporting.lock();
@@ -512,6 +534,39 @@ pub fn convert_each(
             });
         }
     });
+}
+
+/// Where one run writes.
+///
+/// The output root is the boundary `Context` proved. `backups` is set only in
+/// replace mode, where the converted file lands beside its source and the original
+/// has to be somewhere safe before that happens. The manifest is what earlier runs
+/// left behind, and is the only way this run can tell its own old output from a
+/// file it is about to destroy.
+pub struct Destination<'a> {
+    pub out_dir: &'a Path,
+    pub backups: Option<&'a Path>,
+    pub manifest: &'a crate::manifest::Manifest,
+}
+
+impl Destination<'_> {
+    /// Where one source's original moves before its output takes its place.
+    /// `None` outside replace mode, where no original moves at all.
+    pub fn backup(&self, root: &Path, source: &Path) -> Option<PathBuf> {
+        let backups = self.backups?;
+        Some(backups.join(source.strip_prefix(root).unwrap_or(source)))
+    }
+}
+
+/// One spelling of a path for comparison. Case-insensitive, because `Shot.png` and
+/// `shot.png` are two files on Linux and one on macOS, and by component rather than
+/// by string, because Windows joins with a backslash while an audited path may
+/// carry `/`, and the two spellings are one file.
+pub(crate) fn path_key(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Where a converted file goes: the same layout as the source, rooted at `out_dir`,
@@ -578,26 +633,34 @@ pub fn ai_output_path(
 /// `audited` is every image in the folder, not just the ones being converted. Ticking
 /// one file and writing into a subfolder full of untouched originals is the same
 /// destruction, and the run that does it never had those files in `sources`.
+///
+/// An output an earlier run wrote from a different source is refused for the same
+/// reason, read out of the manifest: the folder is the only record either run has
+/// of the other, and `shot.jpg` landing on the `shot.webp` made from `shot.png`
+/// destroys a file this run never looked at.
+///
+/// Replace mode is the one case where an output may claim an audited original: its
+/// own source. The original is in the backup before the rename happens.
 pub fn plan_outputs(
     root: &Path,
     sources: &[PathBuf],
     audited: &[PathBuf],
-    out_dir: &Path,
+    destination: &Destination,
     format: Format,
 ) -> Vec<Result<PathBuf, Failure>> {
-    // Keyed case-insensitively. `Shot.png` and `shot.jpg` are two files on Linux and
-    // one on macOS, and renaming one of them needlessly costs a stranger name, while
-    // not renaming it costs a lost image. Keyed by component, not by string: on
-    // Windows a planned path joins with `\` while the audited one may carry `/`,
-    // and the two spellings are one file.
+    let out_dir = destination.out_dir;
+    let replace = destination.backups.is_some();
     let mut taken: HashSet<String> = HashSet::new();
-    let key = |path: &Path| {
-        path.components()
-            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
-            .collect::<Vec<_>>()
-            .join("/")
-    };
+    let key = path_key;
     let originals: HashSet<String> = audited.iter().map(|path| key(path)).collect();
+    // A name the manifest hands to somebody else. The current source may take back
+    // its own name — that is a rerun, and replacing its own output is the point.
+    let claimed = |candidate: &Path, source: &Path| -> Option<PathBuf> {
+        let relative = candidate.strip_prefix(out_dir).ok()?;
+        let record = destination.manifest.claim(relative)?;
+        let mine = source.strip_prefix(root).unwrap_or(source);
+        (key(&record.source) != key(mine)).then(|| record.source.clone())
+    };
 
     let mut planned = vec![Err(Failure::OverwritesSource); sources.len()];
     let mut order: Vec<usize> = (0..sources.len()).collect();
@@ -610,7 +673,14 @@ pub fn plan_outputs(
     for index in order {
         let source = &sources[index];
         let plain = output_path(root, source, out_dir, format);
-        if originals.contains(&key(&plain)) {
+        // In replace mode a WebP converted to WebP writes its own name back. That
+        // is not destruction: the original moves into the backup first.
+        let own_name = replace && key(&plain) == key(source);
+        if originals.contains(&key(&plain)) && !own_name {
+            continue;
+        }
+        if let Some(owner) = claimed(&plain, source) {
+            planned[index] = Err(Failure::ClaimedByAnotherSource(owner));
             continue;
         }
         if taken.insert(key(&plain)) {
@@ -632,7 +702,7 @@ pub fn plan_outputs(
             let candidate = parent
                 .join(format!("{stem}-{extension}{suffix}"))
                 .with_extension(format.extension());
-            if originals.contains(&key(&candidate)) {
+            if originals.contains(&key(&candidate)) || claimed(&candidate, source).is_some() {
                 continue;
             }
             if taken.insert(key(&candidate)) {
@@ -654,6 +724,21 @@ pub fn plan_outputs(
 /// AI tools and the normal encoder share this boundary: no symlinked ancestor, no
 /// half-written final file, and no path outside the output folder.
 pub fn write_output(output_root: &Path, written: &Path, encoded: &[u8]) -> Result<(), Failure> {
+    write_staged(output_root, written, encoded, || Ok(()))
+}
+
+/// The same write, with one step in between: `before_install` runs after the bytes
+/// are safely staged and before the stage takes the target's name.
+///
+/// Replace mode is what needs it. The original has to leave its own name before the
+/// new file can have it, and it must never leave before there is a finished file to
+/// put there. A refusal here removes the stage and touches nothing else.
+pub fn write_staged(
+    output_root: &Path,
+    written: &Path,
+    encoded: &[u8],
+    before_install: impl FnOnce() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let relative = written
         .strip_prefix(output_root)
         .map_err(|_| Failure::OutsideOutput)?;
@@ -696,11 +781,49 @@ pub fn write_output(output_root: &Path, written: &Path, encoded: &[u8]) -> Resul
         Err(_) => return Err(Failure::Failed),
     };
     let staged = stage.write_all(encoded).and_then(|()| stage.sync_all());
-    if staged.is_err() || std::fs::rename(&partial, written).is_err() {
+    if staged.is_err() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(Failure::Failed);
+    }
+    if let Err(failure) = before_install() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(failure);
+    }
+    if install(&partial, written).is_err() {
         let _ = std::fs::remove_file(&partial);
         return Err(Failure::Failed);
     }
     Ok(())
+}
+
+/// Rename the stage onto its target. Unix replaces an existing file; Windows
+/// refuses to, so a second run over one folder would fail every file it meant to
+/// rewrite — and the run record, which is rewritten every time.
+fn install(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if to.exists() => {
+            std::fs::remove_file(to)?;
+            std::fs::rename(from, to).map_err(|_| error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Move one original into the backup mirror, keeping whatever is already there.
+///
+/// An earlier run's backup of the same name is the real original; this run's
+/// "original" is that run's output. Overwriting it would lose the only copy, so
+/// the file is named and left alone instead.
+fn move_to_backup(source: &Path, backup: &Path) -> Result<(), Failure> {
+    if let Some(parent) = backup.parent() {
+        ensure_directory(parent, || std::fs::create_dir_all(parent))?;
+    }
+    if backup.symlink_metadata().is_ok() {
+        return Err(Failure::BackupOccupied(backup.to_path_buf()));
+    }
+    std::fs::rename(source, backup).map_err(|_| Failure::BackupFailed)
 }
 
 /// `path` must be a plain directory, creating it with `create` if it is missing.
@@ -730,10 +853,16 @@ fn ensure_directory(
 }
 
 /// Read, encode, and write one file to the path `plan_outputs` chose for it.
+///
+/// `backup` is where this source's original moves first, which replace mode sets
+/// and nothing else does. The original is never deleted: it is renamed out of the
+/// way once the new bytes are on disk, and an occupied backup name stops the file
+/// rather than overwriting the older original sitting there.
 pub fn convert_to(
     output_root: &Path,
     source: &Path,
     written: &Path,
+    backup: Option<&Path>,
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
@@ -766,7 +895,10 @@ pub fn convert_to(
     }
     let (width, height) = (decoded.width(), decoded.height());
     let encoded = encode(&decoded, format, quality, profile.as_deref())?;
-    write_output(output_root, written, &encoded)?;
+    write_staged(output_root, written, &encoded, || match backup {
+        Some(backup) => move_to_backup(source, backup),
+        None => Ok(()),
+    })?;
 
     Ok(Converted {
         written: written.to_path_buf(),
@@ -780,6 +912,50 @@ pub fn convert_to(
 pub(crate) mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb, Rgba};
+
+    /// The conversions that predate replace mode: no original moves, and no run
+    /// record exists yet. Shadowing the real ones keeps every test that never
+    /// heard of either reading the way it always did.
+    fn convert_to(
+        output_root: &Path,
+        source: &Path,
+        written: &Path,
+        format: Format,
+        quality: Quality,
+        max_edge: MaxEdge,
+    ) -> Result<Converted, Failure> {
+        super::convert_to(
+            output_root,
+            source,
+            written,
+            None,
+            format,
+            quality,
+            max_edge,
+        )
+    }
+
+    fn plan_outputs(
+        root: &Path,
+        sources: &[PathBuf],
+        audited: &[PathBuf],
+        out_dir: &Path,
+        format: Format,
+    ) -> Vec<Result<PathBuf, Failure>> {
+        super::plan_outputs(root, sources, audited, &plain(out_dir), format)
+    }
+
+    /// A destination that writes into `out_dir` and has no history.
+    pub(crate) fn plain(out_dir: &Path) -> Destination<'_> {
+        Destination {
+            out_dir,
+            backups: None,
+            manifest: &EMPTY,
+        }
+    }
+
+    static EMPTY: std::sync::LazyLock<crate::manifest::Manifest> =
+        std::sync::LazyLock::new(crate::manifest::Manifest::default);
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("imageguide-convert-{tag}"));
@@ -1465,7 +1641,7 @@ pub(crate) mod tests {
         convert_each(
             &root,
             &sources,
-            context.output_root(),
+            &plain(context.output_root()),
             Format::WebP,
             Quality::lossy(80.),
             MaxEdge::FULL,
@@ -1566,6 +1742,342 @@ pub(crate) mod tests {
         );
 
         assert_eq!(planned, [Err(Failure::OverwritesSource)]);
+    }
+
+    /// Everything replace mode needs for one file: where it lands, and where its
+    /// original goes first.
+    fn replace_run<'a>(root: &'a Path, backups: &'a Path) -> Destination<'a> {
+        Destination {
+            out_dir: root,
+            backups: Some(backups),
+            manifest: &EMPTY,
+        }
+    }
+
+    fn write_webp(path: &Path, image: &DynamicImage) {
+        let encoded = encode(image, Format::WebP, Quality::lossy(80.), None).expect("WebP encodes");
+        std::fs::write(path, encoded).unwrap();
+    }
+
+    #[test]
+    fn replace_mode_writes_beside_the_source_and_backs_the_original_up() {
+        let dir = temp_dir("replace-in-place");
+        let source = dir.join("shot.png");
+        photo(64, 64).save(&source).unwrap();
+        let original = std::fs::read(&source).unwrap();
+        assert!(!original.is_empty(), "the fixture is a real file");
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let sources = [source.clone()];
+        let planned = super::plan_outputs(&dir, &sources, &sources, &destination, Format::WebP);
+        assert_eq!(planned, [Ok(dir.join("shot.webp"))]);
+        let written = planned[0].clone().unwrap();
+        let backup = destination
+            .backup(&dir, &source)
+            .expect("replace mode names a backup");
+
+        let converted = super::convert_to(
+            &dir,
+            &source,
+            &written,
+            Some(&backup),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("the file converts in place");
+
+        assert!(converted.bytes > 0);
+        assert!(written.is_file(), "the output took the source's folder");
+        assert!(!source.exists(), "the original left its own name");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            original,
+            "the original is kept byte for byte"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A backup that flattened the tree would put two `shot.png` from two albums on
+    /// one name, and the second would be the one that survived.
+    #[test]
+    fn the_backup_mirrors_the_folder_each_original_was_in() {
+        let dir = temp_dir("replace-mirror");
+        let album = dir.join("album").join("2019");
+        std::fs::create_dir_all(&album).unwrap();
+        let source = album.join("shot.png");
+        photo(48, 48).save(&source).unwrap();
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let backup = destination.backup(&dir, &source).unwrap();
+        assert_eq!(
+            backup,
+            dir.join(crate::scan::BACKUP_DIR)
+                .join("album")
+                .join("2019")
+                .join("shot.png")
+        );
+
+        super::convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &dir, Format::WebP),
+            Some(&backup),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("the nested file converts");
+
+        assert!(backup.is_file(), "the original is under its own folders");
+        assert!(album.join("shot.webp").is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The undo the whole mode rests on. One source changes name on the way out and
+    /// one keeps it, because the WebP-to-WebP case is the one where removing the
+    /// output after the restore would delete the original again.
+    #[test]
+    fn restoring_puts_every_original_back_byte_for_byte_and_removes_what_replaced_it() {
+        let dir = temp_dir("replace-restore");
+        std::fs::create_dir_all(dir.join("album")).unwrap();
+        let png = dir.join("album").join("shot.png");
+        let webp = dir.join("kept.webp");
+        photo(64, 64).save(&png).unwrap();
+        write_webp(&webp, &photo(80, 40));
+        let originals: Vec<Vec<u8>> = [&png, &webp]
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let sources = [png.clone(), webp.clone()];
+        let planned = super::plan_outputs(&dir, &sources, &sources, &destination, Format::WebP);
+        assert_eq!(
+            planned,
+            [Ok(dir.join("album").join("shot.webp")), Ok(webp.clone()),],
+            "a WebP converted to WebP writes its own name back"
+        );
+
+        let stamp = crate::manifest::Stamp::new(Format::WebP, Quality::lossy(60.), MaxEdge::FULL);
+        let mut records = Vec::new();
+        for (source, written) in sources.iter().zip(&planned) {
+            let written = written.clone().unwrap();
+            let backup = destination.backup(&dir, source).unwrap();
+            super::convert_to(
+                &dir,
+                source,
+                &written,
+                Some(&backup),
+                Format::WebP,
+                Quality::lossy(60.),
+                MaxEdge::FULL,
+            )
+            .expect("the file converts");
+            records.push(
+                stamp
+                    .record(&dir, &dir, source, &written, Some(&backup))
+                    .expect("the record describes paths inside the run"),
+            );
+        }
+        crate::manifest::append(&dir, records).expect("the run is recorded");
+        assert!(!png.exists() && dir.join("album").join("shot.webp").is_file());
+        assert_ne!(
+            std::fs::read(&webp).unwrap(),
+            originals[1],
+            "the WebP was really re-encoded over its own name"
+        );
+
+        let restored = crate::manifest::restore(&dir);
+        assert!(
+            restored.failures.is_empty(),
+            "nothing refused: {:?}",
+            restored.failures
+        );
+        assert_eq!(
+            restored.restored,
+            vec![webp.clone(), png.clone()],
+            "the newest run is undone first"
+        );
+        assert_eq!(std::fs::read(&png).unwrap(), originals[0]);
+        assert_eq!(std::fs::read(&webp).unwrap(), originals[1]);
+        assert!(
+            !dir.join("album").join("shot.webp").exists(),
+            "the file that replaced the original is gone"
+        );
+        assert!(!backups.exists(), "the emptied backup does not linger");
+        assert!(!crate::manifest::path(&dir).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The bug the run record exists for: a later run converting `shot.jpg` used to
+    /// walk over the `shot.webp` an earlier one made from `shot.png`, and report the
+    /// destroyed file as a saving.
+    #[test]
+    fn a_name_an_earlier_run_wrote_from_another_source_is_refused_by_name() {
+        let dir = temp_dir("manifest-claim");
+        let out = dir.join(crate::scan::OUTPUT_DIR);
+        let png = dir.join("shot.png");
+        let jpg = dir.join("shot.jpg");
+        photo(40, 40).save(&png).unwrap();
+        photo(40, 40).save(&jpg).unwrap();
+        let audited = [png.clone(), jpg.clone()];
+
+        let first = super::plan_outputs(
+            &dir,
+            std::slice::from_ref(&png),
+            &audited,
+            &plain(&out),
+            Format::WebP,
+        );
+        let written = first[0].clone().expect("the first run claims the name");
+        convert_to(
+            &out,
+            &png,
+            &written,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("the first run converts");
+        let kept = std::fs::read(&written).unwrap();
+        let stamp = crate::manifest::Stamp::new(Format::WebP, Quality::lossy(80.), MaxEdge::FULL);
+        crate::manifest::append(
+            &out,
+            vec![stamp.record(&dir, &out, &png, &written, None).unwrap()],
+        )
+        .expect("the first run is recorded");
+
+        let recorded = crate::manifest::load(&out);
+        let destination = Destination {
+            out_dir: &out,
+            backups: None,
+            manifest: &recorded,
+        };
+        let second = super::plan_outputs(
+            &dir,
+            std::slice::from_ref(&jpg),
+            &audited,
+            &destination,
+            Format::WebP,
+        );
+
+        assert_eq!(
+            second,
+            [Err(Failure::ClaimedByAnotherSource(PathBuf::from(
+                "shot.png"
+            )))]
+        );
+        assert!(
+            second[0]
+                .clone()
+                .unwrap_err()
+                .reason()
+                .unwrap()
+                .contains("shot.png"),
+            "the refusal names the file that owns the output"
+        );
+        assert_eq!(
+            std::fs::read(&written).unwrap(),
+            kept,
+            "the earlier run's output is untouched"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Its own output is the one file a source may always replace, or nothing could
+    /// ever be converted twice.
+    #[test]
+    fn a_rerun_from_the_same_source_replaces_its_own_output() {
+        let dir = temp_dir("manifest-rerun");
+        let out = dir.join(crate::scan::OUTPUT_DIR);
+        let source = dir.join("shot.png");
+        photo(120, 120).save(&source).unwrap();
+        let sources = [source.clone()];
+
+        let mut sizes = Vec::new();
+        for quality in [90., 20.] {
+            let recorded = crate::manifest::load(&out);
+            let destination = Destination {
+                out_dir: &out,
+                backups: None,
+                manifest: &recorded,
+            };
+            let planned = super::plan_outputs(&dir, &sources, &sources, &destination, Format::WebP);
+            assert_eq!(planned, [Ok(out.join("shot.webp"))]);
+            let written = planned[0].clone().unwrap();
+            let converted = convert_to(
+                &out,
+                &source,
+                &written,
+                Format::WebP,
+                Quality::lossy(quality),
+                MaxEdge::FULL,
+            )
+            .expect("the rerun converts");
+            sizes.push(converted.bytes);
+            let stamp =
+                crate::manifest::Stamp::new(Format::WebP, Quality::lossy(quality), MaxEdge::FULL);
+            crate::manifest::append(
+                &out,
+                vec![stamp.record(&dir, &out, &source, &written, None).unwrap()],
+            )
+            .expect("the rerun is recorded");
+        }
+
+        assert!(
+            sizes[1] < sizes[0],
+            "the second run really rewrote the file: {sizes:?}"
+        );
+        let recorded = crate::manifest::load(&out);
+        assert_eq!(
+            recorded.outputs.len(),
+            1,
+            "one source and one output stay one record"
+        );
+        assert_eq!(recorded.outputs[0].quality, "q20");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An earlier run's backup is the real original; this run's "original" is that
+    /// run's output. Overwriting it would lose the only copy there is.
+    #[test]
+    fn a_backup_name_an_earlier_run_took_stops_the_file_and_keeps_the_older_original() {
+        let dir = temp_dir("replace-backup-taken");
+        let source = dir.join("shot.webp");
+        write_webp(&source, &photo(48, 48));
+        let backups = crate::manifest::backup_root(&dir);
+        let backup = backups.join("shot.webp");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::write(&backup, b"the original from the first run").unwrap();
+
+        let refused = super::convert_to(
+            &dir,
+            &source,
+            &source.clone(),
+            Some(&backup),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        );
+
+        assert_eq!(refused, Err(Failure::BackupOccupied(backup.clone())));
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            b"the original from the first run",
+            "the older original is what stays"
+        );
+        assert!(source.is_file(), "the file this run refused is still there");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|item| item.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "the stage was removed: {leftovers:?}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
