@@ -17,10 +17,11 @@ thumbs::load (per visible row)  compare::build (per view)  convert::convert_file
   Arc<RenderImage>                Pair (in-memory)           writes root/optimized/
 ```
 
-- `src/scan.rs` — header-only folder walk. Never decodes to learn dimensions. `Entry` carries `path/format/width/height/bytes`; `extension_lies()` flags files whose magic bytes disagree with the extension; output goes to `OUTPUT_DIR = "optimized"`, which the walk skips.
+- `src/scan.rs` — header-only folder walk. Never decodes to learn dimensions. `Entry` carries `path/format/width/height/bytes`; `extension_lies()` flags files whose magic bytes disagree with the extension; output goes to `OUTPUT_DIR = "optimized"`, which the walk skips, as it skips `BACKUP_DIR = "press-originals"` (replace mode's originals) and the run manifest.
 - `src/convert.rs` — re-encode. WebP via libwebp (real transparency forces lossless), AVIF via system libavif/libaom speed 6 with libyuv conversion where packaged (no lossless AVIF). `MaxEdge` downscales with Lanczos3, never up. `output_path` mirrors the source tree.
 - `src/compare.rs` — original-vs-converted pair built in memory, decode-encode-decode so both sides are real pixels. Cached by `Key` (path+format+quality+max_edge).
 - `src/thumbs.rs` — decode + 96px thumbnail + BGRA swap (`to_bgra`, shared with compare). `None` means draw a gap, not an error.
+- `src/manifest.rs` — `.press-manifest.jsonl` in the output root, one appended line per written output: which source it came from, what it measured, and where a replaced original was moved. Written before the original moves, so a killed run is still recoverable. `plan_outputs` reads it so a later run never walks over an earlier one's output, and `restore` walks it backwards to undo a replace run.
 - `src/settings.rs` — hand-rolled `key=value` file at `<config>/imageguide/settings`; tolerant parse. The `imageguide` folder name predates the rename to Press and stays, so saved credentials survive.
 - `src/main.rs` — everything else: `main` (line ~3090), `parse_args`, `convert_headless`, `run_window`/`build_audit`/`init_theme`/`Launch`, and the whole `Audit` UI (struct at ~254, `Render` impl at ~2593, `AuditTable` delegate at ~2286).
 
@@ -53,6 +54,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo run --release -- ~/path/to/folder            # audit window
 cargo run --release -- ~/folder --convert --avif   # headless convert
+cargo run --release -- ~/folder --convert --replace # convert in place; originals to press-originals/
+cargo run --release -- restore ~/folder             # put those originals back
 cargo test --bin press -- --ignored --nocapture screenshot   # known-broken on Linux (no HeadlessRenderer); prove UI with the real app instead
 ```
 

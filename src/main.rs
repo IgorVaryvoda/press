@@ -13,6 +13,7 @@ mod convert;
 mod crash;
 mod jxl;
 mod local_ai;
+mod manifest;
 mod menus;
 mod output;
 mod scan;
@@ -48,11 +49,13 @@ const HELP: &str = concat!(
     "  press [PATH] [OPTIONS]\n",
     "  press audit <PATH> [--json]\n",
     "  press convert <PATH> [OPTIONS]\n",
+    "  press restore <PATH>\n",
     "  press skill\n",
     "  press update\n\n",
     "Commands:\n",
     "  audit      Read image headers without opening a window or writing files\n",
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
+    "  restore    Put back the originals a --replace run moved aside\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
     "  update     Install the latest signed Press release\n",
     "  help       Print this help\n",
@@ -67,6 +70,7 @@ const HELP: &str = concat!(
     "  --quality <1..100>        Lossy quality (default: 80)\n",
     "  --lossless                Lossless WebP or JPEG XL\n",
     "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
+    "  --replace                 Convert in place; originals move to press-originals/\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -101,6 +105,7 @@ enum Command {
     Window,
     Audit,
     Convert,
+    Restore,
     Skill,
     Update,
     Help,
@@ -118,6 +123,7 @@ struct Args {
     json: bool,
     /// Headless scope. The window has its own remembered chip for this.
     subfolders: bool,
+    replace: bool,
     unknown: Vec<String>,
 }
 
@@ -140,6 +146,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut grid = false;
     let mut json = false;
     let mut subfolders = true;
+    let mut replace = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
 
@@ -147,6 +154,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         match argument.as_str() {
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
+            "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
             "skill" if root.is_none() && command == Command::Window => command = Command::Skill,
             "update" if root.is_none() && command == Command::Window => command = Command::Update,
             "help" if root.is_none() && command == Command::Window => command = Command::Help,
@@ -200,6 +208,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 format = Format::WebP;
             }
+            "--replace" => {
+                conversion_option = true;
+                replace = true;
+            }
             "--grid" => grid = true,
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
@@ -246,8 +258,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             grid,
             json,
             subfolders,
+            replace,
             unknown,
         });
+    }
+    if command == Command::Restore && (conversion_option || grid) {
+        return Err("restore takes only a folder".into());
     }
     if matches!(command, Command::Skill | Command::Update)
         && (root.is_some()
@@ -275,7 +291,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Convert && grid {
         return Err("--grid is available only for the window".into());
     }
-    if command == Command::Window && json {
+    if json && !matches!(command, Command::Audit | Command::Convert) {
         return Err("--json needs audit or convert".into());
     }
     if command == Command::Window && !subfolders {
@@ -285,6 +301,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if !format.supports_lossless() && quality == Quality::LOSSLESS {
         return Err("--lossless is available only with --webp or --jxl".into());
+    }
+    if replace && command != Command::Convert {
+        return Err("--replace needs convert".into());
     }
 
     Ok(Args {
@@ -296,6 +315,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         grid,
         json,
         subfolders,
+        replace,
         unknown,
     })
 }
@@ -505,6 +525,10 @@ struct ConversionRun {
     after: u64,
     failed: usize,
     files: Vec<ConversionFile>,
+    /// The run record on disk, or `None` when it could not be written. Replace
+    /// mode's undo reads it, so a report that named one that is not there would
+    /// be promising something.
+    written_manifest: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -535,6 +559,8 @@ struct ConversionReport {
     options: ConversionOptions,
     scan: ScanSummary,
     summary: ConversionSummary,
+    manifest: Option<String>,
+    backup: Option<String>,
     files: Vec<ConversionFile>,
     unreadable: Vec<String>,
     walk_errors: Vec<String>,
@@ -543,13 +569,14 @@ struct ConversionReport {
 /// Convert without opening a window, so the same work is scriptable and testable.
 fn convert_headless(
     root: &std::path::Path,
-    out_dir: &std::path::Path,
+    destination: &convert::Destination,
     entries: &[Entry],
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
     json: bool,
 ) -> ConversionRun {
+    let out_dir = destination.out_dir;
     let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
     let by_path: HashMap<&Path, &Entry> = entries
         .iter()
@@ -563,11 +590,12 @@ fn convert_headless(
         after: 0,
         failed: 0,
         files: Vec::with_capacity(entries.len()),
+        written_manifest: None,
     });
     convert::convert_each(
         root,
         &sources,
-        out_dir,
+        destination,
         format,
         quality,
         max_edge,
@@ -637,6 +665,9 @@ fn convert_headless(
     totals
         .files
         .sort_by(|left, right| left.source.cmp(&right.source));
+    // Each file appended its own line as it landed; this only names the file.
+    let record = manifest::path(out_dir);
+    totals.written_manifest = record.is_file().then_some(record);
 
     if !json {
         let growth = totals.after > totals.before;
@@ -660,6 +691,13 @@ fn convert_headless(
         );
         if entries.len() - totals.failed > 0 {
             println!("written to {}", out_dir.display());
+            if let Some(backups) = destination.backups {
+                println!(
+                    "originals moved to {}; press restore {} puts them back",
+                    backups.display(),
+                    root.display()
+                );
+            }
         }
     }
     totals
@@ -687,7 +725,7 @@ fn main() {
             update_headless();
             return;
         }
-        Command::Window | Command::Audit | Command::Convert => {}
+        Command::Window | Command::Audit | Command::Convert | Command::Restore => {}
     }
 
     if args.command == Command::Window {
@@ -718,10 +756,10 @@ fn main() {
         if args.command != Command::Window {
             eprintln!(
                 "press: {} needs a file or folder",
-                if args.command == Command::Audit {
-                    "audit"
-                } else {
-                    "convert"
+                match args.command {
+                    Command::Audit => "audit",
+                    Command::Restore => "restore",
+                    _ => "convert",
                 }
             );
             std::process::exit(2);
@@ -751,6 +789,14 @@ fn main() {
             pending_crash,
         );
     };
+
+    if args.command == Command::Restore {
+        if !target.is_dir() {
+            eprintln!("press: {} is not a folder", target.display());
+            std::process::exit(2);
+        }
+        std::process::exit(restore_headless(&target));
+    }
 
     // A single file opens straight into the comparison. A folder opens the audit.
     let open_single = target.is_file();
@@ -856,9 +902,15 @@ fn main() {
             many => println!("{many} macOS packages skipped"),
         }
     }
-    // Headless always writes the default `optimized/`, but it still has to be a usable
-    // folder. Refusing here names the reason once instead of failing every file.
-    let context = match settings::Output::Optimized.context(&root) {
+    // Headless writes the default `optimized/` unless `--replace` asks for the
+    // folder itself, and either still has to be usable. Refusing here names the
+    // reason once instead of failing every file.
+    let output = if args.replace {
+        settings::Output::Replace
+    } else {
+        settings::Output::Optimized
+    };
+    let context = match output.context(&root) {
         Ok(context) => context,
         Err(message) => {
             eprintln!("press: {message}");
@@ -866,9 +918,16 @@ fn main() {
         }
     };
     let out_dir = context.output_root().to_path_buf();
+    let backups = args.replace.then(|| manifest::backup_root(&out_dir));
+    let recorded = manifest::load(&out_dir);
+    let destination = convert::Destination {
+        out_dir: &out_dir,
+        backups: backups.as_deref(),
+        manifest: &recorded,
+    };
     let run = convert_headless(
         &root,
-        &out_dir,
+        &destination,
         &scanned.entries,
         args.format,
         args.quality,
@@ -889,6 +948,8 @@ fn main() {
                 max_edge: args.max_edge.0,
             },
             scan: ScanSummary::from_scan(&scanned),
+            manifest: run.written_manifest.as_deref().map(path_text),
+            backup: backups.as_deref().map(path_text),
             summary: ConversionSummary {
                 attempted: scanned.entries.len(),
                 converted: scanned.entries.len() - run.failed,
@@ -908,6 +969,27 @@ fn main() {
         }
     }
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
+}
+
+/// Put back what a `--replace` run moved aside, and say what came back by name.
+fn restore_headless(root: &Path) -> i32 {
+    let restore = manifest::restore(root);
+    if restore.restored.is_empty() && restore.failures.is_empty() {
+        println!("no originals to restore in {}", root.display());
+        return 0;
+    }
+    for original in &restore.restored {
+        println!("restored {}", original.display());
+    }
+    for failure in &restore.failures {
+        eprintln!("press: could not restore {failure}");
+    }
+    println!(
+        "{} restored, {} left in place",
+        restore.restored.len(),
+        restore.failures.len()
+    );
+    i32::from(!restore.failures.is_empty())
 }
 
 fn update_headless() {
@@ -1394,9 +1476,14 @@ mod tests {
         let context = settings::Output::Optimized
             .context(&root)
             .expect("the default output establishes");
+        let destination = convert::Destination {
+            out_dir: context.output_root(),
+            backups: None,
+            manifest: &manifest::Manifest::default(),
+        };
         let run = convert_headless(
             &root,
-            context.output_root(),
+            &destination,
             &entries,
             Format::WebP,
             Quality::lossy(80.),
@@ -1409,6 +1496,89 @@ mod tests {
         assert_eq!(run.files[0].status, "converted");
         assert!(root.join(scan::OUTPUT_DIR).join("photo.webp").is_file());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The scriptable half of replace mode: convert in place, keep every original,
+    /// and leave a record `press restore` can read on a later run.
+    #[test]
+    fn headless_replace_converts_in_place_and_restores_from_the_record() {
+        let root = std::env::temp_dir().join(format!("press-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("album")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let source = root.join("album").join("photo.png");
+        image::RgbImage::from_fn(64, 64, |x, y| {
+            let hash = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
+            image::Rgb([(hash >> 8) as u8, (hash >> 16) as u8, (hash >> 24) as u8])
+        })
+        .save(&source)
+        .unwrap();
+        let original = std::fs::read(&source).unwrap();
+        let entries = vec![scan::probe(&source).expect("the fixture is an image")];
+
+        let context = settings::Output::Replace
+            .context(&root)
+            .expect("replace mode establishes");
+        let backups = manifest::backup_root(context.output_root());
+        let recorded = manifest::load(context.output_root());
+        let destination = convert::Destination {
+            out_dir: context.output_root(),
+            backups: Some(&backups),
+            manifest: &recorded,
+        };
+        let run = convert_headless(
+            &root,
+            &destination,
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+
+        assert_eq!(run.failed, 0);
+        assert_eq!(run.files.len(), 1);
+        assert_eq!(run.files[0].status, "converted");
+        assert!(root.join("album").join("photo.webp").is_file());
+        assert!(!source.exists(), "the original left its own name");
+        assert_eq!(
+            std::fs::read(backups.join("album").join("photo.png")).unwrap(),
+            original,
+            "the original is kept byte for byte"
+        );
+        assert_eq!(run.written_manifest, Some(manifest::path(&root)));
+        let recorded = manifest::load(&root);
+        assert_eq!(recorded.outputs.len(), 1);
+        assert_eq!(recorded.outputs[0].source, Path::new("album/photo.png"));
+        assert_eq!(
+            recorded.outputs[0].backup.as_deref(),
+            Some(Path::new("album/photo.png"))
+        );
+        assert_eq!(recorded.outputs[0].source_bytes, original.len() as u64);
+
+        assert_eq!(restore_headless(&root), 0);
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(!root.join("album").join("photo.webp").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn replacing_and_restoring_are_their_own_invocations() {
+        let replace = parse(&["convert", "/photos", "--replace"]).unwrap();
+        assert_eq!(replace.command, Command::Convert);
+        assert!(replace.replace);
+        assert!(!parse(&["convert", "/photos"]).unwrap().replace);
+
+        let restore = parse(&["restore", "/photos"]).unwrap();
+        assert_eq!(restore.command, Command::Restore);
+        assert_eq!(restore.root.as_deref(), Some(Path::new("/photos")));
+
+        assert!(
+            parse(&["/photos", "--replace"]).is_err(),
+            "replacing is never something the window inherits from a flag"
+        );
+        assert!(parse(&["restore", "/photos", "--json"]).is_err());
+        assert!(parse(&["restore", "/photos", "--avif"]).is_err());
     }
 
     #[test]

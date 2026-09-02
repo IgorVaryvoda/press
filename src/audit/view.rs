@@ -539,7 +539,12 @@ impl Render for Audit {
             folder: self.root.is_dir().then(|| self.root.clone()),
             recent_folders: self.recent_folders.clone(),
             columns: self.column_prefs,
-            output: self.output.clone(),
+            // Replace mode is not remembered, so the snapshot this compares
+            // against must not hold it either, or every frame looks like a change.
+            output: match self.output {
+                Output::Replace => Output::Optimized,
+                ref output => output.clone(),
+            },
             include_subfolders: self.include_subfolders,
         };
         if current != self.settings {

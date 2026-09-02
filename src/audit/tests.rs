@@ -4419,6 +4419,83 @@ fn convertible_audit(
     (audit, cx)
 }
 
+/// The whole of replace mode through the window: it converts in place, keeps
+/// every original, says so in the rail, and hands them all back on request.
+#[gpui::test]
+fn replacing_converts_in_place_and_the_rail_offers_the_originals_back(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    let originals: Vec<(PathBuf, Vec<u8>)> = audit.read_with(cx, |audit, _| {
+        audit
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    std::fs::read(&entry.path).expect("the fixture is on disk"),
+                )
+            })
+            .collect()
+    });
+    assert_eq!(originals.len(), 3);
+
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    audit.read_with(cx, |audit, _| assert_eq!(audit.output, Output::Replace));
+    assert!(
+        cx.debug_bounds("output-promise").is_some(),
+        "the rail says what the destination does before the run"
+    );
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+
+    let (root, backups) = audit.read_with(cx, |audit, _| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(audit.results.len(), 3);
+        assert_eq!(audit.restorable, 3, "every original can be put back");
+        (
+            audit.root.clone(),
+            crate::manifest::backup_root(&audit.root),
+        )
+    });
+    for (path, bytes) in &originals {
+        let name = path.file_name().expect("the fixture is a file");
+        assert!(!path.exists(), "{} left its own name", path.display());
+        assert!(path.with_extension("webp").is_file());
+        assert_eq!(
+            &std::fs::read(backups.join(name)).expect("the original moved into the backup"),
+            bytes,
+            "the original is kept byte for byte"
+        );
+    }
+
+    // A finished run takes you to the first result, so the rail is behind the
+    // comparison until it is closed.
+    audit.update(cx, |audit, cx| {
+        audit.compare = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("restore-originals").is_some(),
+        "a finished replace run offers the way back"
+    );
+
+    audit.update(cx, |audit, cx| audit.restore_originals(cx));
+    cx.run_until_parked();
+
+    for (path, bytes) in &originals {
+        assert_eq!(&std::fs::read(path).expect("the original came back"), bytes);
+        assert!(
+            !path.with_extension("webp").exists(),
+            "what replaced it is gone"
+        );
+    }
+    audit.read_with(cx, |audit, _| assert_eq!(audit.restorable, 0));
+    assert!(!backups.exists(), "the emptied backup does not linger");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[gpui::test]
 fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
     // Three windows of files, so a stop taken at the first batch of results still

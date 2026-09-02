@@ -53,6 +53,24 @@ pub fn is_heic(path: &Path) -> bool {
 /// otherwise list its own output and offer to convert it again.
 pub const OUTPUT_DIR: &str = "optimized";
 
+/// Replace mode moves every original here, mirroring the audited tree. Skipped by
+/// the walk like `OUTPUT_DIR`: these are the files the folder used to hold, and
+/// offering to convert them again would undo the run that put them here.
+pub const BACKUP_DIR: &str = "press-originals";
+
+/// The backup is not a folder to browse into either. Auditing it and converting
+/// what is inside would rewrite the originals in place of themselves, and no
+/// restore could put back what it no longer has.
+fn is_backup_folder(path: &Path) -> bool {
+    path.file_name() == Some(std::ffi::OsStr::new(BACKUP_DIR))
+}
+
+/// A half-written output belonging to a run in flight. It is never an input, and
+/// a browser that offers it offers a file that is about to be renamed away.
+fn is_partial(path: &Path) -> bool {
+    path.extension() == Some(std::ffi::OsStr::new("part"))
+}
+
 /// Extensions macOS keeps as opaque packages. Some are permission-walled, and the
 /// rest are directory trees whose internal images are not web-delivery candidates.
 /// Skipped by design like camera raw, counted for the same reason.
@@ -550,7 +568,7 @@ fn browse_page(
         };
 
         if file_type.is_dir() {
-            if is_hidden_folder(&path) {
+            if is_hidden_folder(&path) || is_backup_folder(&path) {
                 continue;
             }
             if is_opaque_package(&path) {
@@ -560,7 +578,7 @@ fn browse_page(
             }
             continue;
         }
-        if !file_type.is_file() {
+        if !file_type.is_file() || is_partial(&path) {
             continue;
         }
         if is_raw(&path) {
@@ -604,7 +622,11 @@ fn count_files(root: &Path, cancelled: Option<&AtomicBool>) -> Option<usize> {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return None;
         }
-        if item.is_ok_and(|item| item.file_type().is_file()) {
+        // The run record sits with the outputs and is not one of them, so a folder
+        // holding one converted image still reports one file.
+        if item.is_ok_and(|item| {
+            item.file_type().is_file() && item.file_name() != crate::manifest::NAME
+        }) {
             count += 1;
         }
     }
@@ -709,7 +731,11 @@ pub(crate) fn child_folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     for item in std::fs::read_dir(canonical_boundary(root)?)? {
         let item = item?;
         let path = item.path();
-        if item.file_type()?.is_dir() && !is_hidden_folder(&path) && !is_opaque_package(&path) {
+        if item.file_type()?.is_dir()
+            && !is_hidden_folder(&path)
+            && !is_backup_folder(&path)
+            && !is_opaque_package(&path)
+        {
             folders.push(path);
         }
     }
@@ -864,6 +890,15 @@ fn scan_progressive_cancellable_inner(
                     if entry.depth() == 0 {
                         return true;
                     }
+                    // Pruned rather than walked: the backup is not output this run
+                    // could replace, it is the originals themselves.
+                    if entry
+                        .path()
+                        .components()
+                        .any(|part| part.as_os_str() == BACKUP_DIR)
+                    {
+                        return false;
+                    }
                     // Output is excluded below, but still walked so its count remains
                     // truthful. A package there is not skipped input.
                     if entry
@@ -910,9 +945,16 @@ fn scan_progressive_cancellable_inner(
                         .components()
                         .any(|part| part.as_os_str() == OUTPUT_DIR)
                 {
-                    if in_output {
+                    // The run record is not an image the next run would replace.
+                    if in_output && file.file_name() != crate::manifest::NAME {
                         summary.existing_output += 1;
                     }
+                    continue;
+                }
+                // A run in flight stages its output beside the target. It is a
+                // whole image and it is about to be renamed away, so auditing it
+                // would offer to convert a file that will not be there.
+                if is_partial(file.path()) {
                     continue;
                 }
                 if is_raw(file.path()) {
@@ -1623,6 +1665,84 @@ mod tests {
         let browsed = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
         assert_eq!(browsed.folders, vec![optimized.clone(), visible.clone()]);
         assert_eq!(child_folders(&dir).unwrap(), vec![optimized, visible]);
+    }
+
+    /// Replace mode leaves two things in the audited folder that are not input: the
+    /// originals it moved aside, and the record of what it wrote. Listing either one
+    /// would offer to convert a backup, or count a JSON file as an output image.
+    #[test]
+    fn the_walk_never_lists_the_backup_tree_or_the_run_record() {
+        let dir = temp_dir("backup-tree");
+        write_sample(&dir, "shot.webp", 16, 16);
+        let backups = dir.join(BACKUP_DIR).join("album");
+        std::fs::create_dir_all(&backups).unwrap();
+        write_sample(&backups, "shot.png", 16, 16);
+        write_sample(&dir.join(BACKUP_DIR), "loose.png", 8, 8);
+        std::fs::write(dir.join(crate::manifest::NAME), b"{\"version\":1}").unwrap();
+        std::fs::create_dir_all(dir.join(OUTPUT_DIR)).unwrap();
+        std::fs::write(
+            dir.join(OUTPUT_DIR).join(crate::manifest::NAME),
+            b"{\"version\":1}",
+        )
+        .unwrap();
+
+        let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
+
+        assert_eq!(
+            scanned
+                .entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["shot.webp".to_string()],
+            "only the folder's own images are listed"
+        );
+        assert!(scanned.unreadable.is_empty(), "the record is not an image");
+        assert_eq!(
+            scanned.existing_output, 0,
+            "the record is not an output waiting to be replaced"
+        );
+    }
+
+    /// The browser must not offer the backup either. Navigating into it and
+    /// converting would rewrite the originals in place of themselves, and no
+    /// restore could put back what it no longer has.
+    #[test]
+    fn the_browser_never_lists_the_backup_tree_or_a_half_written_output() {
+        let dir = temp_dir("browse-backup");
+        write_sample(&dir, "shot.png", 16, 16);
+        std::fs::create_dir_all(dir.join(BACKUP_DIR)).unwrap();
+        write_sample(&dir.join(BACKUP_DIR), "shot.png", 16, 16);
+        let album = dir.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+        let partial = dir.join(format!("shot.webp.{}.part", std::process::id()));
+        std::fs::copy(dir.join("shot.png"), &partial).unwrap();
+
+        let browsed = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
+
+        assert_eq!(browsed.folders, vec![album.clone()]);
+        assert_eq!(
+            browsed
+                .scan
+                .entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["shot.png".to_string()],
+            "the half-written output is not an input"
+        );
+        assert_eq!(child_folders(&dir).unwrap(), vec![album]);
+        // The walk that feeds the audit has to agree with the browser: a staged
+        // leftover it listed would be converted as though it were an original.
+        assert_eq!(
+            scan(&dir, &dir.join(OUTPUT_DIR))
+                .entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["shot.png".to_string()]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

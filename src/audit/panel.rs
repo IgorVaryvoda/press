@@ -662,6 +662,7 @@ impl Audit {
     /// tree. The originals never move either way.
     fn destination_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let custom = self.output != Output::Optimized;
+        let replacing = self.output == Output::Replace;
         div()
             .debug_selector(|| "output-destination".into())
             .flex()
@@ -704,6 +705,15 @@ impl Audit {
                             )
                             .on_click(cx.listener(|audit, _, _, cx| audit.reset_output(cx)))
                     }))
+                    .children((!replacing).then(|| {
+                        Button::new("output-replace")
+                            .xsmall()
+                            .ghost()
+                            .label("Replace")
+                            .tooltip("Convert in place, keeping every original in press-originals/")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, _, cx| audit.use_replace_output(cx)))
+                    }))
                     .child(
                         Button::new("output-choose")
                             .xsmall()
@@ -715,12 +725,21 @@ impl Audit {
                     ),
             )
             // The promise the whole app rests on, kept in view rather than
-            // discovered afterwards.
+            // discovered afterwards — and said differently when the destination
+            // is the folder itself, because there the promise is the backup.
             .child(
                 div()
+                    .debug_selector(|| "output-promise".into())
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("Originals are never touched"),
+                    .child(if replacing {
+                        format!(
+                            "Originals move to {}/ and can be restored",
+                            crate::scan::BACKUP_DIR
+                        )
+                    } else {
+                        "Originals are never touched".to_string()
+                    }),
             )
     }
 
@@ -1075,6 +1094,27 @@ impl Audit {
                     )
                 },
             )
+            // Offered whenever the folder's run record still holds an original,
+            // including on a later launch: the undo is a fact on disk, not a
+            // memory of this session.
+            .when(self.restorable > 0 && !self.converting, |block| {
+                block.child(
+                    div().debug_selector(|| "restore-originals".into()).child(
+                        Button::new("restore")
+                            .outline()
+                            .small()
+                            .w_full()
+                            .label("Restore originals")
+                            .tooltip(format!(
+                                "Move {} original{} back out of {}/ and remove what replaced them",
+                                self.restorable,
+                                if self.restorable == 1 { "" } else { "s" },
+                                crate::scan::BACKUP_DIR
+                            ))
+                            .on_click(cx.listener(|audit, _, _, cx| audit.restore_originals(cx))),
+                    ),
+                )
+            })
             .child(
                 Button::new("convert")
                     .primary()

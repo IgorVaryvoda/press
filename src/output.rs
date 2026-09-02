@@ -198,6 +198,46 @@ impl Context {
         })
     }
 
+    /// Establish the boundary for replace mode, where the output root *is* the
+    /// audited root.
+    ///
+    /// Every other destination is refused when it contains the source, and that
+    /// rule is what stops a chosen folder from re-encoding originals onto
+    /// themselves. Replace mode does exactly that on purpose, one file at a time
+    /// and only after the original is safe in the backup, so it gets its own door
+    /// rather than a hole in the rule everything else relies on.
+    pub(crate) fn establish_replace_with_working_directory(
+        source: &Path,
+        working_directory: PathBuf,
+    ) -> Result<Self, Error> {
+        validate_raw(source)?;
+        if !source.is_absolute() {
+            return Err(Error::SourceNotAbsolute);
+        }
+        validate_existing_windows_components(source, false)?;
+        let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
+            path: source.to_path_buf(),
+            error,
+        })?;
+        let source_metadata = fs::metadata(&source_root).map_err(|error| Error::SourceLookup {
+            path: source_root.clone(),
+            error,
+        })?;
+        if !source_metadata.is_dir() {
+            return Err(Error::SourceNotDirectory);
+        }
+        validate_raw(&working_directory)?;
+        if !working_directory.is_absolute() {
+            return Err(Error::SourceNotAbsolute);
+        }
+        Ok(Self {
+            output_root: source_root.clone(),
+            source_root,
+            lexical_source_root: source.to_path_buf(),
+            working_directory,
+        })
+    }
+
     pub(crate) fn establish_default_child_with_working_directory(
         source: &Path,
         child: &Path,
@@ -451,7 +491,10 @@ fn canonical_output(output: &Path) -> Result<PathBuf, Error> {
     Ok(canonical)
 }
 
-fn normal_relative(path: &Path) -> Result<(), Error> {
+/// A path that may be joined onto a proven root: components only, no root, no
+/// dots. Also the rule a stored run record's paths have to pass before anything
+/// is joined onto a folder and deleted.
+pub(crate) fn normal_relative(path: &Path) -> Result<(), Error> {
     if path.as_os_str().is_empty() {
         return Err(Error::RelativePathEmpty);
     }
