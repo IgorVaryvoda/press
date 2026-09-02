@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::RenderImage;
-use image::Frame;
+use image::{DynamicImage, Frame, RgbaImage};
 
 use crate::convert::{self, Format, MaxEdge, Quality};
 use crate::thumbs::to_bgra;
@@ -49,6 +49,13 @@ pub struct Preview {
     pub image: Arc<RenderImage>,
     pub width: u32,
     pub height: u32,
+    /// The source's ICC profile. Only meaningful while `decoded` is true.
+    pub profile: Option<Vec<u8>>,
+    /// True when `image` is this file decoded at full size, so `build` may re-encode
+    /// it instead of reading the file again. False for the thumbnail that stands in
+    /// while the decode runs: that one has been through the cache's lossy WebP and is
+    /// a picture to look at, not a source.
+    pub decoded: bool,
 }
 
 impl Pair {
@@ -62,14 +69,35 @@ impl Pair {
 }
 
 pub fn preview(path: &Path) -> Option<Preview> {
-    let image = crate::thumbs::decode_native(path, None)
-        .or_else(|| Some(crate::scan::decode(path)?.into_rgba8()))?;
+    // The native decoders first, as before. Both of them are eight-bit, so what they
+    // hand back is the whole source and a comparison can be built from it. The general
+    // fallback has already lost anything deeper to `into_rgba8`, and re-encoding those
+    // pixels would quietly write an eight-bit file from a sixteen-bit source, so it
+    // stays a picture to look at.
+    let (image, decoded) = match crate::thumbs::decode_native(path, None) {
+        Some(image) => (image, true),
+        None => (crate::scan::decode(path)?.into_rgba8(), false),
+    };
     let (width, height) = image.dimensions();
     Some(Preview {
         image: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(image))])),
         width,
         height,
+        profile: decoded.then(|| crate::scan::icc_profile(path)).flatten(),
+        decoded,
     })
+}
+
+/// The window's BGRA buffer read back as RGBA. `to_bgra` is its own inverse, so this
+/// is the same swap the preview already went through, run over a copy of it.
+fn rgba(image: &RenderImage) -> Option<RgbaImage> {
+    let size = image.size(0);
+    let pixels = image.as_bytes(0)?.to_vec();
+    Some(to_bgra(RgbaImage::from_raw(
+        u32::from(size.width),
+        u32::from(size.height),
+        pixels,
+    )?))
 }
 
 /// Decode `path`, encode it at `quality`, and decode that back, so both sides are
@@ -79,11 +107,29 @@ pub fn preview(path: &Path) -> Option<Preview> {
 /// 6400px source against a 2000px export would measure the resize, not the
 /// compression, and the resize is not the part you need to eyeball. Both sides are
 /// the delivered resolution; only one of them has been through the encoder.
-pub fn build(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -> Option<Pair> {
+///
+/// `preview` is the preview of this same file, if one is open. Comparing an image you
+/// are already looking at used to read and decode it a second time; its pixels are
+/// already here, and swapping a copy of them back out of BGRA costs a memcpy against a
+/// full decode. Only the original side is reused — the converted side is still
+/// encoded and decoded back, because a promise about the output is not the output.
+pub fn build(
+    path: &Path,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    preview: Option<&Preview>,
+) -> Option<Pair> {
     // The same decode and the same profile the writer uses, so the size shown beside
     // the comparison is the size the file would actually be.
     let format = format.resolve(path).ok()?;
-    let (decoded, profile) = crate::scan::decode_for_conversion(path, max_edge).ok()?;
+    let (decoded, profile) = match preview.filter(|preview| preview.decoded) {
+        Some(preview) => (
+            DynamicImage::ImageRgba8(rgba(&preview.image)?),
+            preview.profile.clone(),
+        ),
+        None => crate::scan::decode_for_conversion(path, max_edge).ok()?,
+    };
     let original = max_edge.apply(decoded);
     let encoded = convert::encode(&original, format, quality, profile.as_deref()).ok()?;
     let decoded = crate::scan::decode_bytes(&encoded)?;
@@ -151,8 +197,14 @@ mod tests {
         .save(&path)
         .unwrap();
 
-        let pair =
-            build(&path, Format::WebP, Quality::lossy(70.), MaxEdge::FULL).expect("pair builds");
+        let pair = build(
+            &path,
+            Format::WebP,
+            Quality::lossy(70.),
+            MaxEdge::FULL,
+            None,
+        )
+        .expect("pair builds");
 
         assert_eq!((pair.width, pair.height), (120, 80));
         // The compare view lines the two up pixel for pixel. If the encoder ever
@@ -177,6 +229,111 @@ mod tests {
         assert_eq!((preview.width, preview.height), (73, 41));
         assert_eq!(u32::from(preview.image.size(0).width), 73);
         assert_eq!(u32::from(preview.image.size(0).height), 41);
+    }
+
+    /// Comparing the image you are already looking at used to read and decode it a
+    /// second time. Proved the only way that cannot be faked: the file is gone by the
+    /// time the pair is built.
+    #[test]
+    fn a_comparison_built_from_a_preview_does_not_read_the_file_again() {
+        let dir = std::env::temp_dir().join("imageguide-compare-reuse");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.jpg");
+        crate::convert::tests::photo(200, 120).save(&path).unwrap();
+
+        let preview = preview(&path).expect("the JPEG previews");
+        assert!(preview.decoded, "a JPEG preview is the decoded source");
+        std::fs::remove_file(&path).unwrap();
+
+        let pair = build(
+            &path,
+            Format::WebP,
+            Quality::lossy(70.),
+            MaxEdge::FULL,
+            Some(&preview),
+        )
+        .expect("the pair builds from the preview's pixels");
+        assert_eq!((pair.width, pair.height), (200, 120));
+        assert_eq!(u32::from(pair.original.size(0).width), 200);
+        // The converted side is still an encode of those pixels decoded back, not a
+        // promise about one.
+        assert_eq!(u32::from(pair.converted.size(0).width), 200);
+        assert!(pair.converted_bytes > 0);
+
+        // And with nothing to reuse there is nothing to build from.
+        assert!(
+            build(
+                &path,
+                Format::WebP,
+                Quality::lossy(70.),
+                MaxEdge::FULL,
+                None
+            )
+            .is_none(),
+            "the file is gone, so a cold build cannot succeed"
+        );
+    }
+
+    /// The picture on screen while a preview decodes is a thumbnail out of the disk
+    /// cache, which has been through lossy WebP. Re-encoding that would report the
+    /// size of a comparison nobody asked for.
+    #[test]
+    fn a_thumbnail_standing_in_for_a_preview_is_never_used_as_a_source() {
+        let dir = std::env::temp_dir().join("imageguide-compare-standin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.jpg");
+        crate::convert::tests::photo(200, 120).save(&path).unwrap();
+
+        let standin = Preview {
+            image: Arc::new(RenderImage::new(vec![Frame::new(
+                crate::convert::tests::photo(20, 12).into_rgba8(),
+            )])),
+            width: 200,
+            height: 120,
+            profile: None,
+            decoded: false,
+        };
+
+        let pair = build(
+            &path,
+            Format::WebP,
+            Quality::lossy(70.),
+            MaxEdge::FULL,
+            Some(&standin),
+        )
+        .expect("the pair builds from the file");
+        assert_eq!(
+            (pair.width, pair.height),
+            (200, 120),
+            "the 20px stand-in was re-encoded as if it were the source"
+        );
+    }
+
+    /// The native decoders carry no ICC profile, so the preview reads it beside them.
+    /// Without it the comparison under-reports every wide gamut file by exactly the
+    /// bytes the writer would attach.
+    #[test]
+    fn a_preview_carries_the_profile_a_comparison_would_write() {
+        let dir = std::env::temp_dir().join("imageguide-compare-profile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.webp");
+        let profile = crate::convert::tests::rgb_profile();
+        let tagged = convert::encode(
+            &crate::convert::tests::photo(64, 48),
+            Format::WebP,
+            Quality::lossy(80.),
+            Some(&profile),
+        )
+        .expect("a tagged WebP encodes");
+        std::fs::write(&path, tagged).unwrap();
+
+        let preview = preview(&path).expect("the WebP previews");
+        assert!(preview.decoded);
+        assert_eq!(
+            preview.profile.as_deref(),
+            Some(profile.as_slice()),
+            "the preview dropped the source profile"
+        );
     }
 
     #[test]
@@ -252,8 +409,14 @@ mod tests {
             .save(&path)
             .unwrap();
 
-        let pair = build(&path, Format::WebP, Quality::lossy(70.), MaxEdge(Some(100)))
-            .expect("pair builds");
+        let pair = build(
+            &path,
+            Format::WebP,
+            Quality::lossy(70.),
+            MaxEdge(Some(100)),
+            None,
+        )
+        .expect("pair builds");
 
         assert_eq!((pair.width, pair.height), (100, 50));
         assert_eq!(u32::from(pair.original.size(0).width), 100);

@@ -454,6 +454,20 @@ fn still<D: ImageDecoder>(
     Ok((image, profile))
 }
 
+/// The source's RGB profile, read from its header alone.
+///
+/// The native decoders behind the preview are fast because they do one job; neither
+/// libjpeg-turbo nor libwebp hands back an ICC profile. A comparison built from those
+/// pixels still has to write the profile the file carried, or the size it reports is
+/// short by exactly the bytes the writer would attach.
+pub fn icc_profile(path: &Path) -> Option<Vec<u8>> {
+    let reader = ImageReader::open(path)
+        .and_then(ImageReader::with_guessed_format)
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    rgb_profile(decoder.icc_profile().ok().flatten())
+}
+
 /// Keep a profile only when it describes the pixels the encoders are handed.
 ///
 /// A decoder answers with the profile the *file* carried, not the one its pixels come

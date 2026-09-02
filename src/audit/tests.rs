@@ -2571,6 +2571,8 @@ fn a_running_ai_job_overlays_only_its_own_preview(cx: &mut TestAppContext) {
                 image,
                 width: 1000,
                 height: 1000,
+                profile: None,
+                decoded: false,
             })),
             pair: None,
             failed: false,

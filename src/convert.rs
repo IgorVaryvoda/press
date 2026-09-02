@@ -1025,6 +1025,11 @@ pub(crate) mod tests {
         }))
     }
 
+    /// The same stand-in in the one colour space the encoders accept.
+    pub(crate) fn rgb_profile() -> Vec<u8> {
+        colour_profile(b"RGB ")
+    }
+
     /// A stand-in for a Display P3 profile, in the given data colour space. Nothing on
     /// the way through reads a profile's contents, so this only has to carry the header
     /// the checks read and come back byte for byte.
