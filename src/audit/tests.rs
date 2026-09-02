@@ -1934,7 +1934,8 @@ fn a_symlinked_multi_folder_drop_keeps_one_root_identity(cx: &mut TestAppContext
 fn typing_in_the_max_edge_box_does_not_clear_the_selection(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
-        audit.selected.insert(0);
+        // Opening ticks every row; narrow to one so the assertion is specific.
+        audit.selected = HashSet::from([0]);
         audit.rail = Rail::Convert;
         audit.selection_changed(cx);
     });
@@ -1961,7 +1962,8 @@ fn keeping_the_format_into_the_audited_folder_disables_convert_with_a_reason(
 ) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
-        audit.selected.insert(0);
+        // Opening ticks every row; narrow to one so the label reads "1 selected".
+        audit.selected = HashSet::from([0]);
         audit.selection_changed(cx);
         audit.apply_format(Format::Same, cx);
         assert!(!audit.keep_format_overwrites_sources());
