@@ -712,12 +712,19 @@ pub fn workers(format: Format) -> usize {
 /// Convert every path, `workers(format)` at a time, calling `report` with each result
 /// as it lands. `report` is called from a worker thread, one at a time.
 ///
+/// `planned` is `plan_outputs`' answer for these sources, one entry each. The caller
+/// plans, so it can also read the planned names — to report them without writing, or
+/// to leave a file out of `sources` once it has decided the output is already current
+/// — while the collision planning still sees the whole list.
+///
 /// The window's conversion has its own copy of this loop built out of executor tasks,
 /// because it has to hand each result back to the UI thread. This one is for callers
 /// that only need the work done.
+#[allow(clippy::too_many_arguments)]
 pub fn convert_each(
     root: &Path,
     sources: &[PathBuf],
+    planned: &[Result<PathBuf, Failure>],
     destination: &Destination,
     format: Format,
     quality: Quality,
@@ -725,7 +732,6 @@ pub fn convert_each(
     report: impl Fn(&Path, Result<Converted, Failure>) + Sync,
 ) {
     let out_dir = destination.out_dir;
-    let planned = &plan_outputs(root, sources, sources, destination, format);
     let stamp = &crate::manifest::Stamp::new(format, quality, max_edge);
     // A shared cursor rather than a slice per thread: files in one folder differ in
     // size by a hundred times, so a fixed split leaves most threads finished early.
@@ -2277,9 +2283,17 @@ pub(crate) mod tests {
         assert!(!context.output_root().starts_with(&root));
 
         let written = parking_lot::Mutex::new(Vec::new());
+        let planned = plan_outputs(
+            &root,
+            &sources,
+            &sources,
+            context.output_root(),
+            Format::WebP,
+        );
         convert_each(
             &root,
             &sources,
+            &planned,
             &plain(context.output_root()),
             Format::WebP,
             Quality::lossy(80.),
@@ -2503,9 +2517,11 @@ pub(crate) mod tests {
         let seen = parking_lot::Mutex::new(Vec::new());
         // JPEG XL runs one file at a time, so "how many records are on disk" is
         // exactly "how far along the run is" and the count can be pinned.
+        let planned = plan_outputs(&dir, &sources, &sources, &out, Format::JpegXl);
         convert_each(
             &dir,
             &sources,
+            &planned,
             &plain(&out),
             Format::JpegXl,
             Quality::lossy(80.),

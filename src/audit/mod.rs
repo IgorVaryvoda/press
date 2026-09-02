@@ -130,7 +130,7 @@ const GALLERY_BORDER: f32 = 1.;
 /// that to −36%..+10%. Samples run together, so 32 of them cost 0.9s on that folder.
 /// AVIF and JPEG XL settle for three and stay rough numbers instead of making each
 /// slider stop feel like a conversion.
-fn sample_size(format: Format) -> usize {
+pub(crate) fn sample_size(format: Format) -> usize {
     match format {
         // A kept-format folder mixes containers, so it needs the wide sample more
         // than any single format does; three files would not project a mixture.
@@ -1894,6 +1894,24 @@ fn sirv_push_plan(
         .collect()
 }
 
+/// One sample per slice of a weight-sorted list, taken from the middle of the slice:
+/// the first file of a slice is its heaviest and the least like the rest of it.
+///
+/// Returns the position to sample and that whole slice's bytes, the sample included.
+/// The window's estimate and a headless dry run both project from this, so the two
+/// cannot quote numbers built from different samples.
+pub(crate) fn strata(weights: &[u64], slices: usize) -> Vec<(usize, u64)> {
+    (0..slices)
+        .filter_map(|slice| {
+            let start = slice * weights.len() / slices;
+            let end = (slice + 1) * weights.len() / slices;
+            let sample = (start + end) / 2;
+            weights.get(sample)?;
+            Some((sample, weights.get(start..end)?.iter().sum()))
+        })
+        .collect()
+}
+
 /// One sampled file and the slice of the list it speaks for.
 struct Stratum {
     path: PathBuf,
@@ -1914,7 +1932,7 @@ struct Stratum {
 /// applied that one ratio to the folder. On a weight-sorted list of 5,739 photos the
 /// heaviest file was 109MB of a 110MB sample, so its 300:1 compression became the
 /// forecast for all 3GB and the window promised "3.0 GB to save, −100%".
-fn project_total(slices: &[(u64, Option<(u64, u64)>)]) -> Option<(u64, usize)> {
+pub(crate) fn project_total(slices: &[(u64, Option<(u64, u64)>)]) -> Option<(u64, usize)> {
     let ratio = |(source, encoded): (u64, u64)| encoded as f64 / source.max(1) as f64;
     let sampled: Vec<f64> = slices
         .iter()
