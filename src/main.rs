@@ -637,6 +637,33 @@ struct ConversionReport {
     walk_errors: Vec<String>,
 }
 
+/// The folder the walk treats as this run's output.
+///
+/// A chosen `--output` under the audited folder holds what the last run wrote, and a
+/// walk that does not skip it audits its own output and offers it back for
+/// conversion. An output anywhere else is outside the walk already, and the default
+/// boundary stands so `optimized/` keeps being skipped and counted.
+fn walk_output(target: &Path, chosen: Option<&Path>) -> PathBuf {
+    let default = target.join(scan::OUTPUT_DIR);
+    let Some(chosen) = chosen else {
+        return default;
+    };
+    let (Ok(root), Ok(output)) = (
+        scan::canonical_boundary(target),
+        scan::canonical_boundary(chosen),
+    ) else {
+        return default;
+    };
+    // An output that is the audited folder is refused when the context is established,
+    // with a reason. Handing it to the walk here would empty the audit first and the
+    // refusal would arrive with nothing left to refuse.
+    if output != root && output.starts_with(&root) {
+        output
+    } else {
+        default
+    }
+}
+
 /// The counts a run only mentions when they happened. Zero skipped and zero failed
 /// is the ordinary case and does not need saying.
 fn run_tail(skipped: usize, failed: usize) -> String {
@@ -674,12 +701,17 @@ struct Queued<'a> {
 /// The plan covers every audited source, so dropping a file here cannot hand its name
 /// to a sibling that would otherwise have collided with it: the next run, with
 /// nothing to skip, plans the same names again.
+///
+/// The comparison is modification time and nothing else. A source that has not
+/// changed since its output was written is skipped even when this run asks for a
+/// different format, quality or maximum edge.
 fn queue_run<'a>(
     entries: &[&'a Entry],
     planned: &[Result<PathBuf, convert::Failure>],
     skip_existing: bool,
     json: bool,
 ) -> Queued<'a> {
+    debug_assert_eq!(entries.len(), planned.len(), "one plan per audited source");
     let mut queued = Queued {
         entries: Vec::with_capacity(entries.len()),
         planned: Vec::with_capacity(entries.len()),
@@ -734,6 +766,13 @@ fn project_run(
     quality: Quality,
     max_edge: MaxEdge,
 ) -> Option<(u64, usize)> {
+    // `strata` reads a weight-sorted list: it takes one sample from the middle of each
+    // slice and `project_total` scales that whole slice by the sample's ratio. In walk
+    // order a slice mixes a 40MB photo with three thumbnails, and whichever one is
+    // sampled speaks for bytes it has nothing to do with. The window sorts by weight
+    // before it estimates; so does this, rather than trusting the caller's order.
+    let mut entries: Vec<&Entry> = entries.to_vec();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
     let weights: Vec<u64> = entries.iter().map(|entry| entry.bytes).collect();
     let slices = audit::sample_size(format).min(weights.len());
     let sampled: Vec<(u64, Option<(u64, u64)>)> = audit::strata(&weights, slices)
@@ -758,7 +797,13 @@ fn project_run(
 ///
 /// The plan is the real one, so the names reported here are the names a run would
 /// write; a source whose plan was refused is named with its reason rather than
-/// counted.
+/// counted. `Format::resolve` runs here too, which is what catches `--format same`
+/// over a container with no encoder and over a file whose extension lies.
+///
+/// The refusals a dry run cannot make are the ones that need the pixels: JPEG over a
+/// source with real transparency, an animated GIF, PNG, WebP or JPEG XL, and a
+/// lossless request over a depth the format cannot keep. Those still fail on the real
+/// run, so a clean dry run is not a promise that every file converts.
 fn dry_run_headless(
     queued: &Queued,
     format: Format,
@@ -775,7 +820,13 @@ fn dry_run_headless(
     };
     let mut writable: Vec<&Entry> = Vec::new();
     for (entry, plan) in queued.entries.iter().zip(&queued.planned) {
-        let (status, planned_output, error) = match plan {
+        // A file the encoder would refuse by name is a failure a dry run can see, and
+        // reporting it as "planned" would send a caller off to look for an output that
+        // was never going to exist.
+        let resolved = plan
+            .clone()
+            .and_then(|written| format.resolve(&entry.path).map(|_| written));
+        let (status, planned_output, error) = match resolved {
             Ok(written) => {
                 run.before += entry.bytes;
                 writable.push(entry);
@@ -787,7 +838,7 @@ fn dry_run_headless(
                         written.display()
                     );
                 }
-                ("planned", Some(path_text(written)), None)
+                ("planned", Some(path_text(&written)), None)
             }
             Err(failure) => {
                 run.failed += 1;
@@ -1123,12 +1174,12 @@ fn main() {
             parent,
         )
     } else if args.subfolders {
-        let output = target.join(scan::OUTPUT_DIR);
+        let output = walk_output(&target, args.output.as_deref());
         (scan::scan(&target, &output), target.clone())
     } else {
         // The one-level read names files by their canonical root, so the root
         // follows it or the listing would lose its relative spelling.
-        let output = target.join(scan::OUTPUT_DIR);
+        let output = walk_output(&target, args.output.as_deref());
         match scan::browse(&target, &output) {
             Ok(browsed) => (
                 browsed.scan,
@@ -2069,6 +2120,144 @@ mod tests {
         assert_eq!(json["summary"]["projected_bytes"], projected);
         assert_eq!(json["files"][0]["status"], "planned");
         assert!(json["files"][0]["planned_output"].is_string());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// The sampler takes one file from the middle of each slice and scales the whole
+    /// slice by it. Handed a list in walk order, a slice pairs a heavy photo with a
+    /// thumbnail and the thumbnail's ratio speaks for both, so the projection follows
+    /// the small files. Sorted by weight, each heavy slice is sampled by a heavy file.
+    #[test]
+    fn a_projection_weighs_the_heavy_files_by_their_own_ratio() {
+        let base = temp_root("projection");
+        std::fs::create_dir_all(&base).unwrap();
+        // Two per slice, sampled at the second: heavy files sit on the even positions,
+        // where walk order would leave every one of them unsampled.
+        let mut paths = Vec::new();
+        for index in 0..64 {
+            let path = base.join(format!("photo-{index:02}.png"));
+            if index < 16 && index % 2 == 0 {
+                write_photo(&path, 160, 160);
+            } else {
+                write_photo(&path, 16, 16);
+            }
+            paths.push(path);
+        }
+        let entries = probe_all(&paths);
+        let heavy: u64 = entries.iter().filter(|entry| entry.bytes > 10_000).count() as u64;
+        assert_eq!(heavy, 8, "the fixture has a heavy tail to weigh");
+        let walk_order: Vec<&Entry> = entries.iter().collect();
+
+        let truth: u64 = entries
+            .iter()
+            .map(|entry| {
+                let (image, profile) = scan::decode_for_conversion(&entry.path).unwrap();
+                convert::encode(
+                    &image,
+                    Format::WebP,
+                    Quality::lossy(80.),
+                    profile.as_deref(),
+                )
+                .unwrap()
+                .len() as u64
+            })
+            .sum();
+        let (projected, samples) = project_run(
+            &walk_order,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("real encodes stand behind this");
+
+        assert_eq!(samples, 32);
+        assert!(truth > 0);
+        let error = projected.abs_diff(truth) as f64 / truth as f64;
+        assert!(
+            error < 0.2,
+            "projected {projected} against a real {truth}, {:.0}% out",
+            error * 100.
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `--format same` refuses a file whose name and bytes disagree, and a dry run can
+    /// see that without decoding anything. Calling it "planned" would send a caller
+    /// looking for an output that was never going to exist.
+    #[test]
+    fn a_dry_run_names_a_file_the_encoder_would_refuse_by_name() {
+        let base = temp_root("refused");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        let liar = root.join("mislabelled.jpg");
+        convert::tests::photo(48, 48)
+            .save_with_format(&liar, image::ImageFormat::Png)
+            .unwrap();
+        write_photo(&root.join("honest.png"), 48, 48);
+        let entries = probe_all(&[root.join("honest.png"), liar.clone()]);
+        assert!(
+            entries.iter().any(|entry| entry.extension_lies()),
+            "the fixture lies about its extension"
+        );
+
+        let queued = plan_run(&root, &out_dir, &entries, Format::Same, false);
+        let run = dry_run_headless(
+            &queued,
+            Format::Same,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+
+        assert_eq!(run.failed, 1);
+        let refused = run
+            .files
+            .iter()
+            .find(|file| file.source == path_text(&liar))
+            .expect("the mislabelled file is reported");
+        assert_eq!(refused.status, "failed");
+        assert!(refused.planned_output.is_none());
+        assert!(
+            refused
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("named .jpg but the bytes are PNG")),
+            "{:?}",
+            refused.error
+        );
+        let planned = run
+            .files
+            .iter()
+            .filter(|file| file.status == "planned")
+            .count();
+        assert_eq!(planned, 1);
+        assert!(!out_dir.exists(), "a dry run writes nothing");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A chosen output under the audited folder is this run's own output. The walk has
+    /// to skip it, or the next run audits what the last one wrote.
+    #[test]
+    fn a_chosen_output_under_the_root_becomes_the_walk_boundary() {
+        let base = temp_root("boundary");
+        let root = base.join("photos");
+        std::fs::create_dir_all(root.join("exports")).unwrap();
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        assert_eq!(
+            walk_output(&root, Some(&root.join("exports"))),
+            root.join("exports")
+        );
+        assert_eq!(
+            walk_output(&root, Some(&elsewhere)),
+            root.join(scan::OUTPUT_DIR)
+        );
+        assert_eq!(walk_output(&root, None), root.join(scan::OUTPUT_DIR));
+        // The context refuses this one by name; the walk must not empty the audit
+        // before that refusal arrives.
+        assert_eq!(walk_output(&root, Some(&root)), root.join(scan::OUTPUT_DIR));
         std::fs::remove_dir_all(&base).unwrap();
     }
 

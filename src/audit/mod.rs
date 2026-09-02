@@ -1746,7 +1746,6 @@ fn sirv_push_plan(
         .collect()
 }
 
-/// One sampled file and the slice of the list it speaks for.
 /// One sample per slice of a weight-sorted list, taken from the middle of the slice:
 /// the first file of a slice is its heaviest and the least like the rest of it.
 ///
@@ -1765,6 +1764,7 @@ pub(crate) fn strata(weights: &[u64], slices: usize) -> Vec<(usize, u64)> {
         .collect()
 }
 
+/// One sampled file and the slice of the list it speaks for.
 struct Stratum {
     path: PathBuf,
     /// The sampled file's own size on disk.
