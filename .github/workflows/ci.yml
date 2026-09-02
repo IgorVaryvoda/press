@@ -71,12 +71,19 @@ jobs:
       # build into about a minute.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      # `cargo test` builds the same crate, so a release build on top of it only
-      # buys the release profile — ten more minutes per platform on every push to a
-      # branch. Keep it on the push to main, where it guards what gets tagged.
+      # The steps below run with `--features updater`, so this is the only compile of
+      # the default feature set and the only one that sees the
+      # `#[cfg(not(feature = "updater"))]` arm. A release link of gpui costs about ten
+      # minutes per platform, which a pull request does not need, so a pull request
+      # gets the same feature set through a `cargo check` and the push to main keeps
+      # the release build that guards a tag.
       - name: Build
         if: github.event_name != 'pull_request'
         run: cargo build --release --locked
+
+      - name: Check the default feature set
+        if: github.event_name == 'pull_request'
+        run: cargo check --locked
 
       - name: Test
         run: cargo test --locked --features updater
