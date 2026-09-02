@@ -36,9 +36,21 @@ use libwebp_sys::{
 pub const THUMB_EDGE: u32 = 224;
 pub const TABLE_THUMB_EDGE: u32 = 96;
 
-/// Thumbnails kept on disk. Even at the old 38KB lossless size this bounds the cache
-/// near 110MB; normal lossy entries are smaller.
-const CACHE_FILES: usize = 3_000;
+/// Thumbnails kept on disk, bounded by what they occupy rather than by how many
+/// there are.
+///
+/// Every image can hold two entries, 96px for the list and 224px for the gallery, so
+/// a 5,000-image folder wants 10,000 of them and the old 3,000-file bound threw the
+/// tail of one folder away on every launch — those files were then decoded again the
+/// next time it was opened. A count is also the wrong unit: an entry is a lossy WebP
+/// whose size follows its picture, and the thing worth bounding is the disk it uses.
+///
+/// A noise photograph — the worst case, since noise does not compress — costs about
+/// 11KB across both edges, so this holds roughly 24,000 images where the old bound
+/// held 1,500. `the_byte_budget_holds_both_edges_of_a_five_thousand_image_folder`
+/// measures a real pair of entries against this number, so the thumbnail encoder
+/// cannot quietly outgrow it.
+const CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 pub(crate) struct PendingCache {
     file: PathBuf,
@@ -339,34 +351,42 @@ fn write_cached(file: &Path, thumbnail: &DynamicImage) {
     }
 }
 
-/// Drop the oldest cached thumbnails once there are more than `CACHE_FILES`.
+/// Drop the oldest cached thumbnails until the rest fit `CACHE_BYTES`.
 ///
-/// Called once when the window opens. A cache with no bound is a slow leak, and a
-/// whole-directory pass has no cheaper moment than startup, on a thread nobody waits
-/// for.
+/// Called once when the window opens, from `cx.background_executor()`. A cache with
+/// no bound is a slow leak, and a whole-directory pass has no cheaper moment than
+/// startup, on a thread nobody waits for. The size comes off the same directory read
+/// that already reports each entry's modification time, so bounding by bytes costs
+/// nothing over bounding by count.
 pub fn trim_cache() {
     if let Some(dir) = cache_dir() {
-        trim_cache_in(&dir, CACHE_FILES);
+        trim_cache_in(&dir, CACHE_BYTES);
     }
 }
 
-fn trim_cache_in(dir: &Path, keep: usize) {
+fn trim_cache_in(dir: &Path, keep_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, entry.path()))
+            let metadata = entry.metadata().ok()?;
+            Some((metadata.modified().ok()?, metadata.len(), entry.path()))
         })
         .collect();
-    if files.len() <= keep {
+    let mut held: u64 = files.iter().map(|(_, bytes, _)| bytes).sum();
+    if held <= keep_bytes {
         return;
     }
-    files.sort_by_key(|(modified, _)| *modified);
-    for (_, path) in files.iter().take(files.len() - keep) {
-        let _ = std::fs::remove_file(path);
+    files.sort_by_key(|(modified, _, _)| *modified);
+    for (_, bytes, path) in &files {
+        if held <= keep_bytes {
+            return;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            held -= bytes;
+        }
     }
 }
 
@@ -575,16 +595,18 @@ mod tests {
     }
 
     #[test]
-    fn trimming_keeps_the_newest_entries() {
+    fn trimming_keeps_the_newest_entries_that_fit_the_byte_budget() {
         let dir = scratch("cache-trim");
         for index in 0..5u32 {
-            std::fs::write(dir.join(format!("{index}.webp")), [index as u8]).unwrap();
+            std::fs::write(dir.join(format!("{index}.webp")), vec![index as u8; 100]).unwrap();
             // `modified` has coarse resolution on some filesystems, so order the files
             // by writing them apart rather than trusting five writes in one instant.
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
 
-        trim_cache_in(&dir, 2);
+        // 250 bytes holds two of these and not three, which a file count could not
+        // have told apart.
+        trim_cache_in(&dir, 250);
 
         let mut left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -592,5 +614,38 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["3.webp", "4.webp"]);
+
+        // A cache already inside the budget is left alone.
+        trim_cache_in(&dir, 250);
+        assert_eq!(cached_files(&dir), 2);
+    }
+
+    /// The bound has to cover the folder this app is for. A 5,000-image folder holds
+    /// two entries per image, and the old 3,000-file bound dropped most of them on
+    /// every launch, so the tail was decoded again on the next open. Measured against
+    /// real entries rather than an assumed size, because the number that matters is
+    /// what the thumbnail encoder actually writes.
+    #[test]
+    fn the_byte_budget_holds_both_edges_of_a_five_thousand_image_folder() {
+        let dir = scratch("cache-budget");
+        let cache = dir.join("cache");
+        let path = dir.join("photo.png");
+        // Noise, not a flat colour: a thumbnail of a real photograph does not
+        // compress to nothing, and a budget proved against nothing proves nothing.
+        crate::convert::tests::photo(1200, 900).save(&path).unwrap();
+        for edge in [TABLE_THUMB_EDGE, THUMB_EDGE] {
+            load_using(Some(&cache), &path, edge).expect("the photo decodes");
+        }
+
+        let per_image: u64 = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum();
+        assert!(per_image > 0, "no entries were written");
+        assert!(
+            CACHE_BYTES >= per_image * 5_000,
+            "the budget holds both edges of only {} images",
+            CACHE_BYTES / per_image
+        );
     }
 }
