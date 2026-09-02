@@ -498,14 +498,9 @@ pub(crate) fn canonical_boundary(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-fn browse_page(
-    root: &Path,
-    output_root: &Path,
-    cancelled: Option<&AtomicBool>,
-) -> std::io::Result<Option<Browse>> {
-    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-        return Ok(None);
-    }
+/// The one identity a browsed folder has, refused when it sits inside the output:
+/// auditing last run's WebPs offers them back as candidates for conversion.
+fn input_root(root: &Path, output_root: &Path) -> std::io::Result<PathBuf> {
     let root = canonical_boundary(root)?;
     let output = canonical_boundary(output_root).or_else(|_| lexical_boundary(output_root))?;
     if root.starts_with(output) {
@@ -514,6 +509,18 @@ fn browse_page(
             "the output folder cannot also be an input folder",
         ));
     }
+    Ok(root)
+}
+
+fn browse_page(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> std::io::Result<Option<Browse>> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Ok(None);
+    }
+    let root = input_root(root, output_root)?;
     let mut folders = Vec::new();
     let mut entries = Vec::new();
     let mut skipped_raw = 0;
@@ -616,8 +623,7 @@ fn is_default_output(root: &Path, output_root: &Path) -> bool {
 
 /// Read one directory level for the window's file browser. Header probes keep
 /// the existing audit rows truthful without decoding image pixels or walking the
-/// directory tree.
-#[cfg(test)]
+/// directory tree. The command line uses it for `--no-subfolders`.
 pub fn browse(root: &Path, output_root: &Path) -> std::io::Result<Browse> {
     Ok(browse_page(root, output_root, None)?.expect("an uncancellable browse completes"))
 }
@@ -678,6 +684,25 @@ fn browse_folders_inner(
     Ok(Some(scan))
 }
 
+/// The window's whole-tree page: the same walk the command line does, with the
+/// direct child folders kept beside it so the folder tree still navigates. Batches
+/// reach `publish` as headers are probed, which is how the window shows a count.
+pub(crate) fn browse_tree_cancellable(
+    root: &Path,
+    output_root: &Path,
+    cancelled: Arc<AtomicBool>,
+    publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
+) -> std::io::Result<Option<Browse>> {
+    let root = input_root(root, output_root)?;
+    let folders = child_folders(&root)?;
+    Ok(
+        match scan_progressive_cancellable(&root, output_root, cancelled, publish) {
+            ScanOutcome::Complete(scan) => Some(Browse { folders, scan }),
+            ScanOutcome::Cancelled => None,
+        },
+    )
+}
+
 /// Folder-only listing used when a tree node expands.
 pub(crate) fn child_folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut folders = Vec::new();
@@ -721,13 +746,17 @@ pub(crate) fn scan_progressive_cancellable(
     cancelled: Arc<AtomicBool>,
     publish: impl FnMut(&[Entry]) -> ControlFlow<()>,
 ) -> ScanOutcome {
-    scan_progressive_cancellable_with_hooks(
-        root,
-        output_root,
-        cancelled,
-        publish,
-        ScanHooks::default(),
-    )
+    let hooks = TEST_HOOKS.with(|hooks| hooks.borrow().clone().unwrap_or_default());
+    scan_progressive_cancellable_with_hooks(root, output_root, cancelled, publish, hooks)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Seams for a window test that reaches the walk through its production entry
+    /// point. Thread-local because gpui's test executor runs the walk on the test's
+    /// own thread, and tests run in parallel.
+    pub(crate) static TEST_HOOKS: std::cell::RefCell<Option<ScanHooks>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(not(test))]
@@ -741,13 +770,14 @@ pub(crate) fn scan_progressive_cancellable(
 }
 
 #[cfg(test)]
-struct ScanHooks {
+#[derive(Clone)]
+pub(crate) struct ScanHooks {
     queue_capacity: Option<usize>,
     before_walk_next: Arc<dyn Fn() + Send + Sync>,
     before_probe: Arc<dyn Fn(&Path) + Send + Sync>,
     before_callback: Arc<dyn Fn() + Send + Sync>,
     before_path_receive: Arc<dyn Fn() + Send + Sync>,
-    before_path_send: Arc<dyn Fn() + Send + Sync>,
+    pub(crate) before_path_send: Arc<dyn Fn() + Send + Sync>,
     before_result_receive: Arc<dyn Fn() + Send + Sync>,
     before_result_send: Arc<dyn Fn() + Send + Sync>,
 }
@@ -1959,6 +1989,39 @@ mod tests {
             .collect();
         complete.sort();
         assert_eq!(published, complete);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_tree_browse_finds_what_the_whole_folder_scan_finds() {
+        let dir = temp_dir("tree-browse");
+        let child = dir.join("child");
+        let grandchild = child.join("grandchild");
+        std::fs::create_dir_all(&grandchild).unwrap();
+        write_sample(&dir, "direct.png", 8, 8);
+        write_sample(&child, "nested.png", 8, 8);
+        write_sample(&grandchild, "deep.png", 8, 8);
+        let mut published = 0;
+
+        let browsed = browse_tree_cancellable(
+            &dir,
+            &dir.join(OUTPUT_DIR),
+            Arc::new(AtomicBool::new(false)),
+            |batch| {
+                published += batch.len();
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap()
+        .expect("an uncancelled tree browse completes");
+
+        let whole = scan(&dir, &dir.join(OUTPUT_DIR));
+        assert_eq!(browsed.scan.entries.len(), 3);
+        assert_eq!(browsed.scan.entries.len(), whole.entries.len());
+        assert_eq!(published, 3);
+        assert_eq!(browsed.folders, vec![child]);
+        let flat = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
+        assert_eq!(flat.scan.entries.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

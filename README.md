@@ -71,6 +71,7 @@ press ~/path/to/folder                        # audit, in a window
 press ~/photo.jpg                             # straight into the comparison
 press audit ~/path/to/folder                  # read-only terminal audit
 press audit ~/path/to/folder --json           # stable, agent-friendly report
+press audit ~/path/to/folder --no-subfolders  # this folder only, as the window opens it
 press convert ~/path/to/folder                # convert to WebP, no window
 press convert ~/path/to/folder --format avif --max-edge 1600 --quality 60
 press convert ~/path/to/folder --format jxl --lossless
@@ -94,10 +95,13 @@ stays in the toolbar afterwards, so you can change source without restarting.
 Picking a new one drops every thumbnail and result belonging to the old one, because
 a stale saving next to a new file is a lie.
 
-The window reads the current folder only, without scanning subfolders. Breadcrumbs,
-search, and the folder tree make moving between folders quick. Terminal `audit` and
-`convert` commands still walk subfolders. Images list heaviest first, because that is
-where the work is.
+The window reads the current folder only until the **Subfolders** chip in the header
+is on; then it walks the whole tree like the terminal does, names rows relative to the
+folder, shows a running count while it looks, and can be cancelled. The choice is
+remembered. Breadcrumbs, search, and the folder tree make moving between folders
+quick either way. Terminal `audit` and `convert` walk subfolders unless
+`--no-subfolders` is given, and both say which they did (`subfolders` in JSON).
+Images list heaviest first, because that is where the work is.
 
 | Column | Meaning |
 |---|---|

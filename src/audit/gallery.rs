@@ -216,7 +216,7 @@ impl Audit {
                     .whitespace_nowrap()
                     .text_size(px(12.))
                     .text_color(cx.theme().foreground)
-                    .child(entry_label(&self.root, self.batch_folders.is_some(), entry)),
+                    .child(entry_label(&self.root, self.show_parent(), entry)),
             )
             .child(
                 div()

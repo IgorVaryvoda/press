@@ -427,6 +427,7 @@ fn screenshot() {
                     recent_folders: Vec::new(),
                     columns: ColumnPrefs::default(),
                     output: crate::settings::Output::default(),
+                    include_subfolders: false,
                 },
                 window,
                 cx,
@@ -630,6 +631,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -739,6 +741,7 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -1352,6 +1355,7 @@ fn notification_audit(
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -1743,6 +1747,7 @@ fn finding_launch() -> Launch {
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     }
 }
 
@@ -2444,6 +2449,7 @@ fn pointer_checkbox_audit(
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| {
         let built = build_audit(launch, window, cx);
@@ -3697,6 +3703,282 @@ fn folder_navigation_is_shallow_and_replaces_the_file_selection(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestAppContext) {
+    let root = scan_fixture("subfolders-toggle");
+    let child = root.join("child");
+    let grandchild = child.join("grandchild");
+    std::fs::create_dir_all(&grandchild).unwrap();
+    write_png(&root, "direct.png");
+    write_png(&child, "nested.png");
+    write_png(&grandchild, "deep.png");
+    let whole = scan::scan(&root, &root.join(scan::OUTPUT_DIR))
+        .entries
+        .len();
+    assert_eq!(whole, 3);
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.include_subfolders);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(audit.folders, vec![child.clone()]);
+    });
+
+    let chip = cx
+        .debug_bounds("include-subfolders")
+        .expect("the header offers the scope chip");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.include_subfolders);
+        assert!(
+            audit.settings.include_subfolders,
+            "the choice is remembered"
+        );
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), whole);
+        assert_eq!(
+            audit.folders,
+            vec![child.clone()],
+            "the tree still navigates"
+        );
+        assert!(audit.tree_paths.values().any(|path| path == &child));
+        let mut labels: Vec<String> = audit
+            .entries
+            .iter()
+            .map(|entry| entry_label(&audit.root, audit.show_parent(), entry))
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                Path::new("child")
+                    .join("grandchild")
+                    .join("deep.png")
+                    .to_string_lossy()
+                    .into_owned(),
+                Path::new("child")
+                    .join("nested.png")
+                    .to_string_lossy()
+                    .into_owned(),
+                "direct.png".to_string(),
+            ]
+        );
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+    });
+
+    audit.update(cx, |audit, cx| audit.toggle_subfolders(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.include_subfolders);
+        assert_eq!(audit.entries.len(), 1);
+        assert_eq!(
+            entry_label(&audit.root, audit.show_parent(), &audit.entries[0]),
+            "direct.png"
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn the_scanning_screen_shows_the_count_and_cancel_keeps_the_last_folder(cx: &mut TestAppContext) {
+    assert_eq!(view::scan_progress_line(1), "Found 1 image…");
+    assert_eq!(view::scan_progress_line(999), "Found 999 images…");
+    assert_eq!(view::scan_progress_line(1240), "Found 1240 images…");
+
+    let (audit, cx) = finding_audit(cx);
+    let (token, request) = audit.update(cx, |audit, _| {
+        let token = retained_scan(audit);
+        audit.scan_found = Some(1240);
+        (token, audit.scan_generation)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let cancel = cx
+        .debug_bounds("cancel-scan")
+        .expect("a scan with a token offers Cancel");
+    assert!(cx.debug_bounds("audit-header").is_none());
+
+    cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        token.load(Ordering::Acquire),
+        "Cancel raises the scan token"
+    );
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, request.wrapping_add(1));
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_found.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert_eq!(audit.entries.len(), 3);
+        assert_eq!(audit.dataset_generation, 0);
+    });
+    assert!(cx.debug_bounds("audit-header").is_some());
+}
+
+#[gpui::test]
+fn cancelling_a_subfolder_scan_mid_walk_keeps_the_previous_dataset(cx: &mut TestAppContext) {
+    let root = scan_fixture("subfolders-cancel");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    write_png(&root, "direct.png");
+    write_png(&child, "nested.png");
+    let (audit, cx) = finding_audit(cx);
+    let retained = audit.read_with(cx, |audit, _| {
+        audit
+            .visible
+            .iter()
+            .map(|index| audit.entries[*index].name())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(retained, vec!["screenshot.png", "photo.jpg", "liar.webp"]);
+
+    // Cancel the way the button does, from inside the walk: the token goes up as
+    // the second path is handed to a worker, so one file was already in flight.
+    let token_slot: Arc<parking_lot::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>> =
+        Arc::new(parking_lot::Mutex::new(None));
+    let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    scan::TEST_HOOKS.with(|hooks| {
+        let token_slot = token_slot.clone();
+        let sends = sends.clone();
+        let mut seams = scan::ScanHooks::default();
+        seams.before_path_send = Arc::new(move || {
+            if sends.fetch_add(1, Ordering::Relaxed) == 1
+                && let Some(token) = token_slot.lock().as_ref()
+            {
+                token.store(true, Ordering::Release);
+            }
+        });
+        *hooks.borrow_mut() = Some(seams);
+    });
+    let request = audit.update(cx, |audit, cx| {
+        audit.include_subfolders = true;
+        let request = audit.scan_generation;
+        audit.request_path(root.clone(), cx);
+        assert!(audit.scanning.is_some());
+        *token_slot.lock() = Some(
+            audit
+                .scan_cancellation
+                .as_ref()
+                .map(|cancellation| cancellation.token.clone())
+                .expect("a tree walk is cancellable"),
+        );
+        request
+    });
+    cx.run_until_parked();
+    scan::TEST_HOOKS.with(|hooks| *hooks.borrow_mut() = None);
+    assert_eq!(
+        sends.load(Ordering::Relaxed),
+        2,
+        "the walk was stopped after one send"
+    );
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, request.wrapping_add(1));
+        assert_eq!(audit.dataset_generation, 0, "no half dataset is committed");
+        let names: Vec<String> = audit
+            .visible
+            .iter()
+            .map(|index| audit.entries[*index].name())
+            .collect();
+        assert_eq!(names, retained);
+        assert_eq!(audit.root, PathBuf::new());
+        assert!(audit.folders.is_empty());
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert!(
+            !audit.include_subfolders,
+            "the chip follows the list it shows"
+        );
+        assert!(!audit.dataset_subfolders);
+    });
+
+    // The same request completes when nobody stops it, with the count shown on
+    // the way: the cancel above stopped a walk that would have landed.
+    audit.update(cx, |audit, cx| {
+        audit.include_subfolders = true;
+        audit.request_path(root.clone(), cx)
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.dataset_generation, 1);
+        assert_eq!(audit.entries.len(), 2);
+        assert_eq!(audit.root, root);
+        assert!(audit.dataset_subfolders);
+        assert_eq!(
+            audit.scan_found,
+            Some(2),
+            "the live count reached the window"
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
+fn turning_subfolders_off_then_cancelling_keeps_the_nested_list_and_the_chip(
+    cx: &mut TestAppContext,
+) {
+    let root = scan_fixture("subfolders-off-cancel");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    write_png(&root, "direct.png");
+    write_png(&child, "nested.png");
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.include_subfolders = true;
+        audit.request_path(root.clone(), cx);
+    });
+    cx.run_until_parked();
+    let nested = Path::new("child")
+        .join("nested.png")
+        .to_string_lossy()
+        .into_owned();
+    let labels_of = |audit: &Audit| -> Vec<String> {
+        audit
+            .visible
+            .iter()
+            .map(|index| entry_label(&audit.root, audit.show_parent(), &audit.entries[*index]))
+            .collect()
+    };
+    let (before, order) = audit.read_with(cx, |audit, _| {
+        assert!(audit.dataset_subfolders);
+        assert_eq!(audit.entries.len(), 2);
+        (labels_of(audit), audit.visible.clone())
+    });
+    assert!(
+        before.contains(&nested),
+        "the list is the nested one: {before:?}"
+    );
+
+    audit.update(cx, |audit, cx| {
+        audit.toggle_subfolders(cx);
+        assert!(!audit.include_subfolders);
+        assert!(audit.scanning.is_some());
+        audit.cancel_scan(cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.entries.len(), 2);
+        assert_eq!(
+            audit.visible, order,
+            "the order is the one the labels sorted"
+        );
+        assert_eq!(labels_of(audit), before, "no label lost its folder");
+        assert!(
+            audit.include_subfolders,
+            "the chip shows the scope the list has"
+        );
+        assert!(
+            audit.settings.include_subfolders,
+            "and the settings remember that"
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
 fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
     let root = scan_fixture("heic-only");
     std::fs::write(root.join("IMG_0001.heic"), b"not really a heic")
@@ -3845,6 +4127,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -3956,6 +4239,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -4035,6 +4319,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
                 recent_folders: Vec::new(),
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
+                include_subfolders: false,
             },
             window,
             cx,
@@ -4118,6 +4403,7 @@ fn convertible_audit(
         recent_folders: Vec::new(),
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
+        include_subfolders: false,
     };
     let mut built = None;
     let (_, cx) = cx.add_window_view(|window, cx| {

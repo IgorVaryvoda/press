@@ -257,7 +257,7 @@ impl Audit {
         let report = audit_report(
             &self.root,
             &self.entries,
-            self.batch_folders.is_some(),
+            self.show_parent(),
             self.skipped_raw,
             self.skipped_heic,
             (self.heavy, self.mislabelled, self.marketplace),

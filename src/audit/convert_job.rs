@@ -141,11 +141,7 @@ impl Audit {
                                         .entries
                                         .get(index)
                                         .map(|entry| {
-                                            entry_label(
-                                                &audit.root,
-                                                audit.batch_folders.is_some(),
-                                                entry,
-                                            )
+                                            entry_label(&audit.root, audit.show_parent(), entry)
                                         })
                                         .unwrap_or_default();
                                     audit.failures.push(match error.reason() {

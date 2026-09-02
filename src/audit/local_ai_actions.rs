@@ -84,7 +84,7 @@ impl Audit {
         if tool == local_ai::Tool::Upscale
             && let Err(message) = local_ai::upscale_dimensions(entry.width, entry.height)
         {
-            let source_name = entry_label(&self.root, self.batch_folders.is_some(), entry);
+            let source_name = entry_label(&self.root, self.show_parent(), entry);
             self.local_ai_job = Some(LocalAiJob {
                 tool,
                 index,
@@ -105,7 +105,7 @@ impl Audit {
         }
 
         let source = entry.path.clone();
-        let source_name = entry_label(&self.root, self.batch_folders.is_some(), entry);
+        let source_name = entry_label(&self.root, self.show_parent(), entry);
         let root = self.root.clone();
         let out_dir = match self.output.context(&self.root) {
             Ok(context) => context.output_root().to_path_buf(),

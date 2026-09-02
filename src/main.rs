@@ -59,6 +59,7 @@ const HELP: &str = concat!(
     "  version    Print the version\n\n",
     "Options:\n",
     "  --json                    Write one schema-versioned JSON document\n",
+    "  --no-subfolders           Read the folder itself, not the folders below it\n",
     "  --format <webp|avif|jxl|jpeg|same>\n",
     "                            Output format (default: webp); same keeps each\n",
     "                            source's own format and name\n",
@@ -75,7 +76,8 @@ const HELP: &str = concat!(
     "  0  Complete success\n",
     "  1  The requested operation failed or was incomplete\n",
     "  2  Invalid invocation or target\n\n",
-    "With --json, stdout contains only JSON; diagnostics go to stderr.\n"
+    "With --json, stdout contains only JSON; diagnostics go to stderr.\n",
+    "audit and convert walk subfolders unless --no-subfolders is given, and say so.\n"
 );
 
 const AGENT_SKILL: &str = include_str!("../.agents/skills/press-cli/SKILL.md");
@@ -114,6 +116,8 @@ struct Args {
     max_edge: MaxEdge,
     grid: bool,
     json: bool,
+    /// Headless scope. The window has its own remembered chip for this.
+    subfolders: bool,
     unknown: Vec<String>,
 }
 
@@ -135,6 +139,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut max_edge = MaxEdge::FULL;
     let mut grid = false;
     let mut json = false;
+    let mut subfolders = true;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
 
@@ -197,6 +202,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--grid" => grid = true,
             "--json" => json = true,
+            "--no-subfolders" => subfolders = false,
             "--lossless" => {
                 conversion_option = true;
                 quality = Quality::LOSSLESS;
@@ -239,11 +245,17 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             max_edge,
             grid,
             json,
+            subfolders,
             unknown,
         });
     }
     if matches!(command, Command::Skill | Command::Update)
-        && (root.is_some() || conversion_option || grid || json || !unknown.is_empty())
+        && (root.is_some()
+            || conversion_option
+            || grid
+            || json
+            || !subfolders
+            || !unknown.is_empty())
     {
         return Err(format!(
             "{} takes no arguments",
@@ -266,6 +278,11 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Window && json {
         return Err("--json needs audit or convert".into());
     }
+    if command == Command::Window && !subfolders {
+        return Err(
+            "--no-subfolders needs audit or convert; the window has a Subfolders chip".into(),
+        );
+    }
     if !format.supports_lossless() && quality == Quality::LOSSLESS {
         return Err("--lossless is available only with --webp or --jxl".into());
     }
@@ -278,6 +295,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         max_edge,
         grid,
         json,
+        subfolders,
         unknown,
     })
 }
@@ -354,6 +372,10 @@ struct AuditReport {
     schema_version: u32,
     command: &'static str,
     target: String,
+    /// Whether the walk went below the target. The window reads one level by
+    /// default, so a report has to say which job it describes. `null` for one
+    /// file, which has no scope, rather than a `false` that reads as a choice.
+    subfolders: Option<bool>,
     summary: ScanSummary,
     files: Vec<AuditFile>,
     unreadable: Vec<String>,
@@ -390,11 +412,12 @@ fn audit_files(entries: &[Entry]) -> Vec<AuditFile> {
     files
 }
 
-fn audit_report(target: &Path, scanned: &scan::Scan) -> AuditReport {
+fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) -> AuditReport {
     AuditReport {
         schema_version: 1,
         command: "audit",
         target: path_text(target),
+        subfolders,
         summary: ScanSummary::from_scan(scanned),
         files: audit_files(&scanned.entries),
         unreadable: sorted_paths(&scanned.unreadable),
@@ -409,14 +432,25 @@ fn write_json(value: &impl Serialize) -> Result<(), String> {
     writeln!(out).map_err(|error| error.to_string())
 }
 
-fn print_audit(target: &Path, scanned: &scan::Scan) {
+/// The scope, said on the summary line of both text outputs. A single file has
+/// no scope to state.
+fn scope_note(subfolders: Option<bool>) -> &'static str {
+    match subfolders {
+        Some(true) => ", subfolders included",
+        Some(false) => ", subfolders excluded",
+        None => "",
+    }
+}
+
+fn print_audit(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) {
     let summary = ScanSummary::from_scan(scanned);
     println!(
-        "{} images, {} on disk, {} heavy, {} mislabelled",
+        "{} images, {} on disk, {} heavy, {} mislabelled{}",
         summary.images,
         format_bytes(summary.bytes),
         summary.heavy,
-        summary.mislabelled
+        summary.mislabelled,
+        scope_note(subfolders)
     );
     // A phone folder is all HEIC, so the line above is four zeroes and the report
     // reads as a failure. The skipped count is the finding there.
@@ -497,6 +531,7 @@ struct ConversionReport {
     command: &'static str,
     target: String,
     output: String,
+    subfolders: Option<bool>,
     options: ConversionOptions,
     scan: ScanSummary,
     summary: ConversionSummary,
@@ -710,6 +745,7 @@ fn main() {
                 recent_folders: remembered.recent_folders.clone(),
                 columns: remembered.columns,
                 output: remembered.output.clone(),
+                include_subfolders: remembered.include_subfolders,
             },
             None,
             pending_crash,
@@ -742,6 +778,7 @@ fn main() {
                 recent_folders: remembered.recent_folders.clone(),
                 columns: remembered.columns,
                 output: remembered.output.clone(),
+                include_subfolders: remembered.include_subfolders,
             },
             Some(target),
             pending_crash,
@@ -766,18 +803,33 @@ fn main() {
             },
             parent,
         )
-    } else {
+    } else if args.subfolders {
         let output = target.join(scan::OUTPUT_DIR);
         (scan::scan(&target, &output), target.clone())
+    } else {
+        // The one-level read names files by their canonical root, so the root
+        // follows it or the listing would lose its relative spelling.
+        let output = target.join(scan::OUTPUT_DIR);
+        match scan::browse(&target, &output) {
+            Ok(browsed) => (
+                browsed.scan,
+                scan::canonical_boundary(&target).unwrap_or_else(|_| target.clone()),
+            ),
+            Err(error) => {
+                eprintln!("press: {}: {error}", target.display());
+                std::process::exit(2);
+            }
+        }
     };
     print_scan_errors(&scanned);
+    let scope = (!open_single).then_some(args.subfolders);
     let unread = scanned.unreadable.len() + scanned.walk_errors.len();
 
     if args.command == Command::Audit {
         let written = if args.json {
-            write_json(&audit_report(&target, &scanned))
+            write_json(&audit_report(&target, &scanned, scope))
         } else {
-            print_audit(&root, &scanned);
+            print_audit(&root, &scanned, scope);
             Ok(())
         };
         if let Err(error) = written {
@@ -789,10 +841,11 @@ fn main() {
 
     if !args.json {
         println!(
-            "{} images, {} on disk, {} camera raw skipped",
+            "{} images, {} on disk, {} camera raw skipped{}",
             scanned.entries.len(),
             format_bytes(scanned.entries.iter().map(|entry| entry.bytes).sum()),
-            scanned.skipped_raw
+            scanned.skipped_raw,
+            scope_note(scope)
         );
         if scanned.skipped_heic > 0 {
             println!("{} HEIC skipped (not supported yet)", scanned.skipped_heic);
@@ -829,6 +882,7 @@ fn main() {
             command: "convert",
             target: path_text(&target),
             output: path_text(&out_dir),
+            subfolders: scope,
             options: ConversionOptions {
                 format: args.format.label(),
                 quality: args.quality.0,
@@ -1009,6 +1063,7 @@ struct Launch {
     recent_folders: Vec<PathBuf>,
     columns: settings::ColumnPrefs,
     output: settings::Output,
+    include_subfolders: bool,
 }
 
 /// `Root` owns these overlays but leaves their placement to the app's content view.
@@ -1357,6 +1412,26 @@ mod tests {
     }
 
     #[test]
+    fn no_subfolders_narrows_the_headless_scope_and_is_stated_in_the_output() {
+        assert!(parse(&["audit", "/photos"]).unwrap().subfolders);
+        assert!(
+            !parse(&["audit", "/photos", "--no-subfolders"])
+                .unwrap()
+                .subfolders
+        );
+        assert!(
+            !parse(&["convert", "/photos", "--no-subfolders", "--avif"])
+                .unwrap()
+                .subfolders
+        );
+        assert!(parse(&["--no-subfolders", "/photos"]).is_err());
+        assert!(parse(&["update", "--no-subfolders"]).is_err());
+        assert_eq!(scope_note(Some(true)), ", subfolders included");
+        assert_eq!(scope_note(Some(false)), ", subfolders excluded");
+        assert_eq!(scope_note(None), "");
+    }
+
+    #[test]
     fn update_is_a_targetless_command() {
         assert_eq!(parse(&["update"]).unwrap().command, Command::Update);
         assert!(parse(&["update", "/tmp"]).is_err());
@@ -1380,8 +1455,10 @@ mod tests {
             existing_output: 3,
         };
 
-        let json = serde_json::to_value(audit_report(Path::new("/photos"), &scanned)).unwrap();
+        let json =
+            serde_json::to_value(audit_report(Path::new("/photos"), &scanned, Some(true))).unwrap();
         assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["subfolders"], true);
         assert_eq!(json["summary"]["heavy"], 1);
         assert_eq!(json["summary"]["camera_raw_skipped"], 2);
         assert_eq!(json["files"][0]["path"], "/photos/heavy.png");
@@ -1400,7 +1477,15 @@ mod tests {
             existing_output: 0,
         };
 
-        let json = serde_json::to_value(audit_report(Path::new("/photos"), &scanned)).unwrap();
+        let json = serde_json::to_value(audit_report(Path::new("/photos"), &scanned, Some(false)))
+            .unwrap();
+        assert_eq!(json["subfolders"], false);
+        let single =
+            serde_json::to_value(audit_report(Path::new("/photo.png"), &scanned, None)).unwrap();
+        assert!(
+            single["subfolders"].is_null(),
+            "one file has no scope to claim"
+        );
         // The whole point: zero images is not the whole story, and a caller that
         // reads only `images` would call an iPhone folder empty.
         assert_eq!(json["summary"]["images"], 0);

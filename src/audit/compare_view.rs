@@ -63,7 +63,7 @@ impl Audit {
         // Keep the image name readable and drop the duplicate byte summary first.
         let entry = self.entries.get(comparison.index);
         let name = entry
-            .map(|entry| entry_label(&self.root, self.batch_folders.is_some(), entry))
+            .map(|entry| entry_label(&self.root, self.show_parent(), entry))
             .unwrap_or_default();
         let processing = self.preview_processing_message(comparison);
         // Where this image sits in the folder, so stepping through it has a
@@ -559,9 +559,7 @@ impl Audit {
                         let name = self
                             .entries
                             .get(index)
-                            .map(|entry| {
-                                entry_label(&self.root, self.batch_folders.is_some(), entry)
-                            })
+                            .map(|entry| entry_label(&self.root, self.show_parent(), entry))
                             .unwrap_or_default();
                         let saving = match (
                             self.entries.get(index).map(|entry| entry.bytes),

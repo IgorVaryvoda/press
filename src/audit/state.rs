@@ -246,7 +246,7 @@ impl Audit {
                 Listing::Walking | Listing::Failed(_) => None,
             });
         let root = &self.root;
-        let show_parent = self.batch_folders.is_some();
+        let show_parent = self.show_parent();
         let mut visible: Vec<usize> = self
             .entries
             .iter()

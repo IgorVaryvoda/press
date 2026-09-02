@@ -41,6 +41,7 @@ use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
+use futures::StreamExt;
 use futures::future::select_all;
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
@@ -549,8 +550,22 @@ pub(crate) struct Audit {
     scan_generation: u64,
     /// The path currently being scanned, if any.
     scanning: Option<String>,
+    /// Images the running tree walk has found so far. `None` for a one-level read,
+    /// which is over before a count would help.
+    scan_found: Option<usize>,
     /// The cancellable folder scan currently allowed to publish into this audit.
     scan_cancellation: Option<ScanCancellation>,
+    /// Walk the whole tree when a folder opens, as `press audit` does. Off, the
+    /// window reads one level and the tree is how you reach the rest. This is the
+    /// chip; `dataset_subfolders` is the list, and the two agree except while a
+    /// walk is running.
+    include_subfolders: bool,
+    /// Whether the installed rows came from a tree walk. Labels and sort order
+    /// follow this, not the chip, so a cancelled walk cannot relabel the list.
+    dataset_subfolders: bool,
+    /// The list is one file opened straight into its comparison. Changing scope
+    /// there would replace the file with its whole folder.
+    single_file: bool,
     /// Keyboard target. Without one the window gets no key events at all.
     focus: FocusHandle,
     /// Last title pushed to the compositor, so render does not set it every frame.
@@ -1016,10 +1031,46 @@ impl Audit {
         self.scanning.is_some()
     }
 
+    /// Rows are named relative to the root whenever one list can hold files from
+    /// more than one folder: a dropped batch, or a folder walked with its subfolders.
+    /// The same label sorts the list, so what you read is what you sorted by.
+    pub(super) fn show_parent(&self) -> bool {
+        self.batch_folders.is_some() || self.dataset_subfolders
+    }
+
+    /// Flip the scope and read the current folder again under it. A dropped batch
+    /// keeps its exact set; the choice applies to the next folder opened.
+    pub(super) fn toggle_subfolders(&mut self, cx: &mut Context<Self>) {
+        if self.converting || self.single_file {
+            return;
+        }
+        self.include_subfolders = !self.include_subfolders;
+        if self.batch_size.is_none() && self.root.is_dir() {
+            self.request_folder(self.root.clone(), cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     pub(super) fn cancel_retained_scan(&mut self) {
         if let Some(cancellation) = self.scan_cancellation.as_mut() {
             cancellation.cancel();
         }
+    }
+
+    /// Stop the running scan and keep what was on screen. The request is disowned
+    /// before the token is raised: a completion racing the click then fails the
+    /// ownership check, and no partial dataset is ever installed. The chip goes
+    /// back to the scope the list still has, so it claims nothing the rows lack
+    /// and the settings write remembers the truth.
+    pub(super) fn cancel_scan(&mut self, cx: &mut Context<Self>) {
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        self.cancel_retained_scan();
+        self.scan_cancellation = None;
+        self.scanning = None;
+        self.scan_found = None;
+        self.include_subfolders = self.dataset_subfolders;
+        cx.notify();
     }
 
     fn owns_scan_request(&self, request: u64, token: Option<&Arc<AtomicBool>>) -> bool {
@@ -1069,6 +1120,8 @@ impl Audit {
         self.browser_output_root = output_identity(&self.output, &self.root);
         self.batch_size = batch_size;
         self.batch_folders = None;
+        self.dataset_subfolders = false;
+        self.single_file = single;
         self.folders.clear();
         self.mislabelled = scanned
             .entries
@@ -1200,6 +1253,7 @@ impl Audit {
             cancellation.cancel();
         }
         self.scan_cancellation = None;
+        self.scan_found = None;
         self.scanning = Some(
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1270,6 +1324,7 @@ impl Audit {
         let cancellation = ScanCancellation::new();
         let token = cancellation.token.clone();
         self.scan_cancellation = Some(cancellation);
+        self.scan_found = None;
         self.scanning = Some(
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1277,35 +1332,75 @@ impl Audit {
         );
         let output_root = self.output.root(&path);
         let requested = path.clone();
+        let include_subfolders = self.include_subfolders;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let browse_token = token.clone();
-            let browsed = cx
-                .background_executor()
-                .spawn(async move {
-                    match scan::browse_cancellable(&path, &output_root, &browse_token) {
-                        Ok(Some(browsed)) => Some(Ok(browsed)),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error)),
+            let browsed = if include_subfolders {
+                // The walker publishes from its own thread, so the count crosses to
+                // the window through a channel; the sender goes away with the scan
+                // and the loop below ends before the result is read.
+                let (progress, mut found) = futures::channel::mpsc::unbounded();
+                let scan = cx.background_executor().spawn(async move {
+                    let mut count = 0;
+                    scan::browse_tree_cancellable(&path, &output_root, browse_token, |batch| {
+                        count += batch.len();
+                        let _ = progress.unbounded_send(count);
+                        std::ops::ControlFlow::Continue(())
+                    })
+                    .transpose()
+                });
+                while let Some(count) = found.next().await {
+                    let shown = this.update(cx, |audit, cx| {
+                        if audit.owns_scan_request(request, Some(&token)) {
+                            audit.scan_found = Some(count);
+                            cx.notify();
+                        }
+                    });
+                    if shown.is_err() {
+                        break;
                     }
-                })
-                .await;
+                }
+                scan.await
+            } else {
+                cx.background_executor()
+                    .spawn(async move {
+                        scan::browse_cancellable(&path, &output_root, &browse_token).transpose()
+                    })
+                    .await
+            };
             let _ = this.update_in(cx, |audit, window, cx| {
                 if !audit.owns_scan_request(request, Some(&token)) {
                     return;
                 }
+                // The count stays until the next request starts: it is only drawn
+                // while `scanning` is set, and a completed walk leaves its total
+                // where a test can read it.
                 audit.scanning = None;
                 audit.scan_cancellation = None;
                 match browsed {
-                    Some(Ok(browsed)) => audit.install_browse(browsed, requested, window, cx),
-                    Some(Err(error)) => audit.notify_error(
-                        "open-image",
-                        "Couldn’t open folder",
-                        format!("{}: {error}", requested.display()),
-                        cx,
-                    ),
-                    None => {}
+                    Some(Ok(browsed)) => {
+                        audit.install_browse(browsed, requested, window, cx);
+                        // Installed like `batch_folders`: the install clears batch
+                        // context, and the scope that labelled these rows goes back
+                        // before the list is sorted by it.
+                        if include_subfolders {
+                            audit.dataset_subfolders = true;
+                            audit.refresh_visible();
+                        }
+                    }
+                    Some(Err(error)) => {
+                        audit.include_subfolders = audit.dataset_subfolders;
+                        audit.notify_error(
+                            "open-image",
+                            "Couldn’t open folder",
+                            format!("{}: {error}", requested.display()),
+                            cx,
+                        )
+                    }
+                    // Stopped from outside the button, so the chip is put back here.
+                    None => audit.include_subfolders = audit.dataset_subfolders,
                 }
                 cx.notify();
             });
@@ -1400,6 +1495,7 @@ impl Audit {
         let cancellation = ScanCancellation::new();
         let token = cancellation.token.clone();
         self.scan_cancellation = Some(cancellation);
+        self.scan_found = None;
         self.scanning = Some(format!("{} folders", paths.len()));
         let folder_count = paths.len();
         let output_root = self.output.root(&root);
@@ -1451,6 +1547,7 @@ impl Audit {
             cancellation.cancel();
         }
         self.scan_cancellation = None;
+        self.scan_found = None;
         self.scanning = Some(format!("{} images", paths.len()));
         cx.notify();
 
@@ -1723,6 +1820,7 @@ pub(crate) fn build_audit(
         recent_folders,
         columns: column_prefs,
         output,
+        include_subfolders,
     } = launch;
     let root = navigation_path(root);
     let recent_folders = recent_folders
@@ -1927,7 +2025,11 @@ pub(crate) fn build_audit(
             dataset_generation: 0,
             scan_generation: 0,
             scanning: None,
+            scan_found: None,
             scan_cancellation: None,
+            include_subfolders,
+            dataset_subfolders: false,
+            single_file: open_single,
             focus,
             titled: String::new(),
             settings: settings::Settings::default(),
