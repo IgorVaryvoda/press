@@ -59,9 +59,10 @@ impl Audit {
         write_settings(&self.settings)
     }
 
-    /// The rows a conversion would touch. Opening a folder ticks every row in it;
-    /// after that the ticks are the user's. A filter only hides rows, so a tick the
-    /// filter is hiding is not a target and becomes one again when it widens.
+    /// The rows a conversion would touch. Opening a folder ticks every row in it and
+    /// changing the Sirv scope clears the ticks; between those, the ticks are the
+    /// user's. A filter only hides rows, so a tick the filter is hiding is not a
+    /// target and becomes one again when the filter widens.
     pub(super) fn targets(&self) -> Vec<usize> {
         conversion_targets(&self.visible, &self.selected)
     }
@@ -155,8 +156,7 @@ impl Audit {
     /// show a greyed button and no number until the user guessed they must tick rows.
     /// Narrowing is the explicit act: untick a row, or use the select-all control.
     pub(super) fn select_all_visible(&mut self) {
-        self.selected.clear();
-        self.selected.extend(self.visible.iter().copied());
+        self.selected = self.visible.iter().copied().collect();
         self.refresh_target_summary();
     }
 
@@ -418,6 +418,18 @@ impl Audit {
             let mut sampled = Vec::with_capacity(strata.len());
 
             loop {
+                // Every folder click starts a burst of these. Re-checking here stops a
+                // superseded one at its next slot, rather than decoding the rest of a
+                // folder nobody is looking at any more.
+                if this
+                    .read_with(cx, |audit, _| {
+                        audit.estimate_generation != generation
+                            || audit.dataset_generation != dataset_generation
+                    })
+                    .unwrap_or(true)
+                {
+                    return;
+                }
                 while inflight.len() < concurrency {
                     let Some(stratum) = queued.next() else {
                         break;

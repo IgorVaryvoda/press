@@ -2365,11 +2365,8 @@ fn pointer_checkbox_audit(
         AuditHarness { audit: built }
     });
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
-    audit.update(cx, |audit, _| {
-        audit.selected.extend([0, 1]);
-        audit.refresh_target_summary();
-        audit.estimate = Some((123, 2));
-    });
+    // Both rows are already ticked: opening the folder did that.
+    audit.update(cx, |audit, _| audit.estimate = Some((123, 2)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     (audit, cx)
 }
@@ -4230,6 +4227,31 @@ fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_sirv_scope_still_leaves_the_next_folder_ticked(cx: &mut TestAppContext) {
+    let root = photo_fixture("select-all-scope", 3);
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        // A remote-only scope hides every local row, and opening a folder retires the
+        // pairing that scope belongs to. The ticks have to follow the rows that reset
+        // brings back, not the empty list the scope showed on the way through.
+        audit.sirv_scope = Some(SirvScope::OnlyRemote);
+        audit.refresh_visible();
+        assert!(audit.visible.is_empty());
+    });
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.sirv_scope, None);
+        assert_eq!(audit.entries.len(), 3);
+        assert_eq!(audit.selected.len(), audit.entries.len());
+        assert_eq!(audit.target_count(), 3);
+    });
+    std::fs::remove_dir_all(root).expect("the fixture folder is removed");
+}
+
+#[gpui::test]
 fn unticking_a_row_narrows_the_conversion_targets(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-untick", 3);
     let (audit, cx) = finding_audit(cx);
@@ -4286,6 +4308,41 @@ fn opening_another_folder_replaces_the_selection(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(first).expect("the fixture folder is removed");
     std::fs::remove_dir_all(second).expect("the fixture folder is removed");
+}
+
+/// Opening a folder starts an estimate, and the next click supersedes it. Without
+/// an in-flight check that burst runs to the end, decoding a whole folder nobody is
+/// looking at any more, one full-size image per worker.
+#[gpui::test]
+fn a_superseded_estimate_stops_before_it_decodes_the_rest(cx: &mut TestAppContext) {
+    let count = convert::workers(Format::WebP) * 2;
+    let (audit, cx) = convertible_audit(count, cx);
+
+    // The supersession waits out the same settling timer as the estimate opening the
+    // folder started, and shares its session: the estimate runs first and starts its
+    // first wave of samples, and cannot resume its loop before this has run.
+    audit.update(cx, |_, cx| {
+        cx.spawn(async move |audit, cx| {
+            cx.background_executor().timer(ESTIMATE_DELAY).await;
+            let _ = audit.update(cx, |audit, _| audit.estimate_generation += 1);
+        })
+        .detach();
+    });
+    cx.executor()
+        .advance_clock(ESTIMATE_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.estimate.is_none(),
+            "a superseded estimate never lands"
+        );
+        let decoded = audit.estimate_decodes.lock().len();
+        assert!(
+            decoded > 0 && decoded < count,
+            "the stale run stopped after {decoded} of {count} samples"
+        );
+    });
 }
 
 #[gpui::test]

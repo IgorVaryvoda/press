@@ -1126,7 +1126,6 @@ impl Audit {
         self.cursor = 0;
         self.anchor = 0;
         self.refresh_visible();
-        self.select_all_visible();
         // A pairing maps one local root to one remote folder. A rescan of that root
         // keeps it; replacing the root retires it before the new rows can be pushed.
         if root_changed {
@@ -1144,6 +1143,10 @@ impl Audit {
                 self.refresh_sirv_counts();
             }
         }
+        // Last, because retiring a pairing resets the Sirv scope and refreshes the
+        // list again. Ticking before that would tick the rows a stale scope was
+        // still hiding, and open the folder with nothing selected.
+        self.select_all_visible();
         self.schedule_estimate(cx);
         cx.notify();
 
