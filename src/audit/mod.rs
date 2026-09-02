@@ -415,6 +415,10 @@ pub(crate) struct Audit {
     /// Outputs successfully written in this session, retained when settings change
     /// so the next action can say that it will replace them.
     completed_outputs: HashSet<(usize, Format)>,
+    /// Originals this folder's run record could put back. Read from disk when the
+    /// dataset changes and after a run, never during a render, and it survives a
+    /// restart because the record does.
+    restorable: usize,
     /// Source and output bytes for `results`. Conversion progress redraws often,
     /// so rebuilding these totals from every completed row would get slower as
     /// the job advances.
@@ -917,7 +921,20 @@ fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn root_needs_custom_output(root: &Path, output: &Output) -> bool {
-    root.has_root() && root.parent().is_none() && matches!(output, Output::Optimized)
+    // Replace mode counts too: its backup mirror would be created at the
+    // filesystem root, which is the same unwritable place for the same reason.
+    root.has_root()
+        && root.parent().is_none()
+        && matches!(output, Output::Optimized | Output::Replace)
+}
+
+/// A path as the window names it: relative to the audited folder when it is
+/// inside it, and whatever it is otherwise.
+fn entry_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn entry_label(root: &Path, show_parent: bool, entry: &Entry) -> String {
@@ -978,9 +995,33 @@ impl Audit {
         message: impl Into<gpui::SharedString>,
         cx: &mut Context<Self>,
     ) {
+        self.notify_toast(NotificationType::Error, scope, title, message, cx);
+    }
+
+    /// The same toast for something that worked. An undo that names the files it
+    /// put back is the only proof the user gets that it did.
+    pub(crate) fn notify_success(
+        &self,
+        scope: &'static str,
+        title: impl Into<gpui::SharedString>,
+        message: impl Into<gpui::SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.notify_toast(NotificationType::Success, scope, title, message, cx);
+    }
+
+    fn notify_toast(
+        &self,
+        kind: NotificationType,
+        scope: &'static str,
+        title: impl Into<gpui::SharedString>,
+        message: impl Into<gpui::SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let failed = matches!(kind, NotificationType::Error);
         let message = message.into();
         let notification = Notification::new()
-            .with_type(NotificationType::Error)
+            .with_type(kind)
             .id1::<ErrorToast>(scope)
             .title(title)
             .content(move |_, _, _| {
@@ -991,7 +1032,8 @@ impl Audit {
                     .child(message.clone())
                     .into_any_element()
             })
-            .autohide(false);
+            // A failure waits to be read; a confirmation gets out of the way.
+            .autohide(!failed);
         self.update_notifications(
             move |window, cx| window.push_notification(notification, cx),
             cx,
@@ -1098,6 +1140,9 @@ impl Audit {
         self.unreadable = scanned.unreadable;
         self.walk_errors = scanned.walk_errors;
         self.existing_output = scanned.existing_output;
+        // A new folder answers this question itself: the previous one's backups are
+        // not something this one can put back.
+        self.restorable = crate::manifest::restorable(&self.root);
         self.thumbs.clear();
         self.thumb_order.clear();
         self.requested.clear();
@@ -1534,6 +1579,82 @@ impl Audit {
         self.set_output(Output::Optimized, cx);
     }
 
+    /// Convert in place. Opt-in, because it is the one destination that changes
+    /// the folder you audited — and it still keeps every original, in the backup
+    /// the Restore button reads.
+    pub(super) fn use_replace_output(&mut self, cx: &mut Context<Self>) {
+        if self.converting {
+            return;
+        }
+        if root_needs_custom_output(&self.root, &Output::Replace) {
+            self.notify_error(
+                "output",
+                "Couldn’t replace in place",
+                "A filesystem-root selection requires a custom output folder.",
+                cx,
+            );
+            return;
+        }
+        self.set_output(Output::Replace, cx);
+    }
+
+    /// Put back every original a replace run moved aside.
+    ///
+    /// The run record on disk is what makes this work after a restart, and what
+    /// makes the report truthful: the files that came back are named, and so are
+    /// the ones that could not.
+    pub(super) fn restore_originals(&mut self, cx: &mut Context<Self>) {
+        if self.converting || self.restorable == 0 {
+            return;
+        }
+        self.clear_error("restore", cx);
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let restored = cx
+                .background_executor()
+                .spawn(async move { crate::manifest::restore(&root) })
+                .await;
+            let _ = this.update(cx, |audit, cx| {
+                audit.restorable = crate::manifest::restorable(&audit.root);
+                if restored.failures.is_empty() {
+                    audit.notify_success(
+                        "restore",
+                        "Originals restored",
+                        format!(
+                            "{} put back: {}",
+                            restored.restored.len(),
+                            named(
+                                restored
+                                    .restored
+                                    .iter()
+                                    .map(|path| entry_name(&audit.root, path))
+                            )
+                        ),
+                        cx,
+                    );
+                } else {
+                    audit.notify_error(
+                        "restore",
+                        "Some originals stayed put",
+                        format!(
+                            "{} put back; {} did not: {}",
+                            restored.restored.len(),
+                            restored.failures.len(),
+                            named(restored.failures.iter().cloned())
+                        ),
+                        cx,
+                    );
+                }
+                // The folder is not what the list is showing any more: the outputs
+                // are gone and the originals are back under their own names.
+                let root = audit.root.clone();
+                audit.request_folder(root, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Take the destination only if it can actually hold output. This refuses a folder
     /// that is or contains the audited one, which would re-encode originals onto
     /// themselves and report the loss as a saving. A folder *inside* the audited tree
@@ -1721,6 +1842,7 @@ pub(crate) fn build_audit(
         .map(navigation_path)
         .collect::<Vec<_>>();
     let browser_output_root = output_identity(&output, &root);
+    let restorable = crate::manifest::restorable(&root);
 
     let audit = cx.new(|cx| {
         let focus = cx.focus_handle();
@@ -1908,6 +2030,7 @@ pub(crate) fn build_audit(
             results: HashMap::new(),
             result_paths: HashMap::new(),
             completed_outputs: HashSet::new(),
+            restorable,
             converted_totals: (0, 0),
             converting: false,
             convert_cancel: None,
