@@ -949,8 +949,10 @@ impl Audit {
 /// between two of its slots; this runs at the top of each slot instead, with the
 /// number of samples finished so far.
 #[cfg(test)]
+pub(super) type EstimateHook = std::rc::Rc<dyn Fn(&mut Audit, usize)>;
+
+#[cfg(test)]
 thread_local! {
-    pub(super) static ESTIMATE_HOOK: std::cell::RefCell<
-        Option<std::rc::Rc<dyn Fn(&mut Audit, usize)>>,
-    > = const { std::cell::RefCell::new(None) };
+    pub(super) static ESTIMATE_HOOK: std::cell::RefCell<Option<EstimateHook>> =
+        const { std::cell::RefCell::new(None) };
 }
