@@ -24,7 +24,6 @@ mod thumbs;
 mod update;
 
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use convert::{Format, MaxEdge, Quality};
@@ -33,6 +32,42 @@ use gpui_component::{ActiveTheme, Root};
 use gpui_platform::application;
 use scan::{Entry, format_bytes};
 use serde::Serialize;
+
+/// Write `text` to `out`. `Ok(false)` means the reader closed the pipe.
+fn write_text(out: &mut impl std::io::Write, text: &str) -> std::io::Result<bool> {
+    match out.write_all(text.as_bytes()) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Every line the CLI writes goes through here.
+///
+/// `press audit big-folder | head` closes the pipe while Press is still writing, and
+/// `println!` panics on that. The panic hook then files a crash report and the next
+/// launch offers to send it, over a shell pipeline that worked. A reader that left is
+/// the end of the run, not a crash, so it exits 0 and the hook stays installed for
+/// everything that really is one.
+fn print_text(text: &str) {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match write_text(&mut out, text) {
+        Ok(true) => {}
+        Ok(false) => std::process::exit(0),
+        Err(error) => {
+            eprintln!("press: could not write to stdout: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `println!` for the CLI, through the guard above.
+macro_rules! outln {
+    ($($argument:tt)*) => {
+        crate::print_text(&format!("{}\n", format_args!($($argument)*)))
+    };
+}
 
 /// The smallest compositor window that supports every production view.
 const WINDOW_MIN_WIDTH: f32 = 760.;
@@ -470,10 +505,9 @@ fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) -
 }
 
 fn write_json(value: &impl Serialize) -> Result<(), String> {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    serde_json::to_writer(&mut out, value).map_err(|error| error.to_string())?;
-    writeln!(out).map_err(|error| error.to_string())
+    let document = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    print_text(&format!("{document}\n"));
+    Ok(())
 }
 
 /// The scope, said on the summary line of both text outputs. A single file has
@@ -488,7 +522,7 @@ fn scope_note(subfolders: Option<bool>) -> &'static str {
 
 fn print_audit(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) {
     let summary = ScanSummary::from_scan(scanned);
-    println!(
+    outln!(
         "{} images, {} on disk, {} heavy, {} mislabelled{}",
         summary.images,
         format_bytes(summary.bytes),
@@ -499,7 +533,7 @@ fn print_audit(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) {
     // A phone folder is all HEIC, so the line above is four zeroes and the report
     // reads as a failure. The skipped count is the finding there.
     if summary.heic_skipped > 0 {
-        println!("{} HEIC skipped (not supported yet)", summary.heic_skipped);
+        outln!("{} HEIC skipped (not supported yet)", summary.heic_skipped);
     }
     for entry in &scanned.entries {
         let relative = entry.path.strip_prefix(target).unwrap_or(&entry.path);
@@ -510,7 +544,7 @@ fn print_audit(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) {
         if entry.extension_lies() {
             findings.push("mislabelled");
         }
-        println!(
+        outln!(
             "{:<52} {:<8} {:>5}x{:<5} {:>9}  {:>5.2} B/px  {}",
             relative.display(),
             scan::format_name(entry.format),
@@ -666,7 +700,7 @@ fn queue_run<'a>(
         };
         let written = plan.as_deref().ok().map(path_text);
         if !json {
-            println!(
+            outln!(
                 "{:<52} {:>9}  skipped, the output is not older",
                 entry.name(),
                 format_bytes(bytes)
@@ -746,7 +780,7 @@ fn dry_run_headless(
                 run.before += entry.bytes;
                 writable.push(entry);
                 if !json {
-                    println!(
+                    outln!(
                         "{:<52} {:>9} -> {}",
                         entry.name(),
                         format_bytes(entry.bytes),
@@ -759,7 +793,7 @@ fn dry_run_headless(
                 run.failed += 1;
                 let reason = failure.reason();
                 if !json {
-                    println!(
+                    outln!(
                         "{:<52} failed{}",
                         entry.name(),
                         reason
@@ -803,7 +837,7 @@ fn dry_run_headless(
             ),
             None => "nothing encoded, so nothing to project".to_string(),
         };
-        println!(
+        outln!(
             "\n{} to convert to {} at {} ({}): {}, {projection}{}",
             writable.len(),
             format.label(),
@@ -812,7 +846,7 @@ fn dry_run_headless(
             format_bytes(run.before),
             run_tail(queued.skipped.len(), run.failed)
         );
-        println!("nothing written (dry run)");
+        outln!("nothing written (dry run)");
     }
     run
 }
@@ -871,7 +905,7 @@ fn convert_headless(
                         format!("  {}x{}", converted.width, converted.height)
                     };
                     if !json {
-                        println!(
+                        outln!(
                             "{:<52} {:>9} -> {:>9}  {percent:+.0}%{resized}",
                             entry.name(),
                             format_bytes(entry.bytes),
@@ -899,7 +933,7 @@ fn convert_headless(
                         .map(|reason| format!(": {reason}"))
                         .unwrap_or_default();
                     if !json {
-                        println!("{:<52} failed{reason}", entry.name());
+                        outln!("{:<52} failed{reason}", entry.name());
                     }
                     totals.files.push(ConversionFile {
                         source: path_text(source),
@@ -931,7 +965,7 @@ fn convert_headless(
         let growth = totals.after > totals.before;
         let delta = totals.before.abs_diff(totals.after);
         let percent = delta as f64 / totals.before.max(1) as f64 * 100.;
-        println!(
+        outln!(
             "\n{} converted to {} at {} ({}): {} -> {}, {} {} ({percent:.0}%){}",
             entries.len() - totals.failed,
             format.label(),
@@ -944,7 +978,7 @@ fn convert_headless(
             run_tail(queued.skipped.len(), totals.failed)
         );
         if entries.len() - totals.failed > 0 {
-            println!("written to {}", out_dir.display());
+            outln!("written to {}", out_dir.display());
         }
     }
     totals
@@ -957,15 +991,15 @@ fn main() {
 
     match args.command {
         Command::Help => {
-            print!("{HELP}");
+            print_text(HELP);
             return;
         }
         Command::Version => {
-            println!("press {}", env!("CARGO_PKG_VERSION"));
+            outln!("press {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         Command::Skill => {
-            print!("{AGENT_SKILL}");
+            print_text(AGENT_SKILL);
             return;
         }
         Command::Update => {
@@ -1125,7 +1159,7 @@ fn main() {
     }
 
     if !args.json {
-        println!(
+        outln!(
             "{} images, {} on disk, {} camera raw skipped{}",
             scanned.entries.len(),
             format_bytes(scanned.entries.iter().map(|entry| entry.bytes).sum()),
@@ -1133,12 +1167,12 @@ fn main() {
             scope_note(scope)
         );
         if scanned.skipped_heic > 0 {
-            println!("{} HEIC skipped (not supported yet)", scanned.skipped_heic);
+            outln!("{} HEIC skipped (not supported yet)", scanned.skipped_heic);
         }
         match scanned.skipped_packages {
             0 => {}
-            1 => println!("1 macOS package skipped"),
-            many => println!("{many} macOS packages skipped"),
+            1 => outln!("1 macOS package skipped"),
+            many => outln!("{many} macOS packages skipped"),
         }
     }
     // A chosen destination goes through the boundary the window establishes, so the
@@ -1239,9 +1273,9 @@ fn update_headless() {
     #[cfg(feature = "updater")]
     match update::install() {
         update::Outcome::Installed => {
-            println!("Press updated; start it again to use the new version")
+            outln!("Press updated; start it again to use the new version")
         }
-        update::Outcome::Current => println!("Press {} is up to date", env!("CARGO_PKG_VERSION")),
+        update::Outcome::Current => outln!("Press {} is up to date", env!("CARGO_PKG_VERSION")),
         update::Outcome::Unsupported => {
             eprintln!(
                 "press: this installation cannot self-update; use its package manager or replace it manually"
@@ -1534,6 +1568,19 @@ fn schedule_pending_crash_prompt(
 mod tests {
     use super::*;
     use gpui::{Context, IntoElement, Render, TestAppContext};
+
+    /// A reader that has gone away, and a stdout that is genuinely broken.
+    struct FailingWriter(std::io::ErrorKind);
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(self.0))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct CrashWindowHarness;
 
@@ -2104,6 +2151,26 @@ mod tests {
         // reads only `images` would call an iPhone folder empty.
         assert_eq!(json["summary"]["images"], 0);
         assert_eq!(json["summary"]["heic_skipped"], 4);
+    }
+
+    /// `press audit big-folder | head` closes the pipe under Press. That is the reader
+    /// leaving, and it must not reach the panic hook; anything else still has to be
+    /// reported as the failure it is.
+    #[test]
+    fn a_closed_reader_ends_a_write_cleanly_and_a_real_failure_stays_an_error() {
+        let mut closed = FailingWriter(std::io::ErrorKind::BrokenPipe);
+        assert!(
+            !write_text(&mut closed, "a line\n").expect("a closed reader is not an error"),
+            "a closed pipe ends the run rather than failing it"
+        );
+
+        let mut broken = FailingWriter(std::io::ErrorKind::PermissionDenied);
+        let error = write_text(&mut broken, "a line\n").expect_err("a real failure is an error");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let mut written = Vec::new();
+        assert!(write_text(&mut written, "a line\n").unwrap());
+        assert_eq!(written, b"a line\n");
     }
 
     #[gpui::test]
