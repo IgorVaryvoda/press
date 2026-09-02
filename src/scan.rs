@@ -340,8 +340,13 @@ pub enum ConversionDecodeError {
 /// The profile travels with the pixels because it is the only thing that says these
 /// pixels are Display P3 or Adobe RGB rather than sRGB. Written without it, a wide
 /// gamut photo is rendered as sRGB by every browser and its colours shift.
+///
+/// `max_edge` is a hint about the size the caller is heading for, not a promise about
+/// the size that comes back: only JPEG can act on it, and only in factors of two. The
+/// caller still runs `MaxEdge::apply` on the result to reach the exact edge.
 pub fn decode_for_conversion(
     path: &Path,
+    max_edge: crate::convert::MaxEdge,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format) {
         if reader.format() == Some(ImageFormat::Gif) {
@@ -377,6 +382,13 @@ pub fn decode_for_conversion(
             return still(decoder);
         }
 
+        if reader.format() == Some(ImageFormat::Jpeg)
+            && let Some(edge) = max_edge.0
+            && let Some(decoded) = scaled_jpeg(path, edge)
+        {
+            return Ok(decoded);
+        }
+
         if let Ok(decoder) = reader.into_decoder() {
             return still(decoder);
         }
@@ -391,6 +403,78 @@ pub fn decode_for_conversion(
         .ok_or(ConversionDecodeError::Failed)
 }
 
+/// Decode a JPEG with the inverse DCT stopped at the smallest scale that still covers
+/// `edge`.
+///
+/// Conversion used to decode every source at full size and throw most of it away:
+/// exporting 1600px out of a 6000px JPEG allocated the whole 6000px image first, once
+/// per worker, and eight workers over 45MP sources is where the resident set went.
+/// libjpeg-turbo can finish the DCT at a half, a quarter or an eighth, so the
+/// intermediate is now at most twice the exported edge.
+///
+/// `MaxEdge::apply` still finishes the job with Lanczos, so the only difference from a
+/// full decode is that scaled-DCT step; the exported pixels are not bit-identical to
+/// what a full decode produced, and they are not meant to be.
+///
+/// `None` means "decode this the old way": a factor of one, or a JPEG libjpeg-turbo
+/// will not hand back as packed pixels — CMYK and YCCK, which it only decompresses to
+/// CMYK, along with lossless and twelve-bit ones. Arithmetic coding it does read, so
+/// those take this path like any other.
+fn scaled_jpeg(path: &Path, edge: u32) -> Option<(DynamicImage, Option<Vec<u8>>)> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
+    let header = decompressor.read_header(&bytes).ok()?;
+    let factor = crate::thumbs::jpeg_scaling_factor(header.width.max(header.height), edge);
+    if factor == turbojpeg::ScalingFactor::ONE {
+        return None;
+    }
+    decompressor.set_scaling_factor(factor).ok()?;
+    let (width, height) = (factor.scale(header.width), factor.scale(header.height));
+    // A grayscale JPEG has to leave here with one channel, the way the full decode
+    // leaves it. Read as RGB it would reach the encoders as three components where the
+    // source had one, and a grayscale photo re-encoded as JPEG would grow.
+    //
+    // Otherwise RGB rather than RGBA: a JPEG has no alpha, and the fourth channel would
+    // be a quarter of this allocation spent carrying 255.
+    let gray = header.subsamp == turbojpeg::Subsamp::Gray;
+    let channels = if gray { 1 } else { 3 };
+    let mut pixels = vec![0u8; width.checked_mul(height)?.checked_mul(channels)?];
+    decompressor
+        .decompress(
+            &bytes,
+            turbojpeg::Image {
+                pixels: &mut pixels,
+                width,
+                pitch: width.checked_mul(channels)?,
+                height,
+                format: if gray {
+                    turbojpeg::PixelFormat::GRAY
+                } else {
+                    turbojpeg::PixelFormat::RGB
+                },
+            },
+        )
+        .ok()?;
+    let (width, height) = (width.try_into().ok()?, height.try_into().ok()?);
+
+    // turbojpeg hands back the stored pixels in the stored order and knows nothing
+    // about EXIF, so orientation and profile still come off the image crate's header
+    // read, and the rotation is applied after the scaled decode — the same order as a
+    // full decode, and the only order in which the dimensions come out swapped.
+    let mut decoder = ImageReader::with_format(std::io::Cursor::new(&bytes), ImageFormat::Jpeg)
+        .into_decoder()
+        .ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let profile = rgb_profile(decoder.icc_profile().ok().flatten());
+    let mut image = if gray {
+        DynamicImage::ImageLuma8(image::GrayImage::from_raw(width, height, pixels)?)
+    } else {
+        DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?)
+    };
+    image.apply_orientation(orientation);
+    Some((image, profile))
+}
+
 /// Orientation and colour profile both have to be read off the decoder before
 /// `from_decoder` consumes it.
 fn still<D: ImageDecoder>(
@@ -402,6 +486,20 @@ fn still<D: ImageDecoder>(
         DynamicImage::from_decoder(decoder).map_err(|_| ConversionDecodeError::Failed)?;
     image.apply_orientation(orientation);
     Ok((image, profile))
+}
+
+/// The source's RGB profile, read from its header alone.
+///
+/// The native decoders behind the preview are fast because they do one job; neither
+/// libjpeg-turbo nor libwebp hands back an ICC profile. A comparison built from those
+/// pixels still has to write the profile the file carried, or the size it reports is
+/// short by exactly the bytes the writer would attach.
+pub fn icc_profile(path: &Path) -> Option<Vec<u8>> {
+    let reader = ImageReader::open(path)
+        .and_then(ImageReader::with_guessed_format)
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    rgb_profile(decoder.icc_profile().ok().flatten())
 }
 
 /// Keep a profile only when it describes the pixels the encoders are handed.
@@ -1273,6 +1371,149 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (20, 40));
     }
 
+    /// Exporting a smaller image must not allocate the larger one first. The saving
+    /// has to be visible in what comes back rather than only in a stopwatch: the
+    /// intermediate is the largest DCT scale that still covers the target edge.
+    #[test]
+    fn a_downscaled_jpeg_decodes_at_a_reduced_dct_scale() {
+        let dir = temp_dir("scaled-jpeg");
+        let path = dir.join("big.jpg");
+        crate::convert::tests::photo(4000, 1000)
+            .save(&path)
+            .unwrap();
+
+        // A quarter of 4000 is exactly the target, so Lanczos has nothing left to do.
+        let (quarter, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(1000)))
+            .expect("the JPEG decodes");
+        assert_eq!((quarter.width(), quarter.height()), (1000, 250));
+
+        // A quarter would land under 1200, so the decode stops at a half and
+        // `MaxEdge::apply` finishes the step down.
+        let (half, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(1200)))
+            .expect("the JPEG decodes");
+        assert_eq!((half.width(), half.height()), (2000, 500));
+        let applied = crate::convert::MaxEdge(Some(1200)).apply(half);
+        assert_eq!((applied.width(), applied.height()), (1200, 300));
+
+        // Full size still decodes every pixel, as it always did.
+        let (full, _) =
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL).expect("the JPEG decodes");
+        assert_eq!((full.width(), full.height()), (4000, 1000));
+
+        // And a budget larger than the source never reaches for a smaller scale.
+        let (untouched, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(6000)))
+            .expect("the JPEG decodes");
+        assert_eq!((untouched.width(), untouched.height()), (4000, 1000));
+    }
+
+    /// libjpeg-turbo hands CMYK and YCCK back only as CMYK, so the scaled path has to
+    /// decline them and let the general decoder do the conversion. Getting that wrong
+    /// is not a failure anyone would notice quickly: four channels read as three come
+    /// out as a picture, just the wrong one.
+    ///
+    /// The fixture is an Adobe CMYK JPEG, red on the left and blue on the right.
+    /// Nothing here writes CMYK, so it is bytes rather than something built in the
+    /// test.
+    #[test]
+    fn a_cmyk_jpeg_falls_back_to_the_general_decoder_with_its_colours_intact() {
+        const CMYK_JPEG: [u8; 377] = [
+            0xff, 0xd8, 0xff, 0xee, 0x00, 0x0e, 0x41, 0x64, 0x6f, 0x62, 0x65, 0x00, 0x64, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x02, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x02, 0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x02,
+            0x02, 0x02, 0x05, 0x04, 0x04, 0x03, 0x04, 0x06, 0x05, 0x06, 0x06, 0x06, 0x05, 0x06,
+            0x06, 0x06, 0x07, 0x09, 0x08, 0x06, 0x07, 0x09, 0x07, 0x06, 0x06, 0x08, 0x0b, 0x08,
+            0x09, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x06, 0x08, 0x0b, 0x0c, 0x0b, 0x0a, 0x0c, 0x09,
+            0x0a, 0x0a, 0x0a, 0xff, 0xc0, 0x00, 0x14, 0x08, 0x00, 0x10, 0x00, 0x10, 0x04, 0x43,
+            0x11, 0x00, 0x4d, 0x11, 0x00, 0x59, 0x11, 0x00, 0x4b, 0x11, 0x00, 0xff, 0xc4, 0x00,
+            0x1f, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+            0x0a, 0x0b, 0xff, 0xc4, 0x00, 0xb5, 0x10, 0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04,
+            0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7d, 0x01, 0x02, 0x03, 0x00, 0x04,
+            0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14,
+            0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0, 0x24,
+            0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46,
+            0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64,
+            0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a,
+            0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+            0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3,
+            0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+            0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2, 0xe3,
+            0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+            0xf8, 0xf9, 0xfa, 0xff, 0xda, 0x00, 0x0e, 0x04, 0x43, 0x00, 0x4d, 0x00, 0x59, 0x00,
+            0x4b, 0x00, 0x00, 0x3f, 0x00, 0xfd, 0xfc, 0xaf, 0xe7, 0xfe, 0xbf, 0x9f, 0xfa, 0xfd,
+            0xfc, 0xaf, 0xe0, 0x0e, 0x8a, 0xfe, 0xff, 0x00, 0x28, 0xaf, 0xef, 0xf2, 0x8a, 0xfe,
+            0x00, 0xe8, 0xaf, 0xe0, 0x0e, 0x8a, 0xfe, 0xff, 0x00, 0x28, 0xaf, 0xff, 0xd9,
+        ];
+
+        let dir = temp_dir("cmyk-jpeg");
+        let path = dir.join("press.jpg");
+        std::fs::write(&path, CMYK_JPEG).unwrap();
+
+        // Half of sixteen, so the scaled path is asked for and has to decline.
+        let (image, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(8)))
+            .expect("a CMYK JPEG decodes");
+        assert_eq!((image.width(), image.height()), (16, 16));
+
+        let pixels = image.to_rgb8();
+        let left = pixels.get_pixel(2, 2).0;
+        let right = pixels.get_pixel(13, 2).0;
+        assert!(
+            left[0] > 200 && left[2] < 60,
+            "the left half is not red: {left:?}"
+        );
+        assert!(
+            right[2] > 200 && right[0] < 60,
+            "the right half is not blue: {right:?}"
+        );
+    }
+
+    /// The rotation belongs after the scaled decode. turbojpeg hands back the stored
+    /// pixels in the stored order, so applying EXIF to the header first would swap the
+    /// dimensions of an image that was never that shape, and the marked corner would
+    /// come out on the wrong side.
+    #[test]
+    fn a_rotated_jpeg_keeps_its_orientation_through_a_scaled_decode() {
+        const EXIF_ROTATE_90: [u8; 36] = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2a, 0, 0, 0, 8,
+            0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let dir = temp_dir("scaled-jpeg-orientation");
+        let path = dir.join("camera.jpg");
+        // A white block in the stored top-left corner. Rotated 90 degrees clockwise it
+        // belongs in the displayed top-right one.
+        let mut marked = crate::convert::tests::photo(2000, 1000).into_rgb8();
+        for y in 0..150 {
+            for x in 0..150 {
+                marked.put_pixel(x, y, Rgb([255, 255, 255]));
+            }
+        }
+        DynamicImage::ImageRgb8(marked).save(&path).unwrap();
+        let jpeg = std::fs::read(&path).unwrap();
+        let mut oriented = Vec::with_capacity(jpeg.len() + EXIF_ROTATE_90.len());
+        oriented.extend_from_slice(&jpeg[..2]);
+        oriented.extend_from_slice(&EXIF_ROTATE_90);
+        oriented.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&path, oriented).unwrap();
+
+        let entry = probe(&path).expect("the oriented JPEG is probed");
+        assert_eq!((entry.width, entry.height), (1000, 2000));
+
+        let (scaled, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(500)))
+            .expect("the JPEG decodes");
+        assert_eq!((scaled.width(), scaled.height()), (250, 500));
+        let pixels = scaled.to_rgb8();
+        assert!(
+            pixels.get_pixel(230, 20).0[1] > 200,
+            "the marked corner did not land top-right"
+        );
+        assert!(
+            pixels.get_pixel(20, 20).0[1] < 200,
+            "the marked corner is still top-left, so nothing rotated"
+        );
+    }
+
     /// The mislabelled files are the whole point, so they have to survive every path
     /// and not just the one that counts them. Decoding by extension meant the folder
     /// this app was built for — 169 files named `.webp`, 59 of them PNG — listed
@@ -1331,7 +1572,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedGif)
         );
     }
@@ -1433,7 +1674,7 @@ mod tests {
         write_animated_png(&path);
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedPng)
         );
     }
@@ -1445,7 +1686,7 @@ mod tests {
         write_animated_webp(&path, 16, 16);
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedWebP)
         );
     }
@@ -1467,7 +1708,8 @@ mod tests {
         std::fs::write(&webp, encoded).unwrap();
 
         for path in [png, webp] {
-            let (image, _) = decode_for_conversion(&path).expect("a still decodes");
+            let (image, _) = decode_for_conversion(&path, crate::convert::MaxEdge::FULL)
+                .expect("a still decodes");
             assert_eq!((image.width(), image.height()), (12, 9));
         }
     }
@@ -1486,7 +1728,7 @@ mod tests {
         std::fs::write(&path, TWO_FRAME_JXL).unwrap();
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedJpegXl)
         );
     }

@@ -594,6 +594,9 @@ fn encode_webp_pixels(
 fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
     let quality = aom_quality(quality);
+    // The one read of the process-wide speed. Everything below this takes it as an
+    // argument, so a test can ask for a speed without writing anything shared.
+    let speed = crate::avif::speed();
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
     let threads = (cores / workers(Format::Avif)).clamp(1, 8);
 
@@ -605,6 +608,7 @@ fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -
             rgba.height(),
             true,
             quality,
+            speed,
             threads,
             profile,
         )
@@ -616,6 +620,7 @@ fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -
             rgb.height(),
             false,
             quality,
+            speed,
             threads,
             profile,
         )
@@ -1228,7 +1233,7 @@ pub fn convert_to(
 ) -> Result<Converted, Failure> {
     let format = format.resolve(source)?;
     let (decoded, profile) =
-        crate::scan::decode_for_conversion(source).map_err(|error| match error {
+        crate::scan::decode_for_conversion(source, max_edge).map_err(|error| match error {
             crate::scan::ConversionDecodeError::Failed => Failure::Failed,
             crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
             crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
@@ -1339,6 +1344,11 @@ pub(crate) mod tests {
         }))
     }
 
+    /// The same stand-in in the one colour space the encoders accept.
+    pub(crate) fn rgb_profile() -> Vec<u8> {
+        colour_profile(b"RGB ")
+    }
+
     /// A stand-in for a Display P3 profile, in the given data colour space. Nothing on
     /// the way through reads a profile's contents, so this only has to carry the header
     /// the checks read and come back byte for byte.
@@ -1397,8 +1407,8 @@ pub(crate) mod tests {
         let source = dir.join("wide.png");
         write_tagged_png(&source, &photo(48, 48), &profile);
 
-        let (_, read_back) =
-            crate::scan::decode_for_conversion(&source).expect("the tagged PNG decodes");
+        let (_, read_back) = crate::scan::decode_for_conversion(&source, MaxEdge::FULL)
+            .expect("the tagged PNG decodes");
         assert_eq!(
             read_back.as_deref(),
             Some(profile.as_slice()),
@@ -1471,8 +1481,8 @@ pub(crate) mod tests {
             let source = dir.join(name);
             write_tagged_png(&source, &photo(16, 16), &profile);
 
-            let (_, read_back) =
-                crate::scan::decode_for_conversion(&source).expect("the tagged PNG decodes");
+            let (_, read_back) = crate::scan::decode_for_conversion(&source, MaxEdge::FULL)
+                .expect("the tagged PNG decodes");
             assert_eq!(read_back, None, "{name} kept a profile it should not have");
 
             let written = output_path(&dir, &source, &out, Format::WebP);
@@ -2077,6 +2087,57 @@ pub(crate) mod tests {
             .expect("a small edge parses")
             .apply(photo(80, 60));
         assert_eq!((scaled.width(), scaled.height()), (40, 30));
+    }
+
+    /// The speed dial has to reach libaom, not just the settings file. Six is what
+    /// Press has always encoded at, so the default must still produce those bytes, and
+    /// a different speed must produce different ones.
+    ///
+    /// Asked for by argument, never by writing the process-wide value: cargo runs
+    /// these in parallel, and the other AVIF tests are encoding while this one runs.
+    #[test]
+    fn the_avif_speed_setting_reaches_the_encoder() {
+        let rgb = photo(64, 64).to_rgb8();
+        let at = |speed| {
+            crate::avif::encode(rgb.as_raw(), 64, 64, false, 50, speed, 1, None)
+                .expect("AVIF encodes")
+        };
+
+        let default = at(crate::avif::DEFAULT_SPEED);
+        let fast = at(10);
+        assert_ne!(fast, default, "speed 10 wrote the speed 6 bytes");
+        assert!(
+            crate::scan::decode_bytes(&fast).is_some(),
+            "speed 10 is unreadable"
+        );
+
+        // And an unconfigured process still asks for six, which is what keeps an
+        // existing run byte for byte what it was.
+        assert_eq!(crate::avif::speed(), crate::avif::DEFAULT_SPEED);
+        assert_eq!(crate::avif::configured_speed(), None);
+    }
+
+    /// The scaled decode changes what conversion holds in memory, not what it writes:
+    /// a 4000px JPEG asked for 1000px still exports 1000px.
+    #[test]
+    fn a_big_jpeg_exports_at_the_max_edge_after_a_scaled_decode() {
+        let dir = temp_dir("scaled-export");
+        let source = dir.join("big.jpg");
+        photo(4000, 1000).save(&source).unwrap();
+
+        let converted = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &dir.join("out"), Format::WebP),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge(Some(1000)),
+        )
+        .expect("conversion runs");
+
+        assert_eq!((converted.width, converted.height), (1000, 250));
+        let written = crate::scan::probe(&converted.written).expect("the output is an image");
+        assert_eq!((written.width, written.height), (1000, 250));
     }
 
     #[test]

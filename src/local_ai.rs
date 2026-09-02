@@ -128,19 +128,22 @@ pub fn process(
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
     check_cancelled(cancelled)?;
-    let (decoded, profile) = scan::decode_for_conversion(source).map_err(|error| match error {
-        scan::ConversionDecodeError::AnimatedGif => "animated GIFs cannot use local AI".to_string(),
-        scan::ConversionDecodeError::AnimatedPng => {
-            "animated PNG files cannot use local AI".to_string()
-        }
-        scan::ConversionDecodeError::AnimatedWebP => {
-            "animated WebP files cannot use local AI".to_string()
-        }
-        scan::ConversionDecodeError::AnimatedJpegXl => {
-            "animated JPEG XL files cannot use local AI".to_string()
-        }
-        scan::ConversionDecodeError::Failed => "the source image would not decode".to_string(),
-    })?;
+    let (decoded, profile) = scan::decode_for_conversion(source, crate::convert::MaxEdge::FULL)
+        .map_err(|error| match error {
+            scan::ConversionDecodeError::AnimatedGif => {
+                "animated GIFs cannot use local AI".to_string()
+            }
+            scan::ConversionDecodeError::AnimatedPng => {
+                "animated PNG files cannot use local AI".to_string()
+            }
+            scan::ConversionDecodeError::AnimatedWebP => {
+                "animated WebP files cannot use local AI".to_string()
+            }
+            scan::ConversionDecodeError::AnimatedJpegXl => {
+                "animated JPEG XL files cannot use local AI".to_string()
+            }
+            scan::ConversionDecodeError::Failed => "the source image would not decode".to_string(),
+        })?;
     let (width, height) = (decoded.width(), decoded.height());
     if prepared.tool == Tool::Upscale {
         upscale_dimensions(width, height)?;

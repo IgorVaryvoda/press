@@ -18,7 +18,7 @@ thumbs::load (per visible row)  compare::build (per view)  convert::convert_file
 ```
 
 - `src/scan.rs` — header-only folder walk. Never decodes to learn dimensions. `Entry` carries `path/format/width/height/bytes`; `extension_lies()` flags files whose magic bytes disagree with the extension; output goes to `OUTPUT_DIR = "optimized"`, which the walk skips, as it skips `BACKUP_DIR = "press-originals"` (replace mode's originals) and the run manifest.
-- `src/convert.rs` — re-encode. WebP via libwebp (real transparency forces lossless), AVIF via system libavif/libaom speed 6 with libyuv conversion where packaged (no lossless AVIF). `MaxEdge` downscales with Lanczos3, never up. `output_path` mirrors the source tree.
+- `src/convert.rs` — re-encode. WebP via libwebp (real transparency forces lossless), AVIF via system libavif/libaom with libyuv conversion where packaged (no lossless AVIF). AVIF speed defaults to 6; `--avif-speed <0..10>` and the `avif_speed=` settings key override it, and `avif::set_speed` is the one place the range is enforced. `MaxEdge` downscales with Lanczos3, never up. `output_path` mirrors the source tree.
 - `src/compare.rs` — original-vs-converted pair built in memory, decode-encode-decode so both sides are real pixels. Cached by `Key` (path+format+quality+max_edge).
 - `src/thumbs.rs` — decode + 96px thumbnail + BGRA swap (`to_bgra`, shared with compare). `None` means draw a gap, not an error.
 - `src/manifest.rs` — `.press-manifest.jsonl` in the output root, one appended line per written output: which source it came from, what it measured, and where a replaced original was moved. Written before the original moves, so a killed run is still recoverable. `plan_outputs` reads it so a later run never walks over an earlier one's output, and `restore` walks it backwards to undo a replace run.
@@ -49,7 +49,7 @@ Key patterns an editor must respect:
 
 ```bash
 cargo build --release        # needs dav1d and libavif/libaom; Linux also packages libyuv
-cargo test --locked          # 48 tests; screenshot test stays ignored
+cargo test --locked          # ~400 tests; screenshot test stays ignored
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo run --release -- ~/path/to/folder            # audit window

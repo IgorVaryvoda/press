@@ -289,6 +289,10 @@ impl Audit {
                     image,
                     width,
                     height,
+                    profile: None,
+                    // A thumbnail standing in until the decode lands. It came out of
+                    // the cache's lossy WebP, so it is a picture, not a source.
+                    decoded: false,
                 })
             })
         });
@@ -397,6 +401,9 @@ impl Audit {
         self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
         let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
+        // Read before the comparison replaces it: the preview of this same file, at
+        // these same settings, has already decoded it.
+        let previewed = self.previewed_source(&key);
         self.compare = Some(Comparison {
             index,
             dataset_generation,
@@ -457,7 +464,9 @@ impl Audit {
 
             let built = cx
                 .background_executor()
-                .spawn(async move { compare::build(&path, format, quality, max_edge) })
+                .spawn(async move {
+                    compare::build(&path, format, quality, max_edge, previewed.as_deref())
+                })
                 .await
                 .map(Arc::new);
 
@@ -511,6 +520,21 @@ impl Audit {
             }
             _ => None,
         }
+    }
+
+    /// The preview of `key` that is on screen or held in the media cache, when it
+    /// holds the file's own decoded pixels. A comparison built from it reads nothing.
+    fn previewed_source(&self, key: &compare::Key) -> Option<Arc<Preview>> {
+        let on_screen = self
+            .compare
+            .as_ref()
+            .filter(|comparison| comparison.key == *key)
+            .and_then(|comparison| comparison.preview.clone());
+        let held = match self.cached.as_ref() {
+            Some((cached, CachedMedia::Preview(preview))) if cached == key => Some(preview.clone()),
+            _ => None,
+        };
+        on_screen.or(held).filter(|preview| preview.decoded)
     }
 
     fn take_cached_preview(&mut self, key: &compare::Key) -> Option<Arc<Preview>> {
@@ -624,7 +648,7 @@ impl Audit {
                             .map(CachedMedia::Preview),
                         MediaMode::Compare => match written {
                             Some(written) => compare::build_written(&path, &written),
-                            None => compare::build(&path, format, quality, max_edge),
+                            None => compare::build(&path, format, quality, max_edge, None),
                         }
                         .map(Arc::new)
                         .map(CachedMedia::Pair),

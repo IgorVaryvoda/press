@@ -19,6 +19,10 @@ pub struct Settings {
     /// Whether the window walks the whole tree like the command line does. Off
     /// by default so a folder opens exactly as it did before the choice existed.
     pub include_subfolders: bool,
+    /// libaom's speed dial for AVIF output. `None` is the built-in default; the
+    /// window has no control for it, so this and `--avif-speed` are the two ways
+    /// to say anything else. Range-checked once, in `avif::set_speed`.
+    pub avif_speed: Option<u8>,
 }
 
 pub const MAX_RECENT_FOLDERS: usize = 5;
@@ -262,6 +266,9 @@ fn parse(text: &str) -> Settings {
             "recent_folder" => settings.recent_folders.push(PathBuf::from(value.trim())),
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "subfolders" => settings.include_subfolders = value.trim() == "1",
+            // Range-checked in `avif::set_speed`, which is where every source of this
+            // value goes through. Parsing only has to reject what is not a number.
+            "avif_speed" => settings.avif_speed = value.trim().parse().ok(),
             "output" => {
                 let value = value.trim();
                 // Replace mode is never inherited from a file. It rewrites the
@@ -305,6 +312,9 @@ fn render(settings: &Settings) -> String {
     // choice existed keeps opening one level at a time.
     if settings.include_subfolders {
         out.push_str("subfolders=1\n");
+    }
+    if let Some(speed) = settings.avif_speed {
+        out.push_str(&format!("avif_speed={speed}\n"));
     }
     out
 }
@@ -403,8 +413,29 @@ mod tests {
             columns: ColumnPrefs::default(),
             output: Output::Folder(PathBuf::from("/exports/web")),
             include_subfolders: true,
+            avif_speed: Some(8),
         };
         assert_eq!(parse(&render(&settings)), settings);
+    }
+
+    /// The window has no control for the AVIF speed, so the file is the only place a
+    /// chosen one lives between launches. The default writes nothing, and junk in the
+    /// line leaves the default alone rather than encoding at some invented speed.
+    #[test]
+    fn an_avif_speed_survives_the_settings_file() {
+        let chosen = Settings {
+            avif_speed: Some(9),
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&chosen)).avif_speed, Some(9));
+
+        assert!(!render(&Settings::default()).contains("avif_speed"));
+        assert_eq!(parse("avif_speed=0\n").avif_speed, Some(0));
+        // Out of range is carried, not dropped: `avif::set_speed` clamps it, and the
+        // window then writes the clamped value back.
+        assert_eq!(parse("avif_speed=11\n").avif_speed, Some(11));
+        assert_eq!(parse("avif_speed=fast\n").avif_speed, None);
+        assert_eq!(parse("avif_speed=999\n").avif_speed, None);
     }
 
     /// The default writes no `output` line, so an older settings file — and a

@@ -450,21 +450,20 @@ impl Audit {
                         // every output by the size the writer will attach.
                         let key = (dataset_generation, path.clone(), max_edge);
                         let cached = decodes.lock().get(&key).cloned();
-                        let decoded =
-                            match cached {
-                                Some(sample) => Some(sample),
-                                None => scan::decode_for_conversion(&path).ok().map(
-                                    |(image, profile)| {
-                                        let sample = Arc::new((max_edge.apply(image), profile));
-                                        let mut cache = decodes.lock();
-                                        let held: u64 = cache.values().map(decoded_bytes).sum();
-                                        if held + decoded_bytes(&sample) <= ESTIMATE_DECODE_BYTES {
-                                            cache.insert(key, sample.clone());
-                                        }
-                                        sample
-                                    },
-                                ),
-                            };
+                        let decoded = match cached {
+                            Some(sample) => Some(sample),
+                            None => scan::decode_for_conversion(&path, max_edge).ok().map(
+                                |(image, profile)| {
+                                    let sample = Arc::new((max_edge.apply(image), profile));
+                                    let mut cache = decodes.lock();
+                                    let held: u64 = cache.values().map(decoded_bytes).sum();
+                                    if held + decoded_bytes(&sample) <= ESTIMATE_DECODE_BYTES {
+                                        cache.insert(key, sample.clone());
+                                    }
+                                    sample
+                                },
+                            ),
+                        };
                         let encoded = decoded
                             .zip(format.resolve(&path).ok())
                             .and_then(|(sample, format)| {

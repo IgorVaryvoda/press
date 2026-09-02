@@ -110,6 +110,8 @@ const HELP: &str = concat!(
     "  --skip-existing           Skip a source whose output is not older than it;\n",
     "                            a format, quality or max-edge change is not seen\n",
     "  --dry-run                 Plan and project a conversion, write nothing\n",
+    "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
+    "                            higher is faster and slightly larger\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -158,6 +160,8 @@ struct Args {
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
+    /// `None` leaves the AVIF speed to the settings file, then to the default.
+    avif_speed: Option<u8>,
     grid: bool,
     json: bool,
     /// Headless scope. The window has its own remembered chip for this.
@@ -189,6 +193,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut format = Format::WebP;
     let mut quality = Quality::lossy(80.);
     let mut max_edge = MaxEdge::FULL;
+    let mut avif_speed = None;
     let mut grid = false;
     let mut json = false;
     let mut subfolders = true;
@@ -261,6 +266,19 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                     .ok_or_else(|| "--output needs a folder".to_string())?;
                 output = Some(PathBuf::from(value));
             }
+            "--avif-speed" => {
+                conversion_option = true;
+                let value = rest
+                    .next()
+                    .ok_or_else(|| "--avif-speed needs a number from 0 to 10".to_string())?;
+                let speed: u8 = value
+                    .parse()
+                    .map_err(|_| format!("--avif-speed needs a number, got {value:?}"))?;
+                if speed > 10 {
+                    return Err(format!("--avif-speed needs 0 to 10, got {value:?}"));
+                }
+                avif_speed = Some(speed);
+            }
             "--webp" => {
                 conversion_option = true;
                 format = Format::WebP;
@@ -320,6 +338,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             format,
             quality,
             max_edge,
+            avif_speed,
             grid,
             json,
             subfolders,
@@ -392,6 +411,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         format,
         quality,
         max_edge,
+        avif_speed,
         grid,
         json,
         subfolders,
@@ -809,7 +829,7 @@ fn project_run(
         .into_iter()
         .map(|(sample, slice_bytes)| {
             let entry = entries[sample];
-            let encoded = scan::decode_for_conversion(&entry.path)
+            let encoded = scan::decode_for_conversion(&entry.path, max_edge)
                 .ok()
                 .zip(format.resolve(&entry.path).ok())
                 .and_then(|((image, profile), format)| {
@@ -1122,6 +1142,14 @@ fn main() {
     } else {
         settings::Settings::default()
     };
+    // Set before anything can encode. The flag wins over the settings file, and a
+    // window launched with the flag writes it back, so the choice sticks.
+    avif::set_speed(
+        args.avif_speed
+            .or(remembered.avif_speed)
+            .unwrap_or(avif::DEFAULT_SPEED),
+    );
+
     let target = args.root.clone().or_else(|| {
         remembered
             .folder
@@ -1925,9 +1953,36 @@ mod tests {
         }
     }
 
+    /// Zero is a real speed, so it cannot be dropped as falsy, and the range is
+    /// libaom's own. An unset flag stays unset: the settings file is asked next.
+    #[test]
+    fn the_avif_speed_flag_takes_zero_to_ten_and_nothing_else() {
+        assert_eq!(
+            parse(&["--avif-speed", "8", "x"]).unwrap().avif_speed,
+            Some(8)
+        );
+        assert_eq!(
+            parse(&["--avif-speed", "0", "x"]).unwrap().avif_speed,
+            Some(0)
+        );
+        assert_eq!(parse(&["--avif", "x"]).unwrap().avif_speed, None);
+        for value in ["11", "-1", "fast"] {
+            match parse(&["--avif-speed", value]) {
+                Err(error) => assert!(error.contains("--avif-speed"), "{value}: {error}"),
+                Ok(_) => panic!("accepted --avif-speed {value}"),
+            }
+        }
+        // It changes the output, so it is a conversion option like the rest.
+        assert!(parse(&["audit", "x", "--avif-speed", "8"]).is_err());
+    }
+
     #[test]
     fn a_missing_value_is_an_error() {
-        for arguments in [["--quality"].as_slice(), ["--max-edge"].as_slice()] {
+        for arguments in [
+            ["--quality"].as_slice(),
+            ["--max-edge"].as_slice(),
+            ["--avif-speed"].as_slice(),
+        ] {
             assert!(parse(arguments).is_err());
         }
     }
@@ -2264,7 +2319,8 @@ mod tests {
         let truth: u64 = entries
             .iter()
             .map(|entry| {
-                let (image, profile) = scan::decode_for_conversion(&entry.path).unwrap();
+                let (image, profile) =
+                    scan::decode_for_conversion(&entry.path, MaxEdge::FULL).unwrap();
                 convert::encode(
                     &image,
                     Format::WebP,
