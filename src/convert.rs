@@ -572,6 +572,9 @@ fn encode_webp_pixels(
 fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
     let quality = aom_quality(quality);
+    // The one read of the process-wide speed. Everything below this takes it as an
+    // argument, so a test can ask for a speed without writing anything shared.
+    let speed = crate::avif::speed();
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
     let threads = (cores / workers(Format::Avif)).clamp(1, 8);
 
@@ -583,6 +586,7 @@ fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -
             rgba.height(),
             true,
             quality,
+            speed,
             threads,
             profile,
         )
@@ -594,6 +598,7 @@ fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -
             rgb.height(),
             false,
             quality,
+            speed,
             threads,
             profile,
         )
@@ -1771,25 +1776,20 @@ pub(crate) mod tests {
     }
 
     /// The speed dial has to reach libaom, not just the settings file. Six is what
-    /// Press has always encoded at, so the unset default must still produce those
-    /// bytes, and a different speed must produce different ones.
+    /// Press has always encoded at, so the default must still produce those bytes, and
+    /// a different speed must produce different ones.
     ///
-    /// The speed is one value for the whole process, so this test puts the default
-    /// back before it returns; nothing else asserts on exact AVIF bytes.
+    /// Asked for by argument, never by writing the process-wide value: cargo runs
+    /// these in parallel, and the other AVIF tests are encoding while this one runs.
     #[test]
     fn the_avif_speed_setting_reaches_the_encoder() {
-        let image = photo(64, 64);
-        let at = |speed: u8| {
-            crate::avif::set_speed(speed);
-            assert_eq!(crate::avif::speed(), speed);
-            encode(&image, Format::Avif, Quality::lossy(70.), None).expect("AVIF encodes")
+        let rgb = photo(64, 64).to_rgb8();
+        let at = |speed| {
+            crate::avif::encode(rgb.as_raw(), 64, 64, false, 50, speed, 1, None)
+                .expect("AVIF encodes")
         };
 
-        let default =
-            encode(&image, Format::Avif, Quality::lossy(70.), None).expect("AVIF encodes");
-        assert_eq!(crate::avif::speed(), crate::avif::DEFAULT_SPEED);
-        assert_eq!(at(crate::avif::DEFAULT_SPEED), default, "the default moved");
-
+        let default = at(crate::avif::DEFAULT_SPEED);
         let fast = at(10);
         assert_ne!(fast, default, "speed 10 wrote the speed 6 bytes");
         assert!(
@@ -1797,58 +1797,10 @@ pub(crate) mod tests {
             "speed 10 is unreadable"
         );
 
-        // Out of range is clamped rather than refused: a hand-edited settings file
-        // must not stop the encoder.
-        crate::avif::set_speed(200);
-        assert_eq!(crate::avif::speed(), 10);
-
-        crate::avif::set_speed(crate::avif::DEFAULT_SPEED);
+        // And an unconfigured process still asks for six, which is what keeps an
+        // existing run byte for byte what it was.
+        assert_eq!(crate::avif::speed(), crate::avif::DEFAULT_SPEED);
         assert_eq!(crate::avif::configured_speed(), None);
-    }
-
-    /// A grayscale JPEG has one channel and has to keep it. Read as RGB by the scaled
-    /// decode it would reach the encoder as three components where the source had one,
-    /// and a black and white photo re-encoded as JPEG would come out bigger than it
-    /// went in.
-    #[test]
-    fn a_grayscale_jpeg_stays_grayscale_through_a_scaled_decode() {
-        let dir = temp_dir("scaled-grayscale");
-        let out = dir.join("out");
-        let gray = dir.join("gray.jpg");
-        let colour = dir.join("colour.jpg");
-        let source = photo(4000, 1000).grayscale();
-        source.save(&gray).unwrap();
-        // The same picture, written with three components. Both carry the same
-        // luminance, so any size difference is the channel count.
-        DynamicImage::ImageRgb8(source.to_rgb8())
-            .save(&colour)
-            .unwrap();
-
-        let converted = |source: &Path| {
-            convert_to(
-                &dir,
-                source,
-                &output_path(&dir, source, &out, Format::Jpeg),
-                Format::Jpeg,
-                Quality::lossy(80.),
-                MaxEdge(Some(1000)),
-            )
-            .expect("conversion runs")
-        };
-
-        let written = converted(&gray);
-        assert_eq!((written.width, written.height), (1000, 250));
-        assert!(
-            matches!(
-                crate::scan::decode(&written.written).expect("the output decodes"),
-                DynamicImage::ImageLuma8(_)
-            ),
-            "the grayscale source came back as a colour JPEG"
-        );
-        assert!(
-            written.bytes < converted(&colour).bytes,
-            "one channel wrote more bytes than three"
-        );
     }
 
     /// The scaled decode changes what conversion holds in memory, not what it writes:

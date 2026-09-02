@@ -11,15 +11,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// folder of five thousand photos usually wants.
 pub const DEFAULT_SPEED: u8 = 6;
 
-/// One value for the whole process, set once at startup from `--avif-speed` or the
-/// settings file. Speed changes nothing about the pixels an encoder is handed, so
-/// threading it through `convert::encode` would be nine call sites and every test
-/// carrying a constant.
+/// One value for the whole process, written once at startup from `--avif-speed` or
+/// the settings file and read at one call site. Speed changes nothing about the pixels
+/// an encoder is handed, so threading it through `convert::encode` would be nine call
+/// sites and every test carrying a constant; `encode` below takes it as an argument so
+/// nothing has to write this to test it.
 static SPEED: AtomicU8 = AtomicU8::new(DEFAULT_SPEED);
 
-/// Values above ten are clamped rather than refused: the command line already
-/// rejects them by name, and this is also reached from a settings file a person may
-/// have typed into.
+/// The one place the range is enforced. The command line rejects a bad value by name
+/// before it gets here, but the settings file is a text file a person may have typed
+/// into, and an encoder that refuses to run is a worse answer than a clamp.
 pub fn set_speed(speed: u8) {
     SPEED.store(speed.min(10), Ordering::Relaxed);
 }
@@ -57,12 +58,16 @@ unsafe extern "C" {
     fn imageguide_avif_free(encoded: *mut ImageGuideAvifData);
 }
 
+// One argument per parameter of `imageguide_avif_encode`, which is what a boundary
+// this thin is for. A struct here would only be the same list with a name on it.
+#[allow(clippy::too_many_arguments)]
 pub fn encode(
     pixels: &[u8],
     width: u32,
     height: u32,
     has_alpha: bool,
     quality: u8,
+    speed: u8,
     threads: usize,
     profile: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
@@ -85,7 +90,7 @@ pub fn encode(
             height,
             c_int::from(has_alpha),
             c_int::from(quality),
-            c_int::from(speed()),
+            c_int::from(speed),
             c_int::try_from(threads).ok()?,
             profile.map_or(std::ptr::null(), <[u8]>::as_ptr),
             profile.map_or(0, <[u8]>::len),

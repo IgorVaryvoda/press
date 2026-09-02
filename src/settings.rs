@@ -21,7 +21,7 @@ pub struct Settings {
     pub include_subfolders: bool,
     /// libaom's speed dial for AVIF output. `None` is the built-in default; the
     /// window has no control for it, so this and `--avif-speed` are the two ways
-    /// to say anything else.
+    /// to say anything else. Range-checked once, in `avif::set_speed`.
     pub avif_speed: Option<u8>,
 }
 
@@ -254,9 +254,9 @@ fn parse(text: &str) -> Settings {
             "recent_folder" => settings.recent_folders.push(PathBuf::from(value.trim())),
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "subfolders" => settings.include_subfolders = value.trim() == "1",
-            "avif_speed" => {
-                settings.avif_speed = value.trim().parse().ok().filter(|speed| *speed <= 10);
-            }
+            // Range-checked in `avif::set_speed`, which is where every source of this
+            // value goes through. Parsing only has to reject what is not a number.
+            "avif_speed" => settings.avif_speed = value.trim().parse().ok(),
             "output" => {
                 let value = value.trim();
                 settings.output = if value.is_empty() {
@@ -416,8 +416,11 @@ mod tests {
 
         assert!(!render(&Settings::default()).contains("avif_speed"));
         assert_eq!(parse("avif_speed=0\n").avif_speed, Some(0));
-        assert_eq!(parse("avif_speed=11\n").avif_speed, None);
+        // Out of range is carried, not dropped: `avif::set_speed` clamps it, and the
+        // window then writes the clamped value back.
+        assert_eq!(parse("avif_speed=11\n").avif_speed, Some(11));
         assert_eq!(parse("avif_speed=fast\n").avif_speed, None);
+        assert_eq!(parse("avif_speed=999\n").avif_speed, None);
     }
 
     /// The default writes no `output` line, so an older settings file — and a
