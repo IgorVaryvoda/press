@@ -131,7 +131,9 @@ const GALLERY_BORDER: f32 = 1.;
 /// slider stop feel like a conversion.
 fn sample_size(format: Format) -> usize {
     match format {
-        Format::WebP => 32,
+        // A kept-format folder mixes containers, so it needs the wide sample more
+        // than any single format does; three files would not project a mixture.
+        Format::WebP | Format::Jpeg | Format::Png | Format::Same => 32,
         Format::Avif | Format::JpegXl => 3,
     }
 }
@@ -397,6 +399,9 @@ pub(crate) struct Audit {
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
+    /// The size typed beside the presets. A preset click empties it; a typed size
+    /// that happens to be a preset lights that preset and stays in the box.
+    max_edge_input: gpui::Entity<InputState>,
     /// Drives the quality slider. Its own entity, because that is how the component
     /// reports drags.
     quality_slider: gpui::Entity<SliderState>,
@@ -1766,6 +1771,28 @@ pub(crate) fn build_audit(
                 .step(1.)
                 .default_value(quality.0.unwrap_or(80.))
         });
+        let max_edge_input = cx.new(|cx| {
+            let typed = match max_edge {
+                edge if MaxEdge::PRESETS.contains(&edge) => String::new(),
+                MaxEdge(Some(edge)) => edge.to_string(),
+                MaxEdge(None) => String::new(),
+            };
+            InputState::new(window, cx)
+                .placeholder("Custom")
+                .default_value(typed)
+        });
+        cx.subscribe(
+            &max_edge_input,
+            |audit: &mut Audit, input, event: &InputEvent, cx| {
+                // On Enter or leaving the box, not every keystroke: "1600" typed
+                // one digit at a time is not four sizes and four dropped results.
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let value = input.read(cx).value().to_string();
+                    audit.apply_custom_max_edge(&value, cx);
+                }
+            },
+        )
+        .detach();
         let folder_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search folders"));
         cx.subscribe(
@@ -1872,6 +1899,7 @@ pub(crate) fn build_audit(
             format,
             quality,
             max_edge,
+            max_edge_input,
             quality_slider,
             selected: HashSet::new(),
             selection_bounds: Rc::new(RefCell::new(HashMap::new())),

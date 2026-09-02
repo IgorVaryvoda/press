@@ -1928,6 +1928,89 @@ fn a_symlinked_multi_folder_drop_keeps_one_root_identity(cx: &mut TestAppContext
     std::fs::remove_dir_all(fixture).unwrap();
 }
 
+/// Escape in the list puts the selection down. Escape in the size box is the
+/// box's business, and the ticked rows must not pay for it.
+#[gpui::test]
+fn typing_in_the_max_edge_box_does_not_clear_the_selection(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(0);
+        audit.rail = Rail::Convert;
+        audit.selection_changed(cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let input = cx
+        .debug_bounds("max-edge-input")
+        .expect("the size box is in the convert rail");
+    cx.simulate_click(input.center(), gpui::Modifiers::none());
+    cx.update(|window, cx| assert!(audit.read(cx).text_input_focused(window, cx)));
+    cx.simulate_keystrokes("escape");
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, HashSet::from([0]));
+    });
+}
+
+/// With the format kept, the output name is the source name. The rail says so
+/// before the button can be pressed, instead of the failure list saying it once
+/// per file afterwards.
+#[gpui::test]
+fn keeping_the_format_into_the_audited_folder_disables_convert_with_a_reason(
+    cx: &mut TestAppContext,
+) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(0);
+        audit.selection_changed(cx);
+        audit.apply_format(Format::Same, cx);
+        assert!(!audit.keep_format_overwrites_sources());
+        assert!(
+            audit
+                .conversion_action_label()
+                .starts_with("Convert 1 selected")
+        );
+
+        audit.output = Output::Folder(audit.root.clone());
+        assert!(audit.keep_format_overwrites_sources());
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Keep format needs a different output folder"
+        );
+
+        audit.apply_format(Format::WebP, cx);
+        assert!(!audit.keep_format_overwrites_sources());
+    });
+}
+
+/// The box beside the presets follows `--max-edge`: a positive whole number of
+/// pixels applies, junk changes nothing, and an emptied box is the source size.
+#[gpui::test]
+fn a_typed_max_edge_applies_and_junk_leaves_the_last_size(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        assert_eq!(audit.max_edge, MaxEdge::FULL);
+        audit.apply_custom_max_edge("1200", cx);
+        assert_eq!(audit.max_edge, MaxEdge(Some(1200)));
+        assert!(
+            panel::active_preset(audit.format, audit.quality, audit.max_edge).is_none(),
+            "a typed size is a custom configuration"
+        );
+
+        for junk in ["0", "abc", "-4"] {
+            audit.apply_custom_max_edge(junk, cx);
+            assert_eq!(
+                audit.max_edge,
+                MaxEdge(Some(1200)),
+                "{junk:?} changed the size"
+            );
+        }
+
+        audit.apply_custom_max_edge("", cx);
+        assert_eq!(audit.max_edge, MaxEdge::FULL);
+    });
+}
+
 #[gpui::test]
 fn choosing_avif_leaves_lossless_for_the_last_slider_quality(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -2778,7 +2861,7 @@ fn studio_prompt_typing_does_not_toggle_the_audit_selection(cx: &mut TestAppCont
         .debug_bounds("studio-prompt-input")
         .expect("the Studio prompt is visible");
     cx.simulate_click(input.center(), gpui::Modifiers::none());
-    cx.update(|window, cx| assert!(audit.read(cx).studio_input_focused(window, cx)));
+    cx.update(|window, cx| assert!(audit.read(cx).text_input_focused(window, cx)));
     cx.simulate_keystrokes("space");
 
     audit.read_with(cx, |audit, _| {

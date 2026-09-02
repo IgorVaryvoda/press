@@ -82,6 +82,7 @@ pub fn preview(path: &Path) -> Option<Preview> {
 pub fn build(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -> Option<Pair> {
     // The same decode and the same profile the writer uses, so the size shown beside
     // the comparison is the size the file would actually be.
+    let format = format.resolve(path).ok()?;
     let (decoded, profile) = crate::scan::decode_for_conversion(path).ok()?;
     let original = max_edge.apply(decoded);
     let encoded = convert::encode(&original, format, quality, profile.as_deref()).ok()?;

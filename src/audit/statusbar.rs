@@ -50,7 +50,7 @@ impl Audit {
             } else {
                 "images"
             },
-            self.format.label().to_uppercase(),
+            self.format.display(),
             format_bytes(delta),
             if grew { "larger" } else { "saved" },
             self.output.label(),
