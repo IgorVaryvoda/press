@@ -1,6 +1,16 @@
 //! The conversion job: one sliding window of decodes bounded by worker count.
 
 use super::*;
+use crate::manifest;
+
+/// One file's whole plan: which row it is, what to read, where the output goes,
+/// and where its original moves first when the run is replacing them.
+struct Planned {
+    index: usize,
+    source: PathBuf,
+    written: Result<PathBuf, convert::Failure>,
+    backup: Option<PathBuf>,
+}
 
 impl Audit {
     pub(super) fn start_conversion(&mut self, cx: &mut Context<Self>) {
@@ -43,6 +53,9 @@ impl Audit {
 
         let root = self.root.clone();
         let out_dir = context.output_root().to_path_buf();
+        // Replace mode is the only run that moves an original, and it moves it
+        // into one mirror of the audited tree that the scan steps over.
+        let backups = (self.output == Output::Replace).then(|| manifest::backup_root(&out_dir));
         let quality = self.quality;
         let format = self.format;
         let max_edge = self.max_edge;
@@ -61,12 +74,27 @@ impl Audit {
             .iter()
             .map(|entry| entry.path.clone())
             .collect();
-        let planned = convert::plan_outputs(&root, &paths, &audited, &out_dir, format);
-        let sources: Vec<(usize, PathBuf, Result<PathBuf, convert::Failure>)> = sources
+        // What earlier runs left here. An output one of them wrote from another
+        // image is not this run's to overwrite, and the folder is the only place
+        // that fact survives.
+        let recorded = manifest::load(&out_dir);
+        let destination = convert::Destination {
+            out_dir: &out_dir,
+            backups: backups.as_deref(),
+            manifest: &recorded,
+        };
+        let planned = convert::plan_outputs(&root, &paths, &audited, &destination, format);
+        let sources: Vec<Planned> = sources
             .into_iter()
             .zip(planned)
-            .map(|((index, source), written)| (index, source, written))
+            .map(|((index, source), written)| Planned {
+                backup: destination.backup(&root, &source),
+                index,
+                source,
+                written,
+            })
             .collect();
+        let stamp = manifest::Stamp::new(format, quality, max_edge);
 
         cx.spawn(async move |this, cx| {
             // A sliding window rather than batches. Batching waited for all eight of a
@@ -74,11 +102,15 @@ impl Audit {
             // idle; here a finished file is replaced immediately. The window is what
             // bounds memory: every file in flight holds a fully decoded image.
             let workers = convert::workers(format);
-            let mut inflight: Vec<
-                gpui::Task<(usize, Result<convert::Converted, convert::Failure>)>,
-            > = Vec::new();
+            type Landed = (
+                usize,
+                Result<convert::Converted, convert::Failure>,
+                Option<manifest::Record>,
+            );
+            let mut inflight: Vec<gpui::Task<Landed>> = Vec::new();
             let mut queued = sources.iter();
             let mut completed = Vec::with_capacity(workers);
+            let mut records: Vec<manifest::Record> = Vec::new();
 
             loop {
                 // A stop closes the queue, not the window. Abandoning an encode
@@ -87,19 +119,42 @@ impl Audit {
                 // nothing after them is started.
                 let stopped = cancel.load(Ordering::Acquire);
                 while !stopped && inflight.len() < workers {
-                    let Some((index, source, written)) = queued.next() else {
+                    let Some(planned) = queued.next() else {
                         break;
                     };
-                    let (index, source, written) = (*index, source.clone(), written.clone());
+                    let index = planned.index;
+                    let source = planned.source.clone();
+                    let written = planned.written.clone();
+                    let backup = planned.backup.clone();
                     let out_dir = out_dir.clone();
+                    let root = root.clone();
+                    let stamp = stamp.clone();
                     inflight.push(cx.background_executor().spawn(async move {
                         let converted = match written {
                             Ok(written) => convert::convert_to(
-                                &out_dir, &source, &written, format, quality, max_edge,
+                                &out_dir,
+                                &source,
+                                &written,
+                                backup.as_deref(),
+                                format,
+                                quality,
+                                max_edge,
                             ),
                             Err(failure) => Err(failure),
                         };
-                        (index, converted)
+                        // Recorded where the paths are, on the thread that has
+                        // them: the original was just moved, and the record says
+                        // where it went.
+                        let record = converted.as_ref().ok().and_then(|converted| {
+                            stamp.record(
+                                &root,
+                                &out_dir,
+                                &source,
+                                &converted.written,
+                                backup.as_deref(),
+                            )
+                        });
+                        (index, converted, record)
                     }));
                 }
                 if inflight.is_empty() {
@@ -107,9 +162,10 @@ impl Audit {
                 }
                 // Take whichever file finishes first. Waiting for source order here
                 // quietly turns one slow image back into a batch barrier.
-                let ((index, result), _, remaining) = select_all(inflight).await;
+                let ((index, result, record), _, remaining) = select_all(inflight).await;
                 inflight = remaining;
                 completed.push((index, result));
+                records.extend(record);
 
                 // Publishing once per file made a 6,000-image conversion rebuild the
                 // same window 6,000 times. One worker-window keeps progress live while
@@ -163,7 +219,33 @@ impl Audit {
                 }
             }
 
+            // Written once, at the end. The backup mirrors the source tree, so the
+            // originals are recoverable by hand even if this never lands; the
+            // record is what makes the button in the window able to do it.
+            let recorded = cx
+                .background_executor()
+                .spawn({
+                    let out_dir = out_dir.clone();
+                    let root = root.clone();
+                    async move {
+                        let written = manifest::append(&out_dir, records);
+                        (written, manifest::restorable(&root))
+                    }
+                })
+                .await;
+
             let _ = this.update(cx, |audit, cx| {
+                audit.restorable = recorded.1;
+                if let Err(message) = &recorded.0 {
+                    audit.notify_error(
+                        "run-record",
+                        "Couldn’t record this run",
+                        format!("{}: {message}", manifest::path(&out_dir).display()),
+                        cx,
+                    );
+                } else {
+                    audit.clear_error("run-record", cx);
+                }
                 if audit.dataset_generation == dataset_generation {
                     audit.converting = false;
                     audit.active_target_count = None;

@@ -26,11 +26,17 @@ pub const MAX_RECENT_FOLDERS: usize = 5;
 /// makes "originals unchanged" true and easy to check. A chosen folder is for
 /// people whose output belongs somewhere else entirely — a staging directory, a
 /// share, a build tree.
+///
+/// `Replace` is the job most people actually came for: make this folder's images
+/// smaller, in place, without merging a second tree back over the first by hand.
+/// It is opt-in and it still keeps every original — each one moves into
+/// `press-originals/` before its replacement takes its name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Output {
     #[default]
     Optimized,
     Folder(PathBuf),
+    Replace,
 }
 
 impl Output {
@@ -39,6 +45,7 @@ impl Output {
         match self {
             Output::Optimized => audited.join(crate::scan::OUTPUT_DIR),
             Output::Folder(path) => path.clone(),
+            Output::Replace => audited.to_path_buf(),
         }
     }
 
@@ -76,6 +83,10 @@ impl Output {
                     working_directory,
                 )
             }
+            Output::Replace => crate::output::Context::establish_replace_with_working_directory(
+                &audited,
+                working_directory,
+            ),
         };
         context.map(Arc::new).map_err(|error| error.to_string())
     }
@@ -86,6 +97,7 @@ impl Output {
         match self {
             Output::Optimized => format!("{}/", crate::scan::OUTPUT_DIR),
             Output::Folder(path) => path.display().to_string(),
+            Output::Replace => "beside the originals".to_string(),
         }
     }
 }
@@ -248,10 +260,12 @@ fn parse(text: &str) -> Settings {
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "output" => {
                 let value = value.trim();
-                settings.output = if value.is_empty() {
-                    Output::Optimized
-                } else {
-                    Output::Folder(PathBuf::from(value))
+                // A chosen folder is always an absolute path from the picker, so the
+                // bare word cannot collide with one.
+                settings.output = match value {
+                    "" => Output::Optimized,
+                    "replace" => Output::Replace,
+                    path => Output::Folder(PathBuf::from(path)),
                 };
             }
             _ => {}
@@ -279,8 +293,10 @@ fn render(settings: &Settings) -> String {
     out.push_str(&format!("columns={}\n", settings.columns.render()));
     // The default writes no path, so a settings file says nothing about where
     // output goes until somebody chooses somewhere else.
-    if let Output::Folder(path) = &settings.output {
-        out.push_str(&format!("output={}\n", path.display()));
+    match &settings.output {
+        Output::Optimized => {}
+        Output::Folder(path) => out.push_str(&format!("output={}\n", path.display())),
+        Output::Replace => out.push_str("output=replace\n"),
     }
     out
 }
@@ -399,6 +415,45 @@ mod tests {
             Output::Optimized.root(Path::new("/photos")),
             Path::new("/photos/optimized")
         );
+    }
+
+    /// Replace mode is a destination like any other, and a settings file that
+    /// remembers it must not read back as a folder literally named `replace`.
+    #[test]
+    fn replacing_in_place_survives_a_round_trip_and_writes_beside_the_originals() {
+        let replacing = Settings {
+            output: Output::Replace,
+            ..Settings::default()
+        };
+        assert!(render(&replacing).contains("output=replace\n"));
+        assert_eq!(parse(&render(&replacing)).output, Output::Replace);
+        assert_eq!(
+            Output::Replace.root(Path::new("/photos")),
+            Path::new("/photos")
+        );
+    }
+
+    /// The boundary every other destination has to clear is "does not contain the
+    /// source". Replace mode is the audited folder, so it needs its own door.
+    #[test]
+    fn replace_mode_establishes_the_audited_folder_as_its_own_output() {
+        let base = temp_dir("replace-context");
+        let context = Output::Replace
+            .context_with_working_directory(&base, base.clone())
+            .expect("replace mode establishes");
+        assert_eq!(context.source_root(), base);
+        assert_eq!(context.output_root(), base);
+        assert_eq!(
+            context.final_path(Path::new("shot.webp")).unwrap(),
+            base.join("shot.webp")
+        );
+        assert!(
+            Output::Folder(base.clone())
+                .context_with_working_directory(&base, base.clone())
+                .is_err(),
+            "choosing the audited folder by hand is still refused"
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// A hand-edited or half-written file must not stop the app opening.
