@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -68,7 +71,11 @@ jobs:
       # build into about a minute.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
+      # `cargo test` builds the same crate, so a release build on top of it only
+      # buys the release profile — ten more minutes per platform on every push to a
+      # branch. Keep it on the push to main, where it guards what gets tagged.
       - name: Build
+        if: github.event_name != 'pull_request'
         run: cargo build --release --locked
 
       - name: Test
