@@ -690,19 +690,23 @@ pub fn workers(format: Format) -> usize {
 /// Convert every path, `workers(format)` at a time, calling `report` with each result
 /// as it lands. `report` is called from a worker thread, one at a time.
 ///
+/// `planned` is `plan_outputs`' answer for these sources, one entry each. The caller
+/// plans, so it can also read the planned names — to report them without writing, or
+/// to leave a file out of `sources` once it has decided the output is already current
+/// — while the collision planning still sees the whole list.
+///
 /// The window's conversion has its own copy of this loop built out of executor tasks,
 /// because it has to hand each result back to the UI thread. This one is for callers
 /// that only need the work done.
 pub fn convert_each(
-    root: &Path,
     sources: &[PathBuf],
+    planned: &[Result<PathBuf, Failure>],
     out_dir: &Path,
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
     report: impl Fn(&Path, Result<Converted, Failure>) + Sync,
 ) {
-    let planned = &plan_outputs(root, sources, sources, out_dir, format);
     // A shared cursor rather than a slice per thread: files in one folder differ in
     // size by a hundred times, so a fixed split leaves most threads finished early.
     let next = &AtomicUsize::new(0);
@@ -1969,9 +1973,16 @@ pub(crate) mod tests {
         assert!(!context.output_root().starts_with(&root));
 
         let written = parking_lot::Mutex::new(Vec::new());
-        convert_each(
+        let planned = plan_outputs(
             &root,
             &sources,
+            &sources,
+            context.output_root(),
+            Format::WebP,
+        );
+        convert_each(
+            &sources,
+            &planned,
             context.output_root(),
             Format::WebP,
             Quality::lossy(80.),

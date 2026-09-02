@@ -32,9 +32,12 @@ press convert <file-or-folder> --format jxl --lossless --json
 press convert <file-or-folder> --format jpeg --quality 85 --json
 press convert <file-or-folder> --format same --max-edge 1600 --json
 press convert <file-or-folder> --output <dir> --json
+press convert <file-or-folder> --skip-existing --json
 ```
 
 `--output <dir>` (short `-o`) writes the mirrored tree into that folder instead of `optimized/`. It is refused, with the reason on stderr and exit status `2`, when it is or contains the source folder or ends in a symlink.
+
+`--skip-existing` leaves a source alone when its planned output already exists and is not older than the source. Those files come back with `status` `skipped`, `skipped: true`, a named `reason`, and the size already on disk in `output_bytes`; they are counted in `summary.skipped` and never in `converted` or `failed`.
 
 Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF, JPEG, or `same`. `--max-edge` only downscales.
 

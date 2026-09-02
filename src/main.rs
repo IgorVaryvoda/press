@@ -68,6 +68,7 @@ const HELP: &str = concat!(
     "  --lossless                Lossless WebP or JPEG XL\n",
     "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
     "  -o, --output <dir>        Write converted files here instead of optimized/\n",
+    "  --skip-existing           Leave a file whose output is already current\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -122,6 +123,8 @@ struct Args {
     /// Where `convert` writes. `None` is the default `optimized/` beside the sources.
     /// The window has its own remembered Output setting.
     output: Option<PathBuf>,
+    /// Leave a source alone when its planned output is already current.
+    skip_existing: bool,
     unknown: Vec<String>,
 }
 
@@ -145,6 +148,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut json = false;
     let mut subfolders = true;
     let mut output = None;
+    let mut skip_existing = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
 
@@ -213,6 +217,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 format = Format::WebP;
             }
+            "--skip-existing" => {
+                conversion_option = true;
+                skip_existing = true;
+            }
             "--grid" => grid = true,
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
@@ -260,6 +268,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             json,
             subfolders,
             output,
+            skip_existing,
             unknown,
         });
     }
@@ -300,6 +309,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Window && output.is_some() {
         return Err("--output needs convert; the window has its own Output setting".into());
     }
+    if command == Command::Window && skip_existing {
+        return Err("--skip-existing needs convert".into());
+    }
     if !format.supports_lossless() && quality == Quality::LOSSLESS {
         return Err("--lossless is available only with --webp or --jxl".into());
     }
@@ -314,6 +326,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         json,
         subfolders,
         output,
+        skip_existing,
         unknown,
     })
 }
@@ -511,11 +524,18 @@ struct ConversionFile {
     source: String,
     status: &'static str,
     output: Option<String>,
+    /// Where the plan sent this file, whether or not it was written. A skipped or
+    /// dry-run file has no `output` of its own run to report, and this is the name a
+    /// caller needs to find it.
+    planned_output: Option<String>,
     source_bytes: u64,
     output_bytes: Option<u64>,
     width: Option<u32>,
     height: Option<u32>,
     error: Option<String>,
+    skipped: bool,
+    /// Why the file was skipped. Errors and skips are named, not counted.
+    reason: Option<String>,
 }
 
 struct ConversionRun {
@@ -537,6 +557,8 @@ struct ConversionSummary {
     attempted: usize,
     converted: usize,
     failed: usize,
+    /// Sources left alone by `--skip-existing`. Never counted as converted or failed.
+    skipped: usize,
     source_bytes: u64,
     output_bytes: u64,
     grew: bool,
@@ -558,20 +580,111 @@ struct ConversionReport {
     walk_errors: Vec<String>,
 }
 
+/// The counts a run only mentions when they happened. Zero skipped and zero failed
+/// is the ordinary case and does not need saying.
+fn run_tail(skipped: usize, failed: usize) -> String {
+    let mut tail = String::new();
+    if skipped > 0 {
+        tail.push_str(&format!(", {skipped} skipped"));
+    }
+    if failed > 0 {
+        tail.push_str(&format!(", {failed} failed"));
+    }
+    tail
+}
+
+/// The size already on disk when `written` is not older than `source`, or `None` when
+/// it is missing, stale, or unreadable.
+///
+/// A build step re-runs over a tree that mostly has not changed, and re-encoding a
+/// file whose output already answers for it buys nothing but the time. Modification
+/// time is the comparison a build step already trusts for everything else.
+fn current_output_bytes(source: &Path, written: &Path) -> Option<u64> {
+    let output = std::fs::metadata(written).ok()?;
+    let source = std::fs::metadata(source).ok()?;
+    (output.modified().ok()? >= source.modified().ok()?).then_some(output.len())
+}
+
+/// A planned run split into what still has to be converted and what is already there.
+struct Queued<'a> {
+    entries: Vec<&'a Entry>,
+    planned: Vec<Result<PathBuf, convert::Failure>>,
+    skipped: Vec<ConversionFile>,
+}
+
+/// Decide, per file and after planning, which sources `--skip-existing` leaves alone.
+///
+/// The plan covers every audited source, so dropping a file here cannot hand its name
+/// to a sibling that would otherwise have collided with it: the next run, with
+/// nothing to skip, plans the same names again.
+fn queue_run<'a>(
+    entries: &[&'a Entry],
+    planned: &[Result<PathBuf, convert::Failure>],
+    skip_existing: bool,
+    json: bool,
+) -> Queued<'a> {
+    let mut queued = Queued {
+        entries: Vec::with_capacity(entries.len()),
+        planned: Vec::with_capacity(entries.len()),
+        skipped: Vec::new(),
+    };
+    for (entry, plan) in entries.iter().zip(planned) {
+        let current = if skip_existing {
+            plan.as_deref()
+                .ok()
+                .and_then(|written| current_output_bytes(&entry.path, written))
+        } else {
+            None
+        };
+        let Some(bytes) = current else {
+            queued.entries.push(entry);
+            queued.planned.push(plan.clone());
+            continue;
+        };
+        let written = plan.as_deref().ok().map(path_text);
+        if !json {
+            println!(
+                "{:<52} {:>9}  skipped, the output is not older",
+                entry.name(),
+                format_bytes(bytes)
+            );
+        }
+        queued.skipped.push(ConversionFile {
+            source: path_text(&entry.path),
+            status: "skipped",
+            output: written.clone(),
+            planned_output: written,
+            source_bytes: entry.bytes,
+            output_bytes: Some(bytes),
+            width: None,
+            height: None,
+            error: None,
+            skipped: true,
+            reason: Some("the output is not older than the source".to_string()),
+        });
+    }
+    queued
+}
+
 /// Convert without opening a window, so the same work is scriptable and testable.
+///
+/// Only `queued.entries` are converted, each to the name `queue_run` kept for it. The
+/// plan was made against every audited source, so a file left out of the queue still
+/// holds the name it was given.
 fn convert_headless(
-    root: &std::path::Path,
+    queued: &Queued,
     out_dir: &std::path::Path,
-    entries: &[Entry],
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
     json: bool,
 ) -> ConversionRun {
+    let entries = &queued.entries;
     let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
-    let by_path: HashMap<&Path, &Entry> = entries
+    let by_path: HashMap<&Path, (&Entry, Option<&Path>)> = entries
         .iter()
-        .map(|entry| (entry.path.as_path(), entry))
+        .zip(&queued.planned)
+        .map(|(entry, plan)| (entry.path.as_path(), (*entry, plan.as_deref().ok())))
         .collect();
 
     // Lines arrive as files finish rather than in list order, which is what running
@@ -583,14 +696,14 @@ fn convert_headless(
         files: Vec::with_capacity(entries.len()),
     });
     convert::convert_each(
-        root,
         &sources,
+        &queued.planned,
         out_dir,
         format,
         quality,
         max_edge,
         |source, converted| {
-            let Some(entry) = by_path.get(source) else {
+            let Some((entry, planned)) = by_path.get(source) else {
                 return;
             };
             let mut totals = totals.lock();
@@ -617,11 +730,14 @@ fn convert_headless(
                         source: path_text(source),
                         status: "converted",
                         output: Some(path_text(&converted.written)),
+                        planned_output: planned.map(path_text),
                         source_bytes: entry.bytes,
                         output_bytes: Some(converted.bytes),
                         width: Some(converted.width),
                         height: Some(converted.height),
                         error: None,
+                        skipped: false,
+                        reason: None,
                     });
                 }
                 Err(error) => {
@@ -637,6 +753,7 @@ fn convert_headless(
                         source: path_text(source),
                         status: "failed",
                         output: None,
+                        planned_output: planned.map(path_text),
                         source_bytes: entry.bytes,
                         output_bytes: None,
                         width: None,
@@ -646,6 +763,8 @@ fn convert_headless(
                                 .reason()
                                 .unwrap_or_else(|| "conversion failed".to_string()),
                         ),
+                        skipped: false,
+                        reason: None,
                     });
                 }
             }
@@ -670,11 +789,7 @@ fn convert_headless(
             format_bytes(totals.after),
             if growth { "grew" } else { "saved" },
             format_bytes(delta),
-            if totals.failed == 0 {
-                String::new()
-            } else {
-                format!(", {} failed", totals.failed)
-            }
+            run_tail(queued.skipped.len(), totals.failed)
         );
         if entries.len() - totals.failed > 0 {
             println!("written to {}", out_dir.display());
@@ -890,16 +1005,31 @@ fn main() {
         }
     };
     let out_dir = context.output_root().to_path_buf();
-    let run = convert_headless(
-        &root,
+    let audited: Vec<&Entry> = scanned.entries.iter().collect();
+    let sources: Vec<PathBuf> = scanned
+        .entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    // Plan against every audited source first. `--skip-existing` then decides one file
+    // at a time, so the names a run leaves alone are the names it would have written.
+    let planned = convert::plan_outputs(&root, &sources, &sources, &out_dir, args.format);
+    let queued = queue_run(&audited, &planned, args.skip_existing, args.json);
+    let skipped = queued.skipped.len();
+
+    let mut run = convert_headless(
+        &queued,
         &out_dir,
-        &scanned.entries,
         args.format,
         args.quality,
         args.max_edge,
         args.json,
     );
     let failed = run.failed;
+    let converted = queued.entries.len() - failed;
+    run.files.extend(queued.skipped);
+    run.files
+        .sort_by(|left, right| left.source.cmp(&right.source));
     if args.json {
         let report = ConversionReport {
             schema_version: 1,
@@ -915,8 +1045,9 @@ fn main() {
             scan: ScanSummary::from_scan(&scanned),
             summary: ConversionSummary {
                 attempted: scanned.entries.len(),
-                converted: scanned.entries.len() - run.failed,
-                failed: run.failed,
+                converted,
+                failed,
+                skipped,
                 source_bytes: run.before,
                 output_bytes: run.after,
                 grew: run.after > run.before,
@@ -1266,6 +1397,44 @@ mod tests {
         convert::tests::photo(width, height).save(path).unwrap();
     }
 
+    fn probe_all(paths: &[PathBuf]) -> Vec<Entry> {
+        paths
+            .iter()
+            .map(|path| scan::probe(path).expect("the fixture is an image"))
+            .collect()
+    }
+
+    /// Plan a run over every entry, the way `main` does.
+    fn plan_run<'a>(
+        root: &Path,
+        out_dir: &Path,
+        entries: &'a [Entry],
+        format: Format,
+        skip_existing: bool,
+    ) -> Queued<'a> {
+        let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
+        let planned = convert::plan_outputs(root, &sources, &sources, out_dir, format);
+        let audited: Vec<&Entry> = entries.iter().collect();
+        queue_run(&audited, &planned, skip_existing, true)
+    }
+
+    fn convert_all(
+        root: &Path,
+        out_dir: &Path,
+        entries: &[Entry],
+        format: Format,
+    ) -> ConversionRun {
+        let queued = plan_run(root, out_dir, entries, format, false);
+        convert_headless(
+            &queued,
+            out_dir,
+            format,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        )
+    }
+
     #[test]
     fn flags_parse_into_their_fields() {
         let cases = [
@@ -1427,20 +1596,12 @@ mod tests {
         })
         .save(&source)
         .unwrap();
-        let entries = vec![scan::probe(&source).expect("the fixture is an image")];
+        let entries = probe_all(&[source]);
 
         let context = settings::Output::Optimized
             .context(&root)
             .expect("the default output establishes");
-        let run = convert_headless(
-            &root,
-            context.output_root(),
-            &entries,
-            Format::WebP,
-            Quality::lossy(80.),
-            MaxEdge::FULL,
-            true,
-        );
+        let run = convert_all(&root, context.output_root(), &entries, Format::WebP);
 
         assert_eq!(run.failed, 0);
         assert_eq!(run.files.len(), 1);
@@ -1479,24 +1640,13 @@ mod tests {
         let exports = base.join("exports");
         write_photo(&root.join("one.png"), 64, 64);
         write_photo(&album.join("two.png"), 48, 48);
-        let entries: Vec<Entry> = [root.join("one.png"), album.join("two.png")]
-            .iter()
-            .map(|path| scan::probe(path).expect("the fixture is an image"))
-            .collect();
+        let entries = probe_all(&[root.join("one.png"), album.join("two.png")]);
 
         let context = settings::Output::Folder(exports.clone())
             .context(&root)
             .expect("a folder outside the root establishes");
         assert_eq!(context.output_root(), exports);
-        let run = convert_headless(
-            &root,
-            context.output_root(),
-            &entries,
-            Format::WebP,
-            Quality::lossy(80.),
-            MaxEdge::FULL,
-            true,
-        );
+        let run = convert_all(&root, context.output_root(), &entries, Format::WebP);
 
         assert_eq!(run.failed, 0);
         assert_eq!(run.files.len(), 2);
@@ -1504,6 +1654,102 @@ mod tests {
         assert!(exports.join("one.webp").is_file());
         assert!(exports.join("album").join("two.webp").is_file());
         assert!(!root.join(scan::OUTPUT_DIR).exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn skip_existing_is_a_conversion_option() {
+        assert!(
+            parse(&["convert", "/photos", "--skip-existing"])
+                .unwrap()
+                .skip_existing
+        );
+        assert!(!parse(&["convert", "/photos"]).unwrap().skip_existing);
+        assert!(parse(&["audit", "/photos", "--skip-existing"]).is_err());
+        assert!(parse(&["/photos", "--skip-existing"]).is_err());
+        assert!(parse(&["skill", "--skip-existing"]).is_err());
+    }
+
+    /// The point of the flag: a re-run over a tree that mostly has not changed does
+    /// the work only for the files that did.
+    #[test]
+    fn skip_existing_leaves_a_current_output_and_converts_a_stale_one() {
+        let base = temp_root("skip");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        write_photo(&root.join("current.png"), 64, 64);
+        write_photo(&root.join("stale.png"), 64, 64);
+        let entries = probe_all(&[root.join("current.png"), root.join("stale.png")]);
+
+        // One output is written now, so it is not older than its source. The other is
+        // backdated, which is what an edited source looks like to the next run.
+        std::fs::write(out_dir.join("current.webp"), b"already converted").unwrap();
+        std::fs::write(out_dir.join("stale.webp"), b"out of date").unwrap();
+        let stale = std::fs::File::options()
+            .write(true)
+            .open(out_dir.join("stale.webp"))
+            .unwrap();
+        stale
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        drop(stale);
+
+        let queued = plan_run(&root, &out_dir, &entries, Format::WebP, true);
+
+        assert_eq!(queued.skipped.len(), 1);
+        assert_eq!(
+            queued.skipped[0].source,
+            path_text(&root.join("current.png"))
+        );
+        assert!(queued.skipped[0].skipped);
+        assert_eq!(
+            queued.skipped[0].reason.as_deref(),
+            Some("the output is not older than the source")
+        );
+        assert_eq!(queued.skipped[0].output_bytes, Some(17));
+        assert_eq!(queued.entries.len(), 1);
+        assert_eq!(queued.entries[0].path, root.join("stale.png"));
+
+        let run = convert_headless(
+            &queued,
+            &out_dir,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+        assert_eq!(run.failed, 0);
+        assert_eq!(run.files.len(), 1);
+        assert_eq!(run.files[0].status, "converted");
+        // The skipped output is untouched; the stale one was rewritten.
+        assert_eq!(
+            std::fs::read(out_dir.join("current.webp")).unwrap(),
+            b"already converted"
+        );
+        assert!(std::fs::metadata(out_dir.join("stale.webp")).unwrap().len() > 100);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Without the flag nothing is skipped, however current the output is.
+    #[test]
+    fn a_run_without_skip_existing_queues_every_file() {
+        let base = temp_root("no-skip");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        write_photo(&root.join("one.png"), 48, 48);
+        let entries = probe_all(&[root.join("one.png")]);
+        std::fs::write(out_dir.join("one.webp"), b"already converted").unwrap();
+
+        let queued = plan_run(&root, &out_dir, &entries, Format::WebP, false);
+
+        assert!(queued.skipped.is_empty());
+        assert_eq!(queued.entries.len(), 1);
+        assert_eq!(run_tail(0, 0), "");
+        assert_eq!(run_tail(2, 1), ", 2 skipped, 1 failed");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
