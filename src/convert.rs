@@ -125,6 +125,20 @@ impl MaxEdge {
         }
     }
 
+    /// A size typed into the window. The same rule as `--max-edge`: a positive whole
+    /// number of pixels. An emptied box means the source size again; anything else
+    /// is `None`, and the caller leaves the current size alone rather than guess.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Some(Self::FULL);
+        }
+        text.parse()
+            .ok()
+            .filter(|edge| *edge > 0)
+            .map(|edge| Self(Some(edge)))
+    }
+
     /// Scale `image` down to fit. Never scales up: an 800px source asked to fit 2000px
     /// is already inside the budget, and stretching it would invent detail.
     pub fn apply(&self, image: DynamicImage) -> DynamicImage {
@@ -1587,6 +1601,26 @@ pub(crate) mod tests {
         );
         let full = MaxEdge::FULL.apply(photo(80, 60));
         assert_eq!((full.width(), full.height()), (80, 60));
+    }
+
+    /// The window's box follows the CLI's rule: a positive whole number, never a
+    /// stretch. Typing 4000 over an 80px source is a no-op, not an upscale.
+    #[test]
+    fn a_custom_max_edge_rejects_zero_and_never_upscales() {
+        assert_eq!(MaxEdge::parse("1200"), Some(MaxEdge(Some(1200))));
+        assert_eq!(MaxEdge::parse(" 640 "), Some(MaxEdge(Some(640))));
+        assert_eq!(MaxEdge::parse(""), Some(MaxEdge::FULL));
+        for junk in ["0", "-5", "abc", "1.5", "12px"] {
+            assert_eq!(MaxEdge::parse(junk), None, "accepted {junk:?}");
+        }
+
+        let custom = MaxEdge::parse("4000").expect("a large edge parses");
+        let untouched = custom.apply(photo(80, 60));
+        assert_eq!((untouched.width(), untouched.height()), (80, 60));
+        let scaled = MaxEdge::parse("40")
+            .expect("a small edge parses")
+            .apply(photo(80, 60));
+        assert_eq!((scaled.width(), scaled.height()), (40, 30));
     }
 
     #[test]

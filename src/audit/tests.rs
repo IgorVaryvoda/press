@@ -1913,6 +1913,34 @@ fn a_symlinked_multi_folder_drop_keeps_one_root_identity(cx: &mut TestAppContext
     std::fs::remove_dir_all(fixture).unwrap();
 }
 
+/// The box beside the presets follows `--max-edge`: a positive whole number of
+/// pixels applies, junk changes nothing, and an emptied box is the source size.
+#[gpui::test]
+fn a_typed_max_edge_applies_and_junk_leaves_the_last_size(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        assert_eq!(audit.max_edge, MaxEdge::FULL);
+        audit.apply_custom_max_edge("1200", cx);
+        assert_eq!(audit.max_edge, MaxEdge(Some(1200)));
+        assert!(
+            panel::active_preset(audit.format, audit.quality, audit.max_edge).is_none(),
+            "a typed size is a custom configuration"
+        );
+
+        for junk in ["0", "abc", "-4"] {
+            audit.apply_custom_max_edge(junk, cx);
+            assert_eq!(
+                audit.max_edge,
+                MaxEdge(Some(1200)),
+                "{junk:?} changed the size"
+            );
+        }
+
+        audit.apply_custom_max_edge("", cx);
+        assert_eq!(audit.max_edge, MaxEdge::FULL);
+    });
+}
+
 #[gpui::test]
 fn choosing_avif_leaves_lossless_for_the_last_slider_quality(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);

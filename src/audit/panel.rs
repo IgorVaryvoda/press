@@ -432,11 +432,7 @@ impl Audit {
                                 cx,
                             ))
                             .child(self.panel_quality(cx))
-                            .child(self.panel_setting(
-                                "Max size",
-                                self.resize_group(cx).small().compact(),
-                                cx,
-                            )),
+                            .child(self.panel_setting("Max size", self.resize_control(cx), cx)),
                     ),
             )
             .child(
@@ -793,6 +789,7 @@ impl Audit {
                 audit.format = format;
                 audit.quality = quality;
                 audit.max_edge = edge;
+                audit.clear_custom_max_edge(window, cx);
                 if let Some(value) = quality.0 {
                     // Keep the slider where the preset put things, or the knob
                     // below would contradict the number in the estimate.

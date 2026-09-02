@@ -397,6 +397,9 @@ pub(crate) struct Audit {
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
+    /// The size typed beside the presets. Holds text only while the size is not
+    /// one of them, so a lit preset and a number never disagree.
+    max_edge_input: gpui::Entity<InputState>,
     /// Drives the quality slider. Its own entity, because that is how the component
     /// reports drags.
     quality_slider: gpui::Entity<SliderState>,
@@ -1762,6 +1765,26 @@ pub(crate) fn build_audit(
                 .step(1.)
                 .default_value(quality.0.unwrap_or(80.))
         });
+        let max_edge_input = cx.new(|cx| {
+            let typed = match max_edge {
+                edge if MaxEdge::PRESETS.contains(&edge) => String::new(),
+                MaxEdge(Some(edge)) => edge.to_string(),
+                MaxEdge(None) => String::new(),
+            };
+            InputState::new(window, cx)
+                .placeholder("Custom")
+                .default_value(typed)
+        });
+        cx.subscribe(
+            &max_edge_input,
+            |audit: &mut Audit, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    audit.apply_custom_max_edge(&value, cx);
+                }
+            },
+        )
+        .detach();
         let folder_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search folders"));
         cx.subscribe(
@@ -1868,6 +1891,7 @@ pub(crate) fn build_audit(
             format,
             quality,
             max_edge,
+            max_edge_input,
             quality_slider,
             selected: HashSet::new(),
             selection_bounds: Rc::new(RefCell::new(HashMap::new())),
