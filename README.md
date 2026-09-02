@@ -75,12 +75,13 @@ press audit ~/path/to/folder --no-subfolders  # this folder only, as the window 
 press convert ~/path/to/folder                # convert to WebP, no window
 press convert ~/path/to/folder --format avif --max-edge 1600 --quality 60
 press convert ~/path/to/folder --format jxl --lossless
+press convert ~/path/to/folder --output ~/build/images   # write somewhere else
 press update                                    # install the latest signed release
 ```
 
 `press --help` is the complete command reference. `audit` never writes. `convert`
-writes mirrored output under `optimized/`; the older `PATH --convert --avif` form
-remains compatible. With `--json`, stdout contains one document with
+writes mirrored output under `optimized/`, or under `--output`/`-o` when you name a
+folder; the older `PATH --convert --avif` form remains compatible. With `--json`, stdout contains one document with
 `schema_version: 1`, exact byte counts, per-file findings or conversion outcomes,
 and named failures. Diagnostics stay on stderr. Exit `0` means complete success,
 `1` means a partial audit or conversion, and `2` means an invalid invocation.

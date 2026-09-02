@@ -67,6 +67,7 @@ const HELP: &str = concat!(
     "  --quality <1..100>        Lossy quality (default: 80)\n",
     "  --lossless                Lossless WebP or JPEG XL\n",
     "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
+    "  -o, --output <dir>        Write converted files here instead of optimized/\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -118,6 +119,9 @@ struct Args {
     json: bool,
     /// Headless scope. The window has its own remembered chip for this.
     subfolders: bool,
+    /// Where `convert` writes. `None` is the default `optimized/` beside the sources.
+    /// The window has its own remembered Output setting.
+    output: Option<PathBuf>,
     unknown: Vec<String>,
 }
 
@@ -140,6 +144,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut grid = false;
     let mut json = false;
     let mut subfolders = true;
+    let mut output = None;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
 
@@ -196,6 +201,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 }
                 max_edge = MaxEdge(Some(edge));
             }
+            "-o" | "--output" => {
+                conversion_option = true;
+                let value = rest
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "--output needs a folder".to_string())?;
+                output = Some(PathBuf::from(value));
+            }
             "--webp" => {
                 conversion_option = true;
                 format = Format::WebP;
@@ -246,6 +259,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             grid,
             json,
             subfolders,
+            output,
             unknown,
         });
     }
@@ -283,6 +297,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--no-subfolders needs audit or convert; the window has a Subfolders chip".into(),
         );
     }
+    if command == Command::Window && output.is_some() {
+        return Err("--output needs convert; the window has its own Output setting".into());
+    }
     if !format.supports_lossless() && quality == Quality::LOSSLESS {
         return Err("--lossless is available only with --webp or --jxl".into());
     }
@@ -296,6 +313,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         grid,
         json,
         subfolders,
+        output,
         unknown,
     })
 }
@@ -856,9 +874,15 @@ fn main() {
             many => println!("{many} macOS packages skipped"),
         }
     }
-    // Headless always writes the default `optimized/`, but it still has to be a usable
-    // folder. Refusing here names the reason once instead of failing every file.
-    let context = match settings::Output::Optimized.context(&root) {
+    // A chosen destination goes through the boundary the window establishes, so the
+    // same refusals apply — an output that is or contains the source, a symlinked
+    // final component. Refusing here names the reason once instead of failing every
+    // file, and the report carries the canonical root rather than what was typed.
+    let destination = match args.output.clone() {
+        Some(folder) => settings::Output::Folder(folder),
+        None => settings::Output::Optimized,
+    };
+    let context = match destination.context(&root) {
         Ok(context) => context,
         Err(message) => {
             eprintln!("press: {message}");
@@ -1228,6 +1252,20 @@ mod tests {
         parse_args_from(arguments.iter().map(|argument| (*argument).to_string()))
     }
 
+    /// macOS hands out `/var/folders/...`, and `/var` is a symlink to `/private/var`.
+    /// `Context` canonicalizes its roots, so a fixture that starts from the aliased
+    /// spelling compares two different names.
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("press-cli-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    fn write_photo(path: &Path, width: u32, height: u32) {
+        convert::tests::photo(width, height).save(path).unwrap();
+    }
+
     #[test]
     fn flags_parse_into_their_fields() {
         let cases = [
@@ -1409,6 +1447,64 @@ mod tests {
         assert_eq!(run.files[0].status, "converted");
         assert!(root.join(scan::OUTPUT_DIR).join("photo.webp").is_file());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_output_folder_is_a_conversion_option_with_a_short_alias() {
+        for flag in ["--output", "-o"] {
+            assert_eq!(
+                parse(&["convert", "/photos", flag, "/exports"])
+                    .unwrap()
+                    .output,
+                Some(PathBuf::from("/exports")),
+                "{flag}"
+            );
+        }
+        assert!(parse(&["convert", "/photos"]).unwrap().output.is_none());
+        assert!(parse(&["convert", "/photos", "--output"]).is_err());
+        assert!(parse(&["convert", "/photos", "--output", ""]).is_err());
+        assert!(parse(&["audit", "/photos", "--output", "/exports"]).is_err());
+        assert!(parse(&["/photos", "--output", "/exports"]).is_err());
+        assert!(parse(&["update", "-o", "/exports"]).is_err());
+    }
+
+    /// `--output` establishes the window's own boundary, so a folder outside the
+    /// audited tree has to take every file, subfolders and all.
+    #[test]
+    fn a_chosen_output_folder_outside_the_root_takes_every_file() {
+        let base = temp_root("output");
+        let root = base.join("photos");
+        let album = root.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+        let exports = base.join("exports");
+        write_photo(&root.join("one.png"), 64, 64);
+        write_photo(&album.join("two.png"), 48, 48);
+        let entries: Vec<Entry> = [root.join("one.png"), album.join("two.png")]
+            .iter()
+            .map(|path| scan::probe(path).expect("the fixture is an image"))
+            .collect();
+
+        let context = settings::Output::Folder(exports.clone())
+            .context(&root)
+            .expect("a folder outside the root establishes");
+        assert_eq!(context.output_root(), exports);
+        let run = convert_headless(
+            &root,
+            context.output_root(),
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+
+        assert_eq!(run.failed, 0);
+        assert_eq!(run.files.len(), 2);
+        assert!(run.files.iter().all(|file| file.status == "converted"));
+        assert!(exports.join("one.webp").is_file());
+        assert!(exports.join("album").join("two.webp").is_file());
+        assert!(!root.join(scan::OUTPUT_DIR).exists());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

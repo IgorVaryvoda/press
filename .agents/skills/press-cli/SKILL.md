@@ -31,7 +31,10 @@ press convert <file-or-folder> --format avif --quality 70 --max-edge 1600 --json
 press convert <file-or-folder> --format jxl --lossless --json
 press convert <file-or-folder> --format jpeg --quality 85 --json
 press convert <file-or-folder> --format same --max-edge 1600 --json
+press convert <file-or-folder> --output <dir> --json
 ```
+
+`--output <dir>` (short `-o`) writes the mirrored tree into that folder instead of `optimized/`. It is refused, with the reason on stderr and exit status `2`, when it is or contains the source folder or ends in a symlink.
 
 Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF, JPEG, or `same`. `--max-edge` only downscales.
 
