@@ -1765,6 +1765,42 @@ pub(crate) mod tests {
         assert_eq!((scaled.width(), scaled.height()), (40, 30));
     }
 
+    /// The speed dial has to reach libaom, not just the settings file. Six is what
+    /// Press has always encoded at, so the unset default must still produce those
+    /// bytes, and a different speed must produce different ones.
+    ///
+    /// The speed is one value for the whole process, so this test puts the default
+    /// back before it returns; nothing else asserts on exact AVIF bytes.
+    #[test]
+    fn the_avif_speed_setting_reaches_the_encoder() {
+        let image = photo(64, 64);
+        let at = |speed: u8| {
+            crate::avif::set_speed(speed);
+            assert_eq!(crate::avif::speed(), speed);
+            encode(&image, Format::Avif, Quality::lossy(70.), None).expect("AVIF encodes")
+        };
+
+        let default =
+            encode(&image, Format::Avif, Quality::lossy(70.), None).expect("AVIF encodes");
+        assert_eq!(crate::avif::speed(), crate::avif::DEFAULT_SPEED);
+        assert_eq!(at(crate::avif::DEFAULT_SPEED), default, "the default moved");
+
+        let fast = at(10);
+        assert_ne!(fast, default, "speed 10 wrote the speed 6 bytes");
+        assert!(
+            crate::scan::decode_bytes(&fast).is_some(),
+            "speed 10 is unreadable"
+        );
+
+        // Out of range is clamped rather than refused: a hand-edited settings file
+        // must not stop the encoder.
+        crate::avif::set_speed(200);
+        assert_eq!(crate::avif::speed(), 10);
+
+        crate::avif::set_speed(crate::avif::DEFAULT_SPEED);
+        assert_eq!(crate::avif::configured_speed(), None);
+    }
+
     /// The scaled decode changes what conversion holds in memory, not what it writes:
     /// a 4000px JPEG asked for 1000px still exports 1000px.
     #[test]
