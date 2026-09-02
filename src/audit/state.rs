@@ -458,6 +458,14 @@ impl Audit {
             let mut sampled = Vec::with_capacity(samples.len());
 
             loop {
+                #[cfg(test)]
+                {
+                    let hook = ESTIMATE_HOOK.with(|hook| hook.borrow().clone());
+                    if let Some(hook) = hook {
+                        let completed = sampled.len();
+                        let _ = this.update(cx, |audit, _| hook(audit, completed));
+                    }
+                }
                 // Every folder click starts a burst of these. Re-checking here stops a
                 // superseded one at its next slot, rather than decoding the rest of a
                 // folder nobody is looking at any more.
@@ -934,4 +942,15 @@ impl Audit {
             self.open_preview(entry, cx);
         }
     }
+}
+
+/// A seam for the estimate's in-flight check. The test executor runs a whole burst
+/// to completion inside one clock advance, so nothing outside the loop can land
+/// between two of its slots; this runs at the top of each slot instead, with the
+/// number of samples finished so far.
+#[cfg(test)]
+thread_local! {
+    pub(super) static ESTIMATE_HOOK: std::cell::RefCell<
+        Option<std::rc::Rc<dyn Fn(&mut Audit, usize)>>,
+    > = const { std::cell::RefCell::new(None) };
 }

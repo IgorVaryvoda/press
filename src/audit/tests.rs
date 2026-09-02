@@ -4768,19 +4768,20 @@ fn a_superseded_estimate_stops_before_it_decodes_the_rest(cx: &mut TestAppContex
     let count = convert::workers(Format::WebP) * 2;
     let (audit, cx) = convertible_audit(count, cx);
 
-    // The supersession waits out the same settling timer as the estimate opening the
-    // folder started, and shares its session: the estimate runs first and starts its
-    // first wave of samples, and cannot resume its loop before this has run.
-    audit.update(cx, |_, cx| {
-        cx.spawn(async move |audit, cx| {
-            cx.background_executor().timer(ESTIMATE_DELAY).await;
-            let _ = audit.update(cx, |audit, _| audit.estimate_generation += 1);
-        })
-        .detach();
+    // The test executor runs the whole burst inside one clock advance, and a timer
+    // that ties with the estimate's own can wake on either side of it, so the
+    // supersession is raised from inside the loop: once the first sample is in.
+    super::state::ESTIMATE_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(std::rc::Rc::new(|audit: &mut Audit, completed| {
+            if completed >= 1 {
+                audit.estimate_generation += 1;
+            }
+        }));
     });
     cx.executor()
         .advance_clock(ESTIMATE_DELAY + Duration::from_millis(50));
     cx.run_until_parked();
+    super::state::ESTIMATE_HOOK.with(|hook| *hook.borrow_mut() = None);
 
     audit.read_with(cx, |audit, _| {
         assert!(
