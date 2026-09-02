@@ -58,17 +58,20 @@ impl Audit {
             .gap_1()
             .child(self.resize_group(cx).small().compact())
             .child(
-                div().w(px(120.)).child(
-                    Input::new(&self.max_edge_input)
-                        .small()
-                        .disabled(self.converting)
-                        .suffix(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("px"),
-                        ),
-                ),
+                div()
+                    .debug_selector(|| "max-edge-input".into())
+                    .w(px(120.))
+                    .child(
+                        Input::new(&self.max_edge_input)
+                            .small()
+                            .disabled(self.converting)
+                            .suffix(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("px"),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -113,13 +116,8 @@ impl Audit {
         ];
         ButtonGroup::new("format")
             .children(options.iter().map(|format| {
-                // "same" is the CLI's word; beside four container names the
-                // window says what it does instead.
-                let display = match format {
-                    Format::Same => "Keep".to_string(),
-                    _ => format.label().to_uppercase(),
-                };
-                segment(format.label(), display, self.format == *format).disabled(self.converting)
+                segment(format.label(), format.display(), self.format == *format)
+                    .disabled(self.converting)
             }))
             .on_click(cx.listener(move |audit, clicked: &Vec<usize>, _, cx| {
                 if audit.converting {

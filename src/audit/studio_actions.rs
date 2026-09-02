@@ -81,16 +81,16 @@ impl Audit {
         self.studio_prompt.read(cx).value().trim().to_string()
     }
 
-    pub(super) fn studio_input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.studio_prompt
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window)
-            || self
-                .studio_key_input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+    /// Every text box the list's shortcuts must yield to. The filter box swallows
+    /// its own keys; these three do not.
+    pub(super) fn text_input_focused(&self, window: &Window, cx: &App) -> bool {
+        [
+            &self.studio_prompt,
+            &self.studio_key_input,
+            &self.max_edge_input,
+        ]
+        .iter()
+        .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub(super) fn save_studio_key(&mut self, cx: &mut Context<Self>) {

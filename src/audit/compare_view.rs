@@ -53,6 +53,12 @@ impl Audit {
     ) -> gpui::AnyElement {
         let viewport = window.viewport_size();
         let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
+        // "Keep" names nothing on this side; the file's own name says which encoder
+        // the kept format means, without reading it.
+        let shown_format = match self.format {
+            Format::Same => Format::from_extension(&comparison.key.path).unwrap_or(Format::Same),
+            format => format,
+        };
         // At the minimum width the conversion button already names the target format.
         // Keep the image name readable and drop the duplicate byte summary first.
         let entry = self.entries.get(comparison.index);
@@ -326,9 +332,9 @@ impl Audit {
                                     None => written
                                         .file_name()
                                         .map(|name| name.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| self.format.label().to_uppercase()),
+                                        .unwrap_or_else(|| shown_format.display().to_string()),
                                 },
-                                None => self.format.label().to_uppercase(),
+                                None => shown_format.display().to_string(),
                             },
                             cx.theme().green,
                             cx,
@@ -368,7 +374,7 @@ impl Audit {
                 }
                 (MediaMode::Compare, false) => format!(
                     "Building comparison — encoding to {} {}…",
-                    self.format.label().to_uppercase(),
+                    shown_format.display(),
                     self.quality.label()
                 ),
             };

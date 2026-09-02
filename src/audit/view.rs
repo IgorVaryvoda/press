@@ -928,7 +928,7 @@ impl Audit {
             ))
             .on_key_down(
                 cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
-                    if audit.studio_input_focused(window, cx) {
+                    if audit.text_input_focused(window, cx) {
                         return;
                     }
                     // The filter box swallows its own keys, so these only fire when the

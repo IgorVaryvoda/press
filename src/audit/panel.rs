@@ -904,7 +904,7 @@ impl Audit {
                 cx.theme().foreground,
                 format!(
                     "Converting to {} {}…",
-                    self.format.label().to_uppercase(),
+                    self.format.display(),
                     self.quality.label()
                 ),
                 Some((1. - done as f32 / total.max(1) as f32, cx.theme().primary)),
@@ -1080,9 +1080,17 @@ impl Audit {
                     .primary()
                     .w_full()
                     .when(self.converting, |button| button.outline())
-                    .when(target_count == 0, |button| button.ghost())
+                    .when(
+                        target_count == 0 || self.keep_format_overwrites_sources(),
+                        |button| button.ghost(),
+                    )
                     .label(self.conversion_action_label())
-                    .disabled(self.converting || self.scanning.is_some() || target_count == 0)
+                    .disabled(
+                        self.converting
+                            || self.scanning.is_some()
+                            || target_count == 0
+                            || self.keep_format_overwrites_sources(),
+                    )
                     .on_click(cx.listener(|audit, _, _, cx| audit.start_conversion(cx))),
             )
     }

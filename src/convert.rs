@@ -56,6 +56,7 @@ pub enum Failure {
     ProfileNotAttached,
     JpegNeedsOpaque,
     KeepFormatUnavailable(String),
+    ExtensionLies(String, &'static str),
     AnimatedGif,
     AnimatedPng,
     AnimatedWebP,
@@ -81,6 +82,9 @@ impl Failure {
             Self::KeepFormatUnavailable(name) => {
                 Some(format!("keep format is not available for {name}"))
             }
+            Self::ExtensionLies(extension, probed) => Some(format!(
+                "named .{extension} but the bytes are {probed}; convert it explicitly"
+            )),
             Self::AnimatedGif => Some("animated GIFs are not converted".into()),
             Self::AnimatedPng => Some("animated PNG files are not converted".into()),
             Self::AnimatedWebP => Some("animated WebP files are not converted".into()),
@@ -200,10 +204,38 @@ impl Format {
         matches!(self, Self::WebP | Self::JpegXl | Self::Png)
     }
 
-    /// The encoder `Same` means for one source, read off its extension. The name is
-    /// what the output keeps, so the name is what has to be honest: a PNG called
-    /// `.jpg` comes out as the JPEG its name promised. Anything without an encoder
-    /// here is refused by name rather than written as something else.
+    /// The window's word for the format. `Same` is a verb in the window ("Keep"),
+    /// where "SAME" beside four container names would read as a fifth.
+    pub fn display(&self) -> &'static str {
+        match self {
+            Format::WebP => "WEBP",
+            Format::Avif => "AVIF",
+            Format::JpegXl => "JXL",
+            Format::Jpeg => "JPEG",
+            Format::Png => "PNG",
+            Format::Same => "Keep",
+        }
+    }
+
+    /// The format a source's name promises, or `None` when no encoder here answers
+    /// to that name. Reads nothing: the comparison view asks during a render.
+    pub fn from_extension(source: &Path) -> Option<Format> {
+        let extension = source.extension()?.to_string_lossy().to_lowercase();
+        match extension.as_str() {
+            "jpg" | "jpeg" | "jpe" => Some(Format::Jpeg),
+            "png" => Some(Format::Png),
+            "webp" => Some(Format::WebP),
+            "avif" => Some(Format::Avif),
+            "jxl" => Some(Format::JpegXl),
+            _ => None,
+        }
+    }
+
+    /// The encoder `Same` means for one source. The name is what the output keeps,
+    /// so the name and the bytes have to agree: a PNG called `.jpg` is the audit's
+    /// own headline finding, and writing a lossy JPEG under that name would report
+    /// the lie as a conversion. It is refused by name, as is anything without an
+    /// encoder here. Reads the file header, so this belongs off the main thread.
     pub fn resolve(self, source: &Path) -> Result<Format, Failure> {
         if self != Format::Same {
             return Ok(self);
@@ -212,17 +244,22 @@ impl Format {
             .extension()
             .map(|extension| extension.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        match extension.as_str() {
-            "jpg" | "jpeg" | "jpe" => Ok(Format::Jpeg),
-            "png" => Ok(Format::Png),
-            "webp" => Ok(Format::WebP),
-            "avif" => Ok(Format::Avif),
-            "jxl" => Ok(Format::JpegXl),
-            "" => Err(Failure::KeepFormatUnavailable(
+        if extension.is_empty() {
+            return Err(Failure::KeepFormatUnavailable(
                 "a file with no extension".into(),
-            )),
-            _ => Err(Failure::KeepFormatUnavailable(extension.to_uppercase())),
+            ));
         }
+        let format = Self::from_extension(source)
+            .ok_or_else(|| Failure::KeepFormatUnavailable(extension.to_uppercase()))?;
+        if let Some(entry) = crate::scan::probe(source)
+            && entry.extension_lies()
+        {
+            return Err(Failure::ExtensionLies(
+                extension,
+                crate::scan::format_name(entry.format),
+            ));
+        }
+        Ok(format)
     }
 }
 
@@ -307,7 +344,8 @@ fn attach_jpeg_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
     const CHUNK: usize = 65_533 - 14;
     let mut at = 2;
     if encoded.get(at..at + 2) == Some(&[0xff, 0xe0]) {
-        at += 2 + usize::from(u16::from_be_bytes([encoded[at + 2], encoded[at + 3]]));
+        let length = encoded.get(at + 2..at + 4)?;
+        at += 2 + usize::from(u16::from_be_bytes([length[0], length[1]]));
     }
     let count = u8::try_from(profile.chunks(CHUNK).len()).ok()?;
     let mut tagged = Vec::with_capacity(encoded.len() + profile.len() + 18 * usize::from(count));
@@ -324,27 +362,49 @@ fn attach_jpeg_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// 4:2:0 subsampling and baseline Huffman: what every camera and CMS writes, so
-/// the output opens everywhere the source did. Lossless never reaches here; the
-/// window and the CLI both refuse it for JPEG, so `None` only has to be safe.
+/// the output opens everywhere the source did. A grayscale source stays one
+/// plane; promoted to RGB it would pay for two chroma planes of nothing. Lossless
+/// never reaches here; the window and the CLI both refuse it for JPEG, so `None`
+/// only has to be safe.
 fn encode_jpeg(image: &DynamicImage, quality: Quality) -> Result<Vec<u8>, Failure> {
     if has_transparency(image) {
         return Err(Failure::JpegNeedsOpaque);
     }
-    let rgb = image.to_rgb8();
+    let gray = matches!(
+        image,
+        DynamicImage::ImageLuma8(_) | DynamicImage::ImageLuma16(_)
+    );
+    let (pixels, channels, pixel_format, subsamp) = if gray {
+        (
+            image.to_luma8().into_raw(),
+            1,
+            turbojpeg::PixelFormat::GRAY,
+            turbojpeg::Subsamp::Gray,
+        )
+    } else {
+        (
+            image.to_rgb8().into_raw(),
+            3,
+            turbojpeg::PixelFormat::RGB,
+            turbojpeg::Subsamp::Sub2x2,
+        )
+    };
     let mut compressor = turbojpeg::Compressor::new().map_err(|_| Failure::Failed)?;
     compressor
         .set_quality(quality.0.unwrap_or(100.).round() as i32)
         .map_err(|_| Failure::Failed)?;
     compressor
-        .set_subsamp(turbojpeg::Subsamp::Sub2x2)
+        .set_subsamp(subsamp)
         .map_err(|_| Failure::Failed)?;
+    // Optimised Huffman tables cost a second pass and buy a few percent for free.
+    compressor.set_optimize(true).map_err(|_| Failure::Failed)?;
     compressor
         .compress_to_vec(turbojpeg::Image {
-            pixels: rgb.as_raw().as_slice(),
-            width: rgb.width() as usize,
-            pitch: rgb.width() as usize * 3,
-            height: rgb.height() as usize,
-            format: turbojpeg::PixelFormat::RGB,
+            pixels: pixels.as_slice(),
+            width: image.width() as usize,
+            pitch: image.width() as usize * channels,
+            height: image.height() as usize,
+            format: pixel_format,
         })
         .map_err(|_| Failure::Failed)
 }
@@ -616,9 +676,11 @@ pub fn workers(format: Format) -> usize {
     match format {
         // libjpeg-turbo and the PNG deflater run on the calling thread too.
         Format::WebP | Format::Jpeg | Format::Png => cores.clamp(2, 8),
-        // A kept-format folder may hold JPEG XL and AVIF sources, whose encoders
-        // already use every core, so it gets AVIF's count rather than WebP's.
-        Format::Avif | Format::Same => 2,
+        Format::Avif => 2,
+        // A kept-format folder is mostly JPEG and PNG, which want a file per core,
+        // with the odd AVIF or JPEG XL whose encoder already uses them all. Four
+        // keeps the first fast without letting the second double peak memory.
+        Format::Same => 4,
         // jixel uses the machine's cores inside one encode. A second decoded image
         // would add memory and contention without adding useful parallelism.
         Format::JpegXl => 1,
@@ -1268,6 +1330,86 @@ pub(crate) mod tests {
             assert!(bytes.starts_with(magic), "{name} is not its own format");
             assert_eq!((converted.width, converted.height), (20, 15), "{name}");
         }
+    }
+
+    /// A PNG called `.jpg` is the audit's own headline finding. Keeping the "format"
+    /// of that file has two wrong answers: lossy JPEG under the lying name reports
+    /// the lie as a conversion, and PNG bytes under `.jpg` keeps the lie. So it is
+    /// refused by name, and the failure says what to do instead.
+    #[test]
+    fn keep_format_refuses_a_png_named_jpg_by_name() {
+        let dir = temp_dir("keep-lying-name");
+        let source = dir.join("photo.jpg");
+        photo(16, 16)
+            .save_with_format(&source, image::ImageFormat::Png)
+            .unwrap();
+        let out = dir.join("optimised");
+
+        let refused = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &out, Format::Same),
+            Format::Same,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        );
+        assert_eq!(refused, Err(Failure::ExtensionLies("jpg".into(), "PNG")));
+        assert_eq!(
+            Failure::ExtensionLies("jpg".into(), "PNG").reason(),
+            Some("named .jpg but the bytes are PNG; convert it explicitly".into())
+        );
+        assert!(!out.exists(), "nothing was written under the lying name");
+    }
+
+    /// A grayscale source stays a one-plane JPEG. Promoted to RGB with 4:2:0 it came
+    /// out roughly twice the size for the same pixels.
+    #[test]
+    fn a_grayscale_source_becomes_a_single_plane_jpeg() {
+        let image = DynamicImage::ImageLuma8(photo(96, 96).to_luma8());
+        let gray = encode(&image, Format::Jpeg, Quality::lossy(80.), None).unwrap();
+        let rgb = encode(
+            &DynamicImage::ImageRgb8(image.to_rgb8()),
+            Format::Jpeg,
+            Quality::lossy(80.),
+            None,
+        )
+        .unwrap();
+
+        let decoded = image::load_from_memory(&gray).expect("the gray JPEG decodes");
+        assert_eq!(decoded.color(), image::ColorType::L8);
+        assert!(
+            gray.len() < rgb.len(),
+            "gray {} should be smaller than the RGB promotion {}",
+            gray.len(),
+            rgb.len()
+        );
+    }
+
+    /// A real profile is bigger than one APP2 segment can hold: Display P3 from a
+    /// phone is small, but a printer's is hundreds of kilobytes. The chunks have to
+    /// come back in order and byte for byte.
+    #[test]
+    fn a_profile_larger_than_one_app2_segment_round_trips_through_jpeg() {
+        let mut profile: Vec<u8> = (0..200_000u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let size = profile.len() as u32;
+        profile[0..4].copy_from_slice(&size.to_be_bytes());
+        profile[16..20].copy_from_slice(b"RGB ");
+        assert!(profile.len() > 3 * 65_519, "the fixture needs four chunks");
+
+        let encoded = encode(
+            &photo(24, 24),
+            Format::Jpeg,
+            Quality::lossy(80.),
+            Some(&profile),
+        )
+        .expect("a large profile attaches");
+        assert_eq!(
+            embedded_profile(&encoded).as_deref(),
+            Some(profile.as_slice()),
+            "the chunks did not reassemble"
+        );
     }
 
     #[test]

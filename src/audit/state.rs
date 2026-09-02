@@ -77,6 +77,9 @@ impl Audit {
         if target_count == 0 {
             return "Select images to convert".into();
         }
+        if self.keep_format_overwrites_sources() {
+            return "Keep format needs a different output folder".into();
+        }
         let scope = format!("{target_count} selected");
         // `write_output` atomically replaces an existing target on the supported
         // Unix builds; std's Windows rename does not.
@@ -92,12 +95,18 @@ impl Audit {
             } else {
                 "outputs"
             };
-            return format!(
-                "Replace {scope} {} {output}",
-                self.format.label().to_uppercase()
-            );
+            return format!("Replace {scope} {} {output}", self.format.display());
         }
-        format!("Convert {scope} to {}", self.format.label().to_uppercase())
+        format!("Convert {scope} to {}", self.format.display())
+    }
+
+    /// With the format kept, every output name is its source name, so an output
+    /// folder that is the audited folder would refuse every file. Said once in the
+    /// rail rather than three hundred times in the failure list. Compared by
+    /// spelling: an aliased spelling of the same folder still meets the per-file
+    /// guard in `plan_outputs`.
+    pub(super) fn keep_format_overwrites_sources(&self) -> bool {
+        self.format == Format::Same && self.output.root(&self.root) == self.root
     }
 
     pub(super) fn target_bytes(&self) -> u64 {

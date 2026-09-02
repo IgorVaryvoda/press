@@ -131,8 +131,10 @@ const GALLERY_BORDER: f32 = 1.;
 /// slider stop feel like a conversion.
 fn sample_size(format: Format) -> usize {
     match format {
-        Format::WebP | Format::Jpeg | Format::Png => 32,
-        Format::Avif | Format::JpegXl | Format::Same => 3,
+        // A kept-format folder mixes containers, so it needs the wide sample more
+        // than any single format does; three files would not project a mixture.
+        Format::WebP | Format::Jpeg | Format::Png | Format::Same => 32,
+        Format::Avif | Format::JpegXl => 3,
     }
 }
 
@@ -397,8 +399,8 @@ pub(crate) struct Audit {
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
-    /// The size typed beside the presets. Holds text only while the size is not
-    /// one of them, so a lit preset and a number never disagree.
+    /// The size typed beside the presets. A preset click empties it; a typed size
+    /// that happens to be a preset lights that preset and stays in the box.
     max_edge_input: gpui::Entity<InputState>,
     /// Drives the quality slider. Its own entity, because that is how the component
     /// reports drags.
@@ -1778,7 +1780,9 @@ pub(crate) fn build_audit(
         cx.subscribe(
             &max_edge_input,
             |audit: &mut Audit, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
+                // On Enter or leaving the box, not every keystroke: "1600" typed
+                // one digit at a time is not four sizes and four dropped results.
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     let value = input.read(cx).value().to_string();
                     audit.apply_custom_max_edge(&value, cx);
                 }
