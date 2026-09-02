@@ -128,6 +128,33 @@ impl Audit {
         self.converted_totals = (0, 0);
         self.published_results.clear();
         self.report_copied = false;
+        // The failures go with the results. "JPEG cannot keep transparency" is a fact
+        // about the run that said it, not about the same folder aimed at WebP, and a
+        // badge left over from settings nobody is using any more is a lie.
+        self.failures.clear();
+        // Whatever narrowed the list to them has to go too: a filter with no chip
+        // left to turn it off is a list gone empty for no stated reason.
+        if self.finding == Some(Finding::Failed) {
+            self.finding = None;
+            self.refresh_visible();
+        }
+    }
+
+    /// The failed rows the way every summary says them: the file's own label, then
+    /// why. Ordered by row rather than by hash, so the three names a toast has room
+    /// for are the first three in the folder and not three the map happened to pick.
+    pub(super) fn failure_names(&self) -> Vec<String> {
+        let mut rows: Vec<(&usize, &String)> = self.failures.iter().collect();
+        rows.sort_by_key(|(index, _)| **index);
+        rows.into_iter()
+            .filter_map(|(index, reason)| {
+                let entry = self.entries.get(*index)?;
+                Some(format!(
+                    "{} ({reason})",
+                    entry_label(&self.root, self.show_parent(), entry)
+                ))
+            })
+            .collect()
     }
 
     /// The finished outputs, in the order the list is showing their sources.
@@ -237,6 +264,7 @@ impl Audit {
     pub(super) fn refresh_visible(&mut self) {
         let needle = self.filter.to_lowercase();
         let finding = self.finding;
+        let failures = &self.failures;
         let sirv_scope = self.sirv_scope;
         let remote_files = self
             .sirv_pairing
@@ -257,7 +285,13 @@ impl Audit {
                         .to_lowercase()
                         .contains(&needle)
             })
-            .filter(|(_, entry)| finding.is_none_or(|finding| finding.holds(entry)))
+            .filter(|(index, entry)| match finding {
+                None => true,
+                // The one finding keyed by row: what failed is a fact about the
+                // run, and the entry cannot answer it.
+                Some(Finding::Failed) => failures.contains_key(index),
+                Some(finding) => finding.holds(entry),
+            })
             .filter(|(_, entry)| match sirv_scope {
                 None => true,
                 Some(SirvScope::OnlyRemote) => false,

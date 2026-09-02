@@ -162,10 +162,13 @@ pub(super) fn audit_report(
     skipped_raw: usize,
     skipped_heic: usize,
     findings: (usize, usize, usize),
-    conversion: (usize, (u64, u64)),
+    // What the last run did: how many it converted, the bytes before and after, and
+    // why each file it could not convert was refused. One tuple because they are one
+    // run's outcome, and because the report already takes as many facts as it can.
+    conversion: (usize, (u64, u64), &[String]),
 ) -> String {
     let (heavy, mislabelled, marketplace) = findings;
-    let (converted, converted_totals) = conversion;
+    let (converted, converted_totals, failures) = conversion;
     let folder = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -200,6 +203,14 @@ pub(super) fn audit_report(
                 format!("{} larger", format_bytes(after - before))
             }
         ));
+    }
+    // Named, with the reason, and all of them. This is the copy a client is sent,
+    // and "40 failed" would leave them asking which 40.
+    if !failures.is_empty() {
+        report.push_str(&format!("\nCould not convert ({}):\n", failures.len()));
+        for failure in failures {
+            report.push_str(&format!("- {failure}\n"));
+        }
     }
     let mut heaviest = entries.iter().collect::<Vec<_>>();
     heaviest.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
@@ -261,7 +272,11 @@ impl Audit {
             self.skipped_raw,
             self.skipped_heic,
             (self.heavy, self.mislabelled, self.marketplace),
-            (self.results.len(), self.converted_totals),
+            (
+                self.results.len(),
+                self.converted_totals,
+                &self.failure_names(),
+            ),
         );
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(report));
         self.report_copied = true;
@@ -490,9 +505,15 @@ mod tests {
             3,
             2,
             (0, 0, 1),
-            (0, (0, 0)),
+            (
+                0,
+                (0, 0),
+                &["large.jpg (JPEG cannot keep transparency)".to_string()],
+            ),
         );
         assert!(report.contains("camera RAW sources present (not decoded)"));
+        assert!(report.contains("Could not convert (1):"));
+        assert!(report.contains("- large.jpg (JPEG cannot keep transparency)"));
         assert!(report.contains("2 HEIC skipped (not supported yet)"));
         assert!(report.contains("review the background visually"));
         assert!(report.contains("Sirv Studio"));

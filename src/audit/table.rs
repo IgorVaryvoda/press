@@ -633,6 +633,9 @@ impl TableDelegate for AuditTable {
                 .when(!narrow_result, |result| result.items_center().gap_2())
                 .justify_end()
                 .whitespace_nowrap()
+                .when_some(audit.failures.get(&index), |slot, reason| {
+                    slot.child(failure_badge(index, reason, !narrow_result, cx))
+                })
                 .when_some(audit.results.get(&index), |slot, converted| {
                     let saved = entry.bytes.saturating_sub(*converted);
                     let percent = if entry.bytes == 0 {
@@ -771,6 +774,48 @@ impl Audit {
         }
         self.selection_changed(cx);
     }
+}
+
+/// What a row that would not convert says where its result would have been. The
+/// reason is on the badge itself when the cell is wide enough for it and on hover
+/// either way: a failed row used to look exactly like one nobody converted, and the
+/// only place its reason was ever said was a toast you could dismiss.
+pub(super) fn failure_badge(
+    index: usize,
+    reason: &str,
+    room_for_reason: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let hover = reason.to_string();
+    div()
+        // Stateful only so it can carry a tooltip: hover is where the reason lives
+        // when the cell is too narrow to print it.
+        .id(("failed", index))
+        .debug_selector(move || format!("failed-{index}"))
+        .flex()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .tooltip(move |window, cx| Tooltip::new(hover.clone()).build(window, cx))
+        .child(
+            div()
+                .flex_shrink_0()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(cx.theme().red)
+                .child("failed"),
+        )
+        .children(room_for_reason.then(|| {
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child(reason.to_string())
+        }))
 }
 
 pub(super) fn finding_chip(label: &'static str, cx: &App) -> impl IntoElement {

@@ -144,7 +144,11 @@ impl Audit {
             ));
         }
         if !self.failures.is_empty() {
-            parts.push(format!("failed: {}", named(self.failures.iter().cloned())));
+            parts.push(format!(
+                "{} failed: {}",
+                self.failures.len(),
+                named(self.failure_names().into_iter())
+            ));
         }
         // Behind the `updater` feature, this is what tells a windowed user their
         // next launch will be different. Nothing renders while the updater is idle.
