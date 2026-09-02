@@ -1141,8 +1141,24 @@ impl Audit {
         self.walk_errors = scanned.walk_errors;
         self.existing_output = scanned.existing_output;
         // A new folder answers this question itself: the previous one's backups are
-        // not something this one can put back.
-        self.restorable = crate::manifest::restorable(&self.root);
+        // not something this one can put back. Reading the answer is a file read,
+        // so it happens off the main thread and lands under its own generation.
+        self.restorable = 0;
+        let dataset = self.dataset_generation;
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let restorable = cx
+                .background_executor()
+                .spawn(async move { crate::manifest::restorable(&root) })
+                .await;
+            let _ = this.update(cx, |audit, cx| {
+                if audit.dataset_generation == dataset {
+                    audit.restorable = restorable;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.thumbs.clear();
         self.thumb_order.clear();
         self.requested.clear();
@@ -1617,12 +1633,16 @@ impl Audit {
         self.clear_error("restore", cx);
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let restored = cx
+            let (restored, restorable) = cx
                 .background_executor()
-                .spawn(async move { crate::manifest::restore(&root) })
+                .spawn(async move {
+                    let restored = crate::manifest::restore(&root);
+                    let restorable = crate::manifest::restorable(&root);
+                    (restored, restorable)
+                })
                 .await;
             let _ = this.update(cx, |audit, cx| {
-                audit.restorable = crate::manifest::restorable(&audit.root);
+                audit.restorable = restorable;
                 if restored.failures.is_empty() {
                     audit.notify_success(
                         "restore",

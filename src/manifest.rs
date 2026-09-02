@@ -12,6 +12,12 @@
 //! four hundred restorable originals; a file rewritten at the end of the run would
 //! have left none of either. Appending is also how eight workers, a window and a
 //! command line share one file without a lock or a lost record.
+//!
+//! A line that does not parse is stepped over rather than trusted, and it is not
+//! necessarily the last one: a full disk or a network share that does not honour
+//! `O_APPEND` atomically can leave a half-written line with whole records after it.
+//! Each append starts a fresh line of its own if the file does not already end on
+//! one, so a torn line can only ever swallow itself.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,6 +53,39 @@ pub struct Record {
     /// comes back. Only replace mode moves an original.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<PathBuf>,
+    /// A line that takes back the record above it. The record goes down before
+    /// the original moves, so a file that fails after that leaves a claim on a
+    /// name it never took; this is how the same run withdraws it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub void: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Record {
+    /// Whether the file at `path` is still the one this record installed. Size and
+    /// timestamp, the only two facts the record kept about it.
+    pub fn installed(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+            metadata.len() == self.output_bytes && modified(&metadata) == self.output_modified
+        })
+    }
+
+    /// The line that withdraws this one.
+    pub fn voided(&self) -> Record {
+        Record {
+            void: true,
+            ..self.clone()
+        }
+    }
+
+    /// What identifies one record across the run that wrote it and the line that
+    /// takes it back.
+    fn identity(&self) -> (String, String, u64) {
+        (path_key(&self.source), path_key(&self.output), self.written)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,7 +94,15 @@ pub struct Manifest {
     /// Records whose paths could not be trusted, named. A manifest arrives with
     /// whatever folder it was in — a download, a shared drive — so a line saying
     /// `../../.ssh/id_rsa` is a file this app must refuse rather than delete.
-    pub rejected: Vec<String>,
+    pub rejected: Vec<Rejected>,
+}
+
+/// A line that was refused, and the line itself: it is the only evidence of what
+/// was in the folder, so an undo puts it back rather than dropping it.
+#[derive(Clone, Debug)]
+pub struct Rejected {
+    pub line: String,
+    pub reason: String,
 }
 
 impl Manifest {
@@ -73,12 +120,17 @@ impl Manifest {
     /// The record that put an original away for a source that is itself an
     /// earlier run's output. Converting a folder twice is a chain, and the file
     /// worth keeping is the one at the start of it.
-    pub fn chain(&self, source: &Path) -> Option<&Record> {
-        let source = path_key(source);
-        self.outputs
-            .iter()
-            .rev()
-            .find(|record| record.backup.is_some() && path_key(&record.output) == source)
+    ///
+    /// Only while the file on disk is still that run's output. Somebody who has
+    /// edited or replaced it since is holding an original of their own, and
+    /// inheriting a backup for it would rename over the only copy.
+    pub fn chain(&self, relative: &Path, on_disk: &Path) -> Option<&Record> {
+        let relative = path_key(relative);
+        self.outputs.iter().rev().find(|record| {
+            record.backup.is_some()
+                && path_key(&record.output) == relative
+                && record.installed(on_disk)
+        })
     }
 }
 
@@ -137,6 +189,7 @@ impl Stamp {
             max_edge: self.max_edge,
             written: self.written,
             backup,
+            void: false,
         })
     }
 }
@@ -159,6 +212,7 @@ pub fn load(output_root: &Path) -> Manifest {
     let Ok(text) = std::fs::read_to_string(path(output_root)) else {
         return manifest;
     };
+    let mut voided = std::collections::HashSet::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -166,13 +220,23 @@ pub fn load(output_root: &Path) -> Manifest {
         let Ok(record) = serde_json::from_str::<Record>(line) else {
             continue;
         };
+        if record.void {
+            voided.insert(record.identity());
+            continue;
+        }
         match untrusted(&record) {
-            Some(reason) => manifest
-                .rejected
-                .push(format!("{NAME} line {} ({reason})", index + 1)),
+            Some(reason) => manifest.rejected.push(Rejected {
+                line: line.to_string(),
+                reason: format!("{NAME} line {} ({reason})", index + 1),
+            }),
             None => manifest.outputs.push(record),
         }
     }
+    // A withdrawn record describes a name its run never took. Acting on it would
+    // delete somebody else's file and report an original that is not there.
+    manifest
+        .outputs
+        .retain(|record| !voided.contains(&record.identity()));
     manifest
 }
 
@@ -193,13 +257,16 @@ fn untrusted(record: &Record) -> Option<String> {
         })
 }
 
-/// How many originals this folder could put back.
+/// How many originals this folder could put back. Counted by backup, not by
+/// record: a folder converted twice has two records over one original, and
+/// offering to restore it twice would be a lie about what is there.
 pub fn restorable(root: &Path) -> usize {
     load(root)
         .outputs
         .iter()
-        .filter(|record| record.backup.is_some())
-        .count()
+        .filter_map(|record| record.backup.as_ref().map(|backup| path_key(backup)))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
 }
 
 /// One line, appended and flushed before this file's original moves.
@@ -209,6 +276,12 @@ pub fn restorable(root: &Path) -> usize {
 pub fn append_record(output_root: &Path, record: &Record) -> Result<(), String> {
     let mut line = serde_json::to_vec(record).map_err(|error| error.to_string())?;
     line.push(b'\n');
+    // A full disk, or a share that does not honour `O_APPEND` atomically, can
+    // leave a line with no newline on the end. Opening the next record with one
+    // keeps that torn line from swallowing this one too.
+    if unterminated(&path(output_root)) {
+        line.insert(0, b'\n');
+    }
     // The output root already exists: the staged file that this record describes
     // was created inside it a moment ago, through the same directory checks.
     let mut file = std::fs::OpenOptions::new()
@@ -220,12 +293,35 @@ pub fn append_record(output_root: &Path, record: &Record) -> Result<(), String> 
     file.sync_data().map_err(|error| error.to_string())
 }
 
-/// Rewrite the file with the records that are left. Only `restore` does this, and
-/// it goes through the same stage-and-rename as any output.
-fn save(root: &Path, records: &[Record]) -> Result<(), String> {
+/// Whether the last byte on disk is something other than a newline.
+fn unterminated(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(end) = file.seek(SeekFrom::End(0)) else {
+        return false;
+    };
+    if end == 0 || file.seek(SeekFrom::Start(end - 1)).is_err() {
+        return false;
+    }
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).is_ok() && last[0] != b'\n'
+}
+
+/// Rewrite the file with the records that are left, and with every line the undo
+/// refused to act on: those lines are the only evidence of what was claimed here,
+/// and dropping them would quietly erase the thing being reported. Only `restore`
+/// rewrites, and it goes through the same stage-and-rename as any output.
+fn save(root: &Path, records: &[Record], rejected: &[Rejected]) -> Result<(), String> {
     let mut encoded = Vec::new();
     for record in records {
         serde_json::to_writer(&mut encoded, record).map_err(|error| error.to_string())?;
+        encoded.push(b'\n');
+    }
+    for line in rejected {
+        encoded.extend_from_slice(line.line.as_bytes());
         encoded.push(b'\n');
     }
     crate::convert::write_output(root, &path(root), &encoded).map_err(|failure| {
@@ -250,7 +346,11 @@ pub fn restore(root: &Path) -> Restore {
     let backups = backup_root(root);
     let loaded = load(root);
     let mut restored = Vec::new();
-    let mut failures = loaded.rejected.clone();
+    let mut failures: Vec<String> = loaded
+        .rejected
+        .iter()
+        .map(|rejected| rejected.reason.clone())
+        .collect();
     let mut kept = Vec::new();
 
     for record in loaded.outputs.iter().rev() {
@@ -284,10 +384,10 @@ pub fn restore(root: &Path) -> Restore {
     }
 
     kept.reverse();
-    let saved = if kept.is_empty() {
+    let saved = if kept.is_empty() && loaded.rejected.is_empty() {
         remove_if_present(&path(root))
     } else {
-        save(root, &kept)
+        save(root, &kept, &loaded.rejected)
     };
     if let Err(message) = saved {
         failures.push(format!("{NAME} ({message})"));
@@ -342,10 +442,10 @@ fn restore_one(
 /// Remove the file the run installed, and only that file. A different size or a
 /// later timestamp is somebody's edit, and an undo that eats it is not an undo.
 fn remove_output(output: &Path, record: &Record) -> Result<(), String> {
-    let Ok(metadata) = output.symlink_metadata() else {
+    if output.symlink_metadata().is_err() {
         return Ok(());
-    };
-    if metadata.len() != record.output_bytes || modified(&metadata) != record.output_modified {
+    }
+    if !record.installed(output) {
         return Err(format!(
             "{} has changed since the run wrote it",
             output.display()

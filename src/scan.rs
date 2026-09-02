@@ -921,6 +921,12 @@ fn scan_progressive_cancellable_inner(
                     }
                     continue;
                 }
+                // A run in flight stages its output beside the target. It is a
+                // whole image and it is about to be renamed away, so auditing it
+                // would offer to convert a file that will not be there.
+                if is_partial(file.path()) {
+                    continue;
+                }
                 if is_raw(file.path()) {
                     summary.skipped_raw += 1;
                     continue;
@@ -1696,6 +1702,17 @@ mod tests {
             "the half-written output is not an input"
         );
         assert_eq!(child_folders(&dir).unwrap(), vec![album]);
+        // The walk that feeds the audit has to agree with the browser: a staged
+        // leftover it listed would be converted as though it were an original.
+        assert_eq!(
+            scan(&dir, &dir.join(OUTPUT_DIR))
+                .entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["shot.png".to_string()]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
