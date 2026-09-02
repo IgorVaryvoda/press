@@ -113,6 +113,12 @@ fn rgba(image: &RenderImage) -> Option<RgbaImage> {
 /// already here, and swapping a copy of them back out of BGRA costs a memcpy against a
 /// full decode. Only the original side is reused — the converted side is still
 /// encoded and decoded back, because a promise about the output is not the output.
+///
+/// Reused only at full size. A preview is a full decode, while the writer now decodes
+/// a JPEG at a reduced DCT scale before the same Lanczos step, so under a size budget
+/// the two would disagree by a fraction of a percent and the bytes reported here would
+/// stop being the bytes the file would be. Nothing is lost by reading the file in that
+/// case: the scaled decode is what made it cheap.
 pub fn build(
     path: &Path,
     format: Format,
@@ -123,13 +129,17 @@ pub fn build(
     // The same decode and the same profile the writer uses, so the size shown beside
     // the comparison is the size the file would actually be.
     let format = format.resolve(path).ok()?;
-    let (decoded, profile) = match preview.filter(|preview| preview.decoded) {
-        Some(preview) => (
-            DynamicImage::ImageRgba8(rgba(&preview.image)?),
-            preview.profile.clone(),
-        ),
-        None => crate::scan::decode_for_conversion(path, max_edge).ok()?,
-    };
+    let (decoded, profile) = preview
+        .filter(|preview| preview.decoded && max_edge == MaxEdge::FULL)
+        .and_then(|preview| {
+            Some((
+                DynamicImage::ImageRgba8(rgba(&preview.image)?),
+                preview.profile.clone(),
+            ))
+        })
+        // A frame that will not read back is a reason to decode the file, not a reason
+        // to fail the comparison.
+        .or_else(|| crate::scan::decode_for_conversion(path, max_edge).ok())?;
     let original = max_edge.apply(decoded);
     let encoded = convert::encode(&original, format, quality, profile.as_deref()).ok()?;
     let decoded = crate::scan::decode_bytes(&encoded)?;
@@ -271,6 +281,20 @@ mod tests {
             )
             .is_none(),
             "the file is gone, so a cold build cannot succeed"
+        );
+
+        // Under a size budget the preview is not the decode the writer would make, so
+        // it is not reused and the file is read — which, with the file gone, fails.
+        assert!(
+            build(
+                &path,
+                Format::WebP,
+                Quality::lossy(70.),
+                MaxEdge(Some(100)),
+                Some(&preview),
+            )
+            .is_none(),
+            "a budgeted comparison reused pixels the writer would not have produced"
         );
     }
 

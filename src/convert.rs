@@ -1806,6 +1806,51 @@ pub(crate) mod tests {
         assert_eq!(crate::avif::configured_speed(), None);
     }
 
+    /// A grayscale JPEG has one channel and has to keep it. Read as RGB by the scaled
+    /// decode it would reach the encoder as three components where the source had one,
+    /// and a black and white photo re-encoded as JPEG would come out bigger than it
+    /// went in.
+    #[test]
+    fn a_grayscale_jpeg_stays_grayscale_through_a_scaled_decode() {
+        let dir = temp_dir("scaled-grayscale");
+        let out = dir.join("out");
+        let gray = dir.join("gray.jpg");
+        let colour = dir.join("colour.jpg");
+        let source = photo(4000, 1000).grayscale();
+        source.save(&gray).unwrap();
+        // The same picture, written with three components. Both carry the same
+        // luminance, so any size difference is the channel count.
+        DynamicImage::ImageRgb8(source.to_rgb8())
+            .save(&colour)
+            .unwrap();
+
+        let converted = |source: &Path| {
+            convert_to(
+                &dir,
+                source,
+                &output_path(&dir, source, &out, Format::Jpeg),
+                Format::Jpeg,
+                Quality::lossy(80.),
+                MaxEdge(Some(1000)),
+            )
+            .expect("conversion runs")
+        };
+
+        let written = converted(&gray);
+        assert_eq!((written.width, written.height), (1000, 250));
+        assert!(
+            matches!(
+                crate::scan::decode(&written.written).expect("the output decodes"),
+                DynamicImage::ImageLuma8(_)
+            ),
+            "the grayscale source came back as a colour JPEG"
+        );
+        assert!(
+            written.bytes < converted(&colour).bytes,
+            "one channel wrote more bytes than three"
+        );
+    }
+
     /// The scaled decode changes what conversion holds in memory, not what it writes:
     /// a 4000px JPEG asked for 1000px still exports 1000px.
     #[test]

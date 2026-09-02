@@ -398,8 +398,10 @@ pub fn decode_for_conversion(
 /// full decode is that scaled-DCT step; the exported pixels are not bit-identical to
 /// what a full decode produced, and they are not meant to be.
 ///
-/// `None` means "decode this the old way": a factor of one, or a JPEG turbojpeg will
-/// not answer for at all, such as a CMYK or arithmetic-coded one.
+/// `None` means "decode this the old way": a factor of one, or a JPEG libjpeg-turbo
+/// will not hand back as packed pixels — CMYK and YCCK, which it only decompresses to
+/// CMYK, along with lossless and twelve-bit ones. Arithmetic coding it does read, so
+/// those take this path like any other.
 fn scaled_jpeg(path: &Path, edge: u32) -> Option<(DynamicImage, Option<Vec<u8>>)> {
     let bytes = std::fs::read(path).ok()?;
     let mut decompressor = turbojpeg::Decompressor::new().ok()?;
@@ -410,22 +412,32 @@ fn scaled_jpeg(path: &Path, edge: u32) -> Option<(DynamicImage, Option<Vec<u8>>)
     }
     decompressor.set_scaling_factor(factor).ok()?;
     let (width, height) = (factor.scale(header.width), factor.scale(header.height));
-    // RGB, not RGBA: a JPEG has no alpha, and the fourth channel would be a quarter of
-    // this allocation spent carrying 255.
-    let mut pixels = vec![0u8; width.checked_mul(height)?.checked_mul(3)?];
+    // A grayscale JPEG has to leave here with one channel, the way the full decode
+    // leaves it. Read as RGB it would reach the encoders as three components where the
+    // source had one, and a grayscale photo re-encoded as JPEG would grow.
+    //
+    // Otherwise RGB rather than RGBA: a JPEG has no alpha, and the fourth channel would
+    // be a quarter of this allocation spent carrying 255.
+    let gray = header.subsamp == turbojpeg::Subsamp::Gray;
+    let channels = if gray { 1 } else { 3 };
+    let mut pixels = vec![0u8; width.checked_mul(height)?.checked_mul(channels)?];
     decompressor
         .decompress(
             &bytes,
             turbojpeg::Image {
                 pixels: &mut pixels,
                 width,
-                pitch: width.checked_mul(3)?,
+                pitch: width.checked_mul(channels)?,
                 height,
-                format: turbojpeg::PixelFormat::RGB,
+                format: if gray {
+                    turbojpeg::PixelFormat::GRAY
+                } else {
+                    turbojpeg::PixelFormat::RGB
+                },
             },
         )
         .ok()?;
-    let image = image::RgbImage::from_raw(width.try_into().ok()?, height.try_into().ok()?, pixels)?;
+    let (width, height) = (width.try_into().ok()?, height.try_into().ok()?);
 
     // turbojpeg hands back the stored pixels in the stored order and knows nothing
     // about EXIF, so orientation and profile still come off the image crate's header
@@ -436,7 +448,11 @@ fn scaled_jpeg(path: &Path, edge: u32) -> Option<(DynamicImage, Option<Vec<u8>>)
         .ok()?;
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     let profile = rgb_profile(decoder.icc_profile().ok().flatten());
-    let mut image = DynamicImage::ImageRgb8(image);
+    let mut image = if gray {
+        DynamicImage::ImageLuma8(image::GrayImage::from_raw(width, height, pixels)?)
+    } else {
+        DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?)
+    };
     image.apply_orientation(orientation);
     Some((image, profile))
 }
@@ -1346,6 +1362,68 @@ mod tests {
         let (untouched, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(6000)))
             .expect("the JPEG decodes");
         assert_eq!((untouched.width(), untouched.height()), (4000, 1000));
+    }
+
+    /// libjpeg-turbo hands CMYK and YCCK back only as CMYK, so the scaled path has to
+    /// decline them and let the general decoder do the conversion. Getting that wrong
+    /// is not a failure anyone would notice quickly: four channels read as three come
+    /// out as a picture, just the wrong one.
+    ///
+    /// The fixture is an Adobe CMYK JPEG, red on the left and blue on the right.
+    /// Nothing here writes CMYK, so it is bytes rather than something built in the
+    /// test.
+    #[test]
+    fn a_cmyk_jpeg_falls_back_to_the_general_decoder_with_its_colours_intact() {
+        const CMYK_JPEG: [u8; 377] = [
+            0xff, 0xd8, 0xff, 0xee, 0x00, 0x0e, 0x41, 0x64, 0x6f, 0x62, 0x65, 0x00, 0x64, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x02, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x02, 0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x02,
+            0x02, 0x02, 0x05, 0x04, 0x04, 0x03, 0x04, 0x06, 0x05, 0x06, 0x06, 0x06, 0x05, 0x06,
+            0x06, 0x06, 0x07, 0x09, 0x08, 0x06, 0x07, 0x09, 0x07, 0x06, 0x06, 0x08, 0x0b, 0x08,
+            0x09, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x06, 0x08, 0x0b, 0x0c, 0x0b, 0x0a, 0x0c, 0x09,
+            0x0a, 0x0a, 0x0a, 0xff, 0xc0, 0x00, 0x14, 0x08, 0x00, 0x10, 0x00, 0x10, 0x04, 0x43,
+            0x11, 0x00, 0x4d, 0x11, 0x00, 0x59, 0x11, 0x00, 0x4b, 0x11, 0x00, 0xff, 0xc4, 0x00,
+            0x1f, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+            0x0a, 0x0b, 0xff, 0xc4, 0x00, 0xb5, 0x10, 0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04,
+            0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7d, 0x01, 0x02, 0x03, 0x00, 0x04,
+            0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14,
+            0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0, 0x24,
+            0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46,
+            0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64,
+            0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a,
+            0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+            0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3,
+            0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+            0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2, 0xe3,
+            0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+            0xf8, 0xf9, 0xfa, 0xff, 0xda, 0x00, 0x0e, 0x04, 0x43, 0x00, 0x4d, 0x00, 0x59, 0x00,
+            0x4b, 0x00, 0x00, 0x3f, 0x00, 0xfd, 0xfc, 0xaf, 0xe7, 0xfe, 0xbf, 0x9f, 0xfa, 0xfd,
+            0xfc, 0xaf, 0xe0, 0x0e, 0x8a, 0xfe, 0xff, 0x00, 0x28, 0xaf, 0xef, 0xf2, 0x8a, 0xfe,
+            0x00, 0xe8, 0xaf, 0xe0, 0x0e, 0x8a, 0xfe, 0xff, 0x00, 0x28, 0xaf, 0xff, 0xd9,
+        ];
+
+        let dir = temp_dir("cmyk-jpeg");
+        let path = dir.join("press.jpg");
+        std::fs::write(&path, CMYK_JPEG).unwrap();
+
+        // Half of sixteen, so the scaled path is asked for and has to decline.
+        let (image, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(8)))
+            .expect("a CMYK JPEG decodes");
+        assert_eq!((image.width(), image.height()), (16, 16));
+
+        let pixels = image.to_rgb8();
+        let left = pixels.get_pixel(2, 2).0;
+        let right = pixels.get_pixel(13, 2).0;
+        assert!(
+            left[0] > 200 && left[2] < 60,
+            "the left half is not red: {left:?}"
+        );
+        assert!(
+            right[2] > 200 && right[0] < 60,
+            "the right half is not blue: {right:?}"
+        );
     }
 
     /// The rotation belongs after the scaled decode. turbojpeg hands back the stored
