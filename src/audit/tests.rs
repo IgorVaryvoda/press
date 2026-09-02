@@ -3670,6 +3670,96 @@ fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestA
 }
 
 #[gpui::test]
+fn the_scanning_screen_shows_the_count_and_cancel_keeps_the_last_folder(cx: &mut TestAppContext) {
+    assert_eq!(view::scan_progress_line(1), "Found 1 image…");
+    assert_eq!(view::scan_progress_line(999), "Found 999 images…");
+    assert_eq!(view::scan_progress_line(1240), "Found 1,240 images…");
+    assert_eq!(
+        view::scan_progress_line(1_234_567),
+        "Found 1,234,567 images…"
+    );
+
+    let (audit, cx) = finding_audit(cx);
+    let (token, request) = audit.update(cx, |audit, _| {
+        let token = retained_scan(audit);
+        audit.scan_found = Some(1240);
+        (token, audit.scan_generation)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let cancel = cx
+        .debug_bounds("cancel-scan")
+        .expect("a scan with a token offers Cancel");
+    assert!(cx.debug_bounds("audit-header").is_none());
+
+    cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        token.load(Ordering::Acquire),
+        "Cancel raises the scan token"
+    );
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.scan_generation, request.wrapping_add(1));
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_found.is_none());
+        assert!(audit.scan_cancellation.is_none());
+        assert_eq!(audit.entries.len(), 3);
+        assert_eq!(audit.dataset_generation, 0);
+    });
+    assert!(cx.debug_bounds("audit-header").is_some());
+}
+
+#[gpui::test]
+fn cancelling_a_subfolder_scan_keeps_the_previous_dataset(cx: &mut TestAppContext) {
+    let root = scan_fixture("subfolders-cancel");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    write_png(&root, "direct.png");
+    write_png(&child, "nested.png");
+    let (audit, cx) = finding_audit(cx);
+    let (request, token) = audit.update(cx, |audit, cx| {
+        audit.include_subfolders = true;
+        let request = audit.scan_generation;
+        audit.request_path(root.clone(), cx);
+        assert!(audit.scanning.is_some());
+        let token = audit
+            .scan_cancellation
+            .as_ref()
+            .map(|cancellation| cancellation.token.clone())
+            .expect("a tree walk is cancellable");
+        audit.cancel_scan(cx);
+        (request, token)
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(token.load(Ordering::Acquire));
+        assert_eq!(audit.scan_generation, request.wrapping_add(2));
+        assert_eq!(audit.dataset_generation, 0, "no half dataset is committed");
+        assert_eq!(audit.entries.len(), 3);
+        assert_eq!(audit.root, PathBuf::new());
+        assert!(audit.folders.is_empty());
+        assert!(audit.scanning.is_none());
+        assert!(audit.scan_found.is_none());
+        assert!(audit.scan_cancellation.is_none());
+    });
+
+    // The same request completes when nobody cancels it, with the count shown on
+    // the way: the cancel above stopped a scan that would have landed.
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.dataset_generation, 1);
+        assert_eq!(audit.entries.len(), 2);
+        assert_eq!(audit.root, root);
+        assert_eq!(
+            audit.scan_found,
+            Some(2),
+            "the live count reached the window"
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui::test]
 fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
     let root = scan_fixture("heic-only");
     std::fs::write(root.join("IMG_0001.heic"), b"not really a heic")

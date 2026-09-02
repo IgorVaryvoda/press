@@ -10,6 +10,23 @@ pub(super) fn empty_folder_detail(folder: &str, skipped_heic: usize) -> String {
     }
 }
 
+/// The line under "Opening…" while a tree walk runs. A grouped figure: a shoot is
+/// tens of thousands of files, and "12480" reads as a code, not a count.
+pub(super) fn scan_progress_line(found: usize) -> String {
+    let digits = found.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    match found {
+        1 => "Found 1 image…".to_string(),
+        _ => format!("Found {grouped} images…"),
+    }
+}
+
 /// A label for the comparison view, which floats over the picture rather than over
 /// a theme surface, so it carries its own dark backing.
 /// A proportional bar. The audit is a ranking and a column of numbers does not
@@ -570,6 +587,8 @@ impl Render for Audit {
 
         if let Some(scanning) = self.scanning.as_ref() {
             let label = scanning.clone();
+            let found = self.scan_found.map(scan_progress_line);
+            let cancellable = self.scan_cancellation.is_some();
             return div()
                 .size_full()
                 .flex()
@@ -598,6 +617,13 @@ impl Render for Audit {
                                 .text_color(cx.theme().foreground)
                                 .child(format!("Opening {label}…")),
                         )
+                        .children(found.map(|found| {
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(12.))
+                                .text_color(cx.theme().foreground)
+                                .child(found)
+                        }))
                         .child(
                             div()
                                 .text_size(px(12.))
@@ -605,7 +631,18 @@ impl Render for Audit {
                                 .child(
                                     "The current folder stays untouched until the scan finishes.",
                                 ),
-                        ),
+                        )
+                        // A one-file probe is over before a click; only a walk with a
+                        // token gets the way out, and it goes back to the last folder.
+                        .children(cancellable.then(|| {
+                            div().debug_selector(|| "cancel-scan".into()).child(
+                                Button::new("cancel-scan")
+                                    .small()
+                                    .outline()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|audit, _, _, cx| audit.cancel_scan(cx))),
+                            )
+                        })),
                 )
                 .on_drop(
                     cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {

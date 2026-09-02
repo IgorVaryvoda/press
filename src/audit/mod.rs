@@ -41,6 +41,7 @@ use crate::compare::{Pair, Preview};
 use crate::convert::{Format, MaxEdge, Quality};
 use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
+use futures::StreamExt;
 use futures::future::select_all;
 use gpui::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
@@ -544,6 +545,9 @@ pub(crate) struct Audit {
     scan_generation: u64,
     /// The path currently being scanned, if any.
     scanning: Option<String>,
+    /// Images the running tree walk has found so far. `None` for a one-level read,
+    /// which is over before a count would help.
+    scan_found: Option<usize>,
     /// The cancellable folder scan currently allowed to publish into this audit.
     scan_cancellation: Option<ScanCancellation>,
     /// Walk the whole tree when a folder opens, as `press audit` does. Off, the
@@ -1041,6 +1045,18 @@ impl Audit {
         }
     }
 
+    /// Stop the running scan and keep what was on screen. The request is disowned
+    /// before the token is raised: a completion racing the click then fails the
+    /// ownership check, and no partial dataset is ever installed.
+    pub(super) fn cancel_scan(&mut self, cx: &mut Context<Self>) {
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        self.cancel_retained_scan();
+        self.scan_cancellation = None;
+        self.scanning = None;
+        self.scan_found = None;
+        cx.notify();
+    }
+
     fn owns_scan_request(&self, request: u64, token: Option<&Arc<AtomicBool>>) -> bool {
         self.scan_generation == request
             && match token {
@@ -1215,6 +1231,7 @@ impl Audit {
             cancellation.cancel();
         }
         self.scan_cancellation = None;
+        self.scan_found = None;
         self.scanning = Some(
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1285,6 +1302,7 @@ impl Audit {
         let cancellation = ScanCancellation::new();
         let token = cancellation.token.clone();
         self.scan_cancellation = Some(cancellation);
+        self.scan_found = None;
         self.scanning = Some(
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1297,23 +1315,46 @@ impl Audit {
 
         cx.spawn(async move |this, cx| {
             let browse_token = token.clone();
-            let browsed = cx
-                .background_executor()
-                .spawn(async move {
-                    if include_subfolders {
-                        scan::browse_tree_cancellable(&path, &output_root, browse_token, |_| {
-                            std::ops::ControlFlow::Continue(())
-                        })
-                    } else {
-                        scan::browse_cancellable(&path, &output_root, &browse_token)
-                    }
+            let browsed = if include_subfolders {
+                // The walker publishes from its own thread, so the count crosses to
+                // the window through a channel; the sender goes away with the scan
+                // and the loop below ends before the result is read.
+                let (progress, mut found) = futures::channel::mpsc::unbounded();
+                let scan = cx.background_executor().spawn(async move {
+                    let mut count = 0;
+                    scan::browse_tree_cancellable(&path, &output_root, browse_token, |batch| {
+                        count += batch.len();
+                        let _ = progress.unbounded_send(count);
+                        std::ops::ControlFlow::Continue(())
+                    })
                     .transpose()
-                })
-                .await;
+                });
+                while let Some(count) = found.next().await {
+                    let shown = this.update(cx, |audit, cx| {
+                        if audit.owns_scan_request(request, Some(&token)) {
+                            audit.scan_found = Some(count);
+                            cx.notify();
+                        }
+                    });
+                    if shown.is_err() {
+                        break;
+                    }
+                }
+                scan.await
+            } else {
+                cx.background_executor()
+                    .spawn(async move {
+                        scan::browse_cancellable(&path, &output_root, &browse_token).transpose()
+                    })
+                    .await
+            };
             let _ = this.update_in(cx, |audit, window, cx| {
                 if !audit.owns_scan_request(request, Some(&token)) {
                     return;
                 }
+                // The count stays until the next request starts: it is only drawn
+                // while `scanning` is set, and a completed walk leaves its total
+                // where a test can read it.
                 audit.scanning = None;
                 audit.scan_cancellation = None;
                 match browsed {
@@ -1419,6 +1460,7 @@ impl Audit {
         let cancellation = ScanCancellation::new();
         let token = cancellation.token.clone();
         self.scan_cancellation = Some(cancellation);
+        self.scan_found = None;
         self.scanning = Some(format!("{} folders", paths.len()));
         let folder_count = paths.len();
         let output_root = self.output.root(&root);
@@ -1470,6 +1512,7 @@ impl Audit {
             cancellation.cancel();
         }
         self.scan_cancellation = None;
+        self.scan_found = None;
         self.scanning = Some(format!("{} images", paths.len()));
         cx.notify();
 
@@ -1924,6 +1967,7 @@ pub(crate) fn build_audit(
             dataset_generation: 0,
             scan_generation: 0,
             scanning: None,
+            scan_found: None,
             scan_cancellation: None,
             include_subfolders,
             focus,
