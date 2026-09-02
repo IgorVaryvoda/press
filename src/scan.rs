@@ -623,8 +623,7 @@ fn is_default_output(root: &Path, output_root: &Path) -> bool {
 
 /// Read one directory level for the window's file browser. Header probes keep
 /// the existing audit rows truthful without decoding image pixels or walking the
-/// directory tree.
-#[cfg(test)]
+/// directory tree. The command line uses it for `--no-subfolders`.
 pub fn browse(root: &Path, output_root: &Path) -> std::io::Result<Browse> {
     Ok(browse_page(root, output_root, None)?.expect("an uncancellable browse completes"))
 }
