@@ -438,7 +438,8 @@ impl Audit {
                                 ),
                             };
                         let encoded = decoded
-                            .and_then(|sample| {
+                            .zip(format.resolve(&path).ok())
+                            .and_then(|(sample, format)| {
                                 convert::encode(&sample.0, format, quality, sample.1.as_deref())
                                     .ok()
                             })

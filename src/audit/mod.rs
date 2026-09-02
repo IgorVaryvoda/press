@@ -131,8 +131,8 @@ const GALLERY_BORDER: f32 = 1.;
 /// slider stop feel like a conversion.
 fn sample_size(format: Format) -> usize {
     match format {
-        Format::WebP | Format::Jpeg => 32,
-        Format::Avif | Format::JpegXl => 3,
+        Format::WebP | Format::Jpeg | Format::Png => 32,
+        Format::Avif | Format::JpegXl | Format::Same => 3,
     }
 }
 

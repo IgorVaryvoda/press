@@ -55,6 +55,7 @@ pub enum Failure {
     LosslessNeedsIntegerSamples,
     ProfileNotAttached,
     JpegNeedsOpaque,
+    KeepFormatUnavailable(String),
     AnimatedGif,
     AnimatedPng,
     AnimatedWebP,
@@ -77,6 +78,9 @@ impl Failure {
             }
             Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
             Self::JpegNeedsOpaque => Some("JPEG cannot keep transparency".into()),
+            Self::KeepFormatUnavailable(name) => {
+                Some(format!("keep format is not available for {name}"))
+            }
             Self::AnimatedGif => Some("animated GIFs are not converted".into()),
             Self::AnimatedPng => Some("animated PNG files are not converted".into()),
             Self::AnimatedWebP => Some("animated WebP files are not converted".into()),
@@ -137,21 +141,31 @@ impl MaxEdge {
 }
 
 /// The container to write.
+///
+/// `Same` keeps each source's own container, so `hero.jpg` comes out as `hero.jpg`
+/// and every `<img src>` that named it still resolves. With a max edge it is the
+/// "just make them smaller" run. `Png` exists for that path alone: the window and
+/// the CLI never offer it, because a PNG is only ever the right output for a PNG.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Format {
     WebP,
     Avif,
     JpegXl,
     Jpeg,
+    Png,
+    Same,
 }
 
 impl Format {
-    pub fn extension(&self) -> &'static str {
+    /// `None` for `Same`: the output keeps whatever extension the source has.
+    pub fn extension(&self) -> Option<&'static str> {
         match self {
-            Format::WebP => "webp",
-            Format::Avif => "avif",
-            Format::JpegXl => "jxl",
-            Format::Jpeg => "jpg",
+            Format::WebP => Some("webp"),
+            Format::Avif => Some("avif"),
+            Format::JpegXl => Some("jxl"),
+            Format::Jpeg => Some("jpg"),
+            Format::Png => Some("png"),
+            Format::Same => None,
         }
     }
 
@@ -161,11 +175,40 @@ impl Format {
             Format::Avif => "avif",
             Format::JpegXl => "jxl",
             Format::Jpeg => "jpeg",
+            Format::Png => "png",
+            Format::Same => "same",
         }
     }
 
+    /// `Same` says no: a folder holds JPEGs and AVIFs side by side, and the label
+    /// would be true of some files and false of the rest.
     pub fn supports_lossless(self) -> bool {
-        matches!(self, Self::WebP | Self::JpegXl)
+        matches!(self, Self::WebP | Self::JpegXl | Self::Png)
+    }
+
+    /// The encoder `Same` means for one source, read off its extension. The name is
+    /// what the output keeps, so the name is what has to be honest: a PNG called
+    /// `.jpg` comes out as the JPEG its name promised. Anything without an encoder
+    /// here is refused by name rather than written as something else.
+    pub fn resolve(self, source: &Path) -> Result<Format, Failure> {
+        if self != Format::Same {
+            return Ok(self);
+        }
+        let extension = source
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        match extension.as_str() {
+            "jpg" | "jpeg" | "jpe" => Ok(Format::Jpeg),
+            "png" => Ok(Format::Png),
+            "webp" => Ok(Format::WebP),
+            "avif" => Ok(Format::Avif),
+            "jxl" => Ok(Format::JpegXl),
+            "" => Err(Failure::KeepFormatUnavailable(
+                "a file with no extension".into(),
+            )),
+            _ => Err(Failure::KeepFormatUnavailable(extension.to_uppercase())),
+        }
     }
 }
 
@@ -212,7 +255,35 @@ pub fn encode(
                 None => Ok(encoded),
             }
         }
+        Format::Png => encode_png(image, profile).ok_or(Failure::Failed),
+        // Callers resolve `Same` against the source before encoding; there is no
+        // source here to resolve it against.
+        Format::Same => Err(Failure::Failed),
     }
+}
+
+/// PNG is lossless whatever the quality says, so the only knob worth turning is
+/// how hard the deflater works. The samples go in at the source's own depth: a
+/// 16-bit PNG asked to keep its format keeps its bits.
+fn encode_png(image: &DynamicImage, profile: Option<&[u8]>) -> Option<Vec<u8>> {
+    let mut encoded = Vec::new();
+    let mut encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut encoded,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    if let Some(profile) = profile {
+        image::ImageEncoder::set_icc_profile(&mut encoder, profile.to_vec()).ok()?;
+    }
+    image::ImageEncoder::write_image(
+        encoder,
+        image.as_bytes(),
+        image.width(),
+        image.height(),
+        image.color().into(),
+    )
+    .ok()?;
+    Some(encoded)
 }
 
 /// libjpeg-turbo writes no metadata, so the profile goes in by hand: APP2 segments
@@ -529,9 +600,11 @@ fn has_transparency(image: &DynamicImage) -> bool {
 pub fn workers(format: Format) -> usize {
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
     match format {
-        // libjpeg-turbo runs on the calling thread too.
-        Format::WebP | Format::Jpeg => cores.clamp(2, 8),
-        Format::Avif => 2,
+        // libjpeg-turbo and the PNG deflater run on the calling thread too.
+        Format::WebP | Format::Jpeg | Format::Png => cores.clamp(2, 8),
+        // A kept-format folder may hold JPEG XL and AVIF sources, whose encoders
+        // already use every core, so it gets AVIF's count rather than WebP's.
+        Format::Avif | Format::Same => 2,
         // jixel uses the machine's cores inside one encode. A second decoded image
         // would add memory and contention without adding useful parallelism.
         Format::JpegXl => 1,
@@ -587,7 +660,11 @@ pub fn convert_each(
 /// folder of albums.
 pub fn output_path(root: &Path, source: &Path, out_dir: &Path, format: Format) -> PathBuf {
     let relative = source.strip_prefix(root).unwrap_or(source);
-    out_dir.join(relative).with_extension(format.extension())
+    let target = out_dir.join(relative);
+    match format.extension() {
+        Some(extension) => target.with_extension(extension),
+        None => target,
+    }
 }
 
 /// A collision-free path for one AI result beside the normal converted files.
@@ -699,7 +776,7 @@ pub fn plan_outputs(
             };
             let candidate = parent
                 .join(format!("{stem}-{extension}{suffix}"))
-                .with_extension(format.extension());
+                .with_extension(plain.extension().unwrap_or_default());
             if originals.contains(&key(&candidate)) {
                 continue;
             }
@@ -806,6 +883,7 @@ pub fn convert_to(
     quality: Quality,
     max_edge: MaxEdge,
 ) -> Result<Converted, Failure> {
+    let format = format.resolve(source)?;
     let (decoded, profile) =
         crate::scan::decode_for_conversion(source).map_err(|error| match error {
             crate::scan::ConversionDecodeError::Failed => Failure::Failed,
@@ -1138,6 +1216,131 @@ pub(crate) mod tests {
         assert_eq!(
             Failure::JpegNeedsOpaque.reason(),
             Some("JPEG cannot keep transparency".into())
+        );
+    }
+
+    /// The whole point of keeping the format is that the name does not change: the
+    /// pages that name `hero.jpg` keep working. So the extension is the source's,
+    /// case and all, and the bytes inside are the container the name promises.
+    #[test]
+    fn keep_format_keeps_the_extension_for_jpg_png_and_webp() {
+        let dir = temp_dir("keep-format");
+        let out = dir.join("optimised");
+        for (name, magic) in [
+            ("shot.jpg", &[0xff, 0xd8][..]),
+            ("shot.PNG", &b"\x89PNG"[..]),
+            ("shot.webp", &b"RIFF"[..]),
+        ] {
+            let source = dir.join(name);
+            photo(40, 30)
+                .save_with_format(
+                    &source,
+                    image::ImageFormat::from_path(&source).expect("the name has a format"),
+                )
+                .unwrap();
+            let written = output_path(&dir, &source, &out, Format::Same);
+            assert_eq!(written, out.join(name), "{name} changed its name");
+
+            let converted = convert_to(
+                &dir,
+                &source,
+                &written,
+                Format::Same,
+                Quality::lossy(80.),
+                MaxEdge(Some(20)),
+            )
+            .unwrap_or_else(|error| panic!("{name} did not convert: {error:?}"));
+            let bytes = std::fs::read(&written).unwrap();
+            assert!(bytes.starts_with(magic), "{name} is not its own format");
+            assert_eq!((converted.width, converted.height), (20, 15), "{name}");
+        }
+    }
+
+    #[test]
+    fn keep_format_refuses_a_bmp_by_name() {
+        let dir = temp_dir("keep-bmp");
+        let source = dir.join("scan.bmp");
+        photo(8, 8).save(&source).unwrap();
+
+        let refused = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &dir.join("optimised"), Format::Same),
+            Format::Same,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        );
+        assert_eq!(refused, Err(Failure::KeepFormatUnavailable("BMP".into())));
+        assert_eq!(
+            Failure::KeepFormatUnavailable("BMP".into()).reason(),
+            Some("keep format is not available for BMP".into())
+        );
+        assert_eq!(
+            Format::Same.resolve(Path::new("/p/noext")),
+            Err(Failure::KeepFormatUnavailable(
+                "a file with no extension".into()
+            ))
+        );
+    }
+
+    /// Keeping the format must also keep the depth: a 16-bit PNG that comes back
+    /// as eight bits kept its name and lost half its samples.
+    #[test]
+    fn keep_format_keeps_sixteen_bit_png_samples() {
+        let dir = temp_dir("keep-deep-png");
+        let source = dir.join("deep.png");
+        let image = deep_photo(24, 16);
+        image.save(&source).unwrap();
+        let written = output_path(&dir, &source, &dir.join("optimised"), Format::Same);
+
+        convert_to(
+            &dir,
+            &source,
+            &written,
+            Format::Same,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        )
+        .expect("a 16-bit PNG keeps its format");
+
+        let decoded = image::open(&written).unwrap();
+        assert!(is_high_depth(&decoded), "the output dropped to eight bits");
+        assert_eq!(decoded.to_rgb16(), image.to_rgb16());
+    }
+
+    /// With the format kept, the output name is the source name. Written into the
+    /// audited folder itself that is the original, and the guard that already
+    /// stops `a.png` landing on `a.webp` has to stop this too.
+    #[test]
+    fn keep_format_never_writes_onto_a_source() {
+        let root = Path::new("/photos");
+        let sources = [
+            PathBuf::from("/photos/a.jpg"),
+            PathBuf::from("/photos/album/b.png"),
+        ];
+
+        let onto_itself = plan_outputs(root, &sources, &sources, root, Format::Same);
+        assert_eq!(
+            onto_itself,
+            [
+                Err(Failure::OverwritesSource),
+                Err(Failure::OverwritesSource)
+            ]
+        );
+
+        let mirrored = plan_outputs(
+            root,
+            &sources,
+            &sources,
+            Path::new("/photos/optimized"),
+            Format::Same,
+        );
+        assert_eq!(
+            mirrored,
+            [
+                Ok(PathBuf::from("/photos/optimized/a.jpg")),
+                Ok(PathBuf::from("/photos/optimized/album/b.png")),
+            ]
         );
     }
 

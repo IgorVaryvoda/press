@@ -49,15 +49,22 @@ impl Audit {
     }
 
     pub(super) fn format_group(&self, cx: &mut Context<Self>) -> ButtonGroup {
-        let options = [Format::WebP, Format::Avif, Format::JpegXl, Format::Jpeg];
+        let options = [
+            Format::WebP,
+            Format::Avif,
+            Format::JpegXl,
+            Format::Jpeg,
+            Format::Same,
+        ];
         ButtonGroup::new("format")
             .children(options.iter().map(|format| {
-                segment(
-                    format.label(),
-                    format.label().to_uppercase(),
-                    self.format == *format,
-                )
-                .disabled(self.converting)
+                // "same" is the CLI's word; beside four container names the
+                // window says what it does instead.
+                let display = match format {
+                    Format::Same => "Keep".to_string(),
+                    _ => format.label().to_uppercase(),
+                };
+                segment(format.label(), display, self.format == *format).disabled(self.converting)
             }))
             .on_click(cx.listener(move |audit, clicked: &Vec<usize>, _, cx| {
                 if audit.converting {
