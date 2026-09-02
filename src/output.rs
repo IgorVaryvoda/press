@@ -491,7 +491,10 @@ fn canonical_output(output: &Path) -> Result<PathBuf, Error> {
     Ok(canonical)
 }
 
-fn normal_relative(path: &Path) -> Result<(), Error> {
+/// A path that may be joined onto a proven root: components only, no root, no
+/// dots. Also the rule a stored run record's paths have to pass before anything
+/// is joined onto a folder and deleted.
+pub(crate) fn normal_relative(path: &Path) -> Result<(), Error> {
     if path.as_os_str().is_empty() {
         return Err(Error::RelativePathEmpty);
     }

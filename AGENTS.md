@@ -21,7 +21,7 @@ thumbs::load (per visible row)  compare::build (per view)  convert::convert_file
 - `src/convert.rs` — re-encode. WebP via libwebp (real transparency forces lossless), AVIF via system libavif/libaom speed 6 with libyuv conversion where packaged (no lossless AVIF). `MaxEdge` downscales with Lanczos3, never up. `output_path` mirrors the source tree.
 - `src/compare.rs` — original-vs-converted pair built in memory, decode-encode-decode so both sides are real pixels. Cached by `Key` (path+format+quality+max_edge).
 - `src/thumbs.rs` — decode + 96px thumbnail + BGRA swap (`to_bgra`, shared with compare). `None` means draw a gap, not an error.
-- `src/manifest.rs` — `.press-manifest.json` in the output root: which source each output came from, and where a replaced original was moved. `plan_outputs` reads it so a later run never walks over an earlier one's output, and `restore` walks it backwards to undo a replace run.
+- `src/manifest.rs` — `.press-manifest.jsonl` in the output root, one appended line per written output: which source it came from, what it measured, and where a replaced original was moved. Written before the original moves, so a killed run is still recoverable. `plan_outputs` reads it so a later run never walks over an earlier one's output, and `restore` walks it backwards to undo a replace run.
 - `src/settings.rs` — hand-rolled `key=value` file at `<config>/imageguide/settings`; tolerant parse. The `imageguide` folder name predates the rename to Press and stays, so saved credentials survive.
 - `src/main.rs` — everything else: `main` (line ~3090), `parse_args`, `convert_headless`, `run_window`/`build_audit`/`init_theme`/`Launch`, and the whole `Audit` UI (struct at ~254, `Render` impl at ~2593, `AuditTable` delegate at ~2286).
 

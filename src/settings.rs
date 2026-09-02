@@ -260,11 +260,11 @@ fn parse(text: &str) -> Settings {
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "output" => {
                 let value = value.trim();
-                // A chosen folder is always an absolute path from the picker, so the
-                // bare word cannot collide with one.
+                // Replace mode is never inherited from a file. It rewrites the
+                // folder it is pointed at, and a launch is not the moment to
+                // discover that; a line an older build wrote reads as the default.
                 settings.output = match value {
-                    "" => Output::Optimized,
-                    "replace" => Output::Replace,
+                    "" | "replace" => Output::Optimized,
                     path => Output::Folder(PathBuf::from(path)),
                 };
             }
@@ -294,9 +294,8 @@ fn render(settings: &Settings) -> String {
     // The default writes no path, so a settings file says nothing about where
     // output goes until somebody chooses somewhere else.
     match &settings.output {
-        Output::Optimized => {}
+        Output::Optimized | Output::Replace => {}
         Output::Folder(path) => out.push_str(&format!("output={}\n", path.display())),
-        Output::Replace => out.push_str("output=replace\n"),
     }
     out
 }
@@ -417,16 +416,17 @@ mod tests {
         );
     }
 
-    /// Replace mode is a destination like any other, and a settings file that
-    /// remembers it must not read back as a folder literally named `replace`.
+    /// Replace mode is asked for per folder, never remembered. A settings file
+    /// that carried it would rewrite the next folder somebody opened.
     #[test]
-    fn replacing_in_place_survives_a_round_trip_and_writes_beside_the_originals() {
+    fn replacing_in_place_is_never_persisted_and_never_read_back() {
         let replacing = Settings {
             output: Output::Replace,
             ..Settings::default()
         };
-        assert!(render(&replacing).contains("output=replace\n"));
-        assert_eq!(parse(&render(&replacing)).output, Output::Replace);
+        assert!(!render(&replacing).contains("output="));
+        assert_eq!(parse(&render(&replacing)).output, Output::Optimized);
+        assert_eq!(parse("output=replace\n").output, Output::Optimized);
         assert_eq!(
             Output::Replace.root(Path::new("/photos")),
             Path::new("/photos")

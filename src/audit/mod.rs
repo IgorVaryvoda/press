@@ -1174,6 +1174,13 @@ impl Audit {
         // A pairing maps one local root to one remote folder. A rescan of that root
         // keeps it; replacing the root retires it before the new rows can be pushed.
         if root_changed {
+            // Replacing originals is a decision about one folder. Carrying it into
+            // the next folder somebody opens would rewrite that one on a click
+            // nobody made there, so the destination goes back to the default.
+            if self.output == Output::Replace {
+                self.output = Output::Optimized;
+                self.browser_output_root = output_identity(&self.output, &self.root);
+            }
             self.unpair_sirv(cx);
         } else {
             self.cancel_sirv_transfer();

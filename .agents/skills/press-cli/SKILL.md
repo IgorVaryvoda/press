@@ -37,7 +37,7 @@ Exit status `2` means the destination itself was refused before any file was con
 
 The report's `output` field is the canonical path of the folder that was written, so it can differ from the spelling of the target you passed when that path was reached through a link.
 
-Every run writes `.press-manifest.json` in the output folder, recording which source each output came from. The report's `manifest` field is its path. An output that an earlier run wrote from a different source is refused by name rather than replaced, so a `failed` file with that reason means the folder already holds someone else's output under that name.
+Every run appends one line to `.press-manifest.jsonl` in the output folder as each file lands, recording which source that output came from. The report's `manifest` field is its path. An output an earlier run wrote from a different source is never overwritten: that file gets a name of its own, such as `shot-jpg.webp`, so read each file's `output` rather than assuming the name.
 
 ## Replace the originals only when told to
 

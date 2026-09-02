@@ -478,7 +478,6 @@ struct ConversionRun {
     after: u64,
     failed: usize,
     files: Vec<ConversionFile>,
-    records: Vec<manifest::Record>,
     /// The run record on disk, or `None` when it could not be written. Replace
     /// mode's undo reads it, so a report that named one that is not there would
     /// be promising something.
@@ -530,7 +529,6 @@ fn convert_headless(
     json: bool,
 ) -> ConversionRun {
     let out_dir = destination.out_dir;
-    let stamp = manifest::Stamp::new(format, quality, max_edge);
     let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
     let by_path: HashMap<&Path, &Entry> = entries
         .iter()
@@ -544,7 +542,6 @@ fn convert_headless(
         after: 0,
         failed: 0,
         files: Vec::with_capacity(entries.len()),
-        records: Vec::with_capacity(entries.len()),
         written_manifest: None,
     });
     convert::convert_each(
@@ -577,12 +574,6 @@ fn convert_headless(
                             format_bytes(entry.bytes),
                             format_bytes(converted.bytes)
                         );
-                    }
-                    let backup = destination.backup(root, source);
-                    if let Some(record) =
-                        stamp.record(root, out_dir, source, &converted.written, backup.as_deref())
-                    {
-                        totals.records.push(record);
                     }
                     totals.files.push(ConversionFile {
                         source: path_text(source),
@@ -626,14 +617,9 @@ fn convert_headless(
     totals
         .files
         .sort_by(|left, right| left.source.cmp(&right.source));
-    let records = std::mem::take(&mut totals.records);
-    match manifest::append(out_dir, records) {
-        Ok(()) => {
-            let path = manifest::path(out_dir);
-            totals.written_manifest = path.is_file().then_some(path);
-        }
-        Err(message) => eprintln!("press: could not record this run: {message}"),
-    }
+    // Each file appended its own line as it landed; this only names the file.
+    let record = manifest::path(out_dir);
+    totals.written_manifest = record.is_file().then_some(record);
 
     if !json {
         let growth = totals.after > totals.before;

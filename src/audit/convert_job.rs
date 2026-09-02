@@ -9,7 +9,7 @@ struct Planned {
     index: usize,
     source: PathBuf,
     written: Result<PathBuf, convert::Failure>,
-    backup: Option<PathBuf>,
+    backup: Option<convert::Backup>,
 }
 
 impl Audit {
@@ -102,15 +102,10 @@ impl Audit {
             // idle; here a finished file is replaced immediately. The window is what
             // bounds memory: every file in flight holds a fully decoded image.
             let workers = convert::workers(format);
-            type Landed = (
-                usize,
-                Result<convert::Converted, convert::Failure>,
-                Option<manifest::Record>,
-            );
+            type Landed = (usize, Result<convert::Converted, convert::Failure>);
             let mut inflight: Vec<gpui::Task<Landed>> = Vec::new();
             let mut queued = sources.iter();
             let mut completed = Vec::with_capacity(workers);
-            let mut records: Vec<manifest::Record> = Vec::new();
 
             loop {
                 // A stop closes the queue, not the window. Abandoning an encode
@@ -130,31 +125,28 @@ impl Audit {
                     let root = root.clone();
                     let stamp = stamp.clone();
                     inflight.push(cx.background_executor().spawn(async move {
+                        // The record and the backup move belong to the write, one
+                        // file at a time: a run killed here has a record for every
+                        // original it moved and moved none it has no record for.
+                        let recording = convert::Recording {
+                            root: &root,
+                            out_dir: &out_dir,
+                            stamp: &stamp,
+                            backup: backup.as_ref(),
+                        };
                         let converted = match written {
                             Ok(written) => convert::convert_to(
                                 &out_dir,
                                 &source,
                                 &written,
-                                backup.as_deref(),
+                                Some(&recording),
                                 format,
                                 quality,
                                 max_edge,
                             ),
                             Err(failure) => Err(failure),
                         };
-                        // Recorded where the paths are, on the thread that has
-                        // them: the original was just moved, and the record says
-                        // where it went.
-                        let record = converted.as_ref().ok().and_then(|converted| {
-                            stamp.record(
-                                &root,
-                                &out_dir,
-                                &source,
-                                &converted.written,
-                                backup.as_deref(),
-                            )
-                        });
-                        (index, converted, record)
+                        (index, converted)
                     }));
                 }
                 if inflight.is_empty() {
@@ -162,10 +154,9 @@ impl Audit {
                 }
                 // Take whichever file finishes first. Waiting for source order here
                 // quietly turns one slow image back into a batch barrier.
-                let ((index, result, record), _, remaining) = select_all(inflight).await;
+                let ((index, result), _, remaining) = select_all(inflight).await;
                 inflight = remaining;
                 completed.push((index, result));
-                records.extend(record);
 
                 // Publishing once per file made a 6,000-image conversion rebuild the
                 // same window 6,000 times. One worker-window keeps progress live while
@@ -219,33 +210,18 @@ impl Audit {
                 }
             }
 
-            // Written once, at the end. The backup mirrors the source tree, so the
-            // originals are recoverable by hand even if this never lands; the
-            // record is what makes the button in the window able to do it.
-            let recorded = cx
+            // Each file recorded itself as it landed, so this only has to read
+            // back how many originals the folder can now put back.
+            let restorable = cx
                 .background_executor()
                 .spawn({
-                    let out_dir = out_dir.clone();
                     let root = root.clone();
-                    async move {
-                        let written = manifest::append(&out_dir, records);
-                        (written, manifest::restorable(&root))
-                    }
+                    async move { manifest::restorable(&root) }
                 })
                 .await;
 
             let _ = this.update(cx, |audit, cx| {
-                audit.restorable = recorded.1;
-                if let Err(message) = &recorded.0 {
-                    audit.notify_error(
-                        "run-record",
-                        "Couldn’t record this run",
-                        format!("{}: {message}", manifest::path(&out_dir).display()),
-                        cx,
-                    );
-                } else {
-                    audit.clear_error("run-record", cx);
-                }
+                audit.restorable = restorable;
                 if audit.dataset_generation == dataset_generation {
                     audit.converting = false;
                     audit.active_target_count = None;

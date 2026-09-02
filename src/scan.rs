@@ -58,6 +58,19 @@ pub const OUTPUT_DIR: &str = "optimized";
 /// offering to convert them again would undo the run that put them here.
 pub const BACKUP_DIR: &str = "press-originals";
 
+/// The backup is not a folder to browse into either. Auditing it and converting
+/// what is inside would rewrite the originals in place of themselves, and no
+/// restore could put back what it no longer has.
+fn is_backup_folder(path: &Path) -> bool {
+    path.file_name() == Some(std::ffi::OsStr::new(BACKUP_DIR))
+}
+
+/// A half-written output belonging to a run in flight. It is never an input, and
+/// a browser that offers it offers a file that is about to be renamed away.
+fn is_partial(path: &Path) -> bool {
+    path.extension() == Some(std::ffi::OsStr::new("part"))
+}
+
 /// Extensions macOS keeps as opaque packages. Some are permission-walled, and the
 /// rest are directory trees whose internal images are not web-delivery candidates.
 /// Skipped by design like camera raw, counted for the same reason.
@@ -548,7 +561,7 @@ fn browse_page(
         };
 
         if file_type.is_dir() {
-            if is_hidden_folder(&path) {
+            if is_hidden_folder(&path) || is_backup_folder(&path) {
                 continue;
             }
             if is_opaque_package(&path) {
@@ -558,7 +571,7 @@ fn browse_page(
             }
             continue;
         }
-        if !file_type.is_file() {
+        if !file_type.is_file() || is_partial(&path) {
             continue;
         }
         if is_raw(&path) {
@@ -693,7 +706,11 @@ pub(crate) fn child_folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     for item in std::fs::read_dir(canonical_boundary(root)?)? {
         let item = item?;
         let path = item.path();
-        if item.file_type()?.is_dir() && !is_hidden_folder(&path) && !is_opaque_package(&path) {
+        if item.file_type()?.is_dir()
+            && !is_hidden_folder(&path)
+            && !is_backup_folder(&path)
+            && !is_opaque_package(&path)
+        {
             folders.push(path);
         }
     }
@@ -1649,6 +1666,36 @@ mod tests {
             scanned.existing_output, 0,
             "the record is not an output waiting to be replaced"
         );
+    }
+
+    /// The browser must not offer the backup either. Navigating into it and
+    /// converting would rewrite the originals in place of themselves, and no
+    /// restore could put back what it no longer has.
+    #[test]
+    fn the_browser_never_lists_the_backup_tree_or_a_half_written_output() {
+        let dir = temp_dir("browse-backup");
+        write_sample(&dir, "shot.png", 16, 16);
+        std::fs::create_dir_all(dir.join(BACKUP_DIR)).unwrap();
+        write_sample(&dir.join(BACKUP_DIR), "shot.png", 16, 16);
+        let album = dir.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+        let partial = dir.join(format!("shot.webp.{}.part", std::process::id()));
+        std::fs::copy(dir.join("shot.png"), &partial).unwrap();
+
+        let browsed = browse(&dir, &dir.join(OUTPUT_DIR)).unwrap();
+
+        assert_eq!(browsed.folders, vec![album.clone()]);
+        assert_eq!(
+            browsed
+                .scan
+                .entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["shot.png".to_string()],
+            "the half-written output is not an input"
+        );
+        assert_eq!(child_folders(&dir).unwrap(), vec![album]);
     }
 
     #[test]
