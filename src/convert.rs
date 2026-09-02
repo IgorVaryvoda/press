@@ -10,6 +10,10 @@
 //! process per image.
 //!
 //! JPEG XL encoding uses jixel and decoding uses jxl-oxide, both in Rust.
+//!
+//! JPEG goes through libjpeg-turbo, which the thumbnails already decode with. Its
+//! container has no alpha plane, so a see-through source is refused by name rather
+//! than flattened onto a colour nobody chose.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -50,6 +54,7 @@ pub enum Failure {
     LosslessNeedsEightBit,
     LosslessNeedsIntegerSamples,
     ProfileNotAttached,
+    JpegNeedsOpaque,
     AnimatedGif,
     AnimatedPng,
     AnimatedWebP,
@@ -71,6 +76,7 @@ impl Failure {
                 Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
             }
             Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
+            Self::JpegNeedsOpaque => Some("JPEG cannot keep transparency".into()),
             Self::AnimatedGif => Some("animated GIFs are not converted".into()),
             Self::AnimatedPng => Some("animated PNG files are not converted".into()),
             Self::AnimatedWebP => Some("animated WebP files are not converted".into()),
@@ -136,6 +142,7 @@ pub enum Format {
     WebP,
     Avif,
     JpegXl,
+    Jpeg,
 }
 
 impl Format {
@@ -144,6 +151,7 @@ impl Format {
             Format::WebP => "webp",
             Format::Avif => "avif",
             Format::JpegXl => "jxl",
+            Format::Jpeg => "jpg",
         }
     }
 
@@ -152,11 +160,12 @@ impl Format {
             Format::WebP => "webp",
             Format::Avif => "avif",
             Format::JpegXl => "jxl",
+            Format::Jpeg => "jpeg",
         }
     }
 
     pub fn supports_lossless(self) -> bool {
-        self != Self::Avif
+        matches!(self, Self::WebP | Self::JpegXl)
     }
 }
 
@@ -194,7 +203,65 @@ pub fn encode(
         }
         Format::Avif => encode_avif(image, quality, profile).ok_or(Failure::Failed),
         Format::JpegXl => encode_jpeg_xl(image, quality, profile).ok_or(Failure::Failed),
+        Format::Jpeg => {
+            let encoded = encode_jpeg(image, quality)?;
+            match profile {
+                Some(profile) => {
+                    attach_jpeg_profile(&encoded, profile).ok_or(Failure::ProfileNotAttached)
+                }
+                None => Ok(encoded),
+            }
+        }
     }
+}
+
+/// libjpeg-turbo writes no metadata, so the profile goes in by hand: APP2 segments
+/// tagged `ICC_PROFILE`, at most 65519 profile bytes each, right after the JFIF
+/// APP0 the spec wants first. Every decoder that reads a profile reads it there.
+fn attach_jpeg_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
+    const CHUNK: usize = 65_533 - 14;
+    let mut at = 2;
+    if encoded.get(at..at + 2) == Some(&[0xff, 0xe0]) {
+        at += 2 + usize::from(u16::from_be_bytes([encoded[at + 2], encoded[at + 3]]));
+    }
+    let count = u8::try_from(profile.chunks(CHUNK).len()).ok()?;
+    let mut tagged = Vec::with_capacity(encoded.len() + profile.len() + 18 * usize::from(count));
+    tagged.extend_from_slice(encoded.get(..at)?);
+    for (index, chunk) in profile.chunks(CHUNK).enumerate() {
+        tagged.extend_from_slice(&[0xff, 0xe2]);
+        tagged.extend_from_slice(&(chunk.len() as u16 + 16).to_be_bytes());
+        tagged.extend_from_slice(b"ICC_PROFILE\0");
+        tagged.extend_from_slice(&[index as u8 + 1, count]);
+        tagged.extend_from_slice(chunk);
+    }
+    tagged.extend_from_slice(&encoded[at..]);
+    Some(tagged)
+}
+
+/// 4:2:0 subsampling and baseline Huffman: what every camera and CMS writes, so
+/// the output opens everywhere the source did. Lossless never reaches here; the
+/// window and the CLI both refuse it for JPEG, so `None` only has to be safe.
+fn encode_jpeg(image: &DynamicImage, quality: Quality) -> Result<Vec<u8>, Failure> {
+    if has_transparency(image) {
+        return Err(Failure::JpegNeedsOpaque);
+    }
+    let rgb = image.to_rgb8();
+    let mut compressor = turbojpeg::Compressor::new().map_err(|_| Failure::Failed)?;
+    compressor
+        .set_quality(quality.0.unwrap_or(100.).round() as i32)
+        .map_err(|_| Failure::Failed)?;
+    compressor
+        .set_subsamp(turbojpeg::Subsamp::Sub2x2)
+        .map_err(|_| Failure::Failed)?;
+    compressor
+        .compress_to_vec(turbojpeg::Image {
+            pixels: rgb.as_raw().as_slice(),
+            width: rgb.width() as usize,
+            pitch: rgb.width() as usize * 3,
+            height: rgb.height() as usize,
+            format: turbojpeg::PixelFormat::RGB,
+        })
+        .map_err(|_| Failure::Failed)
 }
 
 /// Rewrap an encoded bitstream in WebP's extended container so it can carry an ICCP
@@ -462,7 +529,8 @@ fn has_transparency(image: &DynamicImage) -> bool {
 pub fn workers(format: Format) -> usize {
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
     match format {
-        Format::WebP => cores.clamp(2, 8),
+        // libjpeg-turbo runs on the calling thread too.
+        Format::WebP | Format::Jpeg => cores.clamp(2, 8),
         Format::Avif => 2,
         // jixel uses the machine's cores inside one encode. A second decoded image
         // would add memory and contention without adding useful parallelism.
@@ -869,7 +937,7 @@ pub(crate) mod tests {
             "the decoder did not hand back the source profile"
         );
 
-        for format in [Format::WebP, Format::Avif, Format::JpegXl] {
+        for format in [Format::WebP, Format::Avif, Format::JpegXl, Format::Jpeg] {
             let out = dir.join(format.label());
             let written = output_path(&dir, &source, &out, format);
             convert_to(
@@ -1018,6 +1086,58 @@ pub(crate) mod tests {
         assert_eq!(
             (decoded.width(), decoded.height()),
             (image.width(), image.height())
+        );
+    }
+
+    #[test]
+    fn jpeg_output_decodes_with_its_dimensions_and_no_alpha() {
+        let image = photo(48, 32);
+        let encoded = encode(&image, Format::Jpeg, Quality::lossy(80.), None).unwrap();
+        assert_eq!(&encoded[..2], &[0xff, 0xd8], "a JPEG starts with SOI");
+
+        let decoded = image::load_from_memory(&encoded).expect("JPEG decodes");
+        assert_eq!((decoded.width(), decoded.height()), (48, 32));
+        assert!(
+            !decoded.color().has_alpha(),
+            "JPEG carries no alpha channel"
+        );
+    }
+
+    #[test]
+    fn lower_jpeg_quality_produces_fewer_bytes() {
+        let image = photo(128, 128);
+        let low = encode(&image, Format::Jpeg, Quality::lossy(20.), None).unwrap();
+        let high = encode(&image, Format::Jpeg, Quality::lossy(95.), None).unwrap();
+        assert!(low.len() < high.len());
+    }
+
+    /// A cut-out has nowhere to keep its transparency in a JPEG. Flattening it onto a
+    /// colour nobody chose would report "converted" for a file that lost its edge, so
+    /// the file is refused by name. An alpha channel that is all opaque is still fine.
+    #[test]
+    fn a_transparent_source_is_refused_for_jpeg_by_name() {
+        let mut buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(16, 16, Rgba([10, 20, 30, 255]));
+        let opaque = encode(
+            &DynamicImage::ImageRgba8(buffer.clone()),
+            Format::Jpeg,
+            Quality::lossy(80.),
+            None,
+        )
+        .expect("an opaque alpha channel still encodes");
+        assert!(opaque.len() > 2);
+
+        buffer.put_pixel(0, 0, Rgba([10, 20, 30, 0]));
+        let refused = encode(
+            &DynamicImage::ImageRgba8(buffer),
+            Format::Jpeg,
+            Quality::lossy(80.),
+            None,
+        );
+        assert_eq!(refused, Err(Failure::JpegNeedsOpaque));
+        assert_eq!(
+            Failure::JpegNeedsOpaque.reason(),
+            Some("JPEG cannot keep transparency".into())
         );
     }
 
@@ -1209,6 +1329,14 @@ pub(crate) mod tests {
             Format::JpegXl,
         );
         assert_eq!(jpeg_xl, Path::new("/photos/optimised/album/one.jxl"));
+
+        let jpeg = output_path(
+            Path::new("/photos"),
+            Path::new("/photos/album/one.PNG"),
+            Path::new("/photos/optimised"),
+            Format::Jpeg,
+        );
+        assert_eq!(jpeg, Path::new("/photos/optimised/album/one.jpg"));
     }
 
     #[test]

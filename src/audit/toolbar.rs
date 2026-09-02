@@ -49,7 +49,7 @@ impl Audit {
     }
 
     pub(super) fn format_group(&self, cx: &mut Context<Self>) -> ButtonGroup {
-        let options = [Format::WebP, Format::Avif, Format::JpegXl];
+        let options = [Format::WebP, Format::Avif, Format::JpegXl, Format::Jpeg];
         ButtonGroup::new("format")
             .children(options.iter().map(|format| {
                 segment(
