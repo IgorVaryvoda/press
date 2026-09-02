@@ -187,19 +187,29 @@ fn decode_webp(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
     )
 }
 
+/// The smallest DCT scale libjpeg-turbo can finish at whose result still covers
+/// `edge`, given the source's longest side. `ONE` when nothing smaller does, which is
+/// also the answer for a source already inside the box.
+///
+/// Shared with conversion: the export path wants the same choice for the same reason,
+/// and two copies of this list would drift.
+pub(crate) fn jpeg_scaling_factor(longest: usize, edge: u32) -> turbojpeg::ScalingFactor {
+    [
+        turbojpeg::ScalingFactor::ONE_EIGHTH,
+        turbojpeg::ScalingFactor::ONE_QUARTER,
+        turbojpeg::ScalingFactor::ONE_HALF,
+        turbojpeg::ScalingFactor::ONE,
+    ]
+    .into_iter()
+    .find(|factor| factor.scale(longest) >= edge as usize)
+    .unwrap_or(turbojpeg::ScalingFactor::ONE)
+}
+
 fn decode_jpeg(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
     let mut decoder = turbojpeg::Decompressor::new().ok()?;
     let header = decoder.read_header(bytes).ok()?;
     let factor = edge.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
-        [
-            turbojpeg::ScalingFactor::ONE_EIGHTH,
-            turbojpeg::ScalingFactor::ONE_QUARTER,
-            turbojpeg::ScalingFactor::ONE_HALF,
-            turbojpeg::ScalingFactor::ONE,
-        ]
-        .into_iter()
-        .find(|factor| factor.scale(header.width.max(header.height)) >= edge as usize)
-        .unwrap_or(turbojpeg::ScalingFactor::ONE)
+        jpeg_scaling_factor(header.width.max(header.height), edge)
     });
     decoder.set_scaling_factor(factor).ok()?;
     let (width, height) = (factor.scale(header.width), factor.scale(header.height));

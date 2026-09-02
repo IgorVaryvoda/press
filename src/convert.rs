@@ -961,7 +961,7 @@ pub fn convert_to(
 ) -> Result<Converted, Failure> {
     let format = format.resolve(source)?;
     let (decoded, profile) =
-        crate::scan::decode_for_conversion(source).map_err(|error| match error {
+        crate::scan::decode_for_conversion(source, max_edge).map_err(|error| match error {
             crate::scan::ConversionDecodeError::Failed => Failure::Failed,
             crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
             crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
@@ -1083,8 +1083,8 @@ pub(crate) mod tests {
         let source = dir.join("wide.png");
         write_tagged_png(&source, &photo(48, 48), &profile);
 
-        let (_, read_back) =
-            crate::scan::decode_for_conversion(&source).expect("the tagged PNG decodes");
+        let (_, read_back) = crate::scan::decode_for_conversion(&source, MaxEdge::FULL)
+            .expect("the tagged PNG decodes");
         assert_eq!(
             read_back.as_deref(),
             Some(profile.as_slice()),
@@ -1157,8 +1157,8 @@ pub(crate) mod tests {
             let source = dir.join(name);
             write_tagged_png(&source, &photo(16, 16), &profile);
 
-            let (_, read_back) =
-                crate::scan::decode_for_conversion(&source).expect("the tagged PNG decodes");
+            let (_, read_back) = crate::scan::decode_for_conversion(&source, MaxEdge::FULL)
+                .expect("the tagged PNG decodes");
             assert_eq!(read_back, None, "{name} kept a profile it should not have");
 
             let written = output_path(&dir, &source, &out, Format::WebP);
@@ -1763,6 +1763,29 @@ pub(crate) mod tests {
             .expect("a small edge parses")
             .apply(photo(80, 60));
         assert_eq!((scaled.width(), scaled.height()), (40, 30));
+    }
+
+    /// The scaled decode changes what conversion holds in memory, not what it writes:
+    /// a 4000px JPEG asked for 1000px still exports 1000px.
+    #[test]
+    fn a_big_jpeg_exports_at_the_max_edge_after_a_scaled_decode() {
+        let dir = temp_dir("scaled-export");
+        let source = dir.join("big.jpg");
+        photo(4000, 1000).save(&source).unwrap();
+
+        let converted = convert_to(
+            &dir,
+            &source,
+            &output_path(&dir, &source, &dir.join("out"), Format::WebP),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge(Some(1000)),
+        )
+        .expect("conversion runs");
+
+        assert_eq!((converted.width, converted.height), (1000, 250));
+        let written = crate::scan::probe(&converted.written).expect("the output is an image");
+        assert_eq!((written.width, written.height), (1000, 250));
     }
 
     #[test]

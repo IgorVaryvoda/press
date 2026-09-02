@@ -322,8 +322,13 @@ pub enum ConversionDecodeError {
 /// The profile travels with the pixels because it is the only thing that says these
 /// pixels are Display P3 or Adobe RGB rather than sRGB. Written without it, a wide
 /// gamut photo is rendered as sRGB by every browser and its colours shift.
+///
+/// `max_edge` is a hint about the size the caller is heading for, not a promise about
+/// the size that comes back: only JPEG can act on it, and only in factors of two. The
+/// caller still runs `MaxEdge::apply` on the result to reach the exact edge.
 pub fn decode_for_conversion(
     path: &Path,
+    max_edge: crate::convert::MaxEdge,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format) {
         if reader.format() == Some(ImageFormat::Gif) {
@@ -359,6 +364,13 @@ pub fn decode_for_conversion(
             return still(decoder);
         }
 
+        if reader.format() == Some(ImageFormat::Jpeg)
+            && let Some(edge) = max_edge.0
+            && let Some(decoded) = scaled_jpeg(path, edge)
+        {
+            return Ok(decoded);
+        }
+
         if let Ok(decoder) = reader.into_decoder() {
             return still(decoder);
         }
@@ -371,6 +383,62 @@ pub fn decode_for_conversion(
     crate::jxl::decode_path(path)
         .map(|(image, profile)| (image, rgb_profile(profile)))
         .ok_or(ConversionDecodeError::Failed)
+}
+
+/// Decode a JPEG with the inverse DCT stopped at the smallest scale that still covers
+/// `edge`.
+///
+/// Conversion used to decode every source at full size and throw most of it away:
+/// exporting 1600px out of a 6000px JPEG allocated the whole 6000px image first, once
+/// per worker, and eight workers over 45MP sources is where the resident set went.
+/// libjpeg-turbo can finish the DCT at a half, a quarter or an eighth, so the
+/// intermediate is now at most twice the exported edge.
+///
+/// `MaxEdge::apply` still finishes the job with Lanczos, so the only difference from a
+/// full decode is that scaled-DCT step; the exported pixels are not bit-identical to
+/// what a full decode produced, and they are not meant to be.
+///
+/// `None` means "decode this the old way": a factor of one, or a JPEG turbojpeg will
+/// not answer for at all, such as a CMYK or arithmetic-coded one.
+fn scaled_jpeg(path: &Path, edge: u32) -> Option<(DynamicImage, Option<Vec<u8>>)> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
+    let header = decompressor.read_header(&bytes).ok()?;
+    let factor = crate::thumbs::jpeg_scaling_factor(header.width.max(header.height), edge);
+    if factor == turbojpeg::ScalingFactor::ONE {
+        return None;
+    }
+    decompressor.set_scaling_factor(factor).ok()?;
+    let (width, height) = (factor.scale(header.width), factor.scale(header.height));
+    // RGB, not RGBA: a JPEG has no alpha, and the fourth channel would be a quarter of
+    // this allocation spent carrying 255.
+    let mut pixels = vec![0u8; width.checked_mul(height)?.checked_mul(3)?];
+    decompressor
+        .decompress(
+            &bytes,
+            turbojpeg::Image {
+                pixels: &mut pixels,
+                width,
+                pitch: width.checked_mul(3)?,
+                height,
+                format: turbojpeg::PixelFormat::RGB,
+            },
+        )
+        .ok()?;
+    let image = image::RgbImage::from_raw(width.try_into().ok()?, height.try_into().ok()?, pixels)?;
+
+    // turbojpeg hands back the stored pixels in the stored order and knows nothing
+    // about EXIF, so orientation and profile still come off the image crate's header
+    // read, and the rotation is applied after the scaled decode — the same order as a
+    // full decode, and the only order in which the dimensions come out swapped.
+    let mut decoder = ImageReader::with_format(std::io::Cursor::new(&bytes), ImageFormat::Jpeg)
+        .into_decoder()
+        .ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let profile = rgb_profile(decoder.icc_profile().ok().flatten());
+    let mut image = DynamicImage::ImageRgb8(image);
+    image.apply_orientation(orientation);
+    Some((image, profile))
 }
 
 /// Orientation and colour profile both have to be read off the decoder before
@@ -1231,6 +1299,87 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (20, 40));
     }
 
+    /// Exporting a smaller image must not allocate the larger one first. The saving
+    /// has to be visible in what comes back rather than only in a stopwatch: the
+    /// intermediate is the largest DCT scale that still covers the target edge.
+    #[test]
+    fn a_downscaled_jpeg_decodes_at_a_reduced_dct_scale() {
+        let dir = temp_dir("scaled-jpeg");
+        let path = dir.join("big.jpg");
+        crate::convert::tests::photo(4000, 1000)
+            .save(&path)
+            .unwrap();
+
+        // A quarter of 4000 is exactly the target, so Lanczos has nothing left to do.
+        let (quarter, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(1000)))
+            .expect("the JPEG decodes");
+        assert_eq!((quarter.width(), quarter.height()), (1000, 250));
+
+        // A quarter would land under 1200, so the decode stops at a half and
+        // `MaxEdge::apply` finishes the step down.
+        let (half, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(1200)))
+            .expect("the JPEG decodes");
+        assert_eq!((half.width(), half.height()), (2000, 500));
+        let applied = crate::convert::MaxEdge(Some(1200)).apply(half);
+        assert_eq!((applied.width(), applied.height()), (1200, 300));
+
+        // Full size still decodes every pixel, as it always did.
+        let (full, _) =
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL).expect("the JPEG decodes");
+        assert_eq!((full.width(), full.height()), (4000, 1000));
+
+        // And a budget larger than the source never reaches for a smaller scale.
+        let (untouched, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(6000)))
+            .expect("the JPEG decodes");
+        assert_eq!((untouched.width(), untouched.height()), (4000, 1000));
+    }
+
+    /// The rotation belongs after the scaled decode. turbojpeg hands back the stored
+    /// pixels in the stored order, so applying EXIF to the header first would swap the
+    /// dimensions of an image that was never that shape, and the marked corner would
+    /// come out on the wrong side.
+    #[test]
+    fn a_rotated_jpeg_keeps_its_orientation_through_a_scaled_decode() {
+        const EXIF_ROTATE_90: [u8; 36] = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2a, 0, 0, 0, 8,
+            0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let dir = temp_dir("scaled-jpeg-orientation");
+        let path = dir.join("camera.jpg");
+        // A white block in the stored top-left corner. Rotated 90 degrees clockwise it
+        // belongs in the displayed top-right one.
+        let mut marked = crate::convert::tests::photo(2000, 1000).into_rgb8();
+        for y in 0..150 {
+            for x in 0..150 {
+                marked.put_pixel(x, y, Rgb([255, 255, 255]));
+            }
+        }
+        DynamicImage::ImageRgb8(marked).save(&path).unwrap();
+        let jpeg = std::fs::read(&path).unwrap();
+        let mut oriented = Vec::with_capacity(jpeg.len() + EXIF_ROTATE_90.len());
+        oriented.extend_from_slice(&jpeg[..2]);
+        oriented.extend_from_slice(&EXIF_ROTATE_90);
+        oriented.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&path, oriented).unwrap();
+
+        let entry = probe(&path).expect("the oriented JPEG is probed");
+        assert_eq!((entry.width, entry.height), (1000, 2000));
+
+        let (scaled, _) = decode_for_conversion(&path, crate::convert::MaxEdge(Some(500)))
+            .expect("the JPEG decodes");
+        assert_eq!((scaled.width(), scaled.height()), (250, 500));
+        let pixels = scaled.to_rgb8();
+        assert!(
+            pixels.get_pixel(230, 20).0[1] > 200,
+            "the marked corner did not land top-right"
+        );
+        assert!(
+            pixels.get_pixel(20, 20).0[1] < 200,
+            "the marked corner is still top-left, so nothing rotated"
+        );
+    }
+
     /// The mislabelled files are the whole point, so they have to survive every path
     /// and not just the one that counts them. Decoding by extension meant the folder
     /// this app was built for — 169 files named `.webp`, 59 of them PNG — listed
@@ -1289,7 +1438,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedGif)
         );
     }
@@ -1391,7 +1540,7 @@ mod tests {
         write_animated_png(&path);
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedPng)
         );
     }
@@ -1403,7 +1552,7 @@ mod tests {
         write_animated_webp(&path, 16, 16);
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedWebP)
         );
     }
@@ -1425,7 +1574,8 @@ mod tests {
         std::fs::write(&webp, encoded).unwrap();
 
         for path in [png, webp] {
-            let (image, _) = decode_for_conversion(&path).expect("a still decodes");
+            let (image, _) = decode_for_conversion(&path, crate::convert::MaxEdge::FULL)
+                .expect("a still decodes");
             assert_eq!((image.width(), image.height()), (12, 9));
         }
     }
@@ -1444,7 +1594,7 @@ mod tests {
         std::fs::write(&path, TWO_FRAME_JXL).unwrap();
 
         assert_eq!(
-            decode_for_conversion(&path),
+            decode_for_conversion(&path, crate::convert::MaxEdge::FULL),
             Err(ConversionDecodeError::AnimatedJpegXl)
         );
     }

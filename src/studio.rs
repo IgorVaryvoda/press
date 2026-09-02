@@ -388,8 +388,8 @@ fn prepare_upload_using(
     }
 
     check_cancelled(cancelled)?;
-    let (mut image, _profile) =
-        scan::decode_for_conversion(source).map_err(|error| match error {
+    let (mut image, _profile) = scan::decode_for_conversion(source, crate::convert::MaxEdge::FULL)
+        .map_err(|error| match error {
             scan::ConversionDecodeError::AnimatedGif => {
                 "this animated GIF is too large for Studio without dropping its animation"
                     .to_string()
