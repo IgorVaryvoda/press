@@ -278,7 +278,7 @@ impl Audit {
                 &self.failure_names(),
             ),
         );
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(report));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(report));
         self.report_copied = true;
         cx.notify();
     }
@@ -365,7 +365,7 @@ impl Audit {
             .map(|url| image_embed(url))
             .collect::<Vec<_>>()
             .join("\n");
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
     }
 
     pub(super) fn copy_spin_embeds(&mut self, cx: &mut Context<Self>) {
@@ -375,10 +375,10 @@ impl Audit {
             .map(|url| spin_embed(url))
             .collect::<Vec<_>>()
             .join("\n");
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
     }
 
-    pub(super) fn spin_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn spin_notice(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         if self.spins.is_empty() {
             return None;
         }

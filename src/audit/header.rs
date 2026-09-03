@@ -1,12 +1,12 @@
 //! The header line above the table: counts, filter box, view switch.
 
+use super::toolbar::segment;
 use super::*;
 
 impl Audit {
-    /// The counts beside the breadcrumb. A string rather than inline elements: what
-    /// a scan left out is as much a fact as what it found, and both are asserted on.
-    pub(super) fn stats_line(&self, count: usize) -> String {
-        let mut stats = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+    /// The primary count beside the breadcrumb: what the list is showing.
+    fn primary_stats(&self, count: usize) -> String {
+        if self.sirv_scope == Some(SirvScope::OnlyRemote) {
             format!("{count} files only on Sirv")
         } else if let Some(folders) = self.batch_folders {
             format!(
@@ -23,20 +23,27 @@ impl Audit {
                 self.entries.len(),
                 format_bytes(self.visible_bytes())
             )
-        };
+        }
+    }
+
+    /// What a scan left out. Rendered muted beside the primary count so a
+    /// warning never hides the count it qualifies; empty when nothing was
+    /// skipped, so the common case stays one short line.
+    fn warning_stats(&self) -> String {
+        let mut warnings = String::new();
         if self.skipped_raw > 0 {
-            stats.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
+            warnings.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
         }
         // Named as unsupported rather than merely skipped: raw is a deliberate
         // exclusion, HEIC is a gap, and the difference is the user's next move.
         if self.skipped_heic > 0 {
-            stats.push_str(&format!(
+            warnings.push_str(&format!(
                 " · {} HEIC skipped (not supported yet)",
                 self.skipped_heic
             ));
         }
         if self.skipped_packages > 0 {
-            stats.push_str(&match self.skipped_packages {
+            warnings.push_str(&match self.skipped_packages {
                 1 => " · 1 macOS package skipped".to_string(),
                 many => format!(" · {many} macOS packages skipped"),
             });
@@ -45,12 +52,35 @@ impl Audit {
         // optimized/ is normal life, and a yellow banner made it look like
         // something had gone wrong.
         if self.existing_output > 0 {
-            stats.push_str(&match self.existing_output {
+            warnings.push_str(&match self.existing_output {
                 1 => format!(" · 1 file in {}/", scan::OUTPUT_DIR),
                 many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
             });
         }
-        stats
+        warnings
+    }
+
+    /// The counts beside the breadcrumb. A string rather than inline elements: what
+    /// a scan left out is as much a fact as what it found, and both are asserted on.
+    #[cfg(test)]
+    pub(super) fn stats_line(&self, count: usize) -> String {
+        format!("{}{}", self.primary_stats(count), self.warning_stats())
+    }
+
+    /// Switching list/gallery refills the thumbnail cache: the list needs 96 px
+    /// thumbs, the gallery 224 px. One cache, refilled on this rare switch.
+    pub(super) fn set_grid(&mut self, grid: bool, cx: &mut Context<Self>) {
+        if grid == self.grid {
+            return;
+        }
+        self.grid = grid;
+        self.thumbs.clear();
+        self.requested.clear();
+        self.thumb_queue.clear();
+        self.thumb_order.clear();
+        self.marquee = None;
+        self.selection_bounds.borrow_mut().clear();
+        cx.notify();
     }
 
     /// Which folder this is, how to get to another one, and the two controls
@@ -104,16 +134,18 @@ impl Audit {
         let reveal_source = source_menu.clone();
         let reveal_root = self.root.clone();
         let can_reveal = reveal_root.is_dir();
-
-        let stats = self.stats_line(count);
+        let sirv_disabled =
+            self.converting || self.batch_folders.is_some() || self.scan_blocks_delivery();
+        let primary_stats = self.primary_stats(count);
+        let warning_stats = self.warning_stats();
         div()
             .debug_selector(|| "audit-header".into())
             .flex()
-            .flex_wrap()
             .items_center()
             .gap_2()
             .px_3()
             .py_1p5()
+            .overflow_hidden()
             .bg(cx.theme().table_head)
             .border_b_1()
             .border_color(cx.theme().border)
@@ -154,12 +186,14 @@ impl Audit {
                             .small()
                             .ghost()
                             .icon(source_icon)
+                            .label("Open")
                             .tooltip("Open a folder or choose images")
                             .dropdown_caret(true)
                             .disabled(self.converting)
                             .dropdown_menu(move |menu, _, _| {
                                 let open_folder = source_menu.clone();
                                 let open_images = source_menu.clone();
+                                let pair_sirv = source_menu.clone();
                                 let reveal_root = reveal_root.clone();
                                 let reveal_source = reveal_source.clone();
                                 menu.item(
@@ -198,25 +232,59 @@ impl Audit {
                                             }
                                         }),
                                 )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Pair with Sirv…")
+                                        .icon(IconName::Globe)
+                                        .disabled(sirv_disabled)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = pair_sirv.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.open_sirv_browser(cx)
+                                                });
+                                            }
+                                        }),
+                                )
                             }),
                     )
                     .child(
                         div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .min_w_0()
-                            .child(stats),
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().foreground)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(primary_stats),
+                            )
+                            .when(!warning_stats.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .min_w_0()
+                                        .child(warning_stats),
+                                )
+                            }),
                     ),
             )
             // The two controls that narrow the list, in the same row as the
             // counts they narrow.
             .child(
                 div()
-                    .w(px(190.))
+                    .w(px(242.))
                     .flex()
                     .items_center()
                     .gap_1()
@@ -229,25 +297,25 @@ impl Audit {
                                 .prefix(IconName::Search),
                         ),
                     )
-                    .when(!self.filter.is_empty(), |row| {
-                        row.child(
-                            div().debug_selector(|| "clear-filter".into()).child(
-                                Button::new("clear-filter")
-                                    .small()
-                                    .ghost()
-                                    .label("Clear")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, window, cx| {
-                                        let input = audit.filter_input.clone();
-                                        input.update(cx, |input, cx| {
-                                            input.set_value("", window, cx)
-                                        });
-                                        audit.set_filter(String::new(), cx);
-                                        window.focus(&input.read(cx).focus_handle(cx), cx);
-                                    })),
-                            ),
-                        )
-                    }),
+                    // Always rendered, disabled when empty: the conditional Clear
+                    // used to pop the filter width on every keystroke.
+                    .child(
+                        div().debug_selector(|| "clear-filter".into()).child(
+                            Button::new("clear-filter")
+                                .small()
+                                .ghost()
+                                .label("Clear")
+                                .disabled(self.converting || self.filter.is_empty())
+                                .on_click(cx.listener(|audit, _, window, cx| {
+                                    let input = audit.filter_input.clone();
+                                    input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx)
+                                    });
+                                    audit.set_filter(String::new(), cx);
+                                    window.focus(&input.read(cx).focus_handle(cx), cx);
+                                })),
+                        ),
+                    ),
             )
             // The one scope choice, beside the counts it changes. A lit chip rather
             // than a checkbox: the header is a row of chips, and a checkbox here
@@ -338,56 +406,30 @@ impl Audit {
                         .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
                 )
             })
-            // Sirv is a separate remote pairing, not another kind of local source.
-            // Once paired, the reconciliation strip below owns its status and actions.
-            .when(self.sirv_pairing.is_none(), |header| {
-                header.child(
-                    Button::new("sirv-browser")
-                        .small()
-                        .ghost()
-                        .icon(IconName::Globe)
-                        .label("Pair with Sirv")
-                        .disabled(
-                            self.converting
-                                || self.batch_folders.is_some()
-                                || self.scan_blocks_delivery(),
-                        )
-                        .on_click(
-                            cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
-                        ),
-                )
-            })
+            // Sirv pairing lives in the Open menu; the reconciliation strip below
+            // owns its status and actions once paired.
             // The view toggle sits at the far end of the window: it changes how
-            // the list below is drawn and nothing else.
+            // the list below is drawn and nothing else. A segmented pair keeps a
+            // stable width; the old single button swapped its label and jittered
+            // the settings corner on every switch.
             .child(
-                self.toolbar_button(
-                    "view-grid",
-                    if self.grid { "List" } else { "Grid" },
-                    if self.grid {
-                        "Show the audit as a list"
-                    } else {
-                        "Show the images as a gallery"
-                    },
-                    if self.grid {
-                        IconName::Menu
-                    } else {
-                        IconName::LayoutDashboard
-                    },
-                    cx,
-                    |audit, cx| {
-                        audit.grid = !audit.grid;
-                        // The list needs 96 px thumbs; the gallery needs 224 px.
-                        // Keep one cache and refill it on this rare mode switch.
-                        audit.thumbs.clear();
-                        audit.requested.clear();
-                        audit.thumb_queue.clear();
-                        audit.thumb_order.clear();
-                        audit.marquee = None;
-                        audit.selection_bounds.borrow_mut().clear();
-                        cx.notify();
-                    },
-                )
-                .disabled(self.converting),
+                ButtonGroup::new("view-grid")
+                    .small()
+                    .compact()
+                    .children([
+                        segment("view-list", "List", !self.grid).disabled(self.converting),
+                        segment("view-gallery", "Grid", self.grid).disabled(self.converting),
+                    ])
+                    .on_click(cx.listener(|audit, clicked: &Vec<usize>, _, cx| {
+                        if audit.converting {
+                            return;
+                        }
+                        let grid = clicked.first() == Some(&1);
+                        if grid == audit.grid {
+                            return;
+                        }
+                        audit.set_grid(grid, cx);
+                    })),
             )
             .child(
                 // Icon-only: the one global surface, always in the same corner.

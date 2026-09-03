@@ -102,7 +102,7 @@ impl Audit {
             // bounds memory: every file in flight holds a fully decoded image.
             let workers = convert::workers(format);
             type Landed = (usize, Result<convert::Converted, convert::Failure>);
-            let mut inflight: Vec<gpui::Task<Landed>> = Vec::new();
+            let mut inflight: Vec<gpui_kit::Task<Landed>> = Vec::new();
             let mut queued = sources.iter();
             let mut completed = Vec::with_capacity(workers);
 

@@ -383,20 +383,17 @@ sudo apt install libdav1d-dev libavif-dev libaom-dev libyuv-dev
 brew install libavif                                     # macOS
 ```
 
-Nothing in `src/` is platform-specific. Two dependencies are, and `Cargo.toml` splits
-them by target: gpui's window backends (`wayland` and `x11` are Linux-only features,
-and macOS and Windows pick their own), and `rfd`, whose xdg-portal backend keeps GTK
-out of the Linux build while the other platforms use their native dialogs by default.
+Nothing in `src/` is platform-specific. One dependency is, and `Cargo.toml` splits
+it by target: `rfd`, whose xdg-portal backend keeps GTK out of the Linux build
+while the other platforms use their native dialogs by default. gpui's platform
+features (`wayland`, `x11`, `font-kit`, `runtime_shaders`) are enabled unconditionally.
 
 Release tags build the Linux, macOS, and Windows installers on their native GitHub
 Actions runners and sign each auto-update artifact.
 
-The UI is [GPUI](https://www.gpui.rs) with
-[gpui-component](https://github.com/longbridge/gpui-component) for the widgets.
-Neither has a crates.io release, and gpui-component tracks Zed's default branch with
-no revision of its own — pinning one here would hand cargo two different git sources
-for gpui and two incompatible copies of every type in it. `Cargo.lock` pins the
-actual commits; CI builds `--locked`.
+The UI is [GPUI](https://www.gpui.rs) with [gpui-kit](https://github.com/longbridge/gpui-kit)
+as the single UI dependency: it re-exports the matching gpui, platform, component
+and asset crates together. `Cargo.lock` pins the actual versions; CI builds `--locked`.
 
 ## Licence
 

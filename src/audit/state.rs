@@ -494,7 +494,7 @@ impl Audit {
             // 32 WebP samples of a 3.0GB folder take 0.9s, inside the wait the status
             // bar already shows as "Sizing it up…".
             let concurrency = convert::workers(format);
-            let mut inflight: Vec<gpui::Task<(u64, u64, Option<u64>)>> = Vec::new();
+            let mut inflight: Vec<gpui_kit::Task<(u64, u64, Option<u64>)>> = Vec::new();
             let mut queued = samples.iter();
             let mut sampled = Vec::with_capacity(samples.len());
 
@@ -700,7 +700,7 @@ impl Audit {
     pub(super) fn click_row(
         &mut self,
         row: usize,
-        event: &gpui::ClickEvent,
+        event: &gpui_kit::ClickEvent,
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.entry_at(row) else {
@@ -742,7 +742,11 @@ impl Audit {
         self.selection_changed(cx);
     }
 
-    pub(super) fn start_marquee(&mut self, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) {
+    pub(super) fn start_marquee(
+        &mut self,
+        event: &gpui_kit::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
         let surface = self.selection_surface.get();
         if self.converting
             || !surface.contains(&event.position)
@@ -784,7 +788,11 @@ impl Audit {
         cx.notify();
     }
 
-    pub(super) fn move_marquee(&mut self, event: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
+    pub(super) fn move_marquee(
+        &mut self,
+        event: &gpui_kit::MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) {
         if !event.dragging() {
             self.finish_marquee(cx);
             return;

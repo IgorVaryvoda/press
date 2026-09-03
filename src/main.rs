@@ -28,9 +28,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use convert::{Format, MaxEdge, Quality};
-use gpui::{App, Bounds, Window, WindowBounds, WindowHandle, WindowOptions, prelude::*, px, size};
-use gpui_component::{ActiveTheme, Root};
-use gpui_platform::application;
+use gpui_kit::component::{ActiveTheme, Root};
+use gpui_kit::platform::application;
+use gpui_kit::{
+    App, Bounds, Window, WindowBounds, WindowHandle, WindowOptions, prelude::*, px, size,
+};
 use scan::{Entry, format_bytes};
 use serde::Serialize;
 
@@ -1580,11 +1582,11 @@ fn open_with_desktop(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()>
 /// Build the audit view for a window. Shared by the app and the screenshot harness
 /// so that what gets captured is the thing that ships.
 fn init_theme(cx: &mut App) {
-    // Must run before any gpui-component type is constructed.
-    gpui_component::init(cx);
+    // Must run before any component type is constructed.
+    gpui_kit::component::init(cx);
     // Dark by default. Judging compression against a bright chrome is a bad idea,
     // and the comparison view is full-bleed imagery either way.
-    gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
+    gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     // The stock dark theme paints `primary` white, which makes the one button that
     // commits work a white slab and leaves nothing to point at anything else. This
     // app already has a blue.
@@ -1592,23 +1594,23 @@ fn init_theme(cx: &mut App) {
     // Both halves of the theme have to be told. A button takes its fill from the
     // token set and its label from the colour set, so setting one and not the other
     // is how you get black text on a blue button.
-    let theme = gpui_component::Theme::global_mut(cx);
+    let theme = gpui_kit::component::Theme::global_mut(cx);
     // One neutral ramp, barely blue, so the imagery in the table carries the
     // colour and the chrome reads as an instrument panel rather than a website.
     // Flat and hairline-precise: surfaces are separated by a line or a stripe,
     // never by a gradient or a shadow, which is what a pro Mac app looks like.
-    let background = gpui::Hsla::from(gpui::rgb(0x0b0e14));
-    let surface = gpui::Hsla::from(gpui::rgb(0x121926));
-    let table = gpui::Hsla::from(gpui::rgb(0x0b0e14));
+    let background = gpui_kit::Hsla::from(gpui_kit::rgb(0x0b0e14));
+    let surface = gpui_kit::Hsla::from(gpui_kit::rgb(0x121926));
+    let table = gpui_kit::Hsla::from(gpui_kit::rgb(0x0b0e14));
     // Every other row. The zebra does the work the row hairlines used to.
-    let stripe = gpui::Hsla::from(gpui::rgb(0x0d111a));
-    let border = gpui::Hsla::from(gpui::rgb(0x1b2331));
-    let foreground = gpui::Hsla::from(gpui::rgb(0xe6ecf4));
-    let muted = gpui::Hsla::from(gpui::rgb(0x8b98ab));
-    let base = gpui::Hsla::from(gpui::rgb(0x4c8dff));
-    let hover = gpui::Hsla::from(gpui::rgb(0x65a0ff));
-    let active = gpui::Hsla::from(gpui::rgb(0x3b79e6));
-    let focus = gpui::Hsla::from(gpui::rgb(0x8fbcff));
+    let stripe = gpui_kit::Hsla::from(gpui_kit::rgb(0x0d111a));
+    let border = gpui_kit::Hsla::from(gpui_kit::rgb(0x1b2331));
+    let foreground = gpui_kit::Hsla::from(gpui_kit::rgb(0xe6ecf4));
+    let muted = gpui_kit::Hsla::from(gpui_kit::rgb(0x8b98ab));
+    let base = gpui_kit::Hsla::from(gpui_kit::rgb(0x4c8dff));
+    let hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x65a0ff));
+    let active = gpui_kit::Hsla::from(gpui_kit::rgb(0x3b79e6));
+    let focus = gpui_kit::Hsla::from(gpui_kit::rgb(0x8fbcff));
 
     theme.background = background;
     theme.secondary = surface;
@@ -1619,48 +1621,48 @@ fn init_theme(cx: &mut App) {
     theme.muted_foreground = muted;
     theme.group_box = surface;
     theme.group_box_foreground = foreground;
-    theme.list_hover = gpui::Hsla::from(gpui::rgb(0x141c28));
-    theme.list_active = gpui::Hsla::from(gpui::rgb(0x16233a));
+    theme.list_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x141c28));
+    theme.list_active = gpui_kit::Hsla::from(gpui_kit::rgb(0x16233a));
     theme.list_active_border = base;
-    theme.table_head = gpui::Hsla::from(gpui::rgb(0x10151d));
+    theme.table_head = gpui_kit::Hsla::from(gpui_kit::rgb(0x10151d));
     theme.table_head_foreground = muted;
-    theme.table_hover = gpui::Hsla::from(gpui::rgb(0x131a25));
+    theme.table_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x131a25));
     // The stripe separates the rows, so a hairline under every one of them was
     // the same edge drawn twice.
-    theme.table_row_border = gpui::transparent_black();
+    theme.table_row_border = gpui_kit::transparent_black();
     theme.table_even = stripe;
     theme.ring = focus;
 
     // The table draws itself from the token set, not the colour set, so the
     // list stayed near-black under a blue-grey zebra until these were told too.
     theme.tokens.table = table.into();
-    theme.tokens.table_head = gpui::Hsla::from(gpui::rgb(0x10151d)).into();
+    theme.tokens.table_head = gpui_kit::Hsla::from(gpui_kit::rgb(0x10151d)).into();
     theme.tokens.table_even = stripe.into();
-    theme.tokens.table_hover = gpui::Hsla::from(gpui::rgb(0x131a25)).into();
+    theme.tokens.table_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x131a25)).into();
     // Translucent on purpose: the table paints its selected row as an overlay
     // ON TOP of that row's cells, so an opaque colour here does not tint the
     // row, it hides it — tick, thumbnail, name and all.
-    theme.tokens.table_active = gpui::Hsla::from(gpui::rgba(0x4c8dff1f)).into();
+    theme.tokens.table_active = gpui_kit::Hsla::from(gpui_kit::rgba(0x4c8dff1f)).into();
     theme.tokens.table_active_border = base.into();
-    theme.tokens.table_row_border = gpui::transparent_black().into();
+    theme.tokens.table_row_border = gpui_kit::transparent_black().into();
 
     theme.primary = base;
     theme.primary_hover = hover;
     theme.primary_active = active;
-    theme.primary_foreground = gpui::white();
+    theme.primary_foreground = gpui_kit::white();
     theme.button_primary = base;
     theme.button_primary_hover = hover;
     theme.button_primary_active = active;
-    theme.button_primary_foreground = gpui::white();
+    theme.button_primary_foreground = gpui_kit::white();
 
     theme.tokens.button_primary = base.into();
     theme.tokens.button_primary_hover = hover.into();
     theme.tokens.button_primary_active = active.into();
-    theme.tokens.button_primary_foreground = gpui::white().into();
+    theme.tokens.button_primary_foreground = gpui_kit::white().into();
 
     // The two findings share one amber, and saved bytes are the one green.
-    theme.yellow = gpui::Hsla::from(gpui::rgb(0xe0b054));
-    theme.green = gpui::Hsla::from(gpui::rgb(0x4ade80));
+    theme.yellow = gpui_kit::Hsla::from(gpui_kit::rgb(0xe0b054));
+    theme.green = gpui_kit::Hsla::from(gpui_kit::rgb(0x4ade80));
 
     // SF Pro Text for words, Fira Code for every measured number. A column of
     // byte counts in a proportional face will not align down its right edge,
@@ -1694,19 +1696,19 @@ struct Launch {
 
 /// `Root` owns these overlays but leaves their placement to the app's content view.
 struct WindowContent {
-    audit: gpui::Entity<audit::Audit>,
+    audit: gpui_kit::Entity<audit::Audit>,
 }
 
 impl Render for WindowContent {
     fn render(
         &mut self,
-        window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<Self>,
     ) -> impl IntoElement {
         let sheet = Root::render_sheet_layer(window, cx);
         let dialog = Root::render_dialog_layer(window, cx);
         let notifications = Root::render_notification_layer(window, cx);
-        gpui::div()
+        gpui_kit::div()
             .relative()
             .size_full()
             .child(self.audit.clone())
@@ -1726,7 +1728,7 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Opti
             // GPUI's macOS default keeps the process alive after the last window
             // closes, which suits a document-based app with a menu bar to come back
             // through. This is a single-window tool: the red light means quit.
-            cx.set_quit_mode(gpui::QuitMode::LastWindowClosed);
+            cx.set_quit_mode(gpui_kit::QuitMode::LastWindowClosed);
 
             // The thumbnail cache grows with every folder ever opened. Bound it once,
             // here, where a whole-directory pass costs a thread nobody waits for.
@@ -1842,7 +1844,7 @@ fn schedule_pending_crash_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, IntoElement, Render, TestAppContext};
+    use gpui_kit::{Context, IntoElement, Render, TestAppContext};
 
     /// A reader that has gone away, and a stdout that is genuinely broken.
     struct FailingWriter(std::io::ErrorKind);
@@ -1862,10 +1864,10 @@ mod tests {
     impl Render for CrashWindowHarness {
         fn render(
             &mut self,
-            window: &mut gpui::Window,
+            window: &mut gpui_kit::Window,
             cx: &mut Context<Self>,
         ) -> impl IntoElement {
-            gpui::div()
+            gpui_kit::div()
                 .size_full()
                 .children(Root::render_dialog_layer(window, cx))
         }
@@ -2968,7 +2970,7 @@ mod tests {
         assert_eq!(written, b"a line\n");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn windowed_startup_runs_the_crash_prompt_hook(cx: &mut TestAppContext) {
         cx.update(init_theme);
         let report = PathBuf::from("crash-00000000000000000001-42-0000.log");

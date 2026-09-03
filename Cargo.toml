@@ -9,17 +9,13 @@ description = "Audit and optimise images locally, with optional Sirv and Studio 
 name = "press"
 path = "src/main.rs"
 
-# gpui has no crates.io release, and gpui-component tracks zed's default branch with
-# no revision of its own. Pinning one here would give cargo two different git sources
-# for gpui and two incompatible copies of every type in it. Cargo.lock is what pins
-# the actual commit; CI builds --locked.
+# One dependency for the whole UI stack: gpui-kit re-exports the matching
+# gpui, platform, component and asset crates together. Cargo.lock pins the
+# actual versions; CI builds --locked.
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-kit = "0.6"
 # The icon SVGs `IconName` refers to. Without an asset source registered on the
 # application every icon resolves to nothing and renders as empty space.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 futures = "0.3"
 image = { version = "0.25", features = ["avif-native"] }
 jixel = "0.2.19"
@@ -42,11 +38,9 @@ cargo-packager-updater = { version = "0.2.3", optional = true }
 [features]
 updater = ["dep:cargo-packager-updater"]
 
-# gpui's window backends are opt-in features, and only Linux has more than one.
-# rfd's portal backend keeps GTK out of the build there; it does not exist on the
-# other platforms, where rfd's defaults are already the native dialogs.
+# rfd's portal backend keeps GTK out of the build on Linux; it does not exist
+# on the other platforms, where rfd's defaults are already the native dialogs.
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["wayland", "x11", "font-kit"] }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
@@ -61,8 +55,11 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 # `test-support` on. That is how `cargo test --bin press -- --ignored
 # screenshot` gets a picture of the real window without needing the screen.
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+gpui-kit = { version = "0.6", features = ["test-support"] }
+# The screenshot harness feeds HeadlessAppContext a real headless renderer,
+# which gpui-pre-platform gates behind its own test-support; the facade does
+# not forward that feature.
+gpui-pre-platform = { version = "0.3.1", features = ["test-support"] }
 
 [build-dependencies]
 cc = "1"

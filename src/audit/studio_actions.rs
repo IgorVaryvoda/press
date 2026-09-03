@@ -374,7 +374,7 @@ impl Audit {
         cx.notify();
     }
 
-    pub(super) fn studio_rail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn studio_rail(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let index = self.single_target();
         let target = index
             .and_then(|index| self.entries.get(index))
@@ -423,7 +423,7 @@ impl Audit {
                             .child("Uses hosted AI and brings the image back here."),
                     )
                     .children(studio::TOOLS.iter().copied().map(|tool| {
-                        Button::new(gpui::SharedString::from(format!(
+                        Button::new(gpui_kit::SharedString::from(format!(
                             "studio-tool-{}",
                             tool.slug()
                         )))

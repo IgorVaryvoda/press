@@ -6,7 +6,7 @@ Press audits a local folder of images and re-encodes it to WebP/AVIF without upl
 
 ## Architecture & Data Flow
 
-Single crate, one binary (`press`). UI is [GPUI](https://www.gpui.rs) with [gpui-component](https://github.com/longbridge/gpui-component) widgets.
+Single crate, one binary (`press`). UI is [GPUI](https://www.gpui.rs) with [gpui-component](https://github.com/longbridge/gpui-kit) widgets.
 
 ```
 scan::scan(root) ──► Launch ──► build_audit ──► Entity<Audit> (all UI state)
@@ -77,22 +77,22 @@ CI runs the same gates with `--locked` (see `.github/workflows/ci.yml`).
 - `src/scan.rs` — `Scan`/`Entry`, header-only walk, `OUTPUT_DIR`.
 - `src/convert.rs` — `Format`/`Quality`/`MaxEdge`, `convert_file`.
 - `src/compare.rs` — `Key`/`Pair`, `build`.
-- `Cargo.toml` — git-pin policy comment; read before adding dependencies.
-- `Cargo.lock` — the actual version pin for gpui and gpui-component.
-- `rust-toolchain.toml` — pinned 1.97.1; the locked zed commit does not build on other compilers.
+- `Cargo.toml` — version policy comment; read before adding dependencies.
+- `Cargo.lock` — the actual version pin for gpui-pre and gpui-component.
+- `rust-toolchain.toml` — pinned 1.97.1; use it, not a system default.
 - `.Codex/napkin.md` — session lessons: host-specific gotchas and patterns that work (Hyprland/ydotool/grim for UI proof).
 
 ## Runtime/Tooling Preferences
 
 - Rust toolchain is pinned; use the pinned toolchain, not a system default.
-- gpui/gpui_platform (zed) and gpui-component(+assets) are unpinned git deps on purpose: pinning a revision in Cargo.toml would give cargo two git sources for gpui and two incompatible copies of every type. `Cargo.lock` pins commits; CI builds `--locked`. Do not "fix" this by adding revs.
-- Linux build uses rfd `xdg-portal` (no GTK) and gpui_platform `wayland,x11,font-kit`; other targets use defaults. AVIF encoding links system libavif >= 1.0 with its libaom backend and libyuv where packaged.
-- `gpui-component-assets` must be registered as the asset source or every `IconName` renders blank.
+- The whole UI stack is one dependency: `gpui-kit` re-exports the matching gpui, platform, component and asset crates. Tests add `gpui-pre-platform/test-support` for the headless renderer, which the facade does not forward. `Cargo.lock` pins the versions; CI builds `--locked`.
+- Linux build uses rfd `xdg-portal` (no GTK); other targets use rfd defaults. The facade enables gpui platform features `wayland,x11,font-kit,runtime_shaders`. AVIF encoding links system libavif >= 1.0 with its libaom backend and libyuv where packaged.
+- `gpui-kit-assets` must be registered as the asset source or every `IconName` renders blank.
 - Only Linux is tested; macOS/Windows builds are believed-correct, not verified. Windows is blocked on dav1d via vcpkg.
 
 ## Testing & QA
 
-- Framework: built-in `cargo test`; UI tests use `#[gpui::test]` with `TestAppContext`/`VisualTestContext` (`cx.update(init_theme)`, `cx.add_window_view(...)`, `simulate_click`, `debug_bounds(selector)`).
+- Framework: built-in `cargo test`; UI tests use `#[gpui_kit::test]` with `TestAppContext`/`VisualTestContext` (`cx.update(init_theme)`, `cx.add_window_view(...)`, `simulate_click`, `debug_bounds(selector)`).
 - Coverage: table/gallery layout thresholds, sort stability (ties fall back to filename), checkbox pointer/keyboard ownership, conversion round-trips, AVIF alpha preservation, scan rules, settings round-trip.
 - Helpers: `entry(name,w,h,bytes,format)`, `pointer_checkbox_audit(grid, cx)`, `photo(w,h)` (deterministic noise — flat colours compress to nothing and make assertions false).
 - The ignored screenshot test fails on this Linux host (`render_to_image not available`). For visual proof, launch the real release binary and capture it through Hyprland/ydotool/grim instead of fixing the harness incidentally.

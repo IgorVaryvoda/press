@@ -9,7 +9,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::RenderImage;
+use gpui_kit::RenderImage;
 use image::{
     DynamicImage, Frame, ImageDecoder as _, ImageFormat, ImageReader, RgbaImage,
     metadata::Orientation,

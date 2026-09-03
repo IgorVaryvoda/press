@@ -46,7 +46,7 @@ pub(super) fn result_size_text(before: u64, after: u64, narrow: bool) -> String 
 /// from for free.
 pub(super) struct AuditTable {
     /// Weak, because the audit owns the table state, which owns this.
-    audit: gpui::WeakEntity<Audit>,
+    audit: gpui_kit::WeakEntity<Audit>,
     columns: Vec<TableColumn>,
     /// Width for the name column, recomputed from the window so the fixed columns
     /// do not leave an empty strip on the right. Columns here take a width, not a
@@ -224,7 +224,7 @@ impl AuditTable {
         (compact, name_width, columns)
     }
 
-    pub(super) fn new(audit: gpui::WeakEntity<Audit>, window: &Window) -> Self {
+    pub(super) fn new(audit: gpui_kit::WeakEntity<Audit>, window: &Window) -> Self {
         let mut table = Self {
             audit,
             name_width: W_NAME_MIN,
@@ -373,7 +373,7 @@ impl TableDelegate for AuditTable {
         row_ix: usize,
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let row = div().id(("row", row_ix));
         let Some(audit) = self.audit.upgrade() else {
             return row;
@@ -387,7 +387,7 @@ impl TableDelegate for AuditTable {
         row.h(px(ROW_HEIGHT))
             .relative()
             .border_1()
-            .border_color(gpui::transparent_black())
+            .border_color(gpui_kit::transparent_black())
             .when(ticked, |row| row.bg(cx.theme().list_active))
             .when(row_ix == cursor, |row| {
                 row.border_color(cx.theme().muted_foreground)
@@ -397,12 +397,14 @@ impl TableDelegate for AuditTable {
                     selection_bounds.borrow_mut().insert(entry, bounds);
                 }
             })
-            .on_click(cx.listener(move |table, event: &gpui::ClickEvent, _, cx| {
-                let Some(audit) = table.delegate().audit.upgrade() else {
-                    return;
-                };
-                audit.update(cx, |audit, cx| audit.click_row(row_ix, event, cx));
-            }))
+            .on_click(
+                cx.listener(move |table, event: &gpui_kit::ClickEvent, _, cx| {
+                    let Some(audit) = table.delegate().audit.upgrade() else {
+                        return;
+                    };
+                    audit.update(cx, |audit, cx| audit.click_row(row_ix, event, cx));
+                }),
+            )
     }
 
     fn context_menu(

@@ -5,7 +5,7 @@ use super::*;
 impl Audit {
     /// A local inference result stays visible after its comparison closes. Unlike
     /// scan notices, this is normal work and uses info/success/error semantics.
-    pub(super) fn local_ai_notice(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn local_ai_notice(&self, _cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let job = self.local_ai_job.as_ref()?;
         let message = job.message(&self.root);
         let alert = match job.state {
@@ -18,7 +18,7 @@ impl Audit {
         Some(alert.py_1().into_any_element())
     }
 
-    pub(super) fn studio_notice(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn studio_notice(&self, _cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let job = self.studio_job.as_ref()?;
         let message = job.message(&self.root);
         let alert = match job.state {
@@ -35,7 +35,7 @@ impl Audit {
     /// A finished run, still said after its results view is closed. A fast
     /// conversion can be over before you have looked up, and "it worked" plus
     /// the way to the files is what you want to find when you look back.
-    pub(super) fn conversion_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn conversion_notice(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         if self.converting || self.results.is_empty() {
             return None;
         }
@@ -123,7 +123,7 @@ impl Audit {
     /// Everything the scan could not take at face value, in one line rather than
     /// three scattered ones. The mislabelled count is a button: it is the audit's best
     /// finding, and a number you cannot act on is a dead end.
-    pub(super) fn notices(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn notices(&self, _cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let mut parts = Vec::new();
         if !self.unreadable.is_empty() {
             parts.push(format!(

@@ -6,7 +6,7 @@
 //! The files are Hugeicons, MIT, taken from the same catalogue Studio renders
 //! from — `EXPECTED_TOOL_GLYPHS` in the Studio repository names the mapping.
 
-use gpui::{AssetSource, Result, SharedString};
+use gpui_kit::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
 /// Path to bytes, resolved before the bundled set. `include_bytes!` keeps them
@@ -46,7 +46,7 @@ impl AssetSource for Assets {
         if let Some((_, bytes)) = STUDIO_ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
-        gpui_component_assets::Assets.load(path)
+        gpui_kit::assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -55,7 +55,7 @@ impl AssetSource for Assets {
             .filter(|(name, _)| name.starts_with(path))
             .map(|(name, _)| SharedString::from(*name))
             .collect();
-        names.extend(gpui_component_assets::Assets.list(path)?);
+        names.extend(gpui_kit::assets::Assets.list(path)?);
         Ok(names)
     }
 }

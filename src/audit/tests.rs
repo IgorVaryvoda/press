@@ -9,8 +9,8 @@ use crate::{
     Launch, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     init_theme, restored_window_size,
 };
-use gpui::{HeadlessAppContext, TestAppContext, size};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{HeadlessAppContext, TestAppContext, size};
 use image::ImageFormat;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::Ordering};
@@ -90,7 +90,7 @@ fn home_shortcut_uses_the_navigation_path_identity() {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn direct_navigation_refuses_the_filesystem_root_with_default_output(cx: &mut TestAppContext) {
     let root = std::env::current_dir()
         .unwrap()
@@ -110,7 +110,7 @@ fn direct_navigation_refuses_the_filesystem_root_with_default_output(cx: &mut Te
     assert_eq!(notification_count(cx), 1);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn filesystem_root_output_cannot_be_reset_to_optimized(cx: &mut TestAppContext) {
     let root = std::env::current_dir()
         .unwrap()
@@ -132,7 +132,7 @@ fn filesystem_root_output_cannot_be_reset_to_optimized(cx: &mut TestAppContext) 
     assert_eq!(notification_count(cx), 1);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_one_file_through_request_paths_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
     let root = scan_fixture("one-file");
     let child = root.join("child");
@@ -153,7 +153,7 @@ fn opening_one_file_through_request_paths_cancels_the_active_folder_scan(cx: &mu
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_one_folder_through_request_paths_cancels_the_active_folder_scan(
     cx: &mut TestAppContext,
 ) {
@@ -169,7 +169,7 @@ fn opening_one_folder_through_request_paths_cancels_the_active_folder_scan(
     cx.run_until_parked();
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_many_files_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
     let root = scan_fixture("many-files");
     let first = write_png(&root, "first.png");
@@ -184,7 +184,7 @@ fn opening_many_files_cancels_the_active_folder_scan(cx: &mut TestAppContext) {
     cx.run_until_parked();
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn an_invalid_path_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
     let root = scan_fixture("missing");
     let (audit, cx) = finding_audit(cx);
@@ -206,7 +206,7 @@ fn an_invalid_path_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn a_rejected_mixed_root_selection_keeps_the_active_folder_scan(cx: &mut TestAppContext) {
     let first_root = scan_fixture("mixed-first");
     let second_root = scan_fixture("mixed-second");
@@ -232,7 +232,7 @@ fn a_rejected_mixed_root_selection_keeps_the_active_folder_scan(cx: &mut TestApp
     std::fs::remove_dir_all(first_root).expect("the first scan fixture is removed");
     std::fs::remove_dir_all(second_root).expect("the second scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -243,7 +243,7 @@ fn an_old_completion_cannot_clear_the_new_scan_handle(cx: &mut TestAppContext) {
         assert!(!audit.owns_scan_request(request, Some(&old)));
     });
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn same_root_rescan_remains_cancellable(cx: &mut TestAppContext) {
     let root = scan_fixture("same-root");
     write_png(&root, "one.png");
@@ -258,7 +258,7 @@ fn same_root_rescan_remains_cancellable(cx: &mut TestAppContext) {
     cx.run_until_parked();
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn a_failed_file_replacement_keeps_the_last_dataset(cx: &mut TestAppContext) {
     let root = scan_fixture("corrupt");
     let corrupt = root.join("corrupt.png");
@@ -278,13 +278,13 @@ fn a_failed_file_replacement_keeps_the_last_dataset(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn an_active_scan_blocks_delivery_actions(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| audit.scanning = Some("partial".into()));
     audit.read_with(cx, |audit, _| assert!(audit.scan_blocks_delivery()));
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn a_successful_retry_replaces_the_dataset(cx: &mut TestAppContext) {
     let root = scan_fixture("retry");
     write_png(&root, "retry.png");
@@ -307,7 +307,7 @@ fn a_successful_retry_replaces_the_dataset(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(root).expect("the scan fixture is removed");
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn closing_the_window_cancels_only_its_retained_scan(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     let token = audit.update(cx, |audit, _| retained_scan(audit));
@@ -320,7 +320,7 @@ fn closing_the_window_cancels_only_its_retained_scan(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(token.load(Ordering::Acquire));
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn releasing_the_audit_cancels_a_silent_scan(cx: &mut TestAppContext) {
     cx.update(init_theme);
     let mut weak_audit = None;
@@ -342,7 +342,7 @@ fn releasing_the_audit_cancels_a_silent_scan(cx: &mut TestAppContext) {
     assert!(weak_audit.upgrade().is_none());
     assert!(token.load(Ordering::Acquire));
 }
-#[gpui::test]
+#[gpui_kit::test]
 fn a_normal_folder_scan_lands_once(cx: &mut TestAppContext) {
     let root = scan_fixture("normal");
     write_png(&root, "normal.png");
@@ -398,11 +398,11 @@ fn screenshot() {
 
     // A real platform, only for its text system: glyph metrics decide every
     // width in the window, so a fake one would measure a different layout.
-    let text_system = gpui_platform::current_platform(true).text_system();
+    let text_system = gpui_kit::platform::current_platform(true).text_system();
     let mut cx = HeadlessAppContext::with_platform(
         text_system,
-        std::sync::Arc::new(gpui_component_assets::Assets),
-        gpui_platform::current_headless_renderer,
+        std::sync::Arc::new(gpui_kit::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
     );
 
     cx.update(init_theme);
@@ -465,20 +465,20 @@ fn screenshot() {
     println!("wrote {out} ({}x{})", image.width(), image.height());
 }
 struct AuditHarness {
-    audit: gpui::Entity<Audit>,
+    audit: gpui_kit::Entity<Audit>,
 }
 
-impl gpui::Render for AuditHarness {
+impl gpui_kit::Render for AuditHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.audit.clone()
     }
 }
 
 struct ReleasingAuditHarness {
-    audit: Option<gpui::Entity<Audit>>,
+    audit: Option<gpui_kit::Entity<Audit>>,
 }
 
-impl gpui::Render for ReleasingAuditHarness {
+impl gpui_kit::Render for ReleasingAuditHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.audit
             .clone()
@@ -584,7 +584,7 @@ fn conversion_targets_follow_visible_order() {
     assert!(conversion_targets(&visible, &hidden).is_empty());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn comparison_navigation_stops_at_visible_edges(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.read_with(cx, |audit, _| {
@@ -600,7 +600,7 @@ fn comparison_navigation_stops_at_visible_edges(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext) {
     let folder =
         std::env::temp_dir().join(format!("press-compare-prefetch-{}", std::process::id()));
@@ -710,7 +710,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
     let _ = std::fs::remove_dir_all(&folder);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
     let folder =
         std::env::temp_dir().join(format!("press-preview-prefetch-{}", std::process::id()));
@@ -948,8 +948,8 @@ fn marquee_bounds_work_in_every_drag_direction() {
     };
 
     let bounds = marquee.bounds();
-    assert_eq!(bounds.origin, gpui::point(px(20.), px(30.)));
-    assert_eq!(bounds.size, gpui::size(px(70.), px(50.)));
+    assert_eq!(bounds.origin, gpui_kit::point(px(20.), px(30.)));
+    assert_eq!(bounds.size, gpui_kit::size(px(70.), px(50.)));
 }
 
 #[test]
@@ -1097,7 +1097,7 @@ fn column_preferences_decide_the_optional_columns() {
     assert!(bare_name > default_name);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn table_select_all_follows_the_visible_rows(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -1193,7 +1193,7 @@ fn a_report_names_a_few_files_and_then_counts_the_rest() {
 
 /// The audit's findings have to be reachable. Narrowing to one shows those rows and
 /// nothing else, and asking for the same one again widens the list back out.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_finding_narrows_the_list_and_a_second_click_widens_it(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     let shown = |audit: &Audit| -> Vec<String> {
@@ -1229,7 +1229,7 @@ fn a_finding_narrows_the_list_and_a_second_click_widens_it(cx: &mut TestAppConte
 
 /// Unpairing retires the loop before dropping its status, so the next loop
 /// check cannot keep uploading into a folder this window no longer owns.
-#[gpui::test]
+#[gpui_kit::test]
 fn unpairing_discards_the_job_and_stops_the_loop(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -1258,7 +1258,7 @@ fn unpairing_discards_the_job_and_stops_the_loop(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -1344,7 +1344,7 @@ fn sirv_jobs_count_every_failure_but_keep_three_examples() {
 fn notification_audit(
     cx: &mut TestAppContext,
     entries: Vec<Entry>,
-) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+) -> (gpui_kit::Entity<Audit>, &mut gpui_kit::VisualTestContext) {
     cx.update(init_theme);
     let audit_entity = Rc::new(RefCell::new(None));
     let capture = audit_entity.clone();
@@ -1383,18 +1383,18 @@ fn notification_audit(
     (audit, cx)
 }
 
-fn notification_count(cx: &mut gpui::VisualTestContext) -> usize {
+fn notification_count(cx: &mut gpui_kit::VisualTestContext) -> usize {
     let mut count = 0;
     cx.update(|window, cx| count = window.notifications(cx).len());
     count
 }
 
-fn finish_notification_exit(cx: &mut gpui::VisualTestContext) {
+fn finish_notification_exit(cx: &mut gpui_kit::VisualTestContext) {
     cx.executor().advance_clock(Duration::from_millis(250));
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_newer_error_replaces_the_old_content_in_its_scope(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(cx, Vec::new());
 
@@ -1421,7 +1421,7 @@ fn a_newer_error_replaces_the_old_content_in_its_scope(cx: &mut TestAppContext) 
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_successful_retry_removes_its_old_error(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(cx, Vec::new());
     audit.update(cx, |audit, cx| {
@@ -1441,7 +1441,7 @@ fn a_successful_retry_removes_its_old_error(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn errors_from_different_scopes_coexist(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(cx, Vec::new());
     audit.update(cx, |audit, cx| {
@@ -1461,7 +1461,7 @@ fn errors_from_different_scopes_coexist(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(
         cx,
@@ -1495,7 +1495,7 @@ fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAp
     assert_eq!(notification_count(cx), 0);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -1518,7 +1518,7 @@ fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_armed_overwrite_is_withdrawn_by_unpair(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -1529,7 +1529,7 @@ fn an_armed_overwrite_is_withdrawn_by_unpair(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn sirv_difference_filters_match_their_category_counts(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -1593,7 +1593,7 @@ fn sirv_difference_filters_match_their_category_counts(cx: &mut TestAppContext) 
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -1658,7 +1658,7 @@ fn a_current_walk_lands() {
 }
 
 /// A finding belongs to the folder it was found in.
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| audit.set_finding(Finding::Heavy, cx));
@@ -1690,7 +1690,7 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -1763,7 +1763,9 @@ fn finding_launch() -> Launch {
     }
 }
 
-fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+fn finding_audit(
+    cx: &mut TestAppContext,
+) -> (gpui_kit::Entity<Audit>, &mut gpui_kit::VisualTestContext) {
     cx.update(init_theme);
     let launch = finding_launch();
     let mut audit = None;
@@ -1779,11 +1781,11 @@ fn finding_audit(cx: &mut TestAppContext) -> (gpui::Entity<Audit>, &mut gpui::Vi
 }
 
 fn tree_row_bounds(
-    audit: &gpui::Entity<Audit>,
+    audit: &gpui_kit::Entity<Audit>,
     path: &Path,
     selector_prefix: &str,
-    cx: &mut gpui::VisualTestContext,
-) -> gpui::Bounds<gpui::Pixels> {
+    cx: &mut gpui_kit::VisualTestContext,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
     let index = audit.read_with(cx, |audit, cx| {
         let id = audit
             .tree_paths
@@ -1808,7 +1810,7 @@ fn tree_row_bounds(
         .expect("the requested tree row is rendered")
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn acquisition_extras_stay_off_the_primary_surface(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -1826,7 +1828,7 @@ fn acquisition_extras_stay_off_the_primary_surface(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("spin-preflight").is_none());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppContext) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1849,11 +1851,11 @@ fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppCon
     let (audit, cx) = finding_audit(cx);
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let position = cx.debug_bounds("audit-header").unwrap().center();
-    cx.simulate_event(gpui::FileDropEvent::Entered {
+    cx.simulate_event(gpui_kit::FileDropEvent::Entered {
         position,
-        paths: gpui::ExternalPaths([first, second].into_iter().collect()),
+        paths: gpui_kit::ExternalPaths([first, second].into_iter().collect()),
     });
-    cx.simulate_event(gpui::FileDropEvent::Submit { position });
+    cx.simulate_event(gpui_kit::FileDropEvent::Submit { position });
     cx.run_until_parked();
 
     audit.read_with(cx, |audit, _| {
@@ -1863,7 +1865,7 @@ fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppCon
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_desktop_drop_opens_direct_images_from_every_dropped_folder(cx: &mut TestAppContext) {
     let root = scan_fixture("multi-folder-drop");
     let first_folder = root.join("first");
@@ -1883,11 +1885,11 @@ fn a_desktop_drop_opens_direct_images_from_every_dropped_folder(cx: &mut TestApp
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let position = cx.debug_bounds("audit-header").unwrap().center();
-    cx.simulate_event(gpui::FileDropEvent::Entered {
+    cx.simulate_event(gpui_kit::FileDropEvent::Entered {
         position,
-        paths: gpui::ExternalPaths([first_folder, second_folder].into_iter().collect()),
+        paths: gpui_kit::ExternalPaths([first_folder, second_folder].into_iter().collect()),
     });
-    cx.simulate_event(gpui::FileDropEvent::Submit { position });
+    cx.simulate_event(gpui_kit::FileDropEvent::Submit { position });
     cx.run_until_parked();
 
     audit.read_with(cx, |audit, _| {
@@ -1911,7 +1913,7 @@ fn a_desktop_drop_opens_direct_images_from_every_dropped_folder(cx: &mut TestApp
 }
 
 #[cfg(unix)]
-#[gpui::test]
+#[gpui_kit::test]
 fn a_symlinked_multi_folder_drop_keeps_one_root_identity(cx: &mut TestAppContext) {
     use std::os::unix::fs::symlink;
 
@@ -1947,7 +1949,7 @@ fn a_symlinked_multi_folder_drop_keeps_one_root_identity(cx: &mut TestAppContext
 
 /// Escape in the list puts the selection down. Escape in the size box is the
 /// box's business, and the ticked rows must not pay for it.
-#[gpui::test]
+#[gpui_kit::test]
 fn typing_in_the_max_edge_box_does_not_clear_the_selection(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -1961,7 +1963,7 @@ fn typing_in_the_max_edge_box_does_not_clear_the_selection(cx: &mut TestAppConte
     let input = cx
         .debug_bounds("max-edge-input")
         .expect("the size box is in the convert rail");
-    cx.simulate_click(input.center(), gpui::Modifiers::none());
+    cx.simulate_click(input.center(), gpui_kit::Modifiers::none());
     cx.update(|window, cx| assert!(audit.read(cx).text_input_focused(window, cx)));
     cx.simulate_keystrokes("escape");
 
@@ -1973,7 +1975,7 @@ fn typing_in_the_max_edge_box_does_not_clear_the_selection(cx: &mut TestAppConte
 /// With the format kept, the output name is the source name. The rail says so
 /// before the button can be pressed, instead of the failure list saying it once
 /// per file afterwards.
-#[gpui::test]
+#[gpui_kit::test]
 fn keeping_the_format_into_the_audited_folder_disables_convert_with_a_reason(
     cx: &mut TestAppContext,
 ) {
@@ -2004,7 +2006,7 @@ fn keeping_the_format_into_the_audited_folder_disables_convert_with_a_reason(
 
 /// The box beside the presets follows `--max-edge`: a positive whole number of
 /// pixels applies, junk changes nothing, and an emptied box is the source size.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_typed_max_edge_applies_and_junk_leaves_the_last_size(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2030,7 +2032,7 @@ fn a_typed_max_edge_applies_and_junk_leaves_the_last_size(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn choosing_avif_leaves_lossless_for_the_last_slider_quality(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2054,7 +2056,7 @@ fn replace_label() -> &'static str {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -2104,7 +2106,7 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -2160,7 +2162,7 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn named_filter_clear_restores_the_audit(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| {
@@ -2179,7 +2181,7 @@ fn named_filter_clear_restores_the_audit(cx: &mut TestAppContext) {
     let clear = cx
         .debug_bounds("clear-filter")
         .expect("a populated filter has a named clear action");
-    cx.simulate_click(clear.center(), gpui::Modifiers::none());
+    cx.simulate_click(clear.center(), gpui_kit::Modifiers::none());
 
     audit.read_with(cx, |audit, cx| {
         assert!(audit.filter.is_empty());
@@ -2195,7 +2197,7 @@ fn sirv_credentials_require_both_nonblank_fields() {
     assert!(credentials_complete(" client ", " secret "));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn key_repeats_share_one_next_frame_redraw(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| {
@@ -2214,7 +2216,7 @@ fn key_repeats_share_one_next_frame_redraw(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn grid_arrows_move_by_tile_and_band_and_shift_range_shrinks(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| {
@@ -2245,7 +2247,7 @@ fn grid_arrows_move_by_tile_and_band_and_shift_range_shrinks(cx: &mut TestAppCon
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn gallery_thumbs_follow_the_virtual_range(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2277,7 +2279,7 @@ fn thumbnail_overscan_never_outgrows_the_cache() {
     assert!(wanted.contains(&447));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn thumbnail_decodes_share_four_slots_and_cap_fallbacks_at_two(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2364,7 +2366,7 @@ fn thumbnail_decodes_share_four_slots_and_cap_fallbacks_at_two(cx: &mut TestAppC
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -2422,7 +2424,7 @@ fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn flushing_settings_clears_the_pending_debounce(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     let dir = std::env::temp_dir().join(format!(
@@ -2456,7 +2458,7 @@ fn flushing_settings_clears_the_pending_debounce(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_failed_debounced_save_reports_until_a_later_revision_clears_it(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     // Drain any debounce a setup render scheduled, so only this test's
@@ -2517,7 +2519,7 @@ fn a_failed_debounced_save_reports_until_a_later_revision_clears_it(cx: &mut Tes
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn rapid_remembers_keep_only_the_newest_pending_snapshot(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     let dir = std::env::temp_dir().join(format!(
@@ -2549,7 +2551,7 @@ fn rapid_remembers_keep_only_the_newest_pending_snapshot(cx: &mut TestAppContext
 fn pointer_checkbox_audit(
     grid: bool,
     cx: &mut TestAppContext,
-) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+) -> (gpui_kit::Entity<Audit>, &mut gpui_kit::VisualTestContext) {
     cx.update(init_theme);
     let launch = Launch {
         root: PathBuf::new(),
@@ -2584,7 +2586,7 @@ fn pointer_checkbox_audit(
     (audit, cx)
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(true, cx);
     assert!(cx.debug_bounds("gallery-sort").is_some());
@@ -2592,7 +2594,7 @@ fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext
     let compare = cx
         .debug_bounds("grid-compare-0")
         .expect("each gallery image has a named comparison action");
-    cx.simulate_click(compare.center(), gpui::Modifiers::none());
+    cx.simulate_click(compare.center(), gpui_kit::Modifiers::none());
 
     audit.read_with(cx, |audit, _| {
         assert_eq!(
@@ -2603,7 +2605,7 @@ fn gallery_exposes_sorting_and_a_separate_compare_action(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_empty_gallery_selection_still_offers_select_all(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(true, cx);
     audit.update(cx, |audit, cx| {
@@ -2615,24 +2617,24 @@ fn an_empty_gallery_selection_still_offers_select_all(cx: &mut TestAppContext) {
     let select_all = cx
         .debug_bounds("bar-select-all")
         .expect("the gallery action bar keeps its bulk-selection action");
-    cx.simulate_click(select_all.center(), gpui::Modifiers::none());
+    cx.simulate_click(select_all.center(), gpui_kit::Modifiers::none());
 
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.selected, HashSet::from([0, 1]));
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn double_click_opens_a_source_preview_before_comparison(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
-    let click = gpui::ClickEvent::Mouse(gpui::MouseClickEvent {
-        down: gpui::MouseDownEvent {
-            button: gpui::MouseButton::Left,
+    let click = gpui_kit::ClickEvent::Mouse(gpui_kit::MouseClickEvent {
+        down: gpui_kit::MouseDownEvent {
+            button: gpui_kit::MouseButton::Left,
             click_count: 2,
             ..Default::default()
         },
-        up: gpui::MouseUpEvent {
-            button: gpui::MouseButton::Left,
+        up: gpui_kit::MouseUpEvent {
+            button: gpui_kit::MouseButton::Left,
             click_count: 2,
             ..Default::default()
         },
@@ -2650,7 +2652,7 @@ fn double_click_opens_a_source_preview_before_comparison(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_open_preview_draws_the_loaded_thumbnail_immediately(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     cx.run_until_parked();
@@ -2672,7 +2674,7 @@ fn an_open_preview_draws_the_loaded_thumbnail_immediately(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_running_ai_job_overlays_only_its_own_preview(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2728,51 +2730,51 @@ fn a_running_ai_job_overlays_only_its_own_preview(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("preview-processing-overlay").is_some());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn marquee_selects_intersecting_visible_items(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
-        audit.selection_surface.set(gpui::Bounds::from_corners(
-            gpui::point(px(0.), px(0.)),
-            gpui::point(px(300.), px(300.)),
+        audit.selection_surface.set(gpui_kit::Bounds::from_corners(
+            gpui_kit::point(px(0.), px(0.)),
+            gpui_kit::point(px(300.), px(300.)),
         ));
         audit.selection_bounds.borrow_mut().extend([
             (
                 0,
-                gpui::Bounds::from_corners(
-                    gpui::point(px(70.), px(70.)),
-                    gpui::point(px(100.), px(100.)),
+                gpui_kit::Bounds::from_corners(
+                    gpui_kit::point(px(70.), px(70.)),
+                    gpui_kit::point(px(100.), px(100.)),
                 ),
             ),
             (
                 1,
-                gpui::Bounds::from_corners(
-                    gpui::point(px(200.), px(200.)),
-                    gpui::point(px(230.), px(230.)),
+                gpui_kit::Bounds::from_corners(
+                    gpui_kit::point(px(200.), px(200.)),
+                    gpui_kit::point(px(230.), px(230.)),
                 ),
             ),
         ]);
         audit.start_marquee(
-            &gpui::MouseDownEvent {
-                button: gpui::MouseButton::Left,
-                position: gpui::point(px(50.), px(50.)),
+            &gpui_kit::MouseDownEvent {
+                button: gpui_kit::MouseButton::Left,
+                position: gpui_kit::point(px(50.), px(50.)),
                 ..Default::default()
             },
             cx,
         );
         assert!(audit.marquee.is_none(), "the table header owns its drags");
         audit.start_marquee(
-            &gpui::MouseDownEvent {
-                button: gpui::MouseButton::Left,
-                position: gpui::point(px(50.), px(120.)),
+            &gpui_kit::MouseDownEvent {
+                button: gpui_kit::MouseButton::Left,
+                position: gpui_kit::point(px(50.), px(120.)),
                 ..Default::default()
             },
             cx,
         );
         audit.move_marquee(
-            &gpui::MouseMoveEvent {
-                position: gpui::point(px(120.), px(50.)),
-                pressed_button: Some(gpui::MouseButton::Left),
+            &gpui_kit::MouseMoveEvent {
+                position: gpui_kit::point(px(120.), px(50.)),
+                pressed_button: Some(gpui_kit::MouseButton::Left),
                 ..Default::default()
             },
             cx,
@@ -2783,10 +2785,10 @@ fn marquee_selects_intersecting_visible_items(cx: &mut TestAppContext) {
         assert!(audit.marquee.is_none());
 
         audit.start_marquee(
-            &gpui::MouseDownEvent {
-                button: gpui::MouseButton::Left,
-                position: gpui::point(px(50.), px(120.)),
-                modifiers: gpui::Modifiers {
+            &gpui_kit::MouseDownEvent {
+                button: gpui_kit::MouseButton::Left,
+                position: gpui_kit::point(px(50.), px(120.)),
+                modifiers: gpui_kit::Modifiers {
                     control: true,
                     ..Default::default()
                 },
@@ -2795,9 +2797,9 @@ fn marquee_selects_intersecting_visible_items(cx: &mut TestAppContext) {
             cx,
         );
         audit.move_marquee(
-            &gpui::MouseMoveEvent {
-                position: gpui::point(px(120.), px(50.)),
-                pressed_button: Some(gpui::MouseButton::Left),
+            &gpui_kit::MouseMoveEvent {
+                position: gpui_kit::point(px(120.), px(50.)),
+                pressed_button: Some(gpui_kit::MouseButton::Left),
                 ..Default::default()
             },
             cx,
@@ -2807,7 +2809,7 @@ fn marquee_selects_intersecting_visible_items(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn action_bar_clicks_do_not_replace_the_marquee_selection(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(false, cx);
     let selected = audit.read_with(cx, |audit, _| audit.selected.clone());
@@ -2816,8 +2818,8 @@ fn action_bar_clicks_do_not_replace_the_marquee_selection(cx: &mut TestAppContex
         .expect("the audit action bar is visible");
 
     cx.simulate_click(
-        gpui::point(convert.left() + px(2.), convert.center().y),
-        gpui::Modifiers::none(),
+        gpui_kit::point(convert.left() + px(2.), convert.center().y),
+        gpui_kit::Modifiers::none(),
     );
 
     audit.read_with(cx, |audit, _| {
@@ -2826,7 +2828,7 @@ fn action_bar_clicks_do_not_replace_the_marquee_selection(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2842,7 +2844,7 @@ fn ai_operations_target_the_context_image(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2872,7 +2874,7 @@ fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| assert!(audit.studio_job.is_none()));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2904,12 +2906,12 @@ fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn scan_blocked_gallery_context_actions_are_disabled(cx: &mut TestAppContext) {
     scan_blocked_context_actions_leave_state_unchanged(true, cx);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn scan_blocked_table_context_actions_are_disabled(cx: &mut TestAppContext) {
     scan_blocked_context_actions_leave_state_unchanged(false, cx);
 }
@@ -2960,10 +2962,10 @@ fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestA
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_incomplete_scan_cannot_copy_a_report(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
-    cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("sentinel".into()));
     audit.update(cx, |audit, cx| {
         audit.report_copied = true;
         retained_scan(audit);
@@ -2977,7 +2979,7 @@ fn an_incomplete_scan_cannot_copy_a_report(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn studio_prompt_typing_does_not_toggle_the_audit_selection(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -2992,7 +2994,7 @@ fn studio_prompt_typing_does_not_toggle_the_audit_selection(cx: &mut TestAppCont
     let input = cx
         .debug_bounds("studio-prompt-input")
         .expect("the Studio prompt is visible");
-    cx.simulate_click(input.center(), gpui::Modifiers::none());
+    cx.simulate_click(input.center(), gpui_kit::Modifiers::none());
     cx.update(|window, cx| assert!(audit.read(cx).text_input_focused(window, cx)));
     cx.simulate_keystrokes("space");
 
@@ -3001,7 +3003,7 @@ fn studio_prompt_typing_does_not_toggle_the_audit_selection(cx: &mut TestAppCont
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn source_preview_has_ai_actions_but_compare_mode_does_not(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
@@ -3066,12 +3068,12 @@ fn heavy_needs_a_file_worth_converting() {
 /// The picker's toggle has to reach the table, not only the state: the delegate
 /// caches its column list against a signature, and a preference left out of that
 /// signature changes nothing on screen.
-#[gpui::test]
+#[gpui_kit::test]
 fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
-    let columns = |cx: &mut gpui::VisualTestContext| {
+    let columns = |cx: &mut gpui_kit::VisualTestContext| {
         audit.read_with(cx, |audit, cx| {
             audit
                 .table
@@ -3094,7 +3096,7 @@ fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
     assert!(!columns(cx).contains(&TableColumn::Density));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn dragging_a_column_changes_and_keeps_its_display_order(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     let table = audit
@@ -3125,7 +3127,7 @@ fn dragging_a_column_changes_and_keeps_its_display_order(cx: &mut TestAppContext
 
 /// The two local models and the Studio API act on one file, so they only
 /// light up when the ticked set names exactly one.
-#[gpui::test]
+#[gpui_kit::test]
 fn one_ticked_file_is_what_single_image_tools_act_on(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     // A folder opens fully ticked, which is already more than one file; this
@@ -3153,7 +3155,7 @@ fn one_ticked_file_is_what_single_image_tools_act_on(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| assert_eq!(audit.single_target(), None));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn custom_output_and_destination_are_named_in_the_panel(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -3166,7 +3168,7 @@ fn custom_output_and_destination_are_named_in_the_panel(cx: &mut TestAppContext)
     assert!(cx.debug_bounds("custom-settings-active").is_some());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_overlay_keeps_the_audit_visible_under_its_scrim(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| audit.open_settings(window, cx));
@@ -3180,16 +3182,16 @@ fn settings_overlay_keeps_the_audit_visible_under_its_scrim(cx: &mut TestAppCont
 }
 
 fn assert_pointer_checkbox_toggle(
-    audit: &gpui::Entity<Audit>,
+    audit: &gpui_kit::Entity<Audit>,
     selector: &'static str,
-    cx: &mut gpui::VisualTestContext,
+    cx: &mut gpui_kit::VisualTestContext,
 ) {
     let checkbox = cx
         .debug_bounds(selector)
         .expect("the checkbox must be rendered in its parent event tree");
     let before = audit.read_with(cx, |audit, _| audit.estimate_generation);
 
-    cx.simulate_click(checkbox.center(), gpui::Modifiers::none());
+    cx.simulate_click(checkbox.center(), gpui_kit::Modifiers::none());
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.selected, [1].into_iter().collect());
         assert!(audit.compare.is_none());
@@ -3201,7 +3203,7 @@ fn assert_pointer_checkbox_toggle(
     let checkbox = cx
         .debug_bounds(selector)
         .expect("the checkbox must remain rendered after its controlled state changes");
-    cx.simulate_click(checkbox.center(), gpui::Modifiers::none());
+    cx.simulate_click(checkbox.center(), gpui_kit::Modifiers::none());
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.selected, [0, 1].into_iter().collect());
         assert!(audit.compare.is_none());
@@ -3210,19 +3212,19 @@ fn assert_pointer_checkbox_toggle(
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn grid_checkbox_pointer_click_stays_inside_checkbox(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(true, cx);
     assert_pointer_checkbox_toggle(&audit, "grid-checkbox-0", cx);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn table_checkbox_pointer_click_stays_inside_checkbox(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(false, cx);
     assert_pointer_checkbox_toggle(&audit, "table-checkbox-0", cx);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn keyboard_selection_refreshes_estimate(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(false, cx);
     let before = audit.read_with(cx, |audit, _| audit.estimate_generation);
@@ -3238,8 +3240,8 @@ fn keyboard_selection_refreshes_estimate(cx: &mut TestAppContext) {
 #[test]
 fn checkbox_activation_owns_only_unmodified_space_and_enter() {
     for key in ["space", "enter"] {
-        let event = gpui::KeyDownEvent {
-            keystroke: gpui::Keystroke {
+        let event = gpui_kit::KeyDownEvent {
+            keystroke: gpui_kit::Keystroke {
                 key: key.into(),
                 ..Default::default()
             },
@@ -3253,8 +3255,8 @@ fn checkbox_activation_owns_only_unmodified_space_and_enter() {
         assert!(!is_checkbox_activation_key(&modified));
     }
 
-    let other = gpui::KeyDownEvent {
-        keystroke: gpui::Keystroke {
+    let other = gpui_kit::KeyDownEvent {
+        keystroke: gpui_kit::Keystroke {
             key: "down".into(),
             ..Default::default()
         },
@@ -3366,7 +3368,7 @@ fn gallery_geometry_accounts_for_root_chrome_and_supported_widths() {
     assert_eq!(gallery_layout(3440., 22., 22., 100).columns, 19);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
 
@@ -3396,7 +3398,7 @@ fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAp
     assert!(cx.debug_bounds("folder-tree-toggle").is_some());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn escape_closes_the_folder_overlay_without_clearing_selection(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -3431,7 +3433,7 @@ fn escape_closes_the_folder_overlay_without_clearing_selection(cx: &mut TestAppC
     cx.update(|window, cx| assert!(audit.read(cx).focus.is_focused(window)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn backdrop_closes_the_folder_overlay_and_restores_list_focus(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     cx.simulate_resize(size(px(900.), px(720.)));
@@ -3441,14 +3443,14 @@ fn backdrop_closes_the_folder_overlay_and_restores_list_focus(cx: &mut TestAppCo
     let backdrop = cx
         .debug_bounds("folder-overlay-backdrop")
         .expect("the narrow folder browser has a backdrop");
-    cx.simulate_click(backdrop.center(), gpui::Modifiers::none());
+    cx.simulate_click(backdrop.center(), gpui_kit::Modifiers::none());
     cx.run_until_parked();
 
     audit.read_with(cx, |audit, _| assert!(!audit.browser_overlay));
     cx.update(|window, cx| assert!(audit.read(cx).focus.is_focused(window)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_stale_recent_removes_itself_without_closing_the_browser(cx: &mut TestAppContext) {
     let stale = std::env::temp_dir().join("press-stale-recent");
     let _ = std::fs::remove_dir_all(&stale);
@@ -3462,7 +3464,7 @@ fn a_stale_recent_removes_itself_without_closing_the_browser(cx: &mut TestAppCon
     let recent = cx
         .debug_bounds("recent-0")
         .expect("the saved recent folder is visible");
-    cx.simulate_click(recent.center(), gpui::Modifiers::none());
+    cx.simulate_click(recent.center(), gpui_kit::Modifiers::none());
     cx.run_until_parked();
 
     audit.read_with(cx, |audit, _| {
@@ -3472,7 +3474,7 @@ fn a_stale_recent_removes_itself_without_closing_the_browser(cx: &mut TestAppCon
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn folder_search_filters_the_loaded_tree_case_insensitively(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-search");
     let alpha = root.join("Alpha");
@@ -3488,7 +3490,7 @@ fn folder_search_filters_the_loaded_tree_case_insensitively(cx: &mut TestAppCont
     let search = cx
         .debug_bounds("folder-search")
         .expect("the folder browser has a search field");
-    cx.simulate_click(search.center(), gpui::Modifiers::none());
+    cx.simulate_click(search.center(), gpui_kit::Modifiers::none());
     cx.simulate_input("ALP");
     cx.run_until_parked();
 
@@ -3500,7 +3502,7 @@ fn folder_search_filters_the_loaded_tree_case_insensitively(cx: &mut TestAppCont
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_failed_tree_listing_can_be_retried(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-tree-retry");
     let missing = root.join("later");
@@ -3531,7 +3533,7 @@ fn a_failed_tree_listing_can_be_retried(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn changing_output_rebuilds_the_folder_tree(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-output-tree");
     let child = root.join("generated");
@@ -3554,7 +3556,7 @@ fn changing_output_rebuilds_the_folder_tree(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppContext) {
     let root = scan_fixture_in(
         &browser::home_dir().unwrap_or_else(std::env::temp_dir),
@@ -3569,7 +3571,7 @@ fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppCont
     cx.run_until_parked();
     let disclosure = tree_row_bounds(&audit, &root, "folder-disclosure", cx);
     let generation = audit.read_with(cx, |audit, _| audit.dataset_generation);
-    cx.simulate_click(disclosure.center(), gpui::Modifiers::none());
+    cx.simulate_click(disclosure.center(), gpui_kit::Modifiers::none());
     cx.run_until_parked();
 
     audit.read_with(cx, |audit, _| {
@@ -3580,7 +3582,7 @@ fn folder_disclosure_collapses_without_reopening_the_folder(cx: &mut TestAppCont
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn clicking_a_tree_folder_label_opens_the_folder(cx: &mut TestAppContext) {
     let root = scan_fixture_in(
         &browser::home_dir().unwrap_or_else(std::env::temp_dir),
@@ -3595,14 +3597,14 @@ fn clicking_a_tree_folder_label_opens_the_folder(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(1100.), px(720.)));
     cx.run_until_parked();
     let folder = tree_row_bounds(&audit, &child, "folder-open", cx);
-    cx.simulate_click(folder.center(), gpui::Modifiers::none());
+    cx.simulate_click(folder.center(), gpui_kit::Modifiers::none());
     cx.run_until_parked();
 
     audit.read_with(cx, |audit, _| assert_eq!(audit.root, child));
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn expanding_a_tree_folder_keeps_the_keyboard_selection(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-expand-selection");
     let child = root.join("child");
@@ -3611,7 +3613,7 @@ fn expanding_a_tree_folder_keeps_the_keyboard_selection(cx: &mut TestAppContext)
 
     audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
     cx.run_until_parked();
-    let child_id: gpui::SharedString = audit.read_with(cx, |audit, _| {
+    let child_id: gpui_kit::SharedString = audit.read_with(cx, |audit, _| {
         audit
             .tree_paths
             .iter()
@@ -3645,7 +3647,7 @@ fn expanding_a_tree_folder_keeps_the_keyboard_selection(cx: &mut TestAppContext)
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn enter_opens_the_keyboard_selected_tree_folder(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-keyboard");
     let child = root.join("child");
@@ -3675,7 +3677,7 @@ fn enter_opens_the_keyboard_selected_tree_folder(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn arrow_down_moves_keyboard_focus_from_search_to_the_tree(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-search-keyboard");
     let child = root.join("child");
@@ -3696,7 +3698,7 @@ fn arrow_down_moves_keyboard_focus_from_search_to_the_tree(cx: &mut TestAppConte
 }
 
 #[cfg(unix)]
-#[gpui::test]
+#[gpui_kit::test]
 fn output_aliases_stay_out_of_the_folder_tree(cx: &mut TestAppContext) {
     use std::os::unix::fs::symlink;
 
@@ -3721,7 +3723,7 @@ fn output_aliases_stay_out_of_the_folder_tree(cx: &mut TestAppContext) {
 }
 
 #[cfg(unix)]
-#[gpui::test]
+#[gpui_kit::test]
 fn a_symlinked_source_uses_one_identity_for_its_output(cx: &mut TestAppContext) {
     use std::os::unix::fs::symlink;
 
@@ -3745,7 +3747,7 @@ fn a_symlinked_source_uses_one_identity_for_its_output(cx: &mut TestAppContext) 
     std::fs::remove_dir_all(fixture).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn child_folder_rows_reset_to_the_top_after_navigation(cx: &mut TestAppContext) {
     let root = scan_fixture("folder-row-scroll");
     for index in 0..12 {
@@ -3785,7 +3787,7 @@ fn child_folder_rows_reset_to_the_top_after_navigation(cx: &mut TestAppContext) 
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn folder_navigation_is_shallow_and_replaces_the_file_selection(cx: &mut TestAppContext) {
     let root = scan_fixture("shallow-navigation");
     let child = root.join("child");
@@ -3826,7 +3828,7 @@ fn folder_navigation_is_shallow_and_replaces_the_file_selection(cx: &mut TestApp
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestAppContext) {
     let root = scan_fixture("subfolders-toggle");
     let child = root.join("child");
@@ -3852,7 +3854,7 @@ fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestA
     let chip = cx
         .debug_bounds("include-subfolders")
         .expect("the header offers the scope chip");
-    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.simulate_click(chip.center(), gpui_kit::Modifiers::default());
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
     audit.read_with(cx, |audit, _| {
@@ -3907,7 +3909,7 @@ fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestA
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_scanning_screen_shows_the_count_and_cancel_keeps_the_last_folder(cx: &mut TestAppContext) {
     assert_eq!(view::scan_progress_line(1), "Found 1 image…");
     assert_eq!(view::scan_progress_line(999), "Found 999 images…");
@@ -3925,7 +3927,7 @@ fn the_scanning_screen_shows_the_count_and_cancel_keeps_the_last_folder(cx: &mut
         .expect("a scan with a token offers Cancel");
     assert!(cx.debug_bounds("audit-header").is_none());
 
-    cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+    cx.simulate_click(cancel.center(), gpui_kit::Modifiers::default());
     cx.run_until_parked();
     assert!(
         token.load(Ordering::Acquire),
@@ -3942,7 +3944,7 @@ fn the_scanning_screen_shows_the_count_and_cancel_keeps_the_last_folder(cx: &mut
     assert!(cx.debug_bounds("audit-header").is_some());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn cancelling_a_subfolder_scan_mid_walk_keeps_the_previous_dataset(cx: &mut TestAppContext) {
     let root = scan_fixture("subfolders-cancel");
     let child = root.join("child");
@@ -4039,7 +4041,7 @@ fn cancelling_a_subfolder_scan_mid_walk_keeps_the_previous_dataset(cx: &mut Test
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn turning_subfolders_off_then_cancelling_keeps_the_nested_list_and_the_chip(
     cx: &mut TestAppContext,
 ) {
@@ -4102,7 +4104,7 @@ fn turning_subfolders_off_then_cancelling_keeps_the_nested_list_and_the_chip(
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
     let root = scan_fixture("heic-only");
     std::fs::write(root.join("IMG_0001.heic"), b"not really a heic")
@@ -4144,7 +4146,7 @@ fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_folder_containing_only_output_uses_the_empty_state(cx: &mut TestAppContext) {
     let root = scan_fixture("output-only-empty-state");
     let output = root.join(scan::OUTPUT_DIR);
@@ -4164,7 +4166,7 @@ fn a_folder_containing_only_output_uses_the_empty_state(cx: &mut TestAppContext)
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn relative_navigation_stores_an_absolute_root(cx: &mut TestAppContext) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4223,9 +4225,9 @@ fn gallery_bands_cover_each_entry_once_for_one_three_and_five_columns() {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn gallery_scroll_resets_only_when_the_production_column_count_changes(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     cx.update(init_theme);
     let entries = (0..120)
@@ -4312,9 +4314,9 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
     }));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     const PNG: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
@@ -4417,8 +4419,8 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
     std::fs::remove_dir_all(test_root).expect("the test gallery folders are removed");
 }
 
-#[gpui::test]
-fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui_kit::TestAppContext) {
     cx.update(init_theme);
     let entries = (0..120)
         .map(|index| entry(&format!("old-{index}.png"), 1, 1, 1, ImageFormat::Png))
@@ -4489,7 +4491,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui::TestAppContex
 fn convertible_audit(
     count: usize,
     cx: &mut TestAppContext,
-) -> (gpui::Entity<Audit>, &mut gpui::VisualTestContext) {
+) -> (gpui_kit::Entity<Audit>, &mut gpui_kit::VisualTestContext) {
     cx.update(init_theme);
     let root = scan_fixture("convert");
     let entries: Vec<Entry> = (0..count)
@@ -4545,7 +4547,7 @@ fn convertible_audit(
 
 /// The whole of replace mode through the window: it converts in place, keeps
 /// every original, says so in the rail, and hands them all back on request.
-#[gpui::test]
+#[gpui_kit::test]
 fn replacing_converts_in_place_and_the_rail_offers_the_originals_back(cx: &mut TestAppContext) {
     let (audit, cx) = convertible_audit(3, cx);
     let originals: Vec<(PathBuf, Vec<u8>)> = audit.read_with(cx, |audit, _| {
@@ -4622,7 +4624,7 @@ fn replacing_converts_in_place_and_the_rail_offers_the_originals_back(cx: &mut T
 
 /// A run that finishes after its folder is gone belongs to the old dataset:
 /// its trailing recount must not become the new folder's undo count.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_stale_conversion_does_not_overwrite_restorable(cx: &mut TestAppContext) {
     let (audit, cx) = convertible_audit(3, cx);
     let root = audit.read_with(cx, |audit, _| audit.root.clone());
@@ -4644,7 +4646,7 @@ fn a_stale_conversion_does_not_overwrite_restorable(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
     // Three windows of files, so a stop taken at the first batch of results still
     // leaves a window in flight and a queue that never starts.
@@ -4738,14 +4740,14 @@ fn sampled_decode(audit: &Audit) -> ((u64, PathBuf, MaxEdge), SampledDecode) {
     (key.clone(), image.clone())
 }
 
-fn settle_estimate(cx: &mut gpui::VisualTestContext) {
+fn settle_estimate(cx: &mut gpui_kit::VisualTestContext) {
     cx.run_until_parked();
     cx.executor()
         .advance_clock(ESTIMATE_DELAY + Duration::from_millis(50));
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_them(
     cx: &mut TestAppContext,
 ) {
@@ -4796,7 +4798,7 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-open", 3);
     let (audit, cx) = finding_audit(cx);
@@ -4822,7 +4824,7 @@ fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContex
     std::fs::remove_dir_all(root).expect("the fixture folder is removed");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_sirv_scope_still_leaves_the_next_folder_ticked(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-scope", 3);
     let (audit, cx) = finding_audit(cx);
@@ -4847,7 +4849,7 @@ fn a_sirv_scope_still_leaves_the_next_folder_ticked(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).expect("the fixture folder is removed");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn unticking_a_row_narrows_the_conversion_targets(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-untick", 3);
     let (audit, cx) = finding_audit(cx);
@@ -4865,7 +4867,7 @@ fn unticking_a_row_narrows_the_conversion_targets(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).expect("the fixture folder is removed");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_empty_folder_still_asks_for_a_selection(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-empty", 0);
     let (audit, cx) = finding_audit(cx);
@@ -4881,7 +4883,7 @@ fn an_empty_folder_still_asks_for_a_selection(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(root).expect("the fixture folder is removed");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn opening_another_folder_replaces_the_selection(cx: &mut TestAppContext) {
     let first = photo_fixture("select-all-first", 3);
     let second = photo_fixture("select-all-second", 2);
@@ -4909,7 +4911,7 @@ fn opening_another_folder_replaces_the_selection(cx: &mut TestAppContext) {
 /// Opening a folder starts an estimate, and the next click supersedes it. Without
 /// an in-flight check that burst runs to the end, decoding a whole folder nobody is
 /// looking at any more, one full-size image per worker.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_superseded_estimate_stops_before_it_decodes_the_rest(cx: &mut TestAppContext) {
     let count = convert::workers(Format::WebP) * 2;
     let (audit, cx) = convertible_audit(count, cx);
@@ -4942,7 +4944,7 @@ fn a_superseded_estimate_stops_before_it_decodes_the_rest(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext) {
     // A real run would end inside the click that simulates the close, so the state
     // a run installs is set directly here.
@@ -4959,7 +4961,7 @@ fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext
     let close = cx
         .debug_bounds("close-rail")
         .expect("the open rail has its close control");
-    cx.simulate_click(close.center(), gpui::Modifiers::none());
+    cx.simulate_click(close.center(), gpui_kit::Modifiers::none());
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
     audit.read_with(cx, |audit, _| assert_eq!(audit.rail, Rail::Convert));
@@ -4974,7 +4976,7 @@ fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext
 /// A chosen destination is routinely somewhere else entirely — a staging directory, a
 /// share, a build tree. Measuring each target against the audited root failed every
 /// one of those files and put nothing but their names on the toast.
-#[gpui::test]
+#[gpui_kit::test]
 fn converting_into_an_output_folder_outside_the_root_writes_every_file(cx: &mut TestAppContext) {
     let root = scan_fixture("gui-external-source");
     let outside = scan_fixture("gui-external-output");
@@ -5019,7 +5021,7 @@ fn converting_into_an_output_folder_outside_the_root_writes_every_file(cx: &mut 
 
 /// The folder being audited cannot also be the destination: `a.png` would land on the
 /// source `a.webp`, and the run would report the destroyed original as a saving.
-#[gpui::test]
+#[gpui_kit::test]
 fn choosing_the_audited_folder_as_the_output_is_refused(cx: &mut TestAppContext) {
     let root = scan_fixture("output-is-the-source");
     let (audit, cx) = finding_audit(cx);
@@ -5038,7 +5040,7 @@ fn choosing_the_audited_folder_as_the_output_is_refused(cx: &mut TestAppContext)
 /// Only one file is ticked, and the destination is a subfolder of the same audit. The
 /// original sitting there was never in this run's source list, so nothing but the
 /// audited set can stop the conversion landing on it.
-#[gpui::test]
+#[gpui_kit::test]
 fn converting_into_a_subfolder_refuses_to_overwrite_an_unselected_original(
     cx: &mut TestAppContext,
 ) {
@@ -5083,7 +5085,7 @@ fn converting_into_a_subfolder_refuses_to_overwrite_an_unselected_original(
 /// looked exactly like the ones nobody converted. The run keeps its reason per row:
 /// the row wears it, the chip collects them, the report names them, and converting
 /// the failed rows again is what clears them.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_failed_row_wears_its_reason_and_the_failed_chip_collects_it(cx: &mut TestAppContext) {
     let root = scan_fixture("failure-badge");
     let keeper = root.join("keeper.png");
@@ -5198,7 +5200,7 @@ fn a_failed_row_wears_its_reason_and_the_failed_chip_collects_it(cx: &mut TestAp
 
 /// The same run seen from the gallery: a tile has no result column, so the badge has
 /// to be in the tile itself or the grid is the view that hides the failures.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_failed_tile_carries_the_badge_the_list_row_does(cx: &mut TestAppContext) {
     let root = scan_fixture("failure-badge-grid");
     let liar = root.join("liar.jpg");
@@ -5248,7 +5250,7 @@ fn a_failed_tile_carries_the_badge_the_list_row_does(cx: &mut TestAppContext) {
 
 /// The result column is only laid out when there is something to put in it, and a
 /// run where every file failed has exactly one thing: the badge saying so.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_run_that_converted_nothing_still_lays_out_the_column_holding_its_failures(
     cx: &mut TestAppContext,
 ) {

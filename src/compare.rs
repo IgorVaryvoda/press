@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui::RenderImage;
+use gpui_kit::RenderImage;
 use image::{DynamicImage, Frame, RgbaImage};
 
 use crate::convert::{self, Format, MaxEdge, Quality};

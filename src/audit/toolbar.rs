@@ -5,8 +5,8 @@ use super::*;
 /// One option in a segmented control.
 ///
 pub(super) fn segment(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<gpui::SharedString>,
+    id: impl Into<gpui_kit::ElementId>,
+    label: impl Into<gpui_kit::SharedString>,
     selected: bool,
 ) -> Button {
     // The group's neutral selected state keeps `primary` for the conversion commit.
@@ -28,7 +28,7 @@ impl Audit {
                     Some(value) => value.to_string(),
                 };
                 segment(
-                    gpui::SharedString::from(edge.label()),
+                    gpui_kit::SharedString::from(edge.label()),
                     display,
                     self.max_edge == *edge,
                 )
@@ -51,7 +51,7 @@ impl Audit {
 
     /// The presets and, under them, the box for any other size: a theme that wants
     /// 1200px used to need the CLI.
-    pub(super) fn resize_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn resize_control(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         div()
             .flex()
             .flex_col()
@@ -99,7 +99,7 @@ impl Audit {
     /// the lit button.
     pub(super) fn clear_custom_max_edge(
         &mut self,
-        window: &mut gpui::Window,
+        window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
         self.max_edge_input
@@ -143,22 +143,5 @@ impl Audit {
         self.clear_results();
         self.schedule_estimate(cx);
         cx.notify();
-    }
-
-    pub(super) fn toolbar_button(
-        &self,
-        id: &'static str,
-        text: &'static str,
-        tooltip: &'static str,
-        icon: IconName,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-    ) -> Button {
-        Button::new(id)
-            .small()
-            .icon(icon)
-            .label(text)
-            .tooltip(tooltip)
-            .on_click(cx.listener(move |audit, _, _, cx| on_click(audit, cx)))
     }
 }

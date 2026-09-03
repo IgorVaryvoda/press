@@ -338,10 +338,12 @@ impl Audit {
         path: PathBuf,
         icon: IconName,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let selected = self.root == path;
         let weak = cx.entity().downgrade();
         let selector = id.clone();
+        let tip = id.clone();
+        let hover = path.display().to_string();
         ListItem::new(id)
             .w_full()
             .h(px(30.))
@@ -349,11 +351,13 @@ impl Audit {
             .selected(selected)
             .child(
                 div()
+                    .id(format!("nav-label-{tip}"))
                     .debug_selector(move || selector.clone())
                     .flex()
                     .items_center()
                     .gap_2()
                     .min_w_0()
+                    .tooltip(move |window, cx| Tooltip::new(hover.clone()).build(window, cx))
                     .child(Icon::new(icon).size_4())
                     .child(
                         div()
@@ -393,7 +397,7 @@ impl Audit {
             .unwrap_or_default()
     }
 
-    pub(super) fn folder_sidebar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn folder_sidebar(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let output_root = self.browser_output_root();
         let places = self
             .places()
@@ -430,6 +434,10 @@ impl Audit {
             } else {
                 IconName::ChevronRight
             };
+            let hover = path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| entry.item().label.to_string());
             let mut navigation = div()
                 .id(format!("folder-open-{index}"))
                 .debug_selector(move || format!("folder-open-{index}"))
@@ -438,6 +446,7 @@ impl Audit {
                 .items_center()
                 .gap_1()
                 .min_w_0()
+                .tooltip(move |window, cx| Tooltip::new(hover.clone()).build(window, cx))
                 .child(Icon::new(icon).size_4())
                 .child(
                     div()
@@ -475,7 +484,8 @@ impl Audit {
                             div()
                                 .id(format!("folder-disclosure-hit-{index}"))
                                 .debug_selector(move || format!("folder-disclosure-{index}"))
-                                .size_3()
+                                .w(px(24.))
+                                .h(px(24.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -504,10 +514,10 @@ impl Audit {
                     .px_2()
                     .pt_2()
                     .pb_1()
-                    .on_key_down(
-                        cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
+                    .on_key_down(cx.listener(
+                        |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
                             if event.keystroke.key == "down"
-                                && event.keystroke.modifiers == gpui::Modifiers::none()
+                                && event.keystroke.modifiers == gpui_kit::Modifiers::none()
                                 && audit
                                     .folder_filter_input
                                     .read(cx)
@@ -519,8 +529,8 @@ impl Audit {
                                     .update(cx, |tree, cx| tree.focus(window, cx));
                                 cx.stop_propagation();
                             }
-                        }),
-                    )
+                        },
+                    ))
                     .child(
                         Input::new(&self.folder_filter_input)
                             .small()
@@ -528,16 +538,20 @@ impl Audit {
                             .prefix(IconName::Search),
                     ),
             )
-            .child(
-                div()
-                    .px_3()
-                    .pt_2()
-                    .pb_1()
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("PLACES"),
-            )
+            // One reliable place needs no section header; the header only pays
+            // when there is more than one place to choose from.
+            .when(places.len() > 1, |sidebar| {
+                sidebar.child(
+                    div()
+                        .px_3()
+                        .pt_2()
+                        .pb_1()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().muted_foreground)
+                        .child("PLACES"),
+                )
+            })
             .children(
                 places
                     .into_iter()
@@ -583,11 +597,15 @@ impl Audit {
                     .flex_1()
                     .min_h_0()
                     .pb_2()
-                    .on_key_down(
-                        cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
+                    .on_key_down(cx.listener(
+                        |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
                             let key = event.keystroke.key.as_str();
+                            // Enter opens the selected folder. Space is
+                            // deliberately swallowed without acting: letting it
+                            // through would toggle the list selection behind
+                            // the tree.
                             if key == "enter"
-                                && event.keystroke.modifiers == gpui::Modifiers::none()
+                                && event.keystroke.modifiers == gpui_kit::Modifiers::none()
                             {
                                 let selected = audit
                                     .tree_state
@@ -622,8 +640,8 @@ impl Audit {
                             {
                                 cx.stop_propagation();
                             }
-                        }),
-                    )
+                        },
+                    ))
                     .when(no_folder_matches, |folders| {
                         folders.child(
                             div()
@@ -639,7 +657,7 @@ impl Audit {
             .into_any_element()
     }
 
-    pub(super) fn folder_rows(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn folder_rows(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let output = self.browser_output_root();
         let folders = Arc::new(
             self.folders
@@ -659,10 +677,15 @@ impl Audit {
                     .filter_map(|index| {
                         let path = folders.get(index)?.clone();
                         let name = path_label(&path);
+                        let hover = path.display().to_string();
                         let selector = format!("child-folder:{name}");
                         Some(
                             div()
+                                .id(("child-folder", index))
                                 .debug_selector(move || selector.clone())
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(hover.clone()).build(window, cx)
+                                })
                                 .child(
                                     ListItem::new(format!("child-folder-{index}"))
                                         .w_full()
@@ -706,7 +729,7 @@ impl Audit {
                     .text_size(px(10.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("FOLDERS · {count}")),
+                    .child(format!("IN THIS FOLDER · {count}")),
             )
             .child(
                 div()

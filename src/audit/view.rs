@@ -25,9 +25,9 @@ pub(super) fn scan_progress_line(found: usize) -> String {
 /// rank — 632 KB and 104 KB were set in the same size and colour, so the shape of
 /// the folder was invisible in a list sorted by exactly that.
 pub(super) fn meter(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui_kit::ElementId>,
     fraction: f32,
-    colour: gpui::Hsla,
+    colour: gpui_kit::Hsla,
     height: f32,
 ) -> Progress {
     let fraction = if fraction.is_finite() {
@@ -46,7 +46,7 @@ impl Audit {
         at_root || !listed || self.batch_folders.is_some() || self.scan_blocks_delivery()
     }
 
-    fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let pairing = self.sirv_pairing.as_ref()?;
         let busy = self.sirv_busy() || self.scan_blocks_delivery();
         let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
@@ -299,7 +299,7 @@ impl Audit {
         )
     }
 
-    fn sirv_remote_only_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn sirv_remote_only_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         uniform_list(
             "sirv-remote-only-list",
             self.sirv_remote_only.len(),
@@ -342,10 +342,14 @@ impl Audit {
 
     /// The remote-folder browser: credentials and choosing one remote folder.
     /// Reconciliation belongs to the audit after the folder is paired.
-    fn sirv_browser_view(&self, browser: &SirvBrowser, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn sirv_browser_view(
+        &self,
+        browser: &SirvBrowser,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let at_root = browser.path.trim_end_matches('/').is_empty();
 
-        let body: gpui::AnyElement = match browser.nodes.as_ref() {
+        let body: gpui_kit::AnyElement = match browser.nodes.as_ref() {
             None => div()
                 .flex()
                 .items_center()
@@ -361,7 +365,7 @@ impl Audit {
                 .child(message.clone())
                 .into_any_element(),
             Some(Ok(nodes)) => {
-                let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                let mut rows: Vec<gpui_kit::AnyElement> = Vec::new();
                 if browser.path != "/" {
                     rows.push(
                         Button::new("sirv-up")
@@ -514,7 +518,7 @@ impl Render for Audit {
     // Three shapes share this method — empty state, comparison, and the list — so it
     // erases to one type rather than making the caller's `impl Trait` pick a winner.
     #[allow(refining_impl_trait)]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let count = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
             self.sirv_remote_only.len()
         } else {
@@ -648,7 +652,7 @@ impl Render for Audit {
                         })),
                 )
                 .on_drop(
-                    cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {
+                    cx.listener(|audit, paths: &gpui_kit::ExternalPaths, window, cx| {
                         audit.request_paths(paths.paths().to_vec(), window, cx);
                     }),
                 )
@@ -667,7 +671,7 @@ impl Render for Audit {
                 .border_color(if self.drag_over {
                     cx.theme().drag_border
                 } else {
-                    gpui::transparent_black()
+                    gpui_kit::transparent_black()
                 })
                 .child(
                     div()
@@ -730,14 +734,14 @@ impl Render for Audit {
                         ),
                 )
                 .on_drag_move(cx.listener(
-                    |audit, _: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                    |audit, _: &gpui_kit::DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
                         if !audit.drag_over {
                             audit.drag_over = true;
                             cx.notify();
                         }
                     },
                 ))
-                .on_drop(cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {
+                .on_drop(cx.listener(|audit, paths: &gpui_kit::ExternalPaths, window, cx| {
                     audit.drag_over = false;
                     audit.request_paths(paths.paths().to_vec(), window, cx);
                 }))
@@ -775,7 +779,7 @@ impl Render for Audit {
                         .justify_center()
                         .bg(cx.theme().background.opacity(0.82))
                         .on_key_down(cx.listener(
-                            |audit, event: &gpui::KeyDownEvent, window, cx| {
+                            |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
                                 match event.keystroke.key.as_str() {
                                     "escape" => {
                                         audit.close_settings(window, cx);
@@ -850,7 +854,7 @@ impl Render for Audit {
                         .bg(cx.theme().background.opacity(0.82))
                         .track_focus(&focus)
                         .on_key_down(cx.listener(
-                            |audit, event: &gpui::KeyDownEvent, window, cx| {
+                            |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
                                 if event.keystroke.key == "escape" {
                                     audit.close_sirv_browser(window, cx);
                                 }
@@ -881,7 +885,7 @@ impl Render for Audit {
                 .size_full()
                 .relative()
                 .track_focus(&self.focus)
-                .on_key_down(cx.listener(|audit, event: &gpui::KeyDownEvent, _, cx| {
+                .on_key_down(cx.listener(|audit, event: &gpui_kit::KeyDownEvent, _, cx| {
                     match event.keystroke.key.as_str() {
                         "escape" => {
                             audit.compare = None;
@@ -920,7 +924,7 @@ impl Audit {
         count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         // What the list has to itself. The floating bar has to fit inside it,
         // and at the minimum window with a rail open that is 460px.
         let (root_left, root_right) = root_horizontal_chrome(window);
@@ -942,12 +946,14 @@ impl Audit {
             .flex_col()
             .bg(cx.theme().background)
             .track_focus(&self.focus)
-            .on_mouse_move(cx.listener(|audit, event: &gpui::MouseMoveEvent, _, cx| {
-                audit.move_marquee(event, cx);
-            }))
+            .on_mouse_move(
+                cx.listener(|audit, event: &gpui_kit::MouseMoveEvent, _, cx| {
+                    audit.move_marquee(event, cx);
+                }),
+            )
             .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|audit, _: &gpui::MouseUpEvent, _, cx| {
+                gpui_kit::MouseButton::Left,
+                cx.listener(|audit, _: &gpui_kit::MouseUpEvent, _, cx| {
                     audit.finish_marquee(cx);
                 }),
             )
@@ -957,10 +963,10 @@ impl Audit {
             .border_color(if self.drag_over {
                 cx.theme().drag_border
             } else {
-                gpui::transparent_black()
+                gpui_kit::transparent_black()
             })
             .on_drag_move(cx.listener(
-                |audit, _: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                |audit, _: &gpui_kit::DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
                     if !audit.drag_over {
                         audit.drag_over = true;
                         cx.notify();
@@ -968,7 +974,7 @@ impl Audit {
                 },
             ))
             .on_key_down(
-                cx.listener(|audit, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(|audit, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if audit.text_input_focused(window, cx) {
                         return;
                     }
@@ -1022,7 +1028,7 @@ impl Audit {
                 }),
             )
             .on_drop(
-                cx.listener(|audit, paths: &gpui::ExternalPaths, window, cx| {
+                cx.listener(|audit, paths: &gpui_kit::ExternalPaths, window, cx| {
                     audit.drag_over = false;
                     audit.request_paths(paths.paths().to_vec(), window, cx);
                 }),
@@ -1070,7 +1076,7 @@ impl Audit {
                             .absolute()
                             .inset_0()
                             .on_key_down(cx.listener(
-                                |audit, event: &gpui::KeyDownEvent, window, cx| {
+                                |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
                                     if event.keystroke.key == "escape" {
                                         audit.close_browser_overlay(window, cx);
                                         cx.stop_propagation();
@@ -1084,7 +1090,7 @@ impl Audit {
                                     .bg(cx.theme().background.opacity(0.55))
                                     .debug_selector(|| "folder-overlay-backdrop".into())
                                     .on_mouse_down(
-                                        gpui::MouseButton::Left,
+                                        gpui_kit::MouseButton::Left,
                                         cx.listener(|audit, _, window, cx| {
                                             audit.close_browser_overlay(window, cx);
                                             cx.stop_propagation();
@@ -1098,7 +1104,26 @@ impl Audit {
                                     .h_full()
                                     .shadow_lg()
                                     .occlude()
-                                    .child(sidebar),
+                                    .child(sidebar)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_2()
+                                            .right_2()
+                                            .debug_selector(|| "folder-overlay-close".into())
+                                            .child(
+                                                Button::new("folder-overlay-close")
+                                                    .small()
+                                                    .ghost()
+                                                    .icon(IconName::Close)
+                                                    .tooltip("Close folder browser")
+                                                    .on_click(cx.listener(
+                                                        |audit, _, window, cx| {
+                                                            audit.close_browser_overlay(window, cx);
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
                             )
                     })),
             )
@@ -1106,7 +1131,7 @@ impl Audit {
     }
 
     /// The list or the gallery, filling the space left of the panel.
-    fn marquee_overlay(&self, cx: &App) -> Option<gpui::AnyElement> {
+    fn marquee_overlay(&self, cx: &App) -> Option<gpui_kit::AnyElement> {
         let marquee = self.marquee.as_ref()?;
         let bounds = marquee.bounds();
         let surface = self.selection_surface.get();
@@ -1130,7 +1155,7 @@ impl Audit {
         count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         self.selection_bounds.borrow_mut().clear();
         if self.sirv_scope == Some(SirvScope::OnlyRemote) {
             return div()
@@ -1174,7 +1199,10 @@ impl Audit {
                 )
                 .into_any_element();
         }
-        let folder_rows = has_visible_folders.then(|| self.folder_rows(cx));
+        // The sidebar owns child navigation when persistent; showing the strip
+        // too would navigate the same move twice and cost ~196 px of list.
+        let folder_rows =
+            (has_visible_folders && !self.browser_persistent(window)).then(|| self.folder_rows(cx));
         // The list runs to the window edge; hairlines above it, not a
         // card floating in padding.
         div()
@@ -1184,8 +1212,8 @@ impl Audit {
             .overflow_hidden()
             .bg(cx.theme().table)
             .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|audit, event: &gpui::MouseDownEvent, _, cx| {
+                gpui_kit::MouseButton::Left,
+                cx.listener(|audit, event: &gpui_kit::MouseDownEvent, _, cx| {
                     audit.start_marquee(event, cx);
                 }),
             )

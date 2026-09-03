@@ -18,7 +18,7 @@ pub(super) fn comparison_landing_applies(
 }
 
 pub(super) fn image_context_menu(
-    audit: gpui::WeakEntity<Audit>,
+    audit: gpui_kit::WeakEntity<Audit>,
     index: usize,
     has_result: bool,
     busy: bool,
@@ -904,7 +904,11 @@ impl Audit {
     /// One place for it, so the table and the gallery cannot drift into two
     /// vocabularies for one fact — the gallery had none at all, which is the widest
     /// two vocabularies can drift.
-    pub(super) fn sync_label(&self, entry: &Entry, cx: &App) -> Option<(&'static str, gpui::Hsla)> {
+    pub(super) fn sync_label(
+        &self,
+        entry: &Entry,
+        cx: &App,
+    ) -> Option<(&'static str, gpui_kit::Hsla)> {
         let Listing::Ready(files) = &self.sirv_pairing.as_ref()?.files else {
             return None;
         };

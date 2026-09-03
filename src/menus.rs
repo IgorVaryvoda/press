@@ -3,7 +3,7 @@
 
 use std::io;
 
-use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
+use gpui_kit::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 
 use crate::audit::Audit;
 
@@ -183,11 +183,11 @@ mod tests {
         sync::Arc,
     };
 
-    use gpui::{MenuItem, TestAppContext};
+    use gpui_kit::{MenuItem, TestAppContext};
 
     use super::*;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn about_action_invokes_its_presenter(cx: &mut TestAppContext) {
         let calls = Rc::new(Cell::new(0));
         let presented = calls.clone();
@@ -210,7 +210,7 @@ mod tests {
 
     impl std::error::Error for InjectedShowCrashReportsError {}
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn show_crash_reports_surfaces_its_name_and_original_error(cx: &mut TestAppContext) {
         let calls = Rc::new(Cell::new(0));
         let fail = Rc::new(Cell::new(true));
@@ -276,7 +276,7 @@ mod tests {
 
     impl std::error::Error for InjectedEmailCrashReportError {}
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn email_crash_report_surfaces_its_named_failure(cx: &mut TestAppContext) {
         let calls = Rc::new(Cell::new(0));
         let payload = Arc::new(InjectedEmailCrashReportError);

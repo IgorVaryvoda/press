@@ -6,10 +6,10 @@ impl Audit {
     /// One labelled row of the settings form.
     pub(super) fn settings_row(
         label: &'static str,
-        input: gpui::Entity<InputState>,
+        input: gpui_kit::Entity<InputState>,
         secret: bool,
         cx: &Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         div()
             .flex()
             .items_center()
@@ -28,7 +28,10 @@ impl Audit {
     }
 
     /// A section heading plus its status line, if one has anything to say.
-    pub(super) fn settings_status(status: Option<(bool, String)>, cx: &Context<Self>) -> gpui::Div {
+    pub(super) fn settings_status(
+        status: Option<(bool, String)>,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
         match status {
             None => div(),
             Some((ok, message)) => div()
@@ -39,7 +42,7 @@ impl Audit {
     }
 
     /// The settings panel: the CDN keys.
-    pub(super) fn settings_panel_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn settings_panel_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(panel) = self.settings_panel.as_ref() else {
             return div().into_any_element();
         };

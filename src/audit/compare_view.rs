@@ -2,7 +2,11 @@
 
 use super::*;
 
-fn compare_chip(text: impl Into<gpui::SharedString>, colour: gpui::Hsla, _cx: &App) -> gpui::Div {
+fn compare_chip(
+    text: impl Into<gpui_kit::SharedString>,
+    colour: gpui_kit::Hsla,
+    _cx: &App,
+) -> gpui_kit::Div {
     div()
         .h(px(18.))
         .px_2()
@@ -50,7 +54,7 @@ impl Audit {
         comparison: &Comparison,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let viewport = window.viewport_size();
         let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
         // "Keep" names nothing on this side; the file's own name says which encoder
@@ -94,8 +98,8 @@ impl Audit {
             .overflow_hidden()
             .bg(rgb(0x0b0d10))
             .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|audit, event: &gpui::MouseDownEvent, _, cx| {
+                gpui_kit::MouseButton::Left,
+                cx.listener(|audit, event: &gpui_kit::MouseDownEvent, _, cx| {
                     if let Some(comparison) = audit.compare.as_mut() {
                         let at = (f32::from(event.position.x), f32::from(event.position.y));
                         comparison.drag = Some((at, comparison.pan));
@@ -104,16 +108,16 @@ impl Audit {
                 }),
             )
             .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|audit, _: &gpui::MouseUpEvent, _, cx| {
+                gpui_kit::MouseButton::Left,
+                cx.listener(|audit, _: &gpui_kit::MouseUpEvent, _, cx| {
                     if let Some(comparison) = audit.compare.as_mut() {
                         comparison.drag = None;
                         cx.notify();
                     }
                 }),
             )
-            .on_scroll_wheel(
-                cx.listener(move |audit, event: &gpui::ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(
+                move |audit, event: &gpui_kit::ScrollWheelEvent, _, cx| {
                     let Some(comparison) = audit.compare.as_mut() else {
                         return;
                     };
@@ -122,8 +126,8 @@ impl Audit {
                     };
 
                     let ticks = match event.delta {
-                        gpui::ScrollDelta::Lines(delta) => delta.y,
-                        gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.,
+                        gpui_kit::ScrollDelta::Lines(delta) => delta.y,
+                        gpui_kit::ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.,
                     };
                     if ticks == 0. {
                         return;
@@ -159,10 +163,10 @@ impl Audit {
                     );
                     comparison.zoom = Some(after);
                     cx.notify();
-                }),
-            )
+                },
+            ))
             .on_mouse_move(
-                cx.listener(move |audit, event: &gpui::MouseMoveEvent, _, cx| {
+                cx.listener(move |audit, event: &gpui_kit::MouseMoveEvent, _, cx| {
                     let Some(comparison) = audit.compare.as_mut() else {
                         return;
                     };
@@ -221,16 +225,16 @@ impl Audit {
                                     .px_3()
                                     .bg(rgba(0x00000099))
                                     .child(
-                                        gpui_component::spinner::Spinner::new()
+                                        gpui_kit::component::spinner::Spinner::new()
                                             .large()
-                                            .color(gpui::white()),
+                                            .color(gpui_kit::white()),
                                     )
                                     .child(
                                         div()
                                             .max_w(px(440.))
                                             .text_center()
                                             .text_size(px(12.))
-                                            .text_color(gpui::white())
+                                            .text_color(gpui_kit::white())
                                             .child(message),
                                     ),
                             )
@@ -245,7 +249,7 @@ impl Audit {
             let top = (view_h - image_h) / 2. + comparison.pan.1;
             let divider = view_w * comparison.split;
 
-            let placed = |image: &Arc<gpui::RenderImage>| {
+            let placed = |image: &Arc<gpui_kit::RenderImage>| {
                 div()
                     .absolute()
                     .left(px(left))
@@ -302,7 +306,7 @@ impl Audit {
                         .border_color(rgba(0xffffffcc))
                         .bg(rgba(0x000000cc))
                         .text_size(px(16.))
-                        .text_color(gpui::white())
+                        .text_color(gpui_kit::white())
                         .cursor_ew_resize()
                         .child("↔"),
                 )
@@ -387,7 +391,7 @@ impl Audit {
                     .justify_center()
                     .gap_2()
                     .child(
-                        gpui_component::spinner::Spinner::new()
+                        gpui_kit::component::spinner::Spinner::new()
                             .large()
                             .color(cx.theme().muted_foreground),
                     )
@@ -588,7 +592,7 @@ impl Audit {
                             })
                             .when(!selected, |tile| {
                                 tile.border_1()
-                                    .border_color(gpui::transparent_black())
+                                    .border_color(gpui_kit::transparent_black())
                                     .hover(|tile| tile.bg(cx.theme().list_hover))
                             })
                             .child(

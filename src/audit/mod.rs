@@ -44,30 +44,32 @@ use crate::scan::{Entry, format_bytes, format_name};
 use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, thumbs};
 use futures::StreamExt;
 use futures::future::select_all;
-use gpui::{
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState};
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::notification::{Notification, NotificationType};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::progress::Progress;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::table::{
+    Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState,
+};
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState, tree};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
+};
+use gpui_kit::{
     App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
     uniform_list,
-};
-use gpui_component::alert::Alert;
-use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
-use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{Input, InputContentType, InputEvent, InputState};
-use gpui_component::list::ListItem;
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::notification::{Notification, NotificationType};
-use gpui_component::popover::Popover;
-use gpui_component::progress::Progress;
-use gpui_component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_component::slider::{Slider, SliderEvent, SliderState};
-use gpui_component::switch::Switch;
-use gpui_component::table::{Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState};
-use gpui_component::tag::Tag;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::tree::{TreeEvent, TreeItem, TreeState, tree};
-use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
 };
 use image::DynamicImage;
 
@@ -258,19 +260,19 @@ struct Marquee {
 }
 
 impl Marquee {
-    fn bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+    fn bounds(&self) -> gpui_kit::Bounds<gpui_kit::Pixels> {
         let left = self.start.0.min(self.current.0);
         let top = self.start.1.min(self.current.1);
         let right = self.start.0.max(self.current.0);
         let bottom = self.start.1.max(self.current.1);
-        gpui::Bounds::from_corners(
-            gpui::point(px(left), px(top)),
-            gpui::point(px(right), px(bottom)),
+        gpui_kit::Bounds::from_corners(
+            gpui_kit::point(px(left), px(top)),
+            gpui_kit::point(px(right), px(bottom)),
         )
     }
 }
 
-fn is_checkbox_activation_key(event: &gpui::KeyDownEvent) -> bool {
+fn is_checkbox_activation_key(event: &gpui_kit::KeyDownEvent) -> bool {
     matches!(event.keystroke.key.as_str(), "space" | "enter")
         && !event.keystroke.modifiers.modified()
 }
@@ -324,7 +326,7 @@ fn gallery_layout(
 
 /// Root owns a one-pixel border on every non-tiled client-decoration edge.
 fn root_horizontal_chrome(window: &Window) -> (f32, f32) {
-    let paddings = gpui_component::window_paddings(window);
+    let paddings = gpui_kit::component::window_paddings(window);
     let (left_border, right_border) = match window.window_decorations() {
         Decorations::Client { tiling } => {
             ((!tiling.left) as u8 as f32, (!tiling.right) as u8 as f32)
@@ -339,7 +341,7 @@ fn root_horizontal_chrome(window: &Window) -> (f32, f32) {
 
 /// Which band a file's byte density falls in. Green is carrying its weight, amber
 /// is suspicious, red is a screenshot saved as a PNG.
-fn density_colour(density: f32, cx: &App) -> gpui::Hsla {
+fn density_colour(density: f32, cx: &App) -> gpui_kit::Hsla {
     if density <= DENSITY_GOOD {
         cx.theme().green
     } else if density <= DENSITY_HEAVY {
@@ -350,7 +352,7 @@ fn density_colour(density: f32, cx: &App) -> gpui::Hsla {
 }
 
 pub(crate) struct Audit {
-    window: gpui::AnyWindowHandle,
+    window: gpui_kit::AnyWindowHandle,
     root: PathBuf,
     /// Filesystem identity of the current output, cached outside render so aliases
     /// and case-folded paths cannot expose the destination as an input folder.
@@ -367,8 +369,8 @@ pub(crate) struct Audit {
     /// The narrow/work-panel form of the folder browser is an overlay.
     browser_overlay: bool,
     /// Backs the loaded-folder search in the browser sidebar.
-    folder_filter_input: gpui::Entity<InputState>,
-    tree_state: gpui::Entity<TreeState>,
+    folder_filter_input: gpui_kit::Entity<InputState>,
+    tree_state: gpui_kit::Entity<TreeState>,
     tree_anchor: PathBuf,
     tree_children: HashMap<PathBuf, Vec<PathBuf>>,
     tree_loaded: HashSet<PathBuf>,
@@ -404,16 +406,16 @@ pub(crate) struct Audit {
     max_edge: MaxEdge,
     /// The size typed beside the presets. A preset click empties it; a typed size
     /// that happens to be a preset lights that preset and stays in the box.
-    max_edge_input: gpui::Entity<InputState>,
+    max_edge_input: gpui_kit::Entity<InputState>,
     /// Drives the quality slider. Its own entity, because that is how the component
     /// reports drags.
-    quality_slider: gpui::Entity<SliderState>,
+    quality_slider: gpui_kit::Entity<SliderState>,
     /// Rows explicitly ticked for conversion.
     selected: HashSet<usize>,
     /// Bounds of the rendered rows or tiles. Marquee selection only needs the
     /// visible objects, so virtualised items never get measured eagerly.
-    selection_bounds: Rc<RefCell<HashMap<usize, gpui::Bounds<gpui::Pixels>>>>,
-    selection_surface: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
+    selection_bounds: Rc<RefCell<HashMap<usize, gpui_kit::Bounds<gpui_kit::Pixels>>>>,
+    selection_surface: Rc<Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>,
     marquee: Option<Marquee>,
     /// Encoded size per row, filled in as conversion progresses.
     results: HashMap<usize, u64>,
@@ -470,8 +472,8 @@ pub(crate) struct Audit {
     studio_job: Option<StudioJob>,
     studio_tool: studio::Tool,
     studio_key: Option<String>,
-    studio_key_input: gpui::Entity<InputState>,
-    studio_prompt: gpui::Entity<InputState>,
+    studio_key_input: gpui_kit::Entity<InputState>,
+    studio_prompt: gpui_kit::Entity<InputState>,
     studio_key_checking: bool,
     studio_status: Option<(bool, String)>,
     /// A local result that opened the Studio rail. Kept with its source row so key
@@ -523,7 +525,7 @@ pub(crate) struct Audit {
     /// rather than replacing it, so you can search within one.
     finding: Option<Finding>,
     /// Backs the filter box.
-    filter_input: gpui::Entity<InputState>,
+    filter_input: gpui_kit::Entity<InputState>,
     /// Row the keyboard is on, as a position in `visible`.
     cursor: usize,
     /// High-rate key repeats update the cursor faster than a display can present.
@@ -604,7 +606,7 @@ pub(crate) struct Audit {
     compare_step: isize,
     /// The build running ahead of the cursor. Holding the task lets a replacement
     /// cancel it during its settle before it reaches the encoder.
-    prefetch: Option<gpui::Task<()>>,
+    prefetch: Option<gpui_kit::Task<()>>,
     /// Identity of that build. Navigation can adopt an in-flight decode instead of
     /// cancelling it and starting the same file again.
     prefetch_key: Option<(compare::Key, MediaMode)>,
@@ -635,7 +637,7 @@ pub(crate) struct Audit {
     /// this audit and reads its rows through that, so it cannot be built until this
     /// audit is a live entity: `TableState::new` asks the delegate for its row and
     /// column counts straight away, and answering that means reading the audit.
-    table: Option<gpui::Entity<TableState<AuditTable>>>,
+    table: Option<gpui_kit::Entity<TableState<AuditTable>>>,
     /// Width/preferences/result/Sirv signature last handed to the component table.
     table_signature: Option<(u32, ColumnPrefs, bool, bool)>,
     /// Which optional columns the picker has on.
@@ -790,14 +792,14 @@ struct SirvBrowser {
     session: u64,
     /// Take focus once after the overlay tree exists, then leave child controls alone.
     focused: bool,
-    focus: gpui::FocusHandle,
+    focus: gpui_kit::FocusHandle,
 }
 
 /// The settings overlay: the CDN credentials, and nothing else. Inputs are entities
 /// so the framework owns their editing state.
 struct SettingsPanel {
-    client_id: gpui::Entity<InputState>,
-    client_secret: gpui::Entity<InputState>,
+    client_id: gpui_kit::Entity<InputState>,
+    client_secret: gpui_kit::Entity<InputState>,
     /// (ok?, message) per section.
     cdn_status: Option<(bool, String)>,
     /// Which form field holds focus, as an index into the field list.
@@ -1008,7 +1010,11 @@ impl Audit {
         cx.spawn(async move |_, cx| {
             let _ = window.update(cx, |_, window, cx| {
                 // Focused tests may render Audit without the production Root.
-                if window.root::<gpui_component::Root>().flatten().is_some() {
+                if window
+                    .root::<gpui_kit::component::Root>()
+                    .flatten()
+                    .is_some()
+                {
                     update(window, cx);
                 }
             });
@@ -1022,8 +1028,8 @@ impl Audit {
     pub(crate) fn notify_error(
         &self,
         scope: &'static str,
-        title: impl Into<gpui::SharedString>,
-        message: impl Into<gpui::SharedString>,
+        title: impl Into<gpui_kit::SharedString>,
+        message: impl Into<gpui_kit::SharedString>,
         cx: &mut Context<Self>,
     ) {
         self.notify_toast(NotificationType::Error, scope, title, message, cx);
@@ -1034,8 +1040,8 @@ impl Audit {
     pub(crate) fn notify_success(
         &self,
         scope: &'static str,
-        title: impl Into<gpui::SharedString>,
-        message: impl Into<gpui::SharedString>,
+        title: impl Into<gpui_kit::SharedString>,
+        message: impl Into<gpui_kit::SharedString>,
         cx: &mut Context<Self>,
     ) {
         self.notify_toast(NotificationType::Success, scope, title, message, cx);
@@ -1045,8 +1051,8 @@ impl Audit {
         &self,
         kind: NotificationType,
         scope: &'static str,
-        title: impl Into<gpui::SharedString>,
-        message: impl Into<gpui::SharedString>,
+        title: impl Into<gpui_kit::SharedString>,
+        message: impl Into<gpui_kit::SharedString>,
         cx: &mut Context<Self>,
     ) {
         let failed = matches!(kind, NotificationType::Error);
@@ -1985,7 +1991,7 @@ pub(crate) fn build_audit(
     launch: Launch,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::Entity<Audit> {
+) -> gpui_kit::Entity<Audit> {
     let Launch {
         root,
         entries,
@@ -2185,7 +2191,7 @@ pub(crate) fn build_audit(
             quality_slider,
             selected: HashSet::new(),
             selection_bounds: Rc::new(RefCell::new(HashMap::new())),
-            selection_surface: Rc::new(Cell::new(gpui::Bounds::default())),
+            selection_surface: Rc::new(Cell::new(gpui_kit::Bounds::default())),
             marquee: None,
             sort: Sort {
                 column: Column::Weight,
@@ -2299,7 +2305,7 @@ pub(crate) fn build_audit(
 
 /// Flush the debounced settings write when the app quits, whatever path
 /// the quit took — menu, Cmd+W on the last window, or the close button.
-pub(crate) fn register_quit_flush(audit: gpui::Entity<Audit>, cx: &mut gpui::App) {
+pub(crate) fn register_quit_flush(audit: gpui_kit::Entity<Audit>, cx: &mut gpui_kit::App) {
     cx.on_app_quit(move |cx| {
         // Quit cannot reliably be cancelled, so a failed flush never stops it:
         let outcome = audit.update(cx, |audit, _| audit.flush_settings());

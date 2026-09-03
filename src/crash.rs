@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{App, InteractiveElement as _, ParentElement as _, Window};
-use gpui_component::WindowExt;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dialog::{DialogDescription, DialogFooter, DialogHeader, DialogTitle};
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::dialog::{DialogDescription, DialogFooter, DialogHeader, DialogTitle};
+use gpui_kit::{App, InteractiveElement as _, ParentElement as _, Window};
 
 const REPORT_LIMIT: usize = 5;
 const REPORT_EMAIL: &str = "igor@varyvoda.com";
@@ -204,7 +204,7 @@ fn show_prompt_with(
                     DialogHeader::new()
                         .child(
                             DialogTitle::new().child(
-                                gpui::div()
+                                gpui_kit::div()
                                     .id("crash-prompt-title")
                                     .debug_selector(|| "crash-prompt-title".into())
                                     .child(PROMPT_TITLE),
@@ -212,7 +212,7 @@ fn show_prompt_with(
                         )
                         .child(
                             DialogDescription::new().child(
-                                gpui::div()
+                                gpui_kit::div()
                                     .id("crash-prompt-description")
                                     .debug_selector(|| "crash-prompt-description".into())
                                     .child(PROMPT_DESCRIPTION),
@@ -223,7 +223,7 @@ fn show_prompt_with(
             .footer(
                 DialogFooter::new()
                     .child(
-                        gpui::div()
+                        gpui_kit::div()
                             .debug_selector(|| "crash-prompt-not-now".into())
                             .child(
                                 Button::new("crash-prompt-not-now")
@@ -232,7 +232,7 @@ fn show_prompt_with(
                             ),
                     )
                     .child(
-                        gpui::div()
+                        gpui_kit::div()
                             .debug_selector(|| "crash-prompt-submit".into())
                             .child(
                             Button::new("crash-prompt-submit")
@@ -467,17 +467,17 @@ fn remove_report_and_marker_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{
+    use gpui_kit::component::Root;
+    use gpui_kit::{
         AppContext, Context, IntoElement, Render, Styled, TestAppContext, VisualTestContext,
     };
-    use gpui_component::Root;
     use std::{cell::Cell, rc::Rc, sync::Arc};
 
     struct PromptHarness;
 
     impl Render for PromptHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            gpui::div()
+            gpui_kit::div()
                 .size_full()
                 .children(Root::render_dialog_layer(window, cx))
         }
@@ -493,7 +493,7 @@ mod tests {
     }
 
     fn draw(cx: &mut VisualTestContext) {
-        cx.simulate_resize(gpui::size(gpui::px(900.), gpui::px(640.)));
+        cx.simulate_resize(gpui_kit::size(gpui_kit::px(900.), gpui_kit::px(640.)));
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(500));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -797,7 +797,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn crash_prompt_is_modal_and_uses_exact_visible_copy(cx: &mut TestAppContext) {
         let directory = test_directory("modal-copy");
         let report = report(&directory, 1);
@@ -835,7 +835,7 @@ mod tests {
         assert!(!prompted_path(&report).exists());
 
         let not_now = cx.debug_bounds("crash-prompt-not-now").unwrap();
-        cx.simulate_click(not_now.center(), gpui::Modifiers::none());
+        cx.simulate_click(not_now.center(), gpui_kit::Modifiers::none());
         draw(cx);
         cx.update(|window, cx| assert!(!window.has_active_dialog(cx)));
         assert_eq!(calls.get(), 0);
@@ -843,7 +843,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn public_defer_prompt_reaches_a_painted_prompt(cx: &mut TestAppContext) {
         let directory = test_directory("public-defer-prompt");
         let report = report(&directory, 1);
@@ -856,7 +856,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn backdrop_click_leaves_crash_prompt_pending(cx: &mut TestAppContext) {
         let directory = test_directory("backdrop-click");
         let report = report(&directory, 1);
@@ -871,8 +871,8 @@ mod tests {
         });
         draw(cx);
         cx.simulate_click(
-            gpui::point(gpui::px(10.), gpui::px(40.)),
-            gpui::Modifiers::none(),
+            gpui_kit::point(gpui_kit::px(10.), gpui_kit::px(40.)),
+            gpui_kit::Modifiers::none(),
         );
         draw(cx);
 
@@ -883,7 +883,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn window_removal_leaves_crash_report_pending(cx: &mut TestAppContext) {
         let directory = test_directory("window-removal");
         let report = report(&directory, 1);
@@ -906,7 +906,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn not_now_leaves_the_report_pending(cx: &mut TestAppContext) {
         let directory = test_directory("not-now");
         let report = report(&directory, 1);
@@ -921,7 +921,7 @@ mod tests {
         });
         draw(cx);
         let not_now = cx.debug_bounds("crash-prompt-not-now").unwrap();
-        cx.simulate_click(not_now.center(), gpui::Modifiers::none());
+        cx.simulate_click(not_now.center(), gpui_kit::Modifiers::none());
         draw(cx);
 
         assert_eq!(calls.get(), 0);
@@ -931,7 +931,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn failed_submit_keeps_the_dialog_open_and_report_pending(cx: &mut TestAppContext) {
         let directory = test_directory("failed-submit");
         let report = report(&directory, 1);
@@ -946,7 +946,7 @@ mod tests {
         });
         draw(cx);
         let submit = cx.debug_bounds("crash-prompt-submit").unwrap();
-        cx.simulate_click(submit.center(), gpui::Modifiers::none());
+        cx.simulate_click(submit.center(), gpui_kit::Modifiers::none());
         draw(cx);
 
         assert_eq!(calls.get(), 1);
@@ -955,7 +955,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn successful_submit_acknowledges_after_generic_handoff(cx: &mut TestAppContext) {
         let directory = test_directory("successful-submit");
         let report = report(&directory, 1);
@@ -970,7 +970,7 @@ mod tests {
         });
         draw(cx);
         let submit = cx.debug_bounds("crash-prompt-submit").unwrap();
-        cx.simulate_click(submit.center(), gpui::Modifiers::none());
+        cx.simulate_click(submit.center(), gpui_kit::Modifiers::none());
         draw(cx);
 
         assert_eq!(calls.get(), 1);
@@ -979,7 +979,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn production_prompt_submit_uses_generic_handoff(cx: &mut TestAppContext) {
         let directory = test_directory("production-handoff");
         let report = report(&directory, 1);

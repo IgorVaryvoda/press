@@ -386,8 +386,8 @@ impl Audit {
     /// True when this transfer is no longer the one the window wants, or the window
     /// is gone. Checked before each file rather than after, so nothing new starts.
     pub(super) fn sirv_superseded(
-        this: &gpui::WeakEntity<Self>,
-        cx: &mut gpui::AsyncApp,
+        this: &gpui_kit::WeakEntity<Self>,
+        cx: &mut gpui_kit::AsyncApp,
         generation: u64,
     ) -> bool {
         this.read_with(cx, |audit, _| audit.sirv_generation != generation)

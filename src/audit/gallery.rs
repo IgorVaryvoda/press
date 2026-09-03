@@ -65,7 +65,7 @@ impl Audit {
         index: usize,
         tile_size: f32,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let Some(entry) = self.entries.get(index) else {
             return div().id(("tile", row)).into_any_element();
         };
@@ -88,7 +88,7 @@ impl Audit {
             // Always bordered, in nothing, so arrowing onto a tile does not shunt
             // its contents a pixel down and right.
             .border_1()
-            .border_color(gpui::transparent_black())
+            .border_color(gpui_kit::transparent_black())
             .when(ticked, |tile| {
                 tile.bg(cx.theme().list_active)
                     .border_color(cx.theme().list_active_border)
@@ -100,11 +100,13 @@ impl Audit {
                 selection_bounds.borrow_mut().insert(index, bounds);
             })
             .hover(|style| style.bg(cx.theme().list_hover))
-            .on_click(cx.listener(move |audit, event: &gpui::ClickEvent, _, cx| {
-                if let Some(position) = audit.row_of(index) {
-                    audit.click_row(position, event, cx);
-                }
-            }))
+            .on_click(
+                cx.listener(move |audit, event: &gpui_kit::ClickEvent, _, cx| {
+                    if let Some(position) = audit.row_of(index) {
+                        audit.click_row(position, event, cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .relative()

@@ -299,7 +299,7 @@ impl Audit {
 
     /// The open rail. Header, the operation's own settings, and its commit at
     /// the foot — the same shape whichever operation it belongs to.
-    pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         if self.rail == Rail::None {
             return None;
         }
@@ -451,7 +451,7 @@ impl Audit {
 
     /// Both local models take no settings: what the rail owes you is what it is
     /// about to do, to which file, and the download the first run costs.
-    fn local_ai_rail(&self, rail: Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn local_ai_rail(&self, rail: Rail, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let tool = match rail {
             Rail::Upscale => local_ai::Tool::Upscale,
             _ => local_ai::Tool::RemoveBackground,
@@ -597,7 +597,7 @@ impl Audit {
     /// The gutter's header control: which optional columns are on. Sirv and
     /// Result are not listed — they appear when a pairing or a conversion
     /// exists, which is not a preference to hold an opinion about.
-    pub(super) fn column_picker(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn column_picker(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let audit = cx.entity();
         let prefs = self.column_prefs;
         div()
@@ -607,7 +607,7 @@ impl Audit {
             .justify_end()
             .child(
                 Popover::new("column-picker")
-                    .anchor(gpui::Anchor::TopRight)
+                    .anchor(gpui_kit::Anchor::TopRight)
                     .trigger(
                         Button::new("column-picker-trigger")
                             .xsmall()
@@ -785,7 +785,7 @@ impl Audit {
             })
             .when(!selected, |row| {
                 row.border_1()
-                    .border_color(gpui::transparent_black())
+                    .border_color(gpui_kit::transparent_black())
                     .hover(|row| row.bg(cx.theme().list_hover))
             })
             .child(
@@ -1009,7 +1009,7 @@ impl Audit {
 
         let (fraction, colour) = bar
             .map(|(remaining, colour)| (1. - remaining, colour))
-            .unwrap_or((0., gpui::transparent_black()));
+            .unwrap_or((0., gpui_kit::transparent_black()));
 
         div()
             .flex()
