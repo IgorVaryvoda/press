@@ -455,7 +455,7 @@ fn screenshot() {
     cx.run_until_parked();
     cx.advance_clock(ESTIMATE_DELAY + Duration::from_millis(200));
     cx.run_until_parked();
-    std::thread::sleep(Duration::from_millis(1200));
+    cx.advance_clock(Duration::from_millis(1200));
     cx.run_until_parked();
 
     let image = cx

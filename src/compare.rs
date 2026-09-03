@@ -196,10 +196,21 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
 
+    /// Per-process unique, so parallel threads and repeated runs never share a
+    /// fixture dir.
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "imageguide-compare-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn both_sides_decode_at_the_source_dimensions() {
-        let dir = std::env::temp_dir().join("imageguide-compare");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("dimensions");
         let path = dir.join("sample.png");
         ImageBuffer::from_fn(120, 80, |x, y| {
             Rgb([(x * 2 % 256) as u8, (y * 3 % 256) as u8, 90])
@@ -227,8 +238,7 @@ mod tests {
 
     #[test]
     fn preview_decodes_only_the_source() {
-        let dir = std::env::temp_dir().join("imageguide-source-preview");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("preview");
         let path = dir.join("source.png");
         ImageBuffer::from_fn(73, 41, |x, y| Rgb([x as u8, y as u8, 120]))
             .save(&path)
@@ -246,8 +256,7 @@ mod tests {
     /// time the pair is built.
     #[test]
     fn a_comparison_built_from_a_preview_does_not_read_the_file_again() {
-        let dir = std::env::temp_dir().join("imageguide-compare-reuse");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("reuse");
         let path = dir.join("shot.jpg");
         crate::convert::tests::photo(200, 120).save(&path).unwrap();
 
@@ -303,8 +312,7 @@ mod tests {
     /// size of a comparison nobody asked for.
     #[test]
     fn a_thumbnail_standing_in_for_a_preview_is_never_used_as_a_source() {
-        let dir = std::env::temp_dir().join("imageguide-compare-standin");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("standin");
         let path = dir.join("shot.jpg");
         crate::convert::tests::photo(200, 120).save(&path).unwrap();
 
@@ -338,8 +346,7 @@ mod tests {
     /// bytes the writer would attach.
     #[test]
     fn a_preview_carries_the_profile_a_comparison_would_write() {
-        let dir = std::env::temp_dir().join("imageguide-compare-profile");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("profile");
         let path = dir.join("wide.webp");
         let profile = crate::convert::tests::rgb_profile();
         let tagged = convert::encode(
@@ -362,8 +369,7 @@ mod tests {
 
     #[test]
     fn written_comparison_reads_the_existing_output() {
-        let dir = std::env::temp_dir().join("imageguide-written-comparison");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("written");
         let source = dir.join("source.png");
         let written = dir.join("already-written.png");
         ImageBuffer::from_fn(120, 80, |x, y| Rgb([x as u8, y as u8, 40]))
@@ -426,8 +432,7 @@ mod tests {
 
     #[test]
     fn a_size_budget_shrinks_both_sides_together() {
-        let dir = std::env::temp_dir().join("imageguide-compare-resize");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("resize");
         let path = dir.join("wide.png");
         ImageBuffer::from_fn(400, 200, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 40]))
             .save(&path)

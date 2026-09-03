@@ -413,8 +413,7 @@ mod tests {
 
     #[test]
     fn scales_to_fit_the_box_and_keeps_the_aspect_ratio() {
-        let dir = std::env::temp_dir().join("imageguide-test-thumb");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("thumb");
         let path = dir.join("wide.png");
         ImageBuffer::from_pixel(400, 100, Rgba([1u8, 2, 3, 255]))
             .save(&path)
@@ -428,8 +427,7 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_an_image_is_skipped_rather_than_fatal() {
-        let dir = std::env::temp_dir().join("imageguide-test-thumb-bad");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("thumb-bad");
         let path = dir.join("broken.png");
         std::fs::write(&path, b"this is not a png").unwrap();
 
@@ -437,7 +435,10 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("imageguide-thumb-{tag}"));
+        let dir = std::env::temp_dir().join(format!(
+            "imageguide-thumb-{tag}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -597,11 +598,19 @@ mod tests {
     #[test]
     fn trimming_keeps_the_newest_entries_that_fit_the_byte_budget() {
         let dir = scratch("cache-trim");
+        let base = std::time::SystemTime::now();
         for index in 0..5u32 {
-            std::fs::write(dir.join(format!("{index}.webp")), vec![index as u8; 100]).unwrap();
-            // `modified` has coarse resolution on some filesystems, so order the files
-            // by writing them apart rather than trusting five writes in one instant.
-            std::thread::sleep(std::time::Duration::from_millis(12));
+            let path = dir.join(format!("{index}.webp"));
+            std::fs::write(&path, vec![index as u8; 100]).unwrap();
+            // `modified` has coarse resolution on some filesystems, so stamp
+            // each file with its own second rather than trusting five writes
+            // in one instant.
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("the fixture opens")
+                .set_modified(base + std::time::Duration::from_secs(u64::from(index)))
+                .expect("the mtime is set");
         }
 
         // 250 bytes holds two of these and not three, which a file count could not
