@@ -107,8 +107,8 @@ const HELP: &str = concat!(
     "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
     "  --replace                 Convert in place; originals move to press-originals/\n",
     "  -o, --output <dir>        Write converted files here instead of optimized/\n",
-    "  --skip-existing           Skip a source whose output is not older than it;\n",
-    "                            a format, quality or max-edge change is not seen\n",
+    "  --skip-existing           Skip a source whose output already matches this\n",
+    "                            format, quality and max edge\n",
     "  --dry-run                 Plan and project a conversion, write nothing\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
@@ -757,16 +757,36 @@ struct Queued<'a> {
 /// to a sibling that would otherwise have collided with it: the next run, with
 /// nothing to skip, plans the same names again.
 ///
-/// The comparison is modification time and nothing else. A source that has not
-/// changed since its output was written is skipped even when this run asks for a
-/// different format, quality or maximum edge.
+/// A current output is skipped only when the manifest shows a run wrote it at
+/// these settings. Records store the requested format label, so `--format same`
+/// compares as `same` against `same`: per-file resolution happens at encode
+/// time and is never recorded. An output no record names keeps the old
+/// mtime-only skip, and one a record names at other settings is rebuilt.
+#[allow(clippy::too_many_arguments)]
 fn queue_run<'a>(
     entries: &[&'a Entry],
     planned: &[Result<PathBuf, convert::Failure>],
     skip_existing: bool,
     json: bool,
+    manifest: &manifest::Manifest,
+    root: &Path,
+    out_dir: &Path,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
 ) -> Queued<'a> {
     debug_assert_eq!(entries.len(), planned.len(), "one plan per audited source");
+    let wanted = (
+        format.label().to_string(),
+        quality.label(),
+        max_edge.0,
+    );
+    let matched = format!(
+        "the output already matches {} {} {}",
+        format.label(),
+        quality.label(),
+        max_edge.label()
+    );
     let mut queued = Queued {
         entries: Vec::with_capacity(entries.len()),
         planned: Vec::with_capacity(entries.len()),
@@ -774,23 +794,49 @@ fn queue_run<'a>(
     };
     for (entry, plan) in entries.iter().zip(planned) {
         let current = if skip_existing {
-            plan.as_deref()
-                .ok()
-                .and_then(|written| current_output_bytes(&entry.path, written))
+            plan.as_deref().ok().and_then(|written| {
+                let bytes = current_output_bytes(&entry.path, written)?;
+                Some((written, bytes))
+            })
         } else {
             None
         };
-        let Some(bytes) = current else {
+        let Some((written, bytes)) = current else {
             queued.entries.push(entry);
             queued.planned.push(plan.clone());
             continue;
         };
+        // A record at other settings is a stale file at this run's settings, so
+        // only a matching record skips. An edited file is not the run's file at
+        // all: rebuilding would eat the edit, so it keeps the legacy skip.
+        let record = relative_pair(root, out_dir, &entry.path, written)
+            .and_then(|(source, output)| manifest.latest(&source, &output));
+        let (matches, stale) = match record {
+            Some(record) if record.installed(written) => {
+                let same = record.format == wanted.0
+                    && record.quality == wanted.1
+                    && record.max_edge == wanted.2;
+                (same, !same)
+            }
+            _ => (false, false),
+        };
+        if stale {
+            queued.entries.push(entry);
+            queued.planned.push(plan.clone());
+            continue;
+        }
+        let reason = if matches {
+            matched.clone()
+        } else {
+            "the output is not older than the source".to_string()
+        };
         let written = plan.as_deref().ok().map(path_text);
         if !json {
             outln!(
-                "{:<52} {:>9}  skipped, the output is not older",
+                "{:<52} {:>9}  skipped, {}",
                 entry.name(),
-                format_bytes(bytes)
+                format_bytes(bytes),
+                reason
             );
         }
         queued.skipped.push(ConversionFile {
@@ -804,10 +850,24 @@ fn queue_run<'a>(
             height: None,
             error: None,
             skipped: true,
-            reason: Some("the output is not older than the source".to_string()),
+            reason: Some(reason),
         });
     }
     queued
+}
+
+/// This source and output as manifest-relative paths, when both sit under the
+/// roots the run was planned against.
+fn relative_pair(
+    root: &Path,
+    out_dir: &Path,
+    source: &Path,
+    written: &Path,
+) -> Option<(PathBuf, PathBuf)> {
+    Some((
+        source.strip_prefix(root).ok()?.to_path_buf(),
+        written.strip_prefix(out_dir).ok()?.to_path_buf(),
+    ))
 }
 
 /// Project what a run would write, by encoding a sample of it in memory.
@@ -1377,7 +1437,18 @@ fn main() {
     // Plan against every audited source first. `--skip-existing` then decides one file
     // at a time, so the names a run leaves alone are the names it would have written.
     let planned = convert::plan_outputs(&root, &sources, &sources, &destination, args.format);
-    let queued = queue_run(&audited, &planned, args.skip_existing, args.json);
+    let queued = queue_run(
+        &audited,
+        &planned,
+        args.skip_existing,
+        args.json,
+        &recorded,
+        &root,
+        &out_dir,
+        args.format,
+        args.quality,
+        args.max_edge,
+    );
     let skipped = queued.skipped.len();
 
     let mut run = if args.dry_run {
@@ -1828,12 +1899,25 @@ mod tests {
         destination: &convert::Destination,
         entries: &'a [Entry],
         format: Format,
+        quality: Quality,
+        max_edge: MaxEdge,
         skip_existing: bool,
     ) -> Queued<'a> {
         let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
         let planned = convert::plan_outputs(root, &sources, &sources, destination, format);
         let audited: Vec<&Entry> = entries.iter().collect();
-        queue_run(&audited, &planned, skip_existing, true)
+        queue_run(
+            &audited,
+            &planned,
+            skip_existing,
+            true,
+            destination.manifest,
+            root,
+            destination.out_dir,
+            format,
+            quality,
+            max_edge,
+        )
     }
 
     /// The same plan against a destination with no history, which is every run that
@@ -1850,6 +1934,8 @@ mod tests {
             &convert::tests::plain(out_dir),
             entries,
             format,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
             skip_existing,
         )
     }
@@ -1861,7 +1947,15 @@ mod tests {
         format: Format,
     ) -> ConversionRun {
         let destination = convert::tests::plain(out_dir);
-        let queued = plan_queue(root, &destination, entries, format, false);
+        let queued = plan_queue(
+            root,
+            &destination,
+            entries,
+            format,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            false,
+        );
         convert_headless(
             root,
             &queued,
@@ -2235,6 +2329,173 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// Plan with the manifest the out dir actually holds, the way `main` does.
+    fn plan_history<'a>(
+        root: &Path,
+        out_dir: &Path,
+        entries: &'a [Entry],
+        format: Format,
+        quality: Quality,
+        max_edge: MaxEdge,
+        skip_existing: bool,
+    ) -> Queued<'a> {
+        let recorded = manifest::load(out_dir);
+        let destination = convert::Destination {
+            out_dir,
+            backups: None,
+            manifest: &recorded,
+        };
+        let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
+        let planned = convert::plan_outputs(root, &sources, &sources, &destination, format);
+        let audited: Vec<&Entry> = entries.iter().collect();
+        queue_run(
+            &audited,
+            &planned,
+            skip_existing,
+            true,
+            &recorded,
+            root,
+            out_dir,
+            format,
+            quality,
+            max_edge,
+        )
+    }
+
+    fn backdate(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("the fixture opens")
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            )
+            .expect("the mtime is set");
+    }
+
+    fn record_at(
+        root: &Path,
+        out_dir: &Path,
+        source: &Path,
+        output: &Path,
+        format: Format,
+        quality: Quality,
+        max_edge: MaxEdge,
+    ) {
+        let record = manifest::Stamp::new(format, quality, max_edge)
+            .record((root, out_dir), source, output, output, None)
+            .expect("the run records");
+        manifest::append_record(out_dir, &record).expect("the record appends");
+    }
+
+    #[test]
+    fn skip_existing_rebuilds_when_the_quality_changed() {
+        let base = temp_root("skip-quality");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        write_photo(&root.join("shot.png"), 64, 64);
+        let entries = probe_all(&[root.join("shot.png")]);
+        // An earlier run wrote this output at q60, and it is still current.
+        std::fs::write(out_dir.join("shot.webp"), b"already converted").unwrap();
+        backdate(&root.join("shot.png"));
+        record_at(
+            &root,
+            &out_dir,
+            &root.join("shot.png"),
+            &out_dir.join("shot.webp"),
+            Format::WebP,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+        );
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+        assert!(queued.skipped.is_empty(), "a quality change rebuilds");
+        assert_eq!(queued.entries.len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn skip_existing_skips_when_settings_match() {
+        let base = temp_root("skip-match");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        write_photo(&root.join("shot.png"), 64, 64);
+        let entries = probe_all(&[root.join("shot.png")]);
+        std::fs::write(out_dir.join("shot.webp"), b"already converted").unwrap();
+        backdate(&root.join("shot.png"));
+        record_at(
+            &root,
+            &out_dir,
+            &root.join("shot.png"),
+            &out_dir.join("shot.webp"),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        );
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+        assert_eq!(queued.skipped.len(), 1);
+        assert!(queued.entries.is_empty());
+        assert_eq!(
+            queued.skipped[0].reason.as_deref(),
+            Some("the output already matches webp q80 full")
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn skip_existing_converts_a_stale_output() {
+        let base = temp_root("skip-stale");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        write_photo(&root.join("shot.png"), 64, 64);
+        let entries = probe_all(&[root.join("shot.png")]);
+        // The output predates the source even though a record describes it.
+        std::fs::write(out_dir.join("shot.webp"), b"out of date").unwrap();
+        backdate(&out_dir.join("shot.webp"));
+        record_at(
+            &root,
+            &out_dir,
+            &root.join("shot.png"),
+            &out_dir.join("shot.webp"),
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+        );
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+        );
+        assert!(queued.skipped.is_empty(), "a stale output converts");
+        assert_eq!(queued.entries.len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// Without the flag nothing is skipped, however current the output is.
     #[test]
     fn a_run_without_skip_existing_queues_every_file() {
@@ -2527,7 +2788,15 @@ mod tests {
             backups: Some(&backups),
             manifest: &recorded,
         };
-        let queued = plan_queue(&root, &destination, &entries, Format::WebP, false);
+        let queued = plan_queue(
+            &root,
+            &destination,
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            false,
+        );
         let run = convert_headless(
             &root,
             &queued,

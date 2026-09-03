@@ -121,6 +121,15 @@ impl Manifest {
                 && record.installed(on_disk)
         })
     }
+
+    /// The newest record naming this source-and-output pair, when some run
+    /// described it. Read-only: the skip decision asks, the write paths own.
+    pub fn latest(&self, source: &Path, output: &Path) -> Option<&Record> {
+        let (source, output) = (path_key(source), path_key(output));
+        self.outputs.iter().rev().find(|record| {
+            path_key(&record.source) == source && path_key(&record.output) == output
+        })
+    }
 }
 
 /// The settings one run wrote with. Every record it appends repeats them, so a
