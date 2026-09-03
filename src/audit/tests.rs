@@ -1131,7 +1131,17 @@ fn table_select_all_follows_the_visible_rows(cx: &mut TestAppContext) {
 /// The app sorts indices into an unmoved `entries`; these tests sort the data
 /// directly, which is the same comparator either way.
 fn sort_entries(entries: &mut [Entry], sort: Sort) {
-    entries.sort_by(|a, b| compare_entries(a, b, sort, &a.name_lossy(), &b.name_lossy()));
+    entries.sort_by(|a, b| {
+        compare_entries(
+            a,
+            b,
+            sort,
+            &a.name_lossy(),
+            &b.name_lossy(),
+            &a.name_lossy().to_lowercase(),
+            &b.name_lossy().to_lowercase(),
+        )
+    });
 }
 
 #[test]
@@ -1144,7 +1154,9 @@ fn batch_name_sorting_uses_the_displayed_relative_path() {
     };
 
     assert_eq!(
-        compare_entries(&first, &second, sort, "z/a.png", "a/z.png"),
+        compare_entries(
+            &first, &second, sort, "z/a.png", "a/z.png", "z/a.png", "a/z.png"
+        ),
         std::cmp::Ordering::Greater
     );
 }

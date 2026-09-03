@@ -666,12 +666,13 @@ fn compare_entries(
     sort: Sort,
     a_name: &str,
     b_name: &str,
+    a_folded: &str,
+    b_folded: &str,
 ) -> std::cmp::Ordering {
     let ordering = match sort.column {
-        Column::Name => a_name
-            .chars()
-            .flat_map(char::to_lowercase)
-            .cmp(b_name.chars().flat_map(char::to_lowercase)),
+        // Folded once per refresh by the caller: folding here would redo Unicode
+        // lowercase per comparison, once per pair the sort touches.
+        Column::Name => a_folded.cmp(b_folded),
         Column::Format => format_name(a.format).cmp(format_name(b.format)),
         Column::Pixels => {
             (a.width as u64 * a.height as u64).cmp(&(b.width as u64 * b.height as u64))
@@ -969,9 +970,8 @@ fn entry_label(root: &Path, show_parent: bool, entry: &Entry) -> String {
 }
 
 /// The same label without the owned copy. Filenames are valid UTF-8 in
-/// practice, so the filter can match on the borrow instead of allocating one
-/// label String per row per keystroke; the lowercase copy stays the only
-/// allocation on that path.
+/// practice, so this borrows instead of allocating; both the owned display
+/// label and the folded sort key build on it.
 fn entry_label_lossy<'a>(root: &Path, show_parent: bool, entry: &'a Entry) -> Cow<'a, str> {
     if show_parent {
         entry
@@ -982,6 +982,13 @@ fn entry_label_lossy<'a>(root: &Path, show_parent: bool, entry: &'a Entry) -> Co
     } else {
         entry.name_lossy()
     }
+}
+
+/// The label the filter matches and the Name column sorts by, lowercased once.
+/// `refresh_visible` builds one per entry and shares it between both, instead of
+/// folding per row per keystroke and per pair per comparison.
+fn folded_label(root: &Path, show_parent: bool, entry: &Entry) -> String {
+    entry_label_lossy(root, show_parent, entry).to_lowercase()
 }
 
 fn navigation_path(path: PathBuf) -> PathBuf {

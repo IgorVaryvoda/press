@@ -276,15 +276,25 @@ impl Audit {
             });
         let root = &self.root;
         let show_parent = self.show_parent();
+        // One lowercased label per entry, shared by the filter and the Name
+        // sort. Built only when one of them can run: otherwise it would be N
+        // allocations the refresh never reads.
+        let folded: Option<Vec<String>> = (!needle.is_empty() || self.sort.column == Column::Name)
+            .then(|| {
+                self.entries
+                    .iter()
+                    .map(|entry| folded_label(root, show_parent, entry))
+                    .collect()
+            });
         let mut visible: Vec<usize> = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
+            .filter(|(index, _)| {
                 needle.is_empty()
-                    || entry_label_lossy(root, show_parent, entry)
-                        .to_lowercase()
-                        .contains(&needle)
+                    || folded
+                        .as_ref()
+                        .is_some_and(|folded| folded[*index].contains(&needle))
             })
             .filter(|(index, entry)| match finding {
                 None => true,
@@ -325,8 +335,22 @@ impl Audit {
         visible.sort_by(|a, b| {
             let a_entry = &entries[*a];
             let b_entry = &entries[*b];
+            // `folded` exists exactly when the Name arm can run; otherwise its
+            // arguments are dead and only the exact names break ties.
+            let (a_folded, b_folded) = folded
+                .as_ref()
+                .map(|folded| (folded[*a].as_str(), folded[*b].as_str()))
+                .unwrap_or_default();
             if let Some(labels) = &labels {
-                compare_entries(a_entry, b_entry, sort, &labels[*a], &labels[*b])
+                compare_entries(
+                    a_entry,
+                    b_entry,
+                    sort,
+                    &labels[*a],
+                    &labels[*b],
+                    a_folded,
+                    b_folded,
+                )
             } else {
                 compare_entries(
                     a_entry,
@@ -334,6 +358,8 @@ impl Audit {
                     sort,
                     &a_entry.name_lossy(),
                     &b_entry.name_lossy(),
+                    a_folded,
+                    b_folded,
                 )
             }
         });
