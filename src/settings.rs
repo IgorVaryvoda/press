@@ -369,6 +369,9 @@ enum Fault {
     Write,
     Sync,
     Replace,
+    /// Never constructed on Windows: directory sync is an explicit no-warning
+    /// platform outcome there, and only the non-Windows warning test builds it.
+    #[cfg_attr(windows, allow(dead_code))]
     ParentSync,
 }
 
