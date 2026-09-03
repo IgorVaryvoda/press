@@ -187,6 +187,21 @@ fn parse_args() -> Args {
     }
 }
 
+/// Pop the value for `flag`, refusing to eat the next flag by accident.
+/// `press convert photos --output --replace` used to create a folder named
+/// `--replace`; a value starting with `-` is always that mistake, never a path.
+fn next_value(
+    rest: &mut impl Iterator<Item = String>,
+    flag: &str,
+    need: &str,
+) -> Result<String, String> {
+    match rest.next() {
+        Some(value) if !value.is_empty() && !value.starts_with('-') => Ok(value),
+        Some(got) => Err(format!("{flag} needs {need}, got {got:?}")),
+        None => Err(format!("{flag} needs {need}")),
+    }
+}
+
 fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut root = None;
     let mut command = Command::Window;
@@ -217,9 +232,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--audit" => select_command(&mut command, Command::Audit, "--audit")?,
             "--format" => {
                 conversion_option = true;
-                let value = rest
-                    .next()
-                    .ok_or_else(|| "--format needs webp, avif, jxl, jpeg, or same".to_string())?;
+                let value =
+                    next_value(&mut rest, "--format", "webp, avif, jxl, jpeg, or same")?;
                 format = match value.as_str() {
                     "webp" => Format::WebP,
                     "avif" => Format::Avif,
@@ -247,9 +261,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--max-edge" => {
                 conversion_option = true;
-                let value = rest
-                    .next()
-                    .ok_or_else(|| "--max-edge needs a positive number".to_string())?;
+                let value = next_value(&mut rest, "--max-edge", "a positive number")?;
                 let edge = value
                     .parse()
                     .map_err(|_| format!("--max-edge needs a number, got {value:?}"))?;
@@ -260,17 +272,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "-o" | "--output" => {
                 conversion_option = true;
-                let value = rest
-                    .next()
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| "--output needs a folder".to_string())?;
+                let value = next_value(&mut rest, "--output", "a folder")?;
                 output = Some(PathBuf::from(value));
             }
             "--avif-speed" => {
                 conversion_option = true;
-                let value = rest
-                    .next()
-                    .ok_or_else(|| "--avif-speed needs a number from 0 to 10".to_string())?;
+                let value = next_value(&mut rest, "--avif-speed", "a number from 0 to 10")?;
                 let speed: u8 = value
                     .parse()
                     .map_err(|_| format!("--avif-speed needs a number, got {value:?}"))?;
@@ -304,9 +311,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--quality" => {
                 conversion_option = true;
-                let value = rest
-                    .next()
-                    .ok_or_else(|| "--quality needs a number from 1 to 100".to_string())?;
+                let value = next_value(&mut rest, "--quality", "a number from 1 to 100")?;
                 let quality_value: f32 = value
                     .parse()
                     .map_err(|_| format!("--quality needs a number, got {value:?}"))?;
@@ -2087,6 +2092,43 @@ mod tests {
         assert!(parse(&["audit", "/photos", "--output", "/exports"]).is_err());
         assert!(parse(&["/photos", "--output", "/exports"]).is_err());
         assert!(parse(&["update", "-o", "/exports"]).is_err());
+    }
+
+    #[test]
+    fn options_refuse_to_eat_the_next_flag_as_their_value() {
+        assert!(parse(&["convert", "/photos", "--output", "--replace"]).is_err());
+        assert!(parse(&["convert", "/photos", "-o", "--json"]).is_err());
+        assert!(parse(&["convert", "/photos", "--format", "--replace"]).is_err());
+        assert!(parse(&["convert", "/photos", "--max-edge", "--dry-run"]).is_err());
+        assert!(parse(&["convert", "/photos", "--avif-speed", "--json"]).is_err());
+        assert!(parse(&["convert", "/photos", "--quality", "--json"]).is_err());
+        assert!(
+            parse(&["convert", "/photos", "-o", "--output"])
+                .is_err_and(|message| message.contains("--output needs a folder"))
+        );
+        assert_eq!(
+            parse(&["convert", "/photos", "--output", "/exports"])
+                .unwrap()
+                .output,
+            Some(PathBuf::from("/exports"))
+        );
+        assert!(matches!(
+            parse(&["convert", "/photos", "--format", "avif"]).unwrap().format,
+            Format::Avif
+        ));
+        assert_eq!(
+            parse(&["convert", "/photos", "--max-edge", "1600"])
+                .unwrap()
+                .max_edge
+                .0,
+            Some(1600)
+        );
+        assert_eq!(
+            parse(&["convert", "/photos", "--avif-speed", "6"])
+                .unwrap()
+                .avif_speed,
+            Some(6)
+        );
     }
 
     /// `--output` establishes the window's own boundary, so a folder outside the
