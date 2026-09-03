@@ -482,3 +482,205 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::convert::{Format, MaxEdge, Quality};
+
+    /// Every temp dir is per-process unique, so parallel threads and repeated
+    /// runs never share a manifest file.
+    fn test_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("press-manifest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the manifest fixture dir is created");
+        dir.canonicalize()
+            .expect("the manifest fixture has one filesystem identity")
+    }
+
+    fn record(source: &str, output: &str, backup: Option<&str>, written: u64) -> Record {
+        Record {
+            source: PathBuf::from(source),
+            source_bytes: 0,
+            source_modified: None,
+            output: PathBuf::from(output),
+            output_bytes: 0,
+            output_modified: None,
+            format: Format::WebP.label().to_string(),
+            quality: Quality::lossy(80.).label(),
+            max_edge: MaxEdge::FULL.0,
+            written,
+            backup: backup.map(PathBuf::from),
+            void: false,
+        }
+    }
+
+    fn stamp() -> Stamp {
+        Stamp::new(Format::WebP, Quality::lossy(80.), MaxEdge::FULL)
+    }
+
+    #[test]
+    fn appended_records_load_back_in_order() {
+        let dir = test_dir("round-trip");
+        let first = record("one.png", "one.webp", None, 1);
+        let second = record("two.png", "two.webp", Some("two.png"), 2);
+        let third = record("three.png", "three.webp", None, 3);
+        for record in [&first, &second, &third] {
+            append_record(&dir, record).expect("the record appends");
+        }
+        let loaded = load(&dir);
+        assert_eq!(loaded.outputs, vec![first, second, third]);
+        assert!(loaded.rejected.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_last_line_costs_only_itself() {
+        let dir = test_dir("torn");
+        append_record(&dir, &record("one.png", "one.webp", None, 1)).expect("append");
+        append_record(&dir, &record("two.png", "two.webp", None, 2)).expect("append");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path(&dir))
+            .expect("the manifest opens")
+            .write_all(b"{\"source\":")
+            .expect("the torn line is written");
+        let loaded = load(&dir);
+        assert_eq!(loaded.outputs.len(), 2);
+        assert!(loaded.rejected.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_manifest_loads_as_empty() {
+        let dir = test_dir("missing");
+        let loaded = load(&dir);
+        assert!(loaded.outputs.is_empty());
+        assert!(loaded.rejected.is_empty());
+        assert_eq!(restorable(&dir), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn absolute_and_parent_paths_are_rejected_not_acted_on() {
+        let dir = test_dir("rejected");
+        let absolute_output = record("/abs/evil.png", "/abs/out.webp", None, 1);
+        let mut parent_source = record("ok.png", "ok.webp", None, 2);
+        parent_source.source = PathBuf::from("../evil.png");
+        let mut absolute_backup = record("other.png", "other.webp", None, 3);
+        absolute_backup.backup = Some(PathBuf::from("/abs/other.png"));
+        for record in [&absolute_output, &parent_source, &absolute_backup] {
+            append_record(&dir, record).expect("the hostile line appends");
+        }
+        let loaded = load(&dir);
+        assert!(loaded.outputs.is_empty());
+        assert_eq!(loaded.rejected.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_voided_record_is_withdrawn() {
+        let dir = test_dir("void");
+        let withdrawn = record("gone.png", "gone.webp", None, 1);
+        let kept = record("kept.png", "kept.webp", None, 2);
+        append_record(&dir, &withdrawn).expect("append");
+        append_record(&dir, &withdrawn.voided()).expect("the withdrawal appends");
+        append_record(&dir, &kept).expect("append");
+        let loaded = load(&dir);
+        assert_eq!(loaded.outputs, vec![kept]);
+        assert!(loaded.rejected.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_edited_output_is_not_the_installed_one() {
+        let dir = test_dir("edited");
+        let staged = dir.join("staged.webp");
+        std::fs::write(&staged, vec![7u8; 64]).expect("the staged output is written");
+        std::fs::write(dir.join("source.png"), vec![1u8; 16]).expect("the source is written");
+        let record = stamp()
+            .record(
+                (&dir, &dir),
+                &dir.join("source.png"),
+                &dir.join("staged.webp"),
+                &staged,
+                None,
+            )
+            .expect("plain relative paths record");
+        assert!(record.installed(&staged));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&staged)
+            .expect("the output opens")
+            .write_all(b"somebody edited this")
+            .expect("the edit lands");
+        assert!(!record.installed(&staged));
+        assert!(remove_output(&staged, &record).is_err());
+        assert!(staged.is_file(), "a refused undo leaves the edit alone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restorable_counts_backups_not_records() {
+        let dir = test_dir("restorable");
+        append_record(
+            &dir,
+            &record("one.png", "one.webp", Some("shared.png"), 1),
+        )
+        .expect("append");
+        append_record(
+            &dir,
+            &record("two.png", "two.webp", Some("shared.png"), 2),
+        )
+        .expect("append");
+        assert_eq!(restorable(&dir), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_walks_newest_first() {
+        let dir = test_dir("restore-order");
+        let backups = backup_root(&dir);
+        std::fs::create_dir_all(&backups).expect("the backup mirror is created");
+        // The true original. Run 1 turned it into run 1's output; run 2 turned
+        // that into run 2's output, so run 2's backup holds run 1's output.
+        std::fs::write(dir.join("photo.png"), vec![1u8; 32]).expect("the original");
+        std::fs::write(dir.join("staged-one.webp"), vec![2u8; 48]).expect("run 1 stages");
+        let first = stamp()
+            .record(
+                (&dir, &dir),
+                &dir.join("photo.png"),
+                &dir.join("photo.webp"),
+                &dir.join("staged-one.webp"),
+                Some(&backups.join("photo.png")),
+            )
+            .expect("run 1 records");
+        std::fs::rename(dir.join("photo.png"), backups.join("photo.png")).expect("run 1 moves");
+        std::fs::rename(dir.join("staged-one.webp"), dir.join("photo.webp")).expect("run 1 installs");
+        std::fs::write(dir.join("staged-two.webp"), vec![3u8; 40]).expect("run 2 stages");
+        let second = stamp()
+            .record(
+                (&dir, &dir),
+                &dir.join("photo.webp"),
+                &dir.join("photo-two.webp"),
+                &dir.join("staged-two.webp"),
+                Some(&backups.join("photo.webp")),
+            )
+            .expect("run 2 records");
+        std::fs::rename(dir.join("photo.webp"), backups.join("photo.webp")).expect("run 2 moves");
+        std::fs::rename(dir.join("staged-two.webp"), dir.join("photo-two.webp"))
+            .expect("run 2 installs");
+        append_record(&dir, &first).expect("run 1 appends");
+        append_record(&dir, &second).expect("run 2 appends");
+        let restored = restore(&dir);
+        assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+        assert_eq!(
+            std::fs::read(dir.join("photo.png")).expect("the original came back"),
+            vec![1u8; 32]
+        );
+        assert_eq!(load(&dir).outputs.len(), 0, "both records are spent");
+        assert!(!backups.exists(), "the emptied mirror does not linger");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
