@@ -118,4 +118,4 @@ signing-identity = "Developer ID Application: Igor Varyvoda (2Z5ZVRKA23)"
 info-plist-path = "assets/macos/Info.plist"
 
 [profile.release]
-opt-level = 2
+opt-level = 3

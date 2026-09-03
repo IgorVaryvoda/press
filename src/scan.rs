@@ -383,8 +383,7 @@ pub fn decode_for_conversion(
         }
 
         if reader.format() == Some(ImageFormat::Jpeg)
-            && let Some(edge) = max_edge.0
-            && let Some(decoded) = scaled_jpeg(path, edge)
+            && let Some(decoded) = scaled_jpeg(path, max_edge)
         {
             return Ok(decoded);
         }
@@ -403,8 +402,8 @@ pub fn decode_for_conversion(
         .ok_or(ConversionDecodeError::Failed)
 }
 
-/// Decode a JPEG with the inverse DCT stopped at the smallest scale that still covers
-/// `edge`.
+/// Decode a JPEG with libjpeg-turbo, stopping the inverse DCT at the smallest
+/// scale that still covers `edge`.
 ///
 /// Conversion used to decode every source at full size and throw most of it away:
 /// exporting 1600px out of a 6000px JPEG allocated the whole 6000px image first, once
@@ -412,22 +411,29 @@ pub fn decode_for_conversion(
 /// libjpeg-turbo can finish the DCT at a half, a quarter or an eighth, so the
 /// intermediate is now at most twice the exported edge.
 ///
-/// `MaxEdge::apply` still finishes the job with Lanczos, so the only difference from a
-/// full decode is that scaled-DCT step; the exported pixels are not bit-identical to
-/// what a full decode produced, and they are not meant to be.
+/// Full-size sources take the same path rather than the image crate's decoder:
+/// `jpeg-decoder` is scalar while turbojpeg is SIMD, so a full-size photo decodes
+/// several times faster for pixels nobody can tell apart. `None` means "decode
+/// this the old way": a JPEG libjpeg-turbo will not hand back as packed pixels —
+/// CMYK and YCCK, which it only decompresses to CMYK, along with lossless and
+/// twelve-bit ones. Arithmetic coding it does read, so those take this path like
+/// any other.
 ///
-/// `None` means "decode this the old way": a factor of one, or a JPEG libjpeg-turbo
-/// will not hand back as packed pixels — CMYK and YCCK, which it only decompresses to
-/// CMYK, along with lossless and twelve-bit ones. Arithmetic coding it does read, so
-/// those take this path like any other.
-fn scaled_jpeg(path: &Path, edge: u32) -> Option<(DynamicImage, Option<Vec<u8>>)> {
+/// `MaxEdge::apply` still finishes the job with Lanczos, so the only difference from
+/// a full decode is that scaled-DCT step; the exported pixels are not bit-identical
+/// to what a full decode produced, and they are not meant to be.
+fn scaled_jpeg(
+    path: &Path,
+    max_edge: crate::convert::MaxEdge,
+) -> Option<(DynamicImage, Option<Vec<u8>>)> {
     let bytes = std::fs::read(path).ok()?;
     let mut decompressor = turbojpeg::Decompressor::new().ok()?;
     let header = decompressor.read_header(&bytes).ok()?;
-    let factor = crate::thumbs::jpeg_scaling_factor(header.width.max(header.height), edge);
-    if factor == turbojpeg::ScalingFactor::ONE {
-        return None;
-    }
+    // `ONE` when the run wants full size or nothing smaller covers the edge.
+    // Falling back there would hand every full-size photo to the scalar decoder.
+    let factor = max_edge.0.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
+        crate::thumbs::jpeg_scaling_factor(header.width.max(header.height), edge)
+    });
     decompressor.set_scaling_factor(factor).ok()?;
     let (width, height) = (factor.scale(header.width), factor.scale(header.height));
     // A grayscale JPEG has to leave here with one channel, the way the full decode
