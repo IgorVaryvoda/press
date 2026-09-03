@@ -489,6 +489,9 @@ enum Fault {
     Write,
     FileSync,
     Persist,
+    /// Never constructed on Windows: directory sync is an explicit no-warning
+    /// platform outcome there, and only the non-Windows warning test builds it.
+    #[cfg_attr(windows, allow(dead_code))]
     ParentSync,
     /// Not a failure: creates the final after staging, so the commit really
     /// races and only `AlreadyExists` may map to [`InstallError::ForeignOutput`].
