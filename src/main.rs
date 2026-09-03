@@ -232,8 +232,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--audit" => select_command(&mut command, Command::Audit, "--audit")?,
             "--format" => {
                 conversion_option = true;
-                let value =
-                    next_value(&mut rest, "--format", "webp, avif, jxl, jpeg, or same")?;
+                let value = next_value(&mut rest, "--format", "webp, avif, jxl, jpeg, or same")?;
                 format = match value.as_str() {
                     "webp" => Format::WebP,
                     "avif" => Format::Avif,
@@ -776,11 +775,7 @@ fn queue_run<'a>(
     max_edge: MaxEdge,
 ) -> Queued<'a> {
     debug_assert_eq!(entries.len(), planned.len(), "one plan per audited source");
-    let wanted = (
-        format.label().to_string(),
-        quality.label(),
-        max_edge.0,
-    );
+    let wanted = (format.label().to_string(), quality.label(), max_edge.0);
     let matched = format!(
         "the output already matches {} {} {}",
         format.label(),
@@ -2207,7 +2202,9 @@ mod tests {
             Some(PathBuf::from("/exports"))
         );
         assert!(matches!(
-            parse(&["convert", "/photos", "--format", "avif"]).unwrap().format,
+            parse(&["convert", "/photos", "--format", "avif"])
+                .unwrap()
+                .format,
             Format::Avif
         ));
         assert_eq!(

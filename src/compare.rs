@@ -199,10 +199,8 @@ mod tests {
     /// Per-process unique, so parallel threads and repeated runs never share a
     /// fixture dir.
     fn test_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "imageguide-compare-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("imageguide-compare-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

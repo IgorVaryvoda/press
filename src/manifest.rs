@@ -126,9 +126,10 @@ impl Manifest {
     /// described it. Read-only: the skip decision asks, the write paths own.
     pub fn latest(&self, source: &Path, output: &Path) -> Option<&Record> {
         let (source, output) = (path_key(source), path_key(output));
-        self.outputs.iter().rev().find(|record| {
-            path_key(&record.source) == source && path_key(&record.output) == output
-        })
+        self.outputs
+            .iter()
+            .rev()
+            .find(|record| path_key(&record.source) == source && path_key(&record.output) == output)
     }
 }
 
@@ -500,8 +501,7 @@ mod tests {
     /// Every temp dir is per-process unique, so parallel threads and repeated
     /// runs never share a manifest file.
     fn test_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("press-manifest-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("press-manifest-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("the manifest fixture dir is created");
         dir.canonicalize()
@@ -633,16 +633,8 @@ mod tests {
     #[test]
     fn restorable_counts_backups_not_records() {
         let dir = test_dir("restorable");
-        append_record(
-            &dir,
-            &record("one.png", "one.webp", Some("shared.png"), 1),
-        )
-        .expect("append");
-        append_record(
-            &dir,
-            &record("two.png", "two.webp", Some("shared.png"), 2),
-        )
-        .expect("append");
+        append_record(&dir, &record("one.png", "one.webp", Some("shared.png"), 1)).expect("append");
+        append_record(&dir, &record("two.png", "two.webp", Some("shared.png"), 2)).expect("append");
         assert_eq!(restorable(&dir), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -666,7 +658,8 @@ mod tests {
             )
             .expect("run 1 records");
         std::fs::rename(dir.join("photo.png"), backups.join("photo.png")).expect("run 1 moves");
-        std::fs::rename(dir.join("staged-one.webp"), dir.join("photo.webp")).expect("run 1 installs");
+        std::fs::rename(dir.join("staged-one.webp"), dir.join("photo.webp"))
+            .expect("run 1 installs");
         std::fs::write(dir.join("staged-two.webp"), vec![3u8; 40]).expect("run 2 stages");
         let second = stamp()
             .record(
