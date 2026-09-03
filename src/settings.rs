@@ -995,13 +995,25 @@ mod tests {
         let dir = temp_dir("save-races");
         let path = dir.join("settings");
         let candidates: Vec<String> = (0..8).map(|index| render(&widths(index as f32))).collect();
-        std::thread::scope(|scope| {
-            for rendered in &candidates {
-                scope.spawn(|| {
-                    save_to(&path, &parse(rendered), Fault::None).unwrap();
-                });
-            }
+        let outcomes: Vec<_> = std::thread::scope(|scope| {
+            candidates
+                .iter()
+                .map(|rendered| scope.spawn(|| save_to(&path, &parse(rendered), Fault::None)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().expect("a saver finishes"))
+                .collect()
         });
+        // A lost race stays a typed replace error with the old-or-new complete
+        // file intact — Windows cannot atomically replace one file from eight
+        // writers at once, and must not tear it trying.
+        for outcome in &outcomes {
+            match outcome {
+                Ok(_) => {}
+                Err(SaveError::Replace { .. }) => {}
+                Err(error) => panic!("a race stays typed: {error:?}"),
+            }
+        }
         let landed = std::fs::read_to_string(&path).unwrap();
         assert!(
             candidates.iter().any(|candidate| candidate == &landed),
