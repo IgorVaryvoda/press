@@ -4498,6 +4498,30 @@ fn replacing_converts_in_place_and_the_rail_offers_the_originals_back(cx: &mut T
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A run that finishes after its folder is gone belongs to the old dataset:
+/// its trailing recount must not become the new folder's undo count.
+#[gpui::test]
+fn a_stale_conversion_does_not_overwrite_restorable(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    // A new folder opens while the run is in flight. Its own undo count is
+    // already on screen; the in-flight run now belongs to the old dataset.
+    audit.update(cx, |audit, _| {
+        audit.dataset_generation = audit.dataset_generation.wrapping_add(1);
+        audit.restorable = 7;
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.restorable, 7,
+            "the stale run moved three originals, but its recount must not land here"
+        );
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[gpui::test]
 fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
     // Three windows of files, so a stop taken at the first batch of results still

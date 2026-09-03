@@ -217,8 +217,8 @@ impl Audit {
                 .await;
 
             let _ = this.update(cx, |audit, cx| {
-                audit.restorable = restorable;
                 if audit.dataset_generation == dataset_generation {
+                    audit.restorable = restorable;
                     audit.converting = false;
                     audit.active_target_count = None;
                     audit.convert_cancel = None;
