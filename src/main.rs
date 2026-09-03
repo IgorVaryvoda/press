@@ -1774,10 +1774,18 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Opti
                                 if !audit.automatic_update_can_restart() {
                                     return false;
                                 }
-                                if let Err(error) = audit.flush_settings() {
-                                    eprintln!("press: could not save settings: {error}");
+                                // A failed flush aborts the restart: relaunching
+                                // into a half-remembered window is worse than
+                                // staying on the installed update.
+                                match audit.flush_settings() {
+                                    settings::WriteOutcome::Failed { error, .. } => {
+                                        eprintln!(
+                                            "press: installed update but settings would not save: {error}"
+                                        );
+                                        false
+                                    }
+                                    _ => true,
                                 }
-                                true
                             });
                             if restart {
                                 match update::relaunch() {

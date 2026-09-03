@@ -299,6 +299,26 @@ fn prepare_reports_directory() -> io::Result<PathBuf> {
     prepare_directory(directory(), create_private_directory)
 }
 
+/// Note a non-crash diagnostic — currently a settings write that failed while
+/// quitting, when no window is left to tell. Best-effort and silent: losing a
+/// diagnostic must never fail anything else, and this never writes a crash
+/// report, because a failed save is not a crash and must not prompt as one.
+pub fn note_diagnostic(message: &str) {
+    let Ok(directory) = prepare_directory(directory(), create_private_directory) else {
+        return;
+    };
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("diagnostics.log"))
+    {
+        let _ = writeln!(log, "{nanos} {message}");
+    }
+}
+
 /// Create the reports folder, owner-only. A crash report holds a backtrace and
 /// the paths the process was working on, so it gets the same treatment as the
 /// credential stores in `sirv.rs`: the usual umask would leave it 0755, and

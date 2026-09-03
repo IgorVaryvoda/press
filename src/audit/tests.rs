@@ -2425,15 +2425,125 @@ fn closing_settings_and_sirv_restores_the_audit_focus(cx: &mut TestAppContext) {
 #[gpui::test]
 fn flushing_settings_clears_the_pending_debounce(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
+    let dir = std::env::temp_dir().join(format!(
+        "press-audit-flush-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings");
     audit.update(cx, |audit, cx| {
+        audit.settings_writer = crate::settings::SettingsWriter::new(Some(path.clone()));
         let mut settings = audit.settings.clone();
         settings.width = Some(1280.);
         audit.remember_settings(settings, cx);
-        assert!(audit.settings_save_pending);
+        assert!(audit.pending_settings.is_some());
 
-        audit.flush_settings().unwrap();
-        assert!(!audit.settings_save_pending);
+        match audit.flush_settings() {
+            crate::settings::WriteOutcome::Written { .. } => {}
+            outcome => panic!("the flush writes: {outcome:?}"),
+        }
+        assert!(audit.pending_settings.is_none());
     });
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("width=1280"),
+        "the flush stores the debounce it cancelled"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[gpui::test]
+fn a_failed_debounced_save_reports_until_a_later_revision_clears_it(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    // Drain any debounce a setup render scheduled, so only this test's
+    // revisions are ever pending.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    let before = notification_count(cx);
+
+    // Renders may schedule their own debounces alongside this one; every
+    // revision fails the same way while no config directory exists, so the
+    // toast count still moves by exactly one either way.
+    audit.update(cx, |audit, cx| {
+        audit.settings_writer = crate::settings::SettingsWriter::new(None);
+        audit.remember_settings(audit.settings.clone(), cx);
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(
+        notification_count(cx),
+        before + 1,
+        "the failed save stays reported"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "press-audit-settings-notice-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings");
+    audit.update(cx, |audit, cx| {
+        audit.settings_writer = crate::settings::SettingsWriter::new(Some(path.clone()));
+        let mut settings = audit.settings.clone();
+        settings.width = Some(1280.);
+        audit.remember_settings(settings, cx);
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(
+        notification_count(cx),
+        before,
+        "the later successful revision clears the report"
+    );
+    assert!(
+        path.exists(),
+        "a successful revision landed while clearing the report"
+    );
+}
+
+#[gpui::test]
+fn rapid_remembers_keep_only_the_newest_pending_snapshot(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let dir = std::env::temp_dir().join(format!(
+        "press-audit-pending-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let path = dir.join("settings");
+    audit.update(cx, |audit, cx| {
+        audit.settings_writer = crate::settings::SettingsWriter::new(Some(path.clone()));
+        let mut first = audit.settings.clone();
+        first.width = Some(800.);
+        audit.remember_settings(first, cx);
+        let (first_revision, _) = audit.pending_settings.clone().expect("first pends");
+        let mut second = audit.settings.clone();
+        second.width = Some(810.);
+        audit.remember_settings(second, cx);
+        let (second_revision, snapshot) = audit.pending_settings.clone().expect("second pends");
+        assert!(second_revision > first_revision, "revisions order the drag");
+        assert_eq!(snapshot.width, Some(810.));
+    });
+    // No clock moves: nothing may have written yet.
+    assert!(!path.exists(), "the debounce holds the drag");
+    std::fs::remove_dir_all(dir).unwrap_or(());
 }
 
 fn pointer_checkbox_audit(

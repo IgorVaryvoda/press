@@ -52,6 +52,11 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = "0.17.2"
 
+# Atomic settings replacement calls ReplaceFileW/MoveFileExW directly; the std
+# rename will not replace an existing file on Windows.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 # gpui can render a frame to an image and hand back the pixels, but only with
 # `test-support` on. That is how `cargo test --bin press -- --ignored
 # screenshot` gets a picture of the real window without needing the screen.

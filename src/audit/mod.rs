@@ -584,9 +584,14 @@ pub(crate) struct Audit {
     /// Last state render asked to store, so render only schedules a write when it
     /// changes.
     settings: settings::Settings,
-    /// A delayed save is already waiting; it reads `settings` when it fires, so a
-    /// whole resize drag needs one task and one write.
-    settings_save_pending: bool,
+    /// Ordered, serialized persistence for the remembered state. The writer
+    /// carries the injected path tests point at a temp file; production uses
+    /// the real config path, so a render never touches it in tests.
+    settings_writer: Arc<settings::SettingsWriter>,
+    /// The newest debounced snapshot and its revision. Each change claims a
+    /// newer revision and replaces this, so a whole resize drag needs one task
+    /// and one write, and an older task can never land after a flush.
+    pending_settings: Option<(u64, settings::Settings)>,
     /// The last full-resolution preview or pair, kept so reopening it is instant.
     // ponytail: one entry. A pair holds two full-size RGBA buffers — 165 MB for a
     // 5568x3712 photo — so a bigger cache would need a byte budget, not a count.
@@ -923,21 +928,6 @@ struct StudioJob {
     prompt: String,
     state: StudioJobState,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-}
-
-/// Write the remembered state, except in tests, where a render must not touch the
-/// user's real config file.
-fn write_settings(settings: &settings::Settings) -> std::io::Result<()> {
-    #[cfg(not(test))]
-    return settings::save(settings);
-    #[cfg(test)]
-    {
-        let _ = (
-            settings,
-            settings::save as fn(&settings::Settings) -> std::io::Result<()>,
-        );
-        Ok(())
-    }
 }
 
 fn batch_root(paths: &[PathBuf]) -> Option<PathBuf> {
@@ -2221,13 +2211,14 @@ pub(crate) fn build_audit(
             scanning: None,
             scan_found: None,
             scan_cancellation: None,
+            settings: settings::Settings::default(),
+            settings_writer: settings::SettingsWriter::new(settings::default_writer_path()),
+            pending_settings: None,
             include_subfolders,
             dataset_subfolders: false,
             single_file: open_single,
             focus,
             titled: String::new(),
-            settings: settings::Settings::default(),
-            settings_save_pending: false,
             cached: None,
             ahead: None,
             compare_step: 1,
@@ -2310,8 +2301,22 @@ pub(crate) fn build_audit(
 /// the quit took — menu, Cmd+W on the last window, or the close button.
 pub(crate) fn register_quit_flush(audit: gpui::Entity<Audit>, cx: &mut gpui::App) {
     cx.on_app_quit(move |cx| {
-        if let Err(error) = audit.update(cx, |audit, _| audit.flush_settings()) {
-            eprintln!("press: could not save settings while quitting: {error}");
+        // Quit cannot reliably be cancelled, so a failed flush never stops it:
+        let outcome = audit.update(cx, |audit, _| audit.flush_settings());
+        match outcome {
+            settings::WriteOutcome::Failed { error, .. } => {
+                eprintln!("press: could not save settings while quitting: {error}");
+                crate::crash::note_diagnostic(&format!(
+                    "settings flush failed while quitting: {error}"
+                ));
+            }
+            settings::WriteOutcome::Written {
+                warning: Some(warning),
+                ..
+            } => {
+                eprintln!("press: {warning}");
+            }
+            _ => {}
         }
         async {}
     })

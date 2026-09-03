@@ -13,50 +13,65 @@ impl Audit {
             && self.sirv_job.as_ref().is_none_or(|job| job.finished)
     }
 
-    /// Store settings and schedule the write. The write is debounced: a
-    /// delayed save collects the whole drag and stores the size it ended at.
+    /// Store settings and schedule the write. The write is debounced: each
+    /// change claims a newer revision and replaces the pending snapshot, so a
+    /// whole resize drag needs one task and one write, and the delayed task
+    /// can only land the newest revision it ever held.
     pub(super) fn remember_settings(
         &mut self,
         settings: settings::Settings,
         cx: &mut Context<Self>,
     ) {
-        self.settings = settings;
+        self.settings = settings.clone();
         self.clear_error("settings", cx);
-        if self.settings_save_pending {
+        let revision = self.settings_writer.next_revision();
+        let waiting = self.pending_settings.is_some();
+        self.pending_settings = Some((revision, settings));
+        if waiting {
             return;
         }
-        self.settings_save_pending = true;
+        let writer = self.settings_writer.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SETTINGS_SAVE_DELAY).await;
-            let Ok(settings) = this.update(cx, |audit, _| {
-                audit.settings_save_pending = false;
-                audit.settings.clone()
-            }) else {
+            let pending = this.update(cx, |audit, _| audit.pending_settings.take());
+            let Ok(Some((revision, snapshot))) = pending else {
                 return;
             };
-            let saved = cx
+            let outcome = cx
                 .background_executor()
-                .spawn(async move { write_settings(&settings) })
+                .spawn(async move { writer.write_if_latest(revision, &snapshot) })
                 .await;
-            let _ = this.update(cx, |audit, cx| match saved {
-                Ok(()) => audit.clear_error("settings", cx),
-                Err(error) => audit.notify_error(
-                    "settings",
-                    "Couldn’t save settings",
-                    format!("Your changes apply until Press closes: {error}"),
-                    cx,
-                ),
-            });
+            let _ = this.update(cx, |audit, cx| audit.note_settings_outcome(&outcome, cx));
         })
         .detach();
     }
 
-    /// Write the settings now, cancelling the debounce. Every quit path
-    /// runs through this; without it, quitting inside the 500 ms window
-    /// silently forgets the last resize or folder change.
-    pub(crate) fn flush_settings(&mut self) -> std::io::Result<()> {
-        self.settings_save_pending = false;
-        write_settings(&self.settings)
+    fn note_settings_outcome(&mut self, outcome: &settings::WriteOutcome, cx: &mut Context<Self>) {
+        match outcome {
+            settings::WriteOutcome::Written { warning, .. } => {
+                if let Some(warning) = warning {
+                    eprintln!("press: {warning}");
+                }
+                self.clear_error("settings", cx);
+            }
+            settings::WriteOutcome::Superseded { .. } => {}
+            settings::WriteOutcome::Failed { error, .. } => self.notify_error(
+                "settings",
+                "Couldn’t save settings",
+                format!("Your changes apply until Press closes: {error}"),
+                cx,
+            ),
+        }
+    }
+
+    /// Write the settings now, cancelling the debounce, and say what happened.
+    /// Every quit path runs through this; without it, quitting inside the
+    /// 500 ms window silently forgets the last resize or folder change. A
+    /// failed flush never cancels a quit, but the updater restart below treats
+    /// it as a reason not to relaunch into a half-remembered window.
+    pub(crate) fn flush_settings(&mut self) -> settings::WriteOutcome {
+        self.pending_settings = None;
+        self.settings_writer.flush(&self.settings)
     }
 
     /// The rows a conversion would touch. Opening a folder ticks every row in it and

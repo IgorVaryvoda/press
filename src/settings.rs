@@ -4,9 +4,12 @@
 //! dependency that walks platform config directories costs more than the ten lines
 //! it would save.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -208,32 +211,231 @@ pub fn load() -> Settings {
     parse(&text)
 }
 
-pub fn save(settings: &Settings) -> std::io::Result<()> {
-    let Some(path) = path() else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no config directory is available",
-        ));
-    };
-    save_to(&path, settings)
+/// The path a new writer persists to: the real config file, except in tests,
+/// where a render must not touch the user's real config file. Test audits get
+/// a unique temp path each, so stray debounced saves land complete and silent
+/// instead of failing or escaping; tests that assert contents inject their own.
+pub(crate) fn default_writer_path() -> Option<PathBuf> {
+    #[cfg(not(test))]
+    return path();
+    #[cfg(test)]
+    {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        Some(std::env::temp_dir().join(format!("press-test-settings-{unique}/settings")))
+    }
 }
 
-fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Why a settings write did not land. Stage errors keep their `io::Error` and
+/// its kind; a missing config directory is the only refusal without one.
+#[derive(Debug)]
+pub enum SaveError {
+    NoConfigDir,
+    ParentCreation { path: PathBuf, error: io::Error },
+    Stage { error: io::Error },
+    Write { error: io::Error },
+    Sync { error: io::Error },
+    Replace { error: io::Error },
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoConfigDir => write!(formatter, "no config directory is available"),
+            Self::ParentCreation { path, error } => {
+                write!(
+                    formatter,
+                    "could not create the settings folder {}: {error}",
+                    path.display()
+                )
+            }
+            Self::Stage { error } => {
+                write!(formatter, "could not stage the settings: {error}")
+            }
+            Self::Write { error } => {
+                write!(formatter, "could not write the staged settings: {error}")
+            }
+            Self::Sync { error } => {
+                write!(formatter, "could not sync the staged settings: {error}")
+            }
+            Self::Replace { error } => {
+                write!(formatter, "could not install the staged settings: {error}")
+            }
+        }
     }
+}
+
+impl std::error::Error for SaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NoConfigDir => None,
+            Self::ParentCreation { error, .. }
+            | Self::Stage { error }
+            | Self::Write { error }
+            | Self::Sync { error }
+            | Self::Replace { error } => Some(error),
+        }
+    }
+}
+
+/// What one ordered write did. Every variant carries the revision it acted on,
+/// so a caller can tell a superseded drag from a failed disk.
+// Revisions are asserted by the contract tests; production routes on the
+// variant and only the notice path reads the error.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum WriteOutcome {
+    Written {
+        revision: u64,
+        warning: Option<crate::output::DurabilityWarning>,
+    },
+    Superseded {
+        revision: u64,
+    },
+    Failed {
+        revision: u64,
+        error: SaveError,
+    },
+}
+
+/// One lock plus a revision counter for every settings write the process does.
+/// The mutex serializes filesystem writes; the counter retires overlapped
+/// work: after taking the lock, a revision older than the latest claimed one
+/// returns `Superseded` without touching the disk.
+pub struct SettingsWriter {
+    path: Option<PathBuf>,
+    lock: Mutex<()>,
+    latest: AtomicU64,
+}
+
+impl SettingsWriter {
+    pub fn new(path: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            lock: Mutex::new(()),
+            latest: AtomicU64::new(0),
+        })
+    }
+
+    /// Claim the next revision. The debounced save calls this at every change
+    /// and writes only the newest claim; the synchronous flush calls it and
+    /// always writes, so an older task can neither overlap nor land afterward.
+    pub fn next_revision(&self) -> u64 {
+        self.latest.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Write unless a newer revision was claimed meanwhile. Runs off the UI
+    /// thread; concurrent calls serialize on the writer lock.
+    pub fn write_if_latest(&self, revision: u64, settings: &Settings) -> WriteOutcome {
+        let _guard = self.lock.lock();
+        if revision < self.latest.load(Ordering::SeqCst) {
+            return WriteOutcome::Superseded { revision };
+        }
+        self.write_locked(revision, settings)
+    }
+
+    /// Claim a newer revision and write it now, waiting for the same lock.
+    /// Unconditional: quit and updater restart must persist, and the fresh
+    /// revision keeps any older task superseded after it.
+    pub fn flush(&self, settings: &Settings) -> WriteOutcome {
+        let revision = self.next_revision();
+        let _guard = self.lock.lock();
+        self.write_locked(revision, settings)
+    }
+
+    fn write_locked(&self, revision: u64, settings: &Settings) -> WriteOutcome {
+        let Some(path) = self.path.as_ref() else {
+            return WriteOutcome::Failed {
+                revision,
+                error: SaveError::NoConfigDir,
+            };
+        };
+        match save_to(path, settings, Fault::None) {
+            Ok(warning) => WriteOutcome::Written { revision, warning },
+            Err(error) => WriteOutcome::Failed { revision, error },
+        }
+    }
+}
+
+/// Test-only failure injection for [`save_to`]. Each variant fails exactly one
+/// stage; production always runs `Fault::None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Fault {
+    #[default]
+    None,
+    Parent,
+    Temp,
+    Write,
+    Sync,
+    Replace,
+    ParentSync,
+}
+
+fn injected(stage: &str) -> io::Error {
+    io::Error::other(format!("injected {stage} failure"))
+}
+
+fn save_to(
+    path: &Path,
+    settings: &Settings,
+    fault: Fault,
+) -> Result<Option<crate::output::DurabilityWarning>, SaveError> {
+    if fault == Fault::Parent {
+        return Err(SaveError::ParentCreation {
+            path: path.to_path_buf(),
+            error: injected("parent creation"),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| SaveError::ParentCreation {
+            path: parent.to_path_buf(),
+            error,
+        })?;
+    }
+    // Unique per call, not per process: two writers in one process (or a new
+    // process reusing a killed one's pid name) stage side by side, and the
+    // atomic commit still lands exactly one complete file.
+    static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".{}.part", std::process::id()));
+    temporary.push(format!(
+        ".{}.{}.part",
+        std::process::id(),
+        STAGE_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
     let temporary = PathBuf::from(temporary);
     let _ = std::fs::remove_file(&temporary);
     let result = (|| {
+        if fault == Fault::Temp {
+            return Err(SaveError::Stage {
+                error: injected("temp creation"),
+            });
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temporary)?;
-        file.write_all(render(settings).as_bytes())?;
-        file.sync_all()?;
-        replace(&temporary, path)
+            .open(&temporary)
+            .map_err(|error| SaveError::Stage { error })?;
+        file.write_all(render(settings).as_bytes())
+            .map_err(|error| SaveError::Write { error })?;
+        if fault == Fault::Write {
+            return Err(SaveError::Write {
+                error: injected("write"),
+            });
+        }
+        if fault == Fault::Sync {
+            return Err(SaveError::Sync {
+                error: injected("file sync"),
+            });
+        }
+        file.sync_all().map_err(|error| SaveError::Sync { error })?;
+        drop(file);
+        if fault == Fault::Replace {
+            return Err(SaveError::Replace {
+                error: injected("replace"),
+            });
+        }
+        replace(&temporary, path, fault)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -241,15 +443,111 @@ fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
     result
 }
 
-fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(error) if to.exists() => {
-            std::fs::remove_file(to)?;
-            std::fs::rename(from, to).map_err(|_| error)
-        }
-        Err(error) => Err(error),
+/// Atomically replace the old settings with the staged file: the previous
+/// contents stay byte-identical on every injected or real failure, and temp
+/// residue is cleaned by the caller. Unix renames over the old file and syncs
+/// the parent best-effort with a warning; Windows replaces atomically first
+/// and only falls back to a non-replacing move when the destination is
+/// missing, retrying the replace once on a race. Never delete-first: a crash
+/// between delete and rename would leave no settings at all.
+#[cfg(not(windows))]
+fn replace(
+    from: &Path,
+    to: &Path,
+    fault: Fault,
+) -> Result<Option<crate::output::DurabilityWarning>, SaveError> {
+    std::fs::rename(from, to).map_err(|error| SaveError::Replace { error })?;
+    if fault == Fault::ParentSync {
+        return Ok(Some(crate::output::DurabilityWarning(format!(
+            "could not sync the settings directory: {}",
+            injected("parent sync")
+        ))));
+    }
+    let parent = to.parent().unwrap_or(to);
+    match std::fs::File::open(parent).and_then(|file| file.sync_all()) {
+        Ok(()) => Ok(None),
+        Err(error) => Ok(Some(crate::output::DurabilityWarning(format!(
+            "could not sync the settings directory {}: {error}",
+            parent.display()
+        )))),
+    }
+}
+
+#[cfg(windows)]
+fn replace(
+    from: &Path,
+    to: &Path,
+    fault: Fault,
+) -> Result<Option<crate::output::DurabilityWarning>, SaveError> {
+    let _ = fault;
+    windows_replace(from, to).map_err(|error| SaveError::Replace { error })?;
+    Ok(None)
+}
+
+/// Atomic replacement through the Win32 API: `ReplaceFileW` first, a
+/// non-replacing `MoveFileExW` only when the destination is missing, and one
+/// `ReplaceFileW` retry when that move reports a race. A second race stays a
+/// typed error with the old-or-new complete file intact.
+#[cfg(windows)]
+fn windows_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let from_wide = wide(from);
+    let to_wide = wide(to);
+    // SAFETY: both buffers outlive the calls; backup, exclude and reserved
+    // stay null, which the API documents as no backup and no exclusion.
+    let replaced = unsafe {
+        windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+            to_wide.as_ptr(),
+            from_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    } != 0;
+    if replaced {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() != io::ErrorKind::NotFound {
+        return Err(error);
+    }
+    let moved = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            from_wide.as_ptr(),
+            to_wide.as_ptr(),
+            0,
+        )
+    } != 0;
+    if moved {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() != io::ErrorKind::AlreadyExists {
+        return Err(error);
+    }
+    let replaced = unsafe {
+        windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+            to_wide.as_ptr(),
+            from_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    } != 0;
+    if replaced {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -542,13 +840,229 @@ mod tests {
             width: Some(900.),
             ..Settings::default()
         };
-        save_to(&path, &settings).unwrap();
+        save_to(&path, &settings, Fault::None).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "width=900\ncolumns=thumb,format,pixels,weight\n"
         );
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn widths(width: f32) -> Settings {
+        Settings {
+            width: Some(width),
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn serialized_settings_writer_contract() {
+        let dir = temp_dir("writer-contract");
+        let path = dir.join("settings");
+        let writer = SettingsWriter::new(Some(path.clone()));
+
+        let first = writer.next_revision();
+        match writer.write_if_latest(first, &widths(100.)) {
+            WriteOutcome::Written { revision, warning } => {
+                assert_eq!(revision, first);
+                assert!(warning.is_none());
+            }
+            outcome => panic!("the first claim writes: {outcome:?}"),
+        }
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(100.)
+        );
+
+        // A newer claim retires the older one without touching the disk.
+        let second = writer.next_revision();
+        match writer.write_if_latest(first, &widths(200.)) {
+            WriteOutcome::Superseded { revision } => assert_eq!(revision, first),
+            outcome => panic!("the older claim is retired: {outcome:?}"),
+        }
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(100.)
+        );
+        writer.write_if_latest(second, &widths(200.));
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(200.)
+        );
+
+        // The synchronous flush always writes its own newer revision.
+        match writer.flush(&widths(300.)) {
+            WriteOutcome::Written { revision, .. } => assert!(revision > second),
+            outcome => panic!("the flush writes: {outcome:?}"),
+        }
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(300.)
+        );
+
+        // Without a config directory the revision still comes back, as a failure.
+        let homeless = SettingsWriter::new(None);
+        match homeless.write_if_latest(homeless.next_revision(), &widths(1.)) {
+            WriteOutcome::Failed { error, .. } => {
+                assert!(matches!(error, SaveError::NoConfigDir), "typed: {error}")
+            }
+            outcome => panic!("no directory fails: {outcome:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_settings_writes_leave_only_new_bytes() {
+        let dir = temp_dir("writer-races");
+        let path = dir.join("settings");
+        let writer = SettingsWriter::new(Some(path.clone()));
+        let flushed = widths(300.);
+
+        // An older revision queued behind the lock while a flush claims newer
+        // and queues behind it. Whichever acquires first, the file ends on the
+        // flush: the old revision is retired either at its check or before it
+        // ever runs, so join alone orders the assertions, with no sleeps.
+        let old = writer.next_revision();
+        let _ = writer.next_revision();
+        let _held = writer.lock.lock();
+        let queued = {
+            let writer = writer.clone();
+            std::thread::spawn(move || writer.write_if_latest(old, &widths(100.)))
+        };
+        let flushing = {
+            let writer = writer.clone();
+            let flushed = flushed.clone();
+            std::thread::spawn(move || writer.flush(&flushed))
+        };
+        drop(_held);
+        let delayed = queued.join().expect("the delayed write finishes");
+        let outcome = flushing.join().expect("the flush finishes");
+        assert!(
+            matches!(delayed, WriteOutcome::Superseded { .. }),
+            "the delayed write never lands: {delayed:?}"
+        );
+        assert!(
+            matches!(outcome, WriteOutcome::Written { .. }),
+            "the flush lands: {outcome:?}"
+        );
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(300.)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_replace_keeps_the_old_file_on_every_injected_failure() {
+        let dir = temp_dir("save-faults");
+        let path = dir.join("settings");
+        std::fs::write(&path, "width=1\n").unwrap();
+        for (fault, expected) in [
+            (Fault::Parent, "ParentCreation"),
+            (Fault::Temp, "Stage"),
+            (Fault::Write, "Write"),
+            (Fault::Sync, "Sync"),
+            (Fault::Replace, "Replace"),
+        ] {
+            let error = save_to(&path, &widths(2.), fault).unwrap_err();
+            let actual = match &error {
+                SaveError::ParentCreation { .. } => "ParentCreation",
+                SaveError::Stage { .. } => "Stage",
+                SaveError::Write { .. } => "Write",
+                SaveError::Sync { .. } => "Sync",
+                SaveError::Replace { .. } => "Replace",
+                other => panic!("{fault:?} failed as {other:?} instead of {expected}"),
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "width=1\n",
+                "{expected} keeps the old file byte-identical"
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no staged temp lingers"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_settings_saves_never_tear() {
+        let dir = temp_dir("save-races");
+        let path = dir.join("settings");
+        let candidates: Vec<String> = (0..8).map(|index| render(&widths(index as f32))).collect();
+        std::thread::scope(|scope| {
+            for rendered in &candidates {
+                scope.spawn(|| {
+                    save_to(&path, &parse(rendered), Fault::None).unwrap();
+                });
+            }
+        });
+        let landed = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            candidates.iter().any(|candidate| candidate == &landed),
+            "the file is one whole render, never a mixture"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_parent_sync_failure_warns_without_failing() {
+        let dir = temp_dir("save-warning");
+        let path = dir.join("settings");
+        let outcome = save_to(&path, &widths(1.), Fault::ParentSync).unwrap();
+        let warning = outcome.expect("a sync failure is not a save failure");
+        assert!(
+            warning.0.contains("sync"),
+            "the warning says what: {warning}"
+        );
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(1.)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unicode_and_long_settings_paths_save() {
+        let dir = temp_dir("save-names");
+        let long: String = std::iter::repeat_n('n', 150).collect();
+        let path = dir.join("sättings ünicode").join(long).join("settings");
+        save_to(&path, &widths(1.), Fault::None).unwrap();
+        assert_eq!(
+            parse(&std::fs::read_to_string(&path).unwrap()).width,
+            Some(1.)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_folder_refuses_the_stage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("save-permissions");
+        let path = dir.join("settings");
+        std::fs::write(&path, "width=1\n").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let error = save_to(&path, &widths(2.), Fault::None).unwrap_err();
+        match &error {
+            SaveError::Stage { error } => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied)
+            }
+            other => panic!("a read-only folder fails the stage: {other:?}"),
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "width=1\n",
+            "the old file is untouched"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
