@@ -106,17 +106,6 @@ pub struct Rejected {
 }
 
 impl Manifest {
-    /// Who owns an output now: the newest record naming it, ignoring records
-    /// whose output is no longer there. A claim on a file somebody has already
-    /// deleted is not a reason to rename anything.
-    pub fn claim(&self, out_dir: &Path, output: &Path) -> Option<&Record> {
-        let output = path_key(output);
-        self.outputs.iter().rev().find(|record| {
-            path_key(&record.output) == output
-                && out_dir.join(&record.output).symlink_metadata().is_ok()
-        })
-    }
-
     /// The record that put an original away for a source that is itself an
     /// earlier run's output. Converting a folder twice is a chain, and the file
     /// worth keeping is the one at the start of it.

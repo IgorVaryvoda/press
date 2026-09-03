@@ -825,20 +825,47 @@ fn project_run(
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
     let weights: Vec<u64> = entries.iter().map(|entry| entry.bytes).collect();
     let slices = audit::sample_size(format).min(weights.len());
-    let sampled: Vec<(u64, Option<(u64, u64)>)> = audit::strata(&weights, slices)
-        .into_iter()
-        .map(|(sample, slice_bytes)| {
-            let entry = entries[sample];
-            let encoded = scan::decode_for_conversion(&entry.path, max_edge)
-                .ok()
-                .zip(format.resolve(&entry.path).ok())
-                .and_then(|((image, profile), format)| {
-                    convert::encode(&max_edge.apply(image), format, quality, profile.as_deref())
+    let jobs = audit::strata(&weights, slices);
+    // The window encodes its samples together, as many at once as a conversion
+    // allows; a serial dry run made `--dry-run` feel like a conversion on
+    // folders the window sizes in under a second. Indexed slots keep slice
+    let sampled = &parking_lot::Mutex::new(vec![None; jobs.len()]);
+    let next = &std::sync::atomic::AtomicUsize::new(0);
+    let jobs = &jobs;
+    let entries = &entries;
+    let threads = convert::workers(format).min(jobs.len().max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(move || {
+                loop {
+                    let job = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(sample, slice_bytes)) = jobs.get(job) else {
+                        return;
+                    };
+                    let entry = entries[sample];
+                    let encoded = scan::decode_for_conversion(&entry.path, max_edge)
                         .ok()
-                })
-                .map(|encoded| encoded.len() as u64);
-            (slice_bytes, encoded.map(|encoded| (entry.bytes, encoded)))
-        })
+                        .zip(format.resolve(&entry.path).ok())
+                        .and_then(|((image, profile), format)| {
+                            convert::encode(
+                                &max_edge.apply(image),
+                                format,
+                                quality,
+                                profile.as_deref(),
+                            )
+                            .ok()
+                        })
+                        .map(|encoded| encoded.len() as u64);
+                    sampled.lock()[job] =
+                        Some((slice_bytes, encoded.map(|encoded| (entry.bytes, encoded))));
+                }
+            });
+        }
+    });
+    let sampled: Vec<(u64, Option<(u64, u64)>)> = sampled
+        .lock()
+        .iter()
+        .map(|slot| slot.expect("every sample was encoded"))
         .collect();
     audit::project_total(&sampled)
 }

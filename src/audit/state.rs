@@ -282,7 +282,7 @@ impl Audit {
             .enumerate()
             .filter(|(_, entry)| {
                 needle.is_empty()
-                    || entry_label(root, show_parent, entry)
+                    || entry_label_lossy(root, show_parent, entry)
                         .to_lowercase()
                         .contains(&needle)
             })

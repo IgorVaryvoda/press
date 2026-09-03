@@ -1216,23 +1216,18 @@ impl Audit {
                 let gallery = uniform_list(
                     "gallery",
                     layout.rows,
-                    cx.processor(|audit, range: std::ops::Range<usize>, _window, cx| {
+                    cx.processor(move |audit, range: std::ops::Range<usize>, _, cx| {
                         audit.gallery_visible = range.clone();
                         range
                             .map(|band| {
                                 // A plain loop: the closure form borrows `audit`
                                 // mutably for `request_thumb` and immutably for
                                 // `tile`, which nested closures cannot express.
+                                // `layout` is captured from the frame: it is a pure
+                                // function of the viewport width and the visible
+                                // count, so recomputing it per band only burned
+                                // viewport and chrome reads on every row.
                                 let mut tiles = Vec::new();
-                                let (root_left, root_right) = root_horizontal_chrome(_window);
-                                let layout = gallery_layout(
-                                    f32::from(_window.viewport_size().width)
-                                        - audit.rail_width()
-                                        - audit.browser_width(_window),
-                                    root_left,
-                                    root_right,
-                                    audit.visible.len(),
-                                );
                                 for row in layout.band_range(band) {
                                     let Some(entry) = audit.entry_at(row) else {
                                         continue;

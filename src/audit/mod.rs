@@ -26,6 +26,7 @@ use table::AuditTable;
 use table::{TableColumn, W_NAME_MIN};
 use view::meter;
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -964,15 +965,22 @@ fn entry_name(root: &Path, path: &Path) -> String {
 }
 
 fn entry_label(root: &Path, show_parent: bool, entry: &Entry) -> String {
+    entry_label_lossy(root, show_parent, entry).into_owned()
+}
+
+/// The same label without the owned copy. Filenames are valid UTF-8 in
+/// practice, so the filter can match on the borrow instead of allocating one
+/// label String per row per keystroke; the lowercase copy stays the only
+/// allocation on that path.
+fn entry_label_lossy<'a>(root: &Path, show_parent: bool, entry: &'a Entry) -> Cow<'a, str> {
     if show_parent {
         entry
             .path
             .strip_prefix(root)
             .unwrap_or(&entry.path)
             .to_string_lossy()
-            .into_owned()
     } else {
-        entry.name()
+        entry.name_lossy()
     }
 }
 

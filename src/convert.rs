@@ -338,6 +338,10 @@ pub fn encode(
 /// PNG is lossless whatever the quality says, so the only knob worth turning is
 /// how hard the deflater works. The samples go in at the source's own depth: a
 /// 16-bit PNG asked to keep its format keeps its bits.
+///
+/// `Default` was measured 44% faster for 2.1% larger output on 16 real PNGs
+/// (16.1s vs 28.9s debug). Best stays: output bytes are the product, and PNG
+/// runs are rare enough that the time is not the bottleneck.
 fn encode_png(image: &DynamicImage, profile: Option<&[u8]>) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     let mut encoder = image::codecs::png::PngEncoder::new_with_quality(
@@ -396,16 +400,32 @@ fn encode_jpeg(image: &DynamicImage, quality: Quality) -> Result<Vec<u8>, Failur
         image,
         DynamicImage::ImageLuma8(_) | DynamicImage::ImageLuma16(_)
     );
+    // Photographs already arrive as RGB8 or Luma8: borrow those buffers instead of
+    // copying every pixel into a second frame before the compressor reads it.
+    let luma_owned;
+    let rgb_owned;
     let (pixels, channels, pixel_format, subsamp) = if gray {
+        let pixels: &[u8] = if let Some(gray) = image.as_luma8() {
+            gray.as_raw()
+        } else {
+            luma_owned = image.to_luma8().into_raw();
+            &luma_owned
+        };
         (
-            image.to_luma8().into_raw(),
+            pixels,
             1,
             turbojpeg::PixelFormat::GRAY,
             turbojpeg::Subsamp::Gray,
         )
     } else {
+        let pixels: &[u8] = if let Some(rgb) = image.as_rgb8() {
+            rgb.as_raw()
+        } else {
+            rgb_owned = image.to_rgb8().into_raw();
+            &rgb_owned
+        };
         (
-            image.to_rgb8().into_raw(),
+            pixels,
             3,
             turbojpeg::PixelFormat::RGB,
             turbojpeg::Subsamp::Sub2x2,
@@ -422,7 +442,7 @@ fn encode_jpeg(image: &DynamicImage, quality: Quality) -> Result<Vec<u8>, Failur
     compressor.set_optimize(true).map_err(|_| Failure::Failed)?;
     compressor
         .compress_to_vec(turbojpeg::Image {
-            pixels: pixels.as_slice(),
+            pixels,
             width: image.width() as usize,
             pitch: image.width() as usize * channels,
             height: image.height() as usize,
@@ -601,12 +621,39 @@ fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -
     let threads = (cores / workers(Format::Avif)).clamp(1, 8);
 
     if has_alpha {
-        let rgba = image.to_rgba8();
+        // The common photograph with transparency is already RGBA8: handing its
+        // buffer straight to the bridge saves a full-frame copy per file. Other
+        // depths still convert, as they always did.
+        if let Some(rgba) = image.as_rgba8() {
+            crate::avif::encode(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                true,
+                quality,
+                speed,
+                threads,
+                profile,
+            )
+        } else {
+            let rgba = image.to_rgba8();
+            crate::avif::encode(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                true,
+                quality,
+                speed,
+                threads,
+                profile,
+            )
+        }
+    } else if let Some(rgb) = image.as_rgb8() {
         crate::avif::encode(
-            rgba.as_raw(),
-            rgba.width(),
-            rgba.height(),
-            true,
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            false,
             quality,
             speed,
             threads,
@@ -648,19 +695,48 @@ fn encode_jpeg_xl(
             profile,
         );
     }
-    let pixels = if has_alpha {
-        image.to_rgba8().into_raw()
+    // Like AVIF: the decoded frame is usually already 8-bit packed, so borrow it
+    // instead of copying every pixel before the encoder reads it.
+    if has_alpha {
+        if let Some(rgba) = image.as_rgba8() {
+            return crate::jxl::encode(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                true,
+                quality.0,
+                profile,
+            );
+        }
+        let pixels = image.to_rgba8().into_raw();
+        crate::jxl::encode(
+            &pixels,
+            image.width(),
+            image.height(),
+            true,
+            quality.0,
+            profile,
+        )
+    } else if let Some(rgb) = image.as_rgb8() {
+        crate::jxl::encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            false,
+            quality.0,
+            profile,
+        )
     } else {
-        image.to_rgb8().into_raw()
-    };
-    crate::jxl::encode(
-        &pixels,
-        image.width(),
-        image.height(),
-        has_alpha,
-        quality.0,
-        profile,
-    )
+        let pixels = image.to_rgb8().into_raw();
+        crate::jxl::encode(
+            &pixels,
+            image.width(),
+            image.height(),
+            false,
+            quality.0,
+            profile,
+        )
+    }
 }
 
 /// True when the source carries more than eight bits per channel. Only JPEG XL can
@@ -933,31 +1009,56 @@ pub fn plan_outputs(
     let mut taken: HashSet<String> = HashSet::new();
     let key = path_key;
     let originals: HashSet<String> = audited.iter().map(|path| key(path)).collect();
+    // One pass over the manifest instead of one reverse scan per candidate. The
+    // old code answered the same question per source with a linear search plus
+    // a stat; on a large folder that is O(N*M) path keys. Newest record wins,
+    // and only while its file is still on disk — the reverse walk below keeps
+    // the first existing entry per name, which is exactly what the per-candidate
+    // scan used to find.
+    let mut owned: std::collections::HashMap<String, (String, bool)> =
+        std::collections::HashMap::new();
+    for record in destination.manifest.outputs.iter().rev() {
+        let output_key = key(&record.output);
+        if owned.contains_key(&output_key) {
+            continue;
+        }
+        if out_dir.join(&record.output).symlink_metadata().is_ok() {
+            owned.insert(output_key, (key(&record.source), record.backup.is_some()));
+        }
+    }
     // A name an earlier run wrote from somebody else. The current source may take
     // back its own name — that is a rerun, and replacing its own output is the
     // point — and so may a source that is itself that run's output, which is one
     // more link in a replace chain.
-    let claimed = |candidate: &Path, source: &Path| -> bool {
+    let claimed = |candidate: &Path, mine: &str| -> bool {
         let Ok(relative) = candidate.strip_prefix(out_dir) else {
             return false;
         };
-        let Some(record) = destination.manifest.claim(out_dir, relative) else {
+        let output_key = key(relative);
+        let Some((source_key, has_backup)) = owned.get(&output_key) else {
             return false;
         };
-        let mine = key(source.strip_prefix(root).unwrap_or(source));
-        key(&record.source) != mine && !(key(&record.output) == mine && record.backup.is_some())
+        source_key != mine && !(output_key == *mine && *has_backup)
     };
 
     let mut planned = vec![Err(Failure::OverwritesSource); sources.len()];
+    // Source keys computed once: the old ordering compared fresh path keys per
+    // pair, which is O(N log N) allocations for the sort alone.
+    let full_keys: Vec<String> = sources.iter().map(|source| key(source)).collect();
+    let mine_keys: Vec<String> = sources
+        .iter()
+        .map(|source| key(source.strip_prefix(root).unwrap_or(source)))
+        .collect();
     let mut order: Vec<usize> = (0..sources.len()).collect();
     order.sort_by(|left, right| {
-        key(&sources[*left])
-            .cmp(&key(&sources[*right]))
+        full_keys[*left]
+            .cmp(&full_keys[*right])
             .then_with(|| sources[*left].cmp(&sources[*right]))
     });
 
     for index in order {
         let source = &sources[index];
+        let mine = mine_keys[index].as_str();
         let plain = output_path(root, source, out_dir, format);
         // In replace mode a WebP converted to WebP writes its own name back. That
         // is not destruction: the original moves into the backup first.
@@ -968,7 +1069,7 @@ pub fn plan_outputs(
         // A name somebody else's run owns is renamed around like any other taken
         // name. Failing the file instead would stop a folder converting for a
         // reason the person cannot see or clear.
-        if !claimed(&plain, source) && taken.insert(key(&plain)) {
+        if !claimed(&plain, mine) && taken.insert(key(&plain)) {
             planned[index] = Ok(plain);
             continue;
         }
@@ -987,7 +1088,7 @@ pub fn plan_outputs(
             let candidate = parent
                 .join(format!("{stem}-{extension}{suffix}"))
                 .with_extension(plain.extension().unwrap_or_default());
-            if originals.contains(&key(&candidate)) || claimed(&candidate, source) {
+            if originals.contains(&key(&candidate)) || claimed(&candidate, mine) {
                 continue;
             }
             if taken.insert(key(&candidate)) {
