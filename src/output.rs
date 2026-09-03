@@ -9,7 +9,13 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// Why a source/output boundary could not be established.
 #[derive(Debug)]
@@ -346,6 +352,377 @@ impl Context {
             return Err(Error::FinalPathOutsideOutput);
         }
         Ok(final_path)
+    }
+}
+
+/// What a create-new install wrote back: where the complete file is, what it
+/// hashes to, and how many bytes it holds.
+// First consumed by plan 1421; plan 1401 adds owned replacement beside it.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct InstalledOutput {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+/// must never read as a file that did not.
+// First consumed by plan 1421 with its receipt.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct DurabilityWarning(pub String);
+
+impl std::fmt::Display for DurabilityWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// the name, which is [`InstallError::ForeignOutput`] instead of a failure.
+// First consumed by plan 1421; variants stay distinct for its diagnostics.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum InstallError {
+    OutsideOutput { path: PathBuf },
+    ParentSymlink { path: PathBuf },
+    ParentNotDirectory { path: PathBuf },
+    ParentCreation { path: PathBuf, error: io::Error },
+    TempCreation { error: io::Error },
+    Write { error: io::Error },
+    FileSync { error: io::Error },
+    Commit { error: io::Error },
+    ForeignOutput { path: PathBuf },
+}
+
+impl InstallError {
+    /// The `io::ErrorKind` behind the failure: the preserved kind for every
+    /// I/O stage, `AlreadyExists` for a name somebody else owns, and
+    /// `InvalidInput` for a path the boundary refuses.
+    // First consumed by plan 1421 with its error.
+    #[allow(dead_code)]
+    pub fn kind(&self) -> io::ErrorKind {
+        match self {
+            Self::OutsideOutput { .. }
+            | Self::ParentSymlink { .. }
+            | Self::ParentNotDirectory { .. } => io::ErrorKind::InvalidInput,
+            Self::ParentCreation { error, .. }
+            | Self::TempCreation { error }
+            | Self::Write { error }
+            | Self::FileSync { error }
+            | Self::Commit { error } => error.kind(),
+            Self::ForeignOutput { .. } => io::ErrorKind::AlreadyExists,
+        }
+    }
+}
+
+impl std::fmt::Display for InstallError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutsideOutput { path } => {
+                write!(
+                    formatter,
+                    "the target is outside the output folder: {}",
+                    path.display()
+                )
+            }
+            Self::ParentSymlink { path } => {
+                write!(
+                    formatter,
+                    "a folder on the way to the target is a symlink: {}",
+                    path.display()
+                )
+            }
+            Self::ParentNotDirectory { path } => {
+                write!(
+                    formatter,
+                    "a folder on the way to the target is not a directory: {}",
+                    path.display()
+                )
+            }
+            Self::ParentCreation { path, error } => {
+                write!(
+                    formatter,
+                    "could not create the folder {}: {error}",
+                    path.display()
+                )
+            }
+            Self::TempCreation { error } => {
+                write!(formatter, "could not stage the output: {error}")
+            }
+            Self::Write { error } => {
+                write!(formatter, "could not write the staged output: {error}")
+            }
+            Self::FileSync { error } => {
+                write!(formatter, "could not sync the staged output: {error}")
+            }
+            Self::Commit { error } => {
+                write!(formatter, "could not install the staged output: {error}")
+            }
+            Self::ForeignOutput { path } => {
+                write!(formatter, "an earlier run already wrote {}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for InstallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ParentCreation { error, .. }
+            | Self::TempCreation { error }
+            | Self::Write { error }
+            | Self::FileSync { error }
+            | Self::Commit { error } => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Test-only failure injection for [`install`]. Each variant fails exactly one
+/// stage; production always runs `Fault::None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Fault {
+    #[default]
+    None,
+    Parent,
+    Temp,
+    Write,
+    FileSync,
+    Persist,
+    ParentSync,
+    /// Not a failure: creates the final after staging, so the commit really
+    /// races and only `AlreadyExists` may map to [`InstallError::ForeignOutput`].
+    CommitConflict,
+}
+
+fn injected(stage: &str) -> io::Error {
+    io::Error::other(format!("injected {stage} failure"))
+}
+
+/// Install finished bytes as a new file that appears complete or not at all.
+///
+/// Parents are created component by component inside the context's output root
+/// and rechecked immediately before staging; an existing final — found before
+/// staging or raced in after it — is refused as [`InstallError::ForeignOutput`]
+/// and left byte-identical. Routing a relative source onto its final name stays
+/// with the producers (plans 1433/1434); this owns the last mile.
+// First consumed by plan 1421; tested directly until then.
+#[allow(dead_code)]
+pub fn install(
+    context: &Context,
+    final_path: &Path,
+    bytes: &[u8],
+) -> Result<(InstalledOutput, Option<DurabilityWarning>), InstallError> {
+    install_with_fault(context, final_path, bytes, Fault::None)
+}
+
+fn install_with_fault(
+    context: &Context,
+    final_path: &Path,
+    bytes: &[u8],
+    fault: Fault,
+) -> Result<(InstalledOutput, Option<DurabilityWarning>), InstallError> {
+    let output_root = context.output_root();
+    let relative =
+        final_path
+            .strip_prefix(output_root)
+            .map_err(|_| InstallError::OutsideOutput {
+                path: final_path.to_path_buf(),
+            })?;
+    if relative.as_os_str().is_empty() {
+        return Err(InstallError::OutsideOutput {
+            path: final_path.to_path_buf(),
+        });
+    }
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(InstallError::OutsideOutput {
+                path: final_path.to_path_buf(),
+            });
+        }
+    }
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| InstallError::OutsideOutput {
+            path: final_path.to_path_buf(),
+        })?;
+    ensure_parent_dir(output_root, parent, fault)?;
+    if fs::symlink_metadata(final_path).is_ok() {
+        return Err(InstallError::ForeignOutput {
+            path: final_path.to_path_buf(),
+        });
+    }
+
+    if fault == Fault::Temp {
+        return Err(InstallError::TempCreation {
+            error: injected("temp creation"),
+        });
+    }
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| InstallError::TempCreation { error })?;
+    #[cfg(unix)]
+    staged
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o666))
+        .map_err(|error| InstallError::TempCreation { error })?;
+    if fault == Fault::Write {
+        return Err(InstallError::Write {
+            error: injected("write"),
+        });
+    }
+    staged
+        .write_all(bytes)
+        .map_err(|error| InstallError::Write { error })?;
+    staged
+        .flush()
+        .map_err(|error| InstallError::Write { error })?;
+    if fault == Fault::FileSync {
+        return Err(InstallError::FileSync {
+            error: injected("file sync"),
+        });
+    }
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|error| InstallError::FileSync { error })?;
+    if fault == Fault::CommitConflict {
+        fs::write(final_path, b"somebody else won the race").ok();
+    }
+
+    if fault == Fault::Persist {
+        return Err(InstallError::Commit {
+            error: injected("commit"),
+        });
+    }
+    if let Err(persisted) = staged.persist_noclobber(final_path) {
+        let kind = persisted.error.kind();
+        drop(persisted.file);
+        if kind == io::ErrorKind::AlreadyExists {
+            return Err(InstallError::ForeignOutput {
+                path: final_path.to_path_buf(),
+            });
+        }
+        return Err(InstallError::Commit {
+            error: persisted.error,
+        });
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let receipt = InstalledOutput {
+        path: final_path.to_path_buf(),
+        sha256: format!("{:x}", hasher.finalize()),
+        bytes: bytes.len() as u64,
+    };
+    Ok((receipt, sync_parent_warning(parent, fault)))
+}
+/// Create the output root and every parent below it, refusing symlinks and
+/// non-directories before each creation and use. Levels grow top-down from the
+/// filesystem root, so a missing output root grows its own chain one level at
+/// a time; the last check stats the staged file's parent immediately before
+/// the commit, narrowing the swap window to the commit itself. Every ancestor
+/// of a canonical path is canonical, so the walk above the output root meets
+/// no symlinks it did not already prove away at establishment.
+fn ensure_parent_dir(output_root: &Path, parent: &Path, fault: Fault) -> Result<(), InstallError> {
+    if fault == Fault::Parent {
+        return Err(InstallError::ParentCreation {
+            path: parent.to_path_buf(),
+            error: injected("parent creation"),
+        });
+    }
+    if parent.strip_prefix(output_root).is_err() {
+        return Err(InstallError::OutsideOutput {
+            path: parent.to_path_buf(),
+        });
+    }
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => current.push(component),
+            Component::Normal(_) => {
+                current.push(component);
+                ensure_one_dir(&current)?;
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(InstallError::OutsideOutput {
+                    path: parent.to_path_buf(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_one_dir(path: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => check_dir(path, &metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::create_dir(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    // Raced with another creator; judge what is there now.
+                    let metadata = fs::symlink_metadata(path).map_err(|error| {
+                        InstallError::ParentCreation {
+                            path: path.to_path_buf(),
+                            error,
+                        }
+                    })?;
+                    check_dir(path, &metadata)
+                }
+                Err(error) => Err(InstallError::ParentCreation {
+                    path: path.to_path_buf(),
+                    error,
+                }),
+            }
+        }
+        Err(error) => Err(InstallError::ParentCreation {
+            path: path.to_path_buf(),
+            error,
+        }),
+    }
+}
+
+fn check_dir(path: &Path, metadata: &fs::Metadata) -> Result<(), InstallError> {
+    if metadata.file_type().is_symlink() {
+        return Err(InstallError::ParentSymlink {
+            path: path.to_path_buf(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(InstallError::ParentNotDirectory {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Sync the finished file's parent so the rename survives an OS crash. A
+/// failure keeps the install successful and comes back as a warning instead:
+/// the bytes are complete, and a warning must never read as a file that did
+/// not convert. Directory sync is not supported on Windows, which is an
+/// explicit no-warning platform outcome rather than a silent skip.
+fn sync_parent_warning(parent: &Path, fault: Fault) -> Option<DurabilityWarning> {
+    #[cfg(windows)]
+    {
+        let _ = (parent, fault);
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        if fault == Fault::ParentSync {
+            return Some(DurabilityWarning(format!(
+                "could not sync the output directory {}: {}",
+                parent.display(),
+                injected("parent sync")
+            )));
+        }
+        match fs::File::open(parent).and_then(|file| file.sync_all()) {
+            Ok(()) => None,
+            Err(error) => Some(DurabilityWarning(format!(
+                "could not sync the output directory {}: {error}",
+                parent.display()
+            ))),
+        }
     }
 }
 
@@ -1382,6 +1759,273 @@ mod tests {
             Context::establish(Path::new("relative"), &base.join("output")),
             Err(Error::SourceNotAbsolute)
         ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn boundary(source: &Path, out: &Path) -> Context {
+        Context::establish(source, out).expect("the fixture boundary establishes")
+    }
+
+    #[test]
+    fn create_new_output_writes_bytes_and_reports_the_receipt() {
+        let base = temp_dir("install-first");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out").join("nested");
+        let context = boundary(&source, &out);
+
+        let bytes = b"complete webp bytes";
+        let final_path = out.join("pic.webp");
+        let (receipt, warning) = install(&context, &final_path, bytes).expect("first install");
+        assert!(warning.is_none(), "a clean install warns about nothing");
+        assert_eq!(receipt.path, final_path);
+        assert_eq!(receipt.bytes, bytes.len() as u64);
+        assert_eq!(receipt.sha256.len(), 64, "hex sha256");
+        assert_eq!(fs::read(&final_path).unwrap(), bytes);
+
+        // The empty string's hash is a fixed vector, so this pins the digest
+        // rather than recomputing it with the same code under test.
+        let empty = out.join("empty.webp");
+        let (receipt, _) = install(&context, &empty, b"").expect("empty install");
+        assert_eq!(
+            receipt.sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&final_path).unwrap().permissions().mode() & 0o777,
+            0o666,
+            "umask owns the final permissions"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_existing_final_is_left_byte_identical_and_reported_foreign() {
+        let base = temp_dir("install-foreign");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+
+        let final_path = out.join("taken.webp");
+        fs::create_dir_all(out).unwrap();
+        fs::write(&final_path, b"somebody else's bytes").unwrap();
+        let error = install(&context, &final_path, b"new bytes").unwrap_err();
+        assert!(
+            matches!(error, InstallError::ForeignOutput { .. }),
+            "an owned name is refused, not a failure: {error}"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&final_path).unwrap(),
+            b"somebody else's bytes",
+            "the foreign file is byte-identical"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_final_created_after_staging_maps_only_already_exists_to_foreign() {
+        let base = temp_dir("install-raced");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+        let final_path = out.join("raced.webp");
+
+        let error = install_with_fault(&context, &final_path, b"new bytes", Fault::CommitConflict)
+            .unwrap_err();
+        assert!(
+            matches!(error, InstallError::ForeignOutput { .. }),
+            "a raced commit is refused: {error}"
+        );
+        assert_eq!(
+            fs::read(&final_path).unwrap(),
+            b"somebody else won the race",
+            "the winner's bytes stand"
+        );
+        assert_eq!(dir_names(&out), ["raced.webp"], "the staged temp is gone");
+
+        // Any other commit failure stays a failure and stages nothing visible.
+        let error = install_with_fault(
+            &context,
+            &out.join("broke.webp"),
+            b"new bytes",
+            Fault::Persist,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, InstallError::Commit { .. }),
+            "a non-conflict commit fails: {error}"
+        );
+        assert_eq!(dir_names(&out), ["raced.webp"]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn unicode_and_space_parents_are_created_component_by_component() {
+        let base = temp_dir("install-parents");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+
+        let final_path = out
+            .join("Album ünicode")
+            .join("nested deep")
+            .join("pic.webp");
+        let (receipt, _) = install(&context, &final_path, b"bytes").expect("nested install");
+        assert_eq!(receipt.bytes, 5);
+        assert!(final_path.parent().unwrap().is_dir());
+        assert_eq!(fs::read(&final_path).unwrap(), b"bytes");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_parent_is_refused_without_creating_anything() {
+        let base = temp_dir("install-symlink");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+
+        let link = out.join("link");
+        fs::create_dir(&out).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let final_path = link.join("pic.webp");
+        let error = install(&context, &final_path, b"bytes").unwrap_err();
+        assert!(
+            matches!(error, InstallError::ParentSymlink { .. }),
+            "a symlinked parent is refused: {error}"
+        );
+        assert!(!final_path.exists(), "nothing was written through the link");
+        assert_eq!(dir_names(&elsewhere), Vec::<String>::new());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn unrelated_temp_residue_survives_an_install() {
+        let base = temp_dir("install-residue");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".tmpleftover"), b"not mine").unwrap();
+        let final_path = out.join("pic.webp");
+        install(&context, &final_path, b"bytes").expect("install beside residue");
+        assert_eq!(fs::read(out.join(".tmpleftover")).unwrap(), b"not mine");
+        assert_eq!(dir_names(&out), [".tmpleftover", "pic.webp"]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn each_injected_stage_failure_writes_no_final_and_leaves_no_temp() {
+        let base = temp_dir("install-faults");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("residue.tmp"), b"not mine").unwrap();
+        let context = boundary(&source, &out);
+
+        for (fault, expected) in [
+            (Fault::Parent, "ParentCreation"),
+            (Fault::Temp, "TempCreation"),
+            (Fault::Write, "Write"),
+            (Fault::FileSync, "FileSync"),
+            (Fault::Persist, "Commit"),
+        ] {
+            let final_path = out.join(format!("{expected}.webp"));
+            let error = install_with_fault(&context, &final_path, b"bytes", fault).unwrap_err();
+            let actual = match &error {
+                InstallError::ParentCreation { .. } => "ParentCreation",
+                InstallError::TempCreation { .. } => "TempCreation",
+                InstallError::Write { .. } => "Write",
+                InstallError::FileSync { .. } => "FileSync",
+                InstallError::Commit { .. } => "Commit",
+                other => panic!("{fault:?} failed as {other:?} instead of {expected}"),
+            };
+            assert_eq!(actual, expected);
+            assert!(!final_path.exists(), "{expected} stages no final");
+        }
+        assert_eq!(dir_names(&out), ["residue.tmp"], "no staged temp lingers");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_failed_parent_sync_still_reports_the_receipt_with_a_warning() {
+        let base = temp_dir("install-warning");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+        let final_path = out.join("pic.webp");
+
+        let (receipt, warning) =
+            install_with_fault(&context, &final_path, b"bytes", Fault::ParentSync)
+                .expect("a sync failure is not a conversion failure");
+        assert_eq!(receipt.bytes, 5);
+        let warning = warning.expect("the sync failure is reported");
+        assert!(
+            warning.0.contains("sync"),
+            "the warning says what: {warning}"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), b"bytes");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_escaping_final_is_refused_outside_the_output() {
+        let base = temp_dir("install-outside");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+
+        for final_path in [base.join("evil.webp"), out.clone()] {
+            let error = install(&context, &final_path, b"bytes").unwrap_err();
+            assert!(
+                matches!(error, InstallError::OutsideOutput { .. }),
+                "an escaping final is refused: {error}"
+            );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(!base.join("evil.webp").exists());
+        assert!(!out.exists(), "refusal creates nothing");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn long_windows_paths_install_within_runner_policy() {
+        let base = temp_dir("install-long");
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let out = base.join("out");
+        let context = boundary(&source, &out);
+
+        let long: String = std::iter::repeat_n('n', 180).collect();
+        let final_path = out.join(&long).join("pic.webp");
+        let (receipt, _) = install(&context, &final_path, b"bytes").expect("long install");
+        assert_eq!(receipt.bytes, 5);
+        assert_eq!(fs::read(&final_path).unwrap(), b"bytes");
         fs::remove_dir_all(base).unwrap();
     }
 }
