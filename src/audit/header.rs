@@ -514,6 +514,26 @@ impl Audit {
             })
             // Sirv pairing lives in the Open menu; the reconciliation strip below
             // owns its status and actions once paired.
+            // Persistent beside the view toggle so pairing is discoverable:
+            // the menu buried it and users never found it. Selected when
+            // paired, so the paired state stays visible above the strip.
+            .child(
+                div().debug_selector(|| "sirv-pair-header".into()).child(
+                    Button::new("sirv-pair-header")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Globe)
+                        .label("Sirv")
+                        .tooltip(if self.sirv_pairing.is_some() {
+                            "Paired with Sirv — see status below the header"
+                        } else {
+                            "Pair a Sirv folder with this local folder"
+                        })
+                        .selected(self.sirv_pairing.is_some())
+                        .disabled(sirv_disabled)
+                        .on_click(cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx))),
+                ),
+            )
             // One button, not a pair: the views exclude each other. The icon
             // mirrors the layout on screen, so the grid never wears a burger
             // menu, and the tooltip names the destination a click reaches.
