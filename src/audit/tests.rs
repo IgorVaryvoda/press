@@ -3748,42 +3748,47 @@ fn a_symlinked_source_uses_one_identity_for_its_output(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn child_folder_rows_reset_to_the_top_after_navigation(cx: &mut TestAppContext) {
-    let root = scan_fixture("folder-row-scroll");
-    for index in 0..12 {
+fn opening_a_folder_centers_the_sidebar_tree_on_it(cx: &mut TestAppContext) {
+    let root = scan_fixture("tree-centering");
+    // Enough siblings that the last child sits far below the fold: selected
+    // but nowhere on screen, unless the navigation reveals it.
+    for index in 0..40 {
         std::fs::create_dir_all(root.join(format!("child-{index:02}"))).unwrap();
     }
     let (audit, cx) = finding_audit(cx);
-    let browsed = scan::browse(&root, &root.join(scan::OUTPUT_DIR)).unwrap();
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
 
-    audit.update_in(cx, |audit, window, cx| {
-        audit
-            .folder_scroll
-            .scroll_to_item_strict(8, ScrollStrategy::Top);
+    let deep = root.join("child-39");
+    audit.update(cx, |audit, cx| audit.request_path(deep.clone(), cx));
+    cx.run_until_parked();
+
+    let index = audit.read_with(cx, |audit, cx| {
+        let tree = audit.tree_state.read(cx);
+        let id = audit
+            .tree_paths
+            .iter()
+            .find_map(|(id, path)| (path == &deep).then(|| id.clone()))
+            .expect("the open folder is in the tree");
+        // The reveal centers what the selection names.
         assert_eq!(
-            audit
-                .folder_scroll
-                .0
-                .borrow()
-                .deferred_scroll_to_item
-                .as_ref()
-                .unwrap()
-                .item_index,
-            8
+            tree.selected_item().map(|item| item.id.to_string()),
+            Some(id.clone())
         );
-        audit.install_browse(browsed, root.clone(), window, cx);
-        assert_eq!(
-            audit
-                .folder_scroll
-                .0
-                .borrow()
-                .deferred_scroll_to_item
-                .as_ref()
-                .unwrap()
-                .item_index,
-            0
-        );
+        tree.index_of(&id.into())
+            .expect("the open folder has a row")
     });
+    // Drawn after the navigation: the reveal already asked for this row, so a
+    // frame either honours it or leaves the row where the scroll was.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // Tree rows carry their debug selector on the inner navigation div, not
+    // the row item, which is how the disclosure tests find them too.
+    let selector = Box::leak(format!("folder-open-{index}").into_boxed_str());
+    assert!(
+        cx.debug_bounds(selector).is_some(),
+        "the open folder's tree row is on screen"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -4117,10 +4122,10 @@ fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| {
         assert!(audit.entries.is_empty(), "no HEIC is decoded");
         assert_eq!(audit.skipped_heic, 1);
-        let stats = audit.stats_line(0);
+        let stats = audit.status_line(0);
         assert!(
             stats.contains("1 HEIC skipped (not supported yet)"),
-            "the header owes the user the count: {stats}"
+            "the status bar owes the user the count: {stats}"
         );
     });
     assert!(cx.debug_bounds("empty-folder-message").is_some());
@@ -5288,4 +5293,80 @@ fn a_run_that_converted_nothing_still_lays_out_the_column_holding_its_failures(
         "the list still shows the row its run failed"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The new chrome states its facts in strings the tests can read: the output
+/// plan in the status bar, the savings beside the selection, and the findings
+/// behind both the chips and the narrow-window menu.
+#[gpui_kit::test]
+fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.format = Format::WebP;
+        audit.quality = Quality::lossy(80.);
+        audit.max_edge = MaxEdge::FULL;
+        assert_eq!(audit.output_plan(), "WEBP q80 → optimized/");
+        audit.max_edge = MaxEdge(Some(2400));
+        assert_eq!(audit.output_plan(), "WEBP q80 · 2400px → optimized/");
+        audit.quality = Quality::LOSSLESS;
+        audit.max_edge = MaxEdge::FULL;
+        assert_eq!(audit.output_plan(), "WEBP lossless → optimized/");
+
+        audit.entries = vec![
+            entry("a.png", 8, 8, 1000, ImageFormat::Png),
+            entry("b.png", 8, 8, 1000, ImageFormat::Png),
+        ];
+        audit.visible = vec![0, 1];
+        audit.selected = HashSet::from([0, 1]);
+        audit.selected_target_count = 2;
+        audit.selected_target_bytes = 2000;
+        audit.estimate = Some((160, 2));
+        assert_eq!(
+            audit.savings_note(),
+            Some("· ≈160 B output, 92% saved".to_string())
+        );
+        audit.estimate = Some((2200, 2));
+        assert_eq!(
+            audit.savings_note(),
+            Some("· ≈2.1 KB output, 10% larger".to_string())
+        );
+        audit.estimate = None;
+        assert_eq!(audit.savings_note(), None);
+
+        audit.heavy = 0;
+        audit.mislabelled = 3;
+        let findings = audit.available_findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].0, Finding::Mislabelled);
+        assert_eq!(findings[0].2, "3 mislabelled");
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("status-bar").is_some());
+    assert!(cx.debug_bounds("audit-header").is_some());
+}
+#[gpui_kit::test]
+fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        audit.batch_folders = Some(2);
+        audit.entries = vec![
+            entry("a.png", 8, 8, 256, ImageFormat::Png),
+            entry("b.png", 8, 8, 256, ImageFormat::Png),
+        ];
+        audit.visible = vec![0, 1];
+        audit.visible_bytes = 512;
+        assert_eq!(audit.status_line(2), "2 folders, 2 images · 512 B");
+        audit.batch_folders = None;
+        audit.folders = Vec::new();
+        audit.browser_output_root = PathBuf::from("/nowhere");
+        assert_eq!(audit.status_line(2), "2 images · 512 B");
+        audit.visible = vec![0];
+        audit.visible_bytes = 256;
+        assert_eq!(audit.status_line(1), "1 of 2 images · 256 B");
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("status-bar").is_some(),
+        "the totals stay pinned to the window foot"
+    );
 }

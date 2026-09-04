@@ -123,7 +123,7 @@ impl Audit {
     /// Everything the scan could not take at face value, in one line rather than
     /// three scattered ones. The mislabelled count is a button: it is the audit's best
     /// finding, and a number you cannot act on is a dead end.
-    pub(super) fn notices(&self, _cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+    pub(super) fn notices(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let mut parts = Vec::new();
         if !self.unreadable.is_empty() {
             parts.push(format!(
@@ -168,13 +168,168 @@ impl Audit {
         // Left-aligned and only as wide as its text. A full-bleed box for six words
         // was a bigger shape on screen than the finding it was reporting. Findings
         // you can act on (heavy, mislabelled) live as chips in the toolbar; this
-        // row is only for things that went wrong.
+        // row is only for things that went wrong. One line tall unless opened:
+        // a long file list used to push the whole list down.
+        let expanded = self.notices_expanded;
         Some(
-            Alert::warning("notices", parts.join("  ·  "))
-                .icon(IconName::TriangleAlert)
-                .py_1()
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .when(!expanded, |row| row.whitespace_nowrap().text_ellipsis())
+                        .child(
+                            Alert::warning("notices", parts.join("  ·  "))
+                                .icon(IconName::TriangleAlert)
+                                .py_1(),
+                        ),
+                )
+                .child(
+                    Button::new("notices-toggle")
+                        .small()
+                        .ghost()
+                        .label(if expanded { "Less" } else { "Details" })
+                        .tooltip(if expanded {
+                            "Fold the warning back to one line"
+                        } else {
+                            "Show every file the warning names"
+                        })
+                        .on_click(cx.listener(|audit, _, _, cx| {
+                            audit.notices_expanded = !audit.notices_expanded;
+                            cx.notify();
+                        })),
+                )
                 .into_any_element(),
         )
+    }
+
+    /// Folders behind the current list. A dropped batch names its count
+    /// directly; a browsed folder counts the child folders the list can enter,
+    /// leaving out the output folder nobody browses into.
+    fn status_folder_count(&self) -> Option<usize> {
+        if let Some(count) = self.batch_folders {
+            return Some(count);
+        }
+        let count = self
+            .folders
+            .iter()
+            .filter(|path| !path.starts_with(&self.browser_output_root))
+            .count();
+        (count > 0).then_some(count)
+    }
+
+    /// The bottom line: what the list holds, and what the scan left out. The
+    /// totals live here alone now that the header carries no counts, so a long
+    /// list cannot scroll them away. A string rather than inline elements: what
+    /// a scan left out is as much a fact as what it found, and both are asserted on.
+    pub(super) fn status_line(&self, count: usize) -> String {
+        if self.sirv_scope == Some(SirvScope::OnlyRemote) {
+            return match count {
+                1 => "1 file only on Sirv".to_string(),
+                _ => format!("{count} files only on Sirv"),
+            };
+        }
+        let total = self.entries.len();
+        let images = if count == total {
+            match count {
+                1 => "1 image".to_string(),
+                _ => format!("{count} images"),
+            }
+        } else {
+            format!("{count} of {total} images")
+        };
+        let bytes = if count == 0 {
+            String::new()
+        } else {
+            format!(" · {}", format_bytes(self.visible_bytes()))
+        };
+        let warnings = self.warning_stats();
+        match self.status_folder_count() {
+            Some(folders) => {
+                let noun = if folders == 1 { "folder" } else { "folders" };
+                format!("{folders} {noun}, {images}{bytes}{warnings}")
+            }
+            None => format!("{images}{bytes}{warnings}"),
+        }
+    }
+
+    /// The conversion the verbs beside the list would run, in one glance. The
+    /// right side of the bar would otherwise sit empty until something is
+    /// ticked, and the target is exactly what an empty selection hides.
+    pub(super) fn output_plan(&self) -> String {
+        let edge = match self.max_edge.0 {
+            None => String::new(),
+            Some(edge) => format!(" · {edge}px"),
+        };
+        format!(
+            "{} {}{} → {}",
+            self.format.display(),
+            self.quality.label(),
+            edge,
+            self.output.label(),
+        )
+    }
+
+    /// The bar pinned to the window foot. One fixed height in every state, so
+    /// the list above never moves when the selection or the run state changes.
+    pub(super) fn status_bar(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let left = self.status_line(count);
+        let right = if self.converting {
+            let done = self.results.len() + self.failures.len();
+            let total = self
+                .active_target_count
+                .unwrap_or_else(|| self.target_count());
+            format!("{done} of {total} converting")
+        } else if self.target_count() > 0 {
+            match self.target_count() {
+                1 => "1 selected".to_string(),
+                selected => format!("{selected} selected"),
+            }
+        } else if !self.failures.is_empty() {
+            match self.failures.len() {
+                1 => "1 failed".to_string(),
+                failed => format!("{failed} failed"),
+            }
+        } else {
+            self.output_plan()
+        };
+        div()
+            .debug_selector(|| "status-bar".into())
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .h(px(28.))
+            .flex_shrink_0()
+            .bg(cx.theme().table_head)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .min_w_0()
+                    .child(left),
+            )
+            .child(
+                div()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .whitespace_nowrap()
+                    .flex_shrink_0()
+                    .child(right),
+            )
     }
 
     /// A finding shown as the control that narrows the list to it. Lit while it is the

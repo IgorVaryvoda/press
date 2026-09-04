@@ -649,7 +649,8 @@ impl Render for Audit {
                                     .label("Cancel")
                                     .on_click(cx.listener(|audit, _, _, cx| audit.cancel_scan(cx))),
                             )
-                        })),
+                        }))
+                        .children(self.shortcuts_open.then(|| self.shortcuts_overlay(cx))),
                 )
                 .on_drop(
                     cx.listener(|audit, paths: &gpui_kit::ExternalPaths, window, cx| {
@@ -992,9 +993,12 @@ impl Audit {
                         "home" => audit.step_cursor(isize::MIN / 2, extend, window, cx),
                         "end" => audit.step_cursor(isize::MAX / 2, extend, window, cx),
                         "escape" => {
-                            // Nothing is open here, so escape means "put the list down":
-                            // the ticked set clears, the way it does in every file manager.
-                            if !audit.selected.is_empty() && !audit.converting {
+                            // An open dialog outranks the selection: escape
+                            // puts the list down only when nothing covers it.
+                            if audit.shortcuts_open {
+                                audit.shortcuts_open = false;
+                                cx.notify();
+                            } else if !audit.selected.is_empty() && !audit.converting {
                                 audit.selected.clear();
                                 audit.selection_changed(cx);
                             }
@@ -1015,7 +1019,18 @@ impl Audit {
                         {
                             audit.open_settings(window, cx);
                         }
+                        // The filter box names its own shortcut in its
+                        // placeholder, so this has to honour it everywhere.
+                        "k" if event.keystroke.modifiers.control
+                            || event.keystroke.modifiers.platform =>
+                        {
+                            window.focus(&audit.filter_input.read(cx).focus_handle(cx), cx);
+                        }
                         "space" => audit.toggle_cursor_selection(cx),
+                        "?" => {
+                            audit.shortcuts_open = true;
+                            cx.notify();
+                        }
                         "enter" => {
                             if !audit.converting
                                 && let Some(entry) = audit.entry_at(audit.cursor)
@@ -1033,7 +1048,7 @@ impl Audit {
                     audit.request_paths(paths.paths().to_vec(), window, cx);
                 }),
             )
-            .child(self.header(count, window, cx))
+            .child(self.header(window, cx))
             // Audit on the left, the output panel on the right: the working
             // area and the settings column split below one shared header.
             .child(
@@ -1127,6 +1142,9 @@ impl Audit {
                             )
                     })),
             )
+            // Pinned to the window foot, below the list and the rail alike, so
+            // the folder and image totals stay on screen while the list scrolls.
+            .child(self.status_bar(count, cx))
             .into_any_element()
     }
 
@@ -1199,18 +1217,18 @@ impl Audit {
                 )
                 .into_any_element();
         }
-        // The sidebar owns child navigation when persistent; showing the strip
-        // too would navigate the same move twice and cost ~196 px of list.
-        let folder_rows =
-            (has_visible_folders && !self.browser_persistent(window)).then(|| self.folder_rows(cx));
+        // The sidebar owns child navigation now; the strip that used to sit
+        // here duplicated it and cost the list ~196 px.
         // The list runs to the window edge; hairlines above it, not a
-        // card floating in padding.
+        // card floating in padding. While a run owns the rows they dim a
+        // touch, so the eye reads "working" before the progress numbers.
         div()
             .flex()
             .flex_col()
             .flex_1()
             .overflow_hidden()
             .bg(cx.theme().table)
+            .when(self.converting, |content| content.opacity(0.9))
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|audit, event: &gpui_kit::MouseDownEvent, _, cx| {
@@ -1220,7 +1238,6 @@ impl Audit {
             // The action bar floats over this strip rather than over the last
             // row, so every file can be scrolled into the clear.
             .pb(px(panel::BAR_CLEARANCE))
-            .children(folder_rows)
             // Columns take a width, not a share, so the remainder after the
             // fixed ones has to be handed to the name column by hand.
             .child(if self.grid {

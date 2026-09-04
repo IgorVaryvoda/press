@@ -159,6 +159,25 @@ impl Audit {
             )
     }
 
+    /// The projected result beside the selection it describes. The Convert rail
+    /// carries the same numbers, but the decision happens here, next to the
+    /// verbs, so the readout earns its width by answering it.
+    pub(super) fn savings_note(&self) -> Option<String> {
+        let (projected, _) = self.estimate?;
+        let source = self.selected_target_bytes;
+        if source == 0 {
+            return None;
+        }
+        let growth = projected > source;
+        let percent = source.abs_diff(projected) as f32 / source as f32 * 100.;
+        Some(format!(
+            "· ≈{} output, {:.0}% {}",
+            format_bytes(projected),
+            percent,
+            if growth { "larger" } else { "saved" },
+        ))
+    }
+
     /// Left of the divider: the projected saving, or the selection once there is
     /// one. Both are facts about what the verbs beside them would act on.
     fn bar_readout(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -228,6 +247,13 @@ impl Audit {
                     self.visible.len()
                 )),
         )
+        .children(self.savings_note().map(|note| {
+            div()
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .whitespace_nowrap()
+                .child(note)
+        }))
         .child(
             Button::new("bar-select-all")
                 .small()

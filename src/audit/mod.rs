@@ -377,7 +377,6 @@ pub(crate) struct Audit {
     tree_loading: HashSet<PathBuf>,
     tree_expanded: HashSet<PathBuf>,
     tree_paths: HashMap<String, PathBuf>,
-    folder_scroll: UniformListScrollHandle,
     entries: Vec<Entry>,
     skipped_raw: usize,
     /// HEIC/HEIF files the scan counted but could not read, for the same reason:
@@ -647,6 +646,11 @@ pub(crate) struct Audit {
     /// The open rail, if any. A folder opens on Convert: it is the app's job,
     /// and an empty right-hand edge on launch would hide it.
     rail: Rail,
+    /// The keyboard shortcut list, open over the workspace like settings.
+    shortcuts_open: bool,
+    /// The notices row spills past one line. Collapsed, it holds its height
+    /// and the list below never moves; expanded on request for the full names.
+    notices_expanded: bool,
 }
 
 /// List order. Every column is sortable, and clicking the active one reverses it.
@@ -1255,6 +1259,10 @@ impl Audit {
         // A finding belongs to the folder it was found in. Carrying it over would show
         // the new folder narrowed to something nobody asked about.
         self.finding = None;
+        // The notices belong to the last folder too, and an open dialog or an
+        // expanded warning must not outlive the dataset it described.
+        self.shortcuts_open = false;
+        self.notices_expanded = false;
         self.filter_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
@@ -2023,7 +2031,8 @@ pub(crate) fn build_audit(
         let focus = cx.focus_handle();
         focus.focus(window, cx);
 
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name"));
+        let filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name (Ctrl+K)"));
         cx.subscribe(
             &filter_input,
             |audit: &mut Audit, input, event: &InputEvent, cx| {
@@ -2152,7 +2161,6 @@ pub(crate) fn build_audit(
             tree_loading: HashSet::new(),
             tree_expanded: HashSet::new(),
             tree_paths: HashMap::new(),
-            folder_scroll: UniformListScrollHandle::new(),
             entries,
             skipped_raw,
             skipped_heic,
@@ -2263,6 +2271,8 @@ pub(crate) fn build_audit(
             column_prefs,
             output,
             rail: Rail::None,
+            shortcuts_open: false,
+            notices_expanded: false,
         };
         audit.refresh_visible();
         audit.select_all_visible();

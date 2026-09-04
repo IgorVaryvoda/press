@@ -6,8 +6,6 @@ use std::sync::OnceLock;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 220.;
 pub(super) const SIDEBAR_MIN_WINDOW_WIDTH: f32 = 1040.;
-const FOLDER_ROW_HEIGHT: f32 = 34.;
-const MAX_VISIBLE_FOLDER_ROWS: usize = 5;
 
 pub(super) fn home_dir() -> Option<PathBuf> {
     static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -191,8 +189,6 @@ impl Audit {
         cx: &mut Context<Self>,
     ) {
         self.folders = folders.clone();
-        self.folder_scroll
-            .scroll_to_item_strict(0, ScrollStrategy::Top);
         self.remember_recent_folder(&root);
         self.install_tree_page(root, folders, cx);
     }
@@ -227,8 +223,15 @@ impl Audit {
         self.tree_children.insert(root.clone(), folders);
         self.tree_loaded.insert(root.clone());
         self.tree_loading.remove(&root);
-        self.tree_expanded.insert(root);
+        self.tree_expanded.insert(root.clone());
         self.rebuild_tree(cx);
+        // The strip above the list is gone, so the tree is the only way back
+        // to a sibling. Put the open folder in the middle of it on every
+        // navigation rather than leaving the scroll where the last folder was.
+        let current: gpui_kit::SharedString = tree_id(&root).into();
+        self.tree_state.update(cx, |state, cx| {
+            state.reveal_item(&current, ScrollStrategy::Center, cx);
+        });
     }
 
     pub(super) fn rebuild_tree(&mut self, cx: &mut Context<Self>) {
@@ -653,105 +656,6 @@ impl Audit {
                         )
                     })
                     .when(!no_folder_matches, |folders| folders.child(tree)),
-            )
-            .into_any_element()
-    }
-
-    pub(super) fn folder_rows(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let output = self.browser_output_root();
-        let folders = Arc::new(
-            self.folders
-                .iter()
-                .filter(|path| !path.starts_with(&output))
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
-        let count = folders.len();
-        let height = FOLDER_ROW_HEIGHT * count.min(MAX_VISIBLE_FOLDER_ROWS) as f32;
-        let rows = uniform_list(
-            "folder-rows",
-            count,
-            cx.processor(move |_audit, range: Range<usize>, _, cx| {
-                let folders = folders.clone();
-                range
-                    .filter_map(|index| {
-                        let path = folders.get(index)?.clone();
-                        let name = path_label(&path);
-                        let hover = path.display().to_string();
-                        let selector = format!("child-folder:{name}");
-                        Some(
-                            div()
-                                .id(("child-folder", index))
-                                .debug_selector(move || selector.clone())
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(hover.clone()).build(window, cx)
-                                })
-                                .child(
-                                    ListItem::new(format!("child-folder-{index}"))
-                                        .w_full()
-                                        .h(px(FOLDER_ROW_HEIGHT))
-                                        .px_3()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(Icon::new(IconName::Folder).size_4())
-                                                .child(name),
-                                        )
-                                        .on_click(cx.listener(move |audit, _, _, cx| {
-                                            audit.request_path(path.clone(), cx);
-                                        })),
-                                )
-                                .into_any_element(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .track_scroll(&self.folder_scroll)
-        .h(px(height));
-
-        div()
-            .debug_selector(|| "child-folders".into())
-            .flex()
-            .flex_col()
-            .flex_none()
-            .bg(cx.theme().table)
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .h(px(26.))
-                    .flex()
-                    .items_center()
-                    .px_3()
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("IN THIS FOLDER · {count}")),
-            )
-            .child(
-                div()
-                    .relative()
-                    .h(px(height))
-                    .overflow_hidden()
-                    .child(rows)
-                    .when(count > MAX_VISIBLE_FOLDER_ROWS, |list| {
-                        list.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .right_0()
-                                .bottom_0()
-                                .w(Scrollbar::width())
-                                .child(
-                                    Scrollbar::vertical(&self.folder_scroll)
-                                        .mode(ScrollbarMode::Always)
-                                        .viewport_from_layout(),
-                                ),
-                        )
-                    }),
             )
             .into_any_element()
     }

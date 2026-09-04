@@ -1,35 +1,12 @@
-//! The header line above the table: counts, filter box, view switch.
+//! The header line above the table: source, filter box, view switch.
 
-use super::toolbar::segment;
 use super::*;
 
 impl Audit {
-    /// The primary count beside the breadcrumb: what the list is showing.
-    fn primary_stats(&self, count: usize) -> String {
-        if self.sirv_scope == Some(SirvScope::OnlyRemote) {
-            format!("{count} files only on Sirv")
-        } else if let Some(folders) = self.batch_folders {
-            format!(
-                "{folders} folders · {count} images · {}",
-                format_bytes(self.visible_bytes())
-            )
-        } else if self.batch_size.is_some() && count == self.entries.len() {
-            format_bytes(self.visible_bytes())
-        } else if count == self.entries.len() {
-            format!("{count} images · {}", format_bytes(self.visible_bytes()))
-        } else {
-            format!(
-                "{count} of {} images · {}",
-                self.entries.len(),
-                format_bytes(self.visible_bytes())
-            )
-        }
-    }
-
-    /// What a scan left out. Rendered muted beside the primary count so a
-    /// warning never hides the count it qualifies; empty when nothing was
-    /// skipped, so the common case stays one short line.
-    fn warning_stats(&self) -> String {
+    /// What a scan left out. The status bar owns the folder totals, so this
+    /// renders there, muted after the counts; empty when nothing was skipped,
+    /// so the common case stays one short line.
+    pub(super) fn warning_stats(&self) -> String {
         let mut warnings = String::new();
         if self.skipped_raw > 0 {
             warnings.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
@@ -60,11 +37,236 @@ impl Audit {
         warnings
     }
 
-    /// The counts beside the breadcrumb. A string rather than inline elements: what
-    /// a scan left out is as much a fact as what it found, and both are asserted on.
-    #[cfg(test)]
-    pub(super) fn stats_line(&self, count: usize) -> String {
-        format!("{}{}", self.primary_stats(count), self.warning_stats())
+    /// The findings the list can narrow to right now, with the label and
+    /// tooltip each chip would carry. Listed once so the inline chips and the
+    /// narrow-window menu cannot disagree.
+    pub(super) fn available_findings(&self) -> Vec<(Finding, IconName, String, &'static str)> {
+        let mut findings = Vec::new();
+        // The audit reads bytes per pixel for every row and then asks you to
+        // find the heavy ones yourself. These are that answer, as the control
+        // that narrows the list to them.
+        if self.heavy > 0 {
+            findings.push((
+                Finding::Heavy,
+                IconName::TriangleAlert,
+                format!("{} heavy", self.heavy),
+                "Files carrying more bytes per pixel than a photograph \
+                 needs. Click to show only them.",
+            ));
+        }
+        // What the last run could not convert. Only here while there is
+        // something to show: a chip that is always present would be a filter
+        // for an empty list on every folder that converted cleanly.
+        if !self.failures.is_empty() {
+            findings.push((
+                Finding::Failed,
+                IconName::CircleX,
+                format!("{} failed", self.failures.len()),
+                "Files the last run could not convert. Click to show only \
+                 them, then convert them again once the cause is fixed.",
+            ));
+        }
+        if self.mislabelled > 0 {
+            findings.push((
+                Finding::Mislabelled,
+                IconName::TriangleAlert,
+                format!("{} mislabelled", self.mislabelled),
+                "Files whose bytes are not the format their extension \
+                 claims. Click to show only them.",
+            ));
+        }
+        if acquisition::SHOW_ACQUISITION_EXTRAS && self.marketplace > 0 {
+            findings.push((
+                Finding::Marketplace,
+                IconName::TriangleAlert,
+                format!("{} preflight", self.marketplace),
+                "Marketplace file preflight: 1400×1400, at most 250 KB, and a truthful extension. Review the background visually.",
+            ));
+        }
+        findings
+    }
+
+    /// The finding controls for this width. Wide windows show every finding as
+    /// its own chip; below 900px four chips plus the filter and the view
+    /// toggle no longer fit, so one menu carries them all.
+    fn findings_controls(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let findings = self.available_findings();
+        if width >= 900. {
+            return div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .children(findings.iter().map(|(finding, icon, label, tooltip)| {
+                    let chip = self
+                        .finding_button(*finding, icon.clone(), label.clone(), tooltip, cx)
+                        .into_any_element();
+                    // The failures keep this selector, so the run that
+                    // produced them stays one lookup away.
+                    if *finding == Finding::Failed {
+                        div()
+                            .debug_selector(|| "finding-failed".into())
+                            .child(chip)
+                            .into_any_element()
+                    } else {
+                        chip
+                    }
+                }))
+                .into_any_element();
+        }
+        if findings.is_empty() {
+            return div().into_any_element();
+        }
+        let total: usize = findings
+            .iter()
+            .map(|(finding, _, _, _)| match finding {
+                Finding::Failed => self.failures.len(),
+                Finding::Heavy => self.heavy,
+                Finding::Mislabelled => self.mislabelled,
+                Finding::Marketplace => self.marketplace,
+            })
+            .sum();
+        let active = self.finding;
+        let source = cx.entity().downgrade();
+        let has_failed = findings
+            .iter()
+            .any(|(finding, _, _, _)| *finding == Finding::Failed);
+        let menu = div().debug_selector(|| "findings-menu".into()).child(
+            Button::new("findings-menu")
+                .small()
+                .icon(IconName::TriangleAlert)
+                .label(format!("Findings ({total})"))
+                .tooltip("Narrow the list to one finding")
+                .selected(active.is_some())
+                .when(active.is_none(), |button| button.ghost())
+                .when(active.is_some(), |button| button.warning())
+                .disabled(self.converting)
+                .dropdown_menu(move |menu, _, _| {
+                    findings
+                        .iter()
+                        .fold(menu, |menu, (finding, icon, label, _)| {
+                            let finding = *finding;
+                            let label = label.clone();
+                            let source = source.clone();
+                            menu.item(
+                                PopupMenuItem::new(label)
+                                    .icon(icon.clone())
+                                    .checked(active == Some(finding))
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(audit) = source.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.set_finding(finding, cx)
+                                            });
+                                        }
+                                    }),
+                            )
+                        })
+                }),
+        );
+        // The failures keep their own selector in both shapes, so the run that
+        // produced them stays one lookup away however narrow the window is.
+        if has_failed {
+            div()
+                .debug_selector(|| "finding-failed".into())
+                .child(menu)
+                .into_any_element()
+        } else {
+            menu.into_any_element()
+        }
+    }
+
+    /// Every shortcut the list answers to, in one place. The window already
+    /// moves this way, but nothing said so, and a shortcut nobody names is one
+    /// nobody finds. The dialog is state, not a rail: it changes nothing.
+    pub(super) fn shortcuts_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        const SHORTCUTS: [(&str, &str); 9] = [
+            ("↑ ↓ ← →", "Move between images"),
+            ("PgUp PgDn Home End", "Jump through the list"),
+            ("Shift + move", "Extend the selection"),
+            ("Space", "Tick the row"),
+            ("Enter", "Compare original and output"),
+            ("Ctrl/⌘ + A", "Select everything shown"),
+            ("Ctrl/⌘ + K", "Focus the filter box"),
+            ("Ctrl/⌘ + ,", "Open settings"),
+            ("Esc", "Close dialogs, then clear the selection"),
+        ];
+        div()
+            .debug_selector(|| "shortcuts-card".into())
+            .w(px(400.))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .rounded_lg()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .font_family("SF Pro Display")
+                    .text_size(px(15.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child("Keyboard shortcuts"),
+            )
+            .children(SHORTCUTS.iter().map(|(keys, what)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .flex_shrink_0()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(*keys),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(*what),
+                    )
+            }))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Press Esc or click outside to close."),
+            )
+            .into_any_element()
+    }
+
+    /// The shortcut list floating over the list, beside the folder overlay. It
+    /// lives inside the workspace tree so focus never leaves the list and
+    /// Escape reaches the handler that closes it.
+    pub(super) fn shortcuts_overlay(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        div()
+            .id("shortcuts-overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().background.opacity(0.55))
+                    .debug_selector(|| "shortcuts-backdrop".into())
+                    .on_mouse_down(
+                        gpui_kit::MouseButton::Left,
+                        cx.listener(|audit, _, _, cx| {
+                            audit.shortcuts_open = false;
+                            cx.notify();
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+            .child(div().relative().occlude().child(self.shortcuts_view(cx)))
+            .into_any_element()
     }
 
     /// Switching list/gallery refills the thumbnail cache: the list needs 96 px
@@ -86,12 +288,7 @@ impl Audit {
     /// Which folder this is, how to get to another one, and the two controls
     /// that narrow the list. One row: the second strip was carrying a filter box
     /// and two chips across the whole window, and cost the list forty pixels.
-    pub(super) fn header(
-        &self,
-        count: usize,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let source_icon = if self.batch_folders.is_some() {
             IconName::Folder
         } else if self.batch_size.is_some() {
@@ -136,8 +333,6 @@ impl Audit {
         let can_reveal = reveal_root.is_dir();
         let sirv_disabled =
             self.converting || self.batch_folders.is_some() || self.scan_blocks_delivery();
-        let primary_stats = self.primary_stats(count);
-        let warning_stats = self.warning_stats();
         div()
             .debug_selector(|| "audit-header".into())
             .flex()
@@ -150,7 +345,6 @@ impl Audit {
             .border_b_1()
             .border_color(cx.theme().border)
             // One named source control replaces three adjacent icon-only openers.
-            // Counts remain metadata beside it, on the same line.
             .child(
                 div()
                     .flex()
@@ -160,27 +354,20 @@ impl Audit {
                     .min_w_0()
                     .min_w(px(260.))
                     .children(tree_collapsed.then(|| {
-                        div()
-                            .debug_selector(|| "folder-tree-toggle".into())
-                            .child(
-                                Button::new("folder-tree-toggle")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::PanelLeft)
-                                    .selected(self.browser_overlay)
-                                    .tooltip("Browse folders")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, window, cx| {
-                                        audit.toggle_browser(window, cx)
-                                    })),
-                            )
+                        div().debug_selector(|| "folder-tree-toggle".into()).child(
+                            Button::new("folder-tree-toggle")
+                                .small()
+                                .ghost()
+                                .icon(IconName::PanelLeft)
+                                .selected(self.browser_overlay)
+                                .tooltip("Browse folders")
+                                .disabled(self.converting)
+                                .on_click(cx.listener(|audit, _, window, cx| {
+                                    audit.toggle_browser(window, cx)
+                                })),
+                        )
                     }))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(breadcrumbs),
-                    )
+                    .child(div().min_w_0().overflow_hidden().child(breadcrumbs))
                     .child(
                         Button::new("source-picker")
                             .small()
@@ -246,42 +433,9 @@ impl Audit {
                                         }),
                                 )
                             }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_size(px(11.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().foreground)
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(primary_stats),
-                            )
-                            .when(!warning_stats.is_empty(), |row| {
-                                row.child(
-                                    div()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .min_w_0()
-                                        .child(warning_stats),
-                                )
-                            }),
                     ),
             )
-            // The two controls that narrow the list, in the same row as the
-            // counts they narrow.
+            // The two controls that narrow the list.
             .child(
                 div()
                     .w(px(242.))
@@ -308,9 +462,7 @@ impl Audit {
                                 .disabled(self.converting || self.filter.is_empty())
                                 .on_click(cx.listener(|audit, _, window, cx| {
                                     let input = audit.filter_input.clone();
-                                    input.update(cx, |input, cx| {
-                                        input.set_value("", window, cx)
-                                    });
+                                    input.update(cx, |input, cx| input.set_value("", window, cx));
                                     audit.set_filter(String::new(), cx);
                                     window.focus(&input.read(cx).focus_handle(cx), cx);
                                 })),
@@ -339,53 +491,8 @@ impl Audit {
                         .on_click(cx.listener(|audit, _, _, cx| audit.toggle_subfolders(cx))),
                 ),
             )
-            // The audit reads bytes per pixel for every row and then asks you to
-            // find the heavy ones yourself. These are that answer, as the control
-            // that narrows the list to them.
-            .children((self.heavy > 0).then(|| {
-                self.finding_button(
-                    Finding::Heavy,
-                    IconName::TriangleAlert,
-                    format!("{} heavy", self.heavy),
-                    "Files carrying more bytes per pixel than a photograph \
-                     needs. Click to show only them.",
-                    cx,
-                )
-            }))
-            // What the last run could not convert. Only here while there is
-            // something to show: a chip that is always present would be a filter
-            // for an empty list on every folder that converted cleanly.
-            .children((!self.failures.is_empty()).then(|| {
-                div().debug_selector(|| "finding-failed".into()).child(
-                    self.finding_button(
-                        Finding::Failed,
-                        IconName::CircleX,
-                        format!("{} failed", self.failures.len()),
-                        "Files the last run could not convert. Click to show only \
-                         them, then convert them again once the cause is fixed.",
-                        cx,
-                    ),
-                )
-            }))
-            .children((self.mislabelled > 0).then(|| {
-                self.finding_button(
-                    Finding::Mislabelled,
-                    IconName::TriangleAlert,
-                    format!("{} mislabelled", self.mislabelled),
-                    "Files whose bytes are not the format their extension \
-                     claims. Click to show only them.",
-                    cx,
-                )
-            }))
-            .children((acquisition::SHOW_ACQUISITION_EXTRAS && self.marketplace > 0).then(|| {
-                self.finding_button(
-                    Finding::Marketplace,
-                    IconName::TriangleAlert,
-                    format!("{} preflight", self.marketplace),
-                    "Marketplace file preflight: 1400×1400, at most 250 KB, and a truthful extension. Review the background visually.",
-                    cx,
-                )
-            }))
+            // One control per finding on wide windows, one menu below 900px.
+            .child(self.findings_controls(width, cx))
             .when(acquisition::SHOW_ACQUISITION_EXTRAS, |header| {
                 header.child(
                     Button::new("copy-audit-report")
@@ -408,27 +515,42 @@ impl Audit {
             })
             // Sirv pairing lives in the Open menu; the reconciliation strip below
             // owns its status and actions once paired.
-            // The view toggle sits at the far end of the window: it changes how
-            // the list below is drawn and nothing else. A segmented pair keeps a
-            // stable width; the old single button swapped its label and jittered
-            // the settings corner on every switch.
+            // One button, not a pair: the views exclude each other. The icon
+            // mirrors the layout on screen, so the grid never wears a burger
+            // menu, and the tooltip names the destination a click reaches.
             .child(
-                ButtonGroup::new("view-grid")
+                Button::new("view-grid")
                     .small()
-                    .compact()
-                    .children([
-                        segment("view-list", "List", !self.grid).disabled(self.converting),
-                        segment("view-gallery", "Grid", self.grid).disabled(self.converting),
-                    ])
-                    .on_click(cx.listener(|audit, clicked: &Vec<usize>, _, cx| {
+                    .outline()
+                    .icon(if self.grid {
+                        IconName::LayoutDashboard
+                    } else {
+                        IconName::Menu
+                    })
+                    .tooltip(if self.grid {
+                        "Show the audit as a list"
+                    } else {
+                        "Show the images as a gallery"
+                    })
+                    .disabled(self.converting)
+                    .on_click(cx.listener(|audit, _, _, cx| {
                         if audit.converting {
                             return;
                         }
-                        let grid = clicked.first() == Some(&1);
-                        if grid == audit.grid {
-                            return;
-                        }
-                        audit.set_grid(grid, cx);
+                        audit.set_grid(!audit.grid, cx);
+                    })),
+            )
+            .child(
+                // The full shortcut list, one key away. Text, not an icon: no
+                // icon in the set says "keyboard" on its own.
+                Button::new("open-shortcuts")
+                    .small()
+                    .ghost()
+                    .label("?")
+                    .tooltip("Keyboard shortcuts (?)")
+                    .on_click(cx.listener(|audit, _, _, cx| {
+                        audit.shortcuts_open = true;
+                        cx.notify();
                     })),
             )
             .child(
