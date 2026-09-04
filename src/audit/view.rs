@@ -360,11 +360,39 @@ impl Audit {
                 .child(format!("Listing {}…", browser.path))
                 .into_any_element(),
             Some(Err(message)) => div()
-                .text_size(px(12.))
-                .text_color(cx.theme().yellow)
-                .child(message.clone())
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .debug_selector(|| "sirv-error".into())
+                        .text_size(px(12.))
+                        .text_color(cx.theme().yellow)
+                        .child(message.clone()),
+                )
+                .child(
+                    // This branch only renders once a listing has landed, so no
+                    // listing is ever in flight under it and the button stays live.
+                    div().debug_selector(|| "sirv-retry".into()).child(
+                        Button::new("sirv-retry")
+                            .outline()
+                            .small()
+                            .label("Retry")
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                if let Some(browser) = audit.sirv_browser.as_mut() {
+                                    Self::browse_sirv_path(browser, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                )
                 .into_any_element(),
             Some(Ok(nodes)) => {
+                // The filter narrows what is already on screen; it never lists
+                // again, so typing in a folder of hundreds costs no request.
+                let needle = self.sirv_browser_filter.trim().to_lowercase();
+                let total_folders = nodes.iter().filter(|node| node.is_folder()).count();
                 let mut rows: Vec<gpui_kit::AnyElement> = Vec::new();
                 if browser.path != "/" {
                     rows.push(
@@ -377,44 +405,76 @@ impl Audit {
                             .into_any_element(),
                     );
                 }
-                for (ix, node) in nodes.iter().filter(|node| node.is_folder()).enumerate() {
+                let mut shown: usize = 0;
+                for node in nodes.iter().filter(|node| node.is_folder()) {
                     let name = node
                         .filename
                         .rsplit('/')
                         .next()
                         .unwrap_or(&node.filename)
                         .to_string();
+                    if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    let ix = shown;
+                    shown += 1;
                     let descend_to = name.clone();
                     rows.push(
-                        Button::new(("sirv-dir", ix))
-                            .ghost()
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .label(name)
-                            .on_click(cx.listener(move |audit, _, _, cx| {
-                                audit.descend_sirv(descend_to.clone(), cx);
-                            }))
+                        div()
+                            .debug_selector(move || format!("sirv-dir-{ix}"))
+                            .child(
+                                Button::new(("sirv-dir", ix))
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::FolderOpen)
+                                    .label(name)
+                                    .on_click(cx.listener(move |audit, _, _, cx| {
+                                        audit.descend_sirv(descend_to.clone(), cx);
+                                    })),
+                            )
                             .into_any_element(),
                     );
                 }
-                if rows.is_empty() {
+                if shown == 0 {
                     rows.push(
                         div()
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("No subfolders.")
+                            .child(if !needle.is_empty() && total_folders > 0 {
+                                "No subfolders match."
+                            } else {
+                                "No subfolders."
+                            })
                             .into_any_element(),
                     );
                 }
                 div()
-                    .id("sirv-list")
                     .flex()
                     .flex_col()
                     .items_start()
-                    .gap_0p5()
-                    .max_h(px(280.))
-                    .overflow_y_scroll()
-                    .children(rows)
+                    .gap_2()
+                    .child(
+                        div()
+                            .debug_selector(|| "sirv-filter".into())
+                            .w_full()
+                            .child(
+                                Input::new(&self.sirv_browser_filter_input)
+                                    .small()
+                                    .cleanable(true)
+                                    .prefix(IconName::Search),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("sirv-list")
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap_0p5()
+                            .max_h(px(280.))
+                            .overflow_y_scroll()
+                            .children(rows),
+                    )
                     .into_any_element()
             }
         };

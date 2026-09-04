@@ -5437,3 +5437,106 @@ fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
         "the totals stay pinned to the window foot"
     );
 }
+
+fn sirv_folder(filename: &str) -> sirv::Node {
+    sirv::Node {
+        filename: filename.into(),
+        size: 0,
+        is_directory: true,
+        kind: None,
+    }
+}
+
+fn sirv_browser_audit(
+    audit: &gpui_kit::Entity<Audit>,
+    nodes: Option<Result<Vec<sirv::Node>, String>>,
+    cx: &mut gpui_kit::VisualTestContext,
+) {
+    audit.update(cx, |audit, cx| {
+        audit.sirv_browser = Some(SirvBrowser {
+            client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                sirv::Credentials {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                },
+            ))),
+            path: "/photos".into(),
+            needs_credentials: false,
+            nodes,
+            generation: 0,
+            session: 1,
+            focused: false,
+            focus: cx.focus_handle(),
+        });
+        cx.notify();
+    });
+}
+
+#[gpui_kit::test]
+fn sirv_browser_filter_shows_only_matching_folders(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    sirv_browser_audit(
+        &audit,
+        Some(Ok(vec![
+            sirv_folder("/photos/alpha"),
+            sirv_folder("/photos/beta"),
+            sirv_folder("/photos/alpine"),
+        ])),
+        cx,
+    );
+    audit.update(cx, |audit, cx| {
+        // The box edits the string the rows read; typing never lists again.
+        audit.sirv_browser_filter = "alp".into();
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("sirv-filter").is_some());
+    assert!(cx.debug_bounds("sirv-dir-0").is_some());
+    assert!(cx.debug_bounds("sirv-dir-1").is_some());
+    assert!(
+        cx.debug_bounds("sirv-dir-2").is_none(),
+        "beta is filtered out of the loaded listing, which is never re-listed"
+    );
+    audit.read_with(cx, |audit, _| {
+        let nodes = audit
+            .sirv_browser
+            .as_ref()
+            .and_then(|browser| browser.nodes.as_ref())
+            .expect("the listing stays loaded under the filter");
+        assert_eq!(
+            nodes.as_ref().expect("the listing is still ready").len(),
+            3,
+            "filtering hides rows without touching the loaded listing"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn sirv_browser_error_offers_a_retry(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    sirv_browser_audit(&audit, Some(Err("Sirv said 500: boom".into())), cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("sirv-error").is_some(),
+        "the message stays on screen next to the retry"
+    );
+    let retry = cx
+        .debug_bounds("sirv-retry")
+        .expect("a failed listing offers a retry");
+    let generation = audit.read_with(cx, |audit, _| {
+        audit
+            .sirv_browser
+            .as_ref()
+            .map(|browser| browser.generation)
+    });
+    cx.simulate_click(retry.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        let browser = audit.sirv_browser.as_ref().expect("the browser stays open");
+        assert_eq!(
+            Some(browser.generation),
+            generation.map(|generation| generation.wrapping_add(1)),
+            "retry re-runs the current path listing"
+        );
+        assert_eq!(browser.path, "/photos");
+    });
+}

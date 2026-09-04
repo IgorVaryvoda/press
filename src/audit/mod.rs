@@ -512,6 +512,12 @@ pub(crate) struct Audit {
     sirv_browser_generation: u64,
     /// The open remote-folder browser.
     sirv_browser: Option<SirvBrowser>,
+    /// Narrows the open Sirv browser to matching folder names. Lives on the
+    /// audit rather than the browser so opening and navigating listings needs
+    /// no new construction state; it filters the already-loaded listing only.
+    sirv_browser_filter: String,
+    /// Backs the Sirv browser filter box.
+    sirv_browser_filter_input: gpui_kit::Entity<InputState>,
     /// The open settings overlay.
     settings_panel: Option<SettingsPanel>,
     /// How the list is ordered.
@@ -2108,6 +2114,20 @@ pub(crate) fn build_audit(
             },
         )
         .detach();
+        let sirv_browser_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter folders"));
+        cx.subscribe(
+            &sirv_browser_filter_input,
+            |audit: &mut Audit, input, event: &InputEvent, cx| {
+                // The box owns the text; the string is what the rows read.
+                // Typing narrows the loaded listing and never lists again.
+                if matches!(event, InputEvent::Change) {
+                    audit.sirv_browser_filter = input.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let tree_state = cx.new(|cx| TreeState::new(cx));
         cx.subscribe(
             &tree_state,
@@ -2271,6 +2291,8 @@ pub(crate) fn build_audit(
             sirv_walk_cancel: None,
             sirv_browser_generation: 0,
             sirv_browser: None,
+            sirv_browser_filter: String::new(),
+            sirv_browser_filter_input,
             settings_panel: None,
             compare: None,
             local_ai_job: None,
