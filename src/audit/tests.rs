@@ -5540,3 +5540,69 @@ fn sirv_browser_error_offers_a_retry(cx: &mut TestAppContext) {
         assert_eq!(browser.path, "/photos");
     });
 }
+
+#[gpui_kit::test]
+fn sirv_filter_box_owns_its_keys(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    sirv_browser_audit(
+        &audit,
+        Some(Ok(vec![
+            sirv_folder("/photos/alpha"),
+            sirv_folder("/photos/beta"),
+        ])),
+        cx,
+    );
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selected.insert(0);
+        audit.selection_changed(cx);
+        // A live browser has taken its one-time focus already; otherwise the
+        // view's deferred focus would yank the focus below back out of the box.
+        audit
+            .sirv_browser
+            .as_mut()
+            .expect("the browser is open")
+            .focused = true;
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // Click to focus, the way a user reaches the box. The click itself is a
+    // separate path (the scrim does not occlude, so it also reaches the list
+    // marquee underneath — reported separately), so the selection is reset
+    // after it and this test owns the key path only.
+    let filter = cx
+        .debug_bounds("sirv-filter")
+        .expect("the browser filter box is visible");
+    cx.simulate_click(filter.center(), gpui_kit::Modifiers::none());
+    audit.update_in(cx, |audit, window, cx| {
+        assert!(
+            audit
+                .sirv_browser_filter_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window),
+            "the click lands in the filter box"
+        );
+        audit.selected.clear();
+        audit.selected.insert(0);
+        audit.selection_changed(cx);
+    });
+    // Typed text proves the box itself still receives keys.
+    cx.simulate_input("alp");
+    // A bare space is a list shortcut with no text, so it proves the shield:
+    // at the root it would toggle the row behind the modal.
+    cx.simulate_keystrokes("space");
+
+    audit.read_with(cx, |audit, cx| {
+        assert_eq!(
+            audit.selected,
+            HashSet::from([0]),
+            "a space typed in the filter box never reaches the list behind the modal"
+        );
+        assert_eq!(
+            audit.sirv_browser_filter_input.read(cx).value(),
+            "alp",
+            "the filter box kept the keys it swallowed"
+        );
+    });
+}

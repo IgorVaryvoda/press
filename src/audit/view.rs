@@ -454,9 +454,32 @@ impl Audit {
                     .items_start()
                     .gap_2()
                     .child(
+                        // The box is not in `text_input_focused`, so without
+                        // this every key typed here also reaches the audit
+                        // root: a space would toggle the row behind the modal,
+                        // enter would open it, the arrows would move its
+                        // cursor. Escape, tab and the editing keys keep going
+                        // so the browser still closes, focus still travels and
+                        // the box stays typeable; stopping those too would
+                        // swallow the very text it edits.
                         div()
                             .debug_selector(|| "sirv-filter".into())
                             .w_full()
+                            .on_key_down(cx.listener(|_, event: &gpui_kit::KeyDownEvent, _, cx| {
+                                let key = event.keystroke.key.as_str();
+                                let modifiers = &event.keystroke.modifiers;
+                                let plain = !modifiers.control
+                                    && !modifiers.platform
+                                    && !modifiers.alt
+                                    && !modifiers.function;
+                                let editing = matches!(key, "backspace" | "delete" | "tab")
+                                    || (plain
+                                        && key.chars().count() == 1
+                                        && key.chars().all(|c| c.is_alphanumeric()));
+                                if key != "escape" && !editing {
+                                    cx.stop_propagation();
+                                }
+                            }))
                             .child(
                                 Input::new(&self.sirv_browser_filter_input)
                                     .small()
