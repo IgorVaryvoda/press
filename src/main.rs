@@ -1814,7 +1814,24 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Opti
                                         });
                                     }
                                 }
+                            } else {
+                                // Installed while work was active: the run finishes
+                                // first, and the toast says what is waiting.
+                                audit.update(cx, |audit, cx| {
+                                    audit.notify_success(
+                                        "update",
+                                        "Update installed",
+                                        "Restart Press to use it",
+                                        cx,
+                                    );
+                                });
                             }
+                        } else if let Some(line) = update::notice() {
+                            // No update installed and the attempt said why: that
+                            // used to sit in the notice lane, now it toasts once.
+                            audit.update(cx, |audit, cx| {
+                                audit.notify_error("update", "Couldn’t update", line, cx);
+                            });
                         }
                         audit.update(cx, |_, cx| cx.notify());
                     })

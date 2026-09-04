@@ -452,8 +452,8 @@ pub(crate) struct Audit {
     /// The first few of those, named, as the notices line says them. Built when the
     /// map changes rather than per frame: that line is on screen for the whole run.
     failure_summary: String,
-    /// Files in the folder that claim to be images and will not decode, by name. A
-    /// count alone says a folder has a problem and gives you nowhere to look.
+    /// Files in the folder that claim to be images and will not decode, by name.
+    /// Counted nowhere inline: the scan toast names them once per dataset.
     unreadable: Vec<PathBuf>,
     /// Directories the scan could not enter, by path. Every number in the header is
     /// short while one of these exists, so they are named like `unreadable`.
@@ -659,8 +659,8 @@ pub(crate) struct Audit {
     sidebar_open: bool,
     /// The keyboard shortcut list, open over the workspace like settings.
     shortcuts_open: bool,
-    /// The notices row spills past one line. Collapsed, it holds its height
-    /// and the list below never moves; expanded on request for the full names.
+    /// The lane's overflow toggle. One flag for the whole lane, never per block,
+    /// so the count and the list below it never disagree.
     notices_expanded: bool,
 }
 
@@ -726,7 +726,8 @@ fn compare_entries(
 /// loading and failed, and the same fix.
 enum Listing {
     Walking,
-    Failed(String),
+    // The reason toasts once at the production site; nothing inline reads it.
+    Failed,
     Ready(HashMap<String, sirv::Node>),
 }
 
@@ -1925,15 +1926,10 @@ enum Finding {
     /// put them instead of three names on a toast nobody kept.
     Failed,
 }
-/// The lane's share of an unreadable-files finding: a count, never names. The
-/// names were announced in the scan toast; inline they truncate into a blob.
-fn unreadable_summary(count: usize) -> String {
-    format!("{count} would not decode")
-}
 
 impl Finding {
-    /// The one place a finding about a file is decided, so the count in the toolbar,
-    /// the filter it applies, and the chip in the row can never disagree. `Failed`
+    /// The one place a finding about a file is decided, so the count in the status
+    /// bar, the filter it applies, and the chip in the row can never disagree. `Failed`
     /// is not one of those: it is keyed by row, and `refresh_visible` answers it
     /// from the failure map instead.
     pub(super) fn holds(self, entry: &Entry) -> bool {

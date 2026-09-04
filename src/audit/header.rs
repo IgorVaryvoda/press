@@ -86,94 +86,6 @@ impl Audit {
         findings
     }
 
-    /// The finding controls for this width. Wide windows show every finding as
-    /// its own chip; below 900px four chips plus the filter and the view
-    /// toggle no longer fit, so one menu carries them all.
-    fn findings_controls(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let findings = self.available_findings();
-        if width >= 900. {
-            return div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .children(findings.iter().map(|(finding, icon, label, tooltip)| {
-                    let chip = self
-                        .finding_button(*finding, icon.clone(), label.clone(), tooltip, cx)
-                        .into_any_element();
-                    // The failures keep this selector, so the run that
-                    // produced them stays one lookup away.
-                    if *finding == Finding::Failed {
-                        div()
-                            .debug_selector(|| "finding-failed".into())
-                            .child(chip)
-                            .into_any_element()
-                    } else {
-                        chip
-                    }
-                }))
-                .into_any_element();
-        }
-        if findings.is_empty() {
-            return div().into_any_element();
-        }
-        let total: usize = findings
-            .iter()
-            .map(|(finding, _, _, _)| match finding {
-                Finding::Failed => self.failures.len(),
-                Finding::Heavy => self.heavy,
-                Finding::Mislabelled => self.mislabelled,
-                Finding::Marketplace => self.marketplace,
-            })
-            .sum();
-        let active = self.finding;
-        let source = cx.entity().downgrade();
-        let has_failed = findings
-            .iter()
-            .any(|(finding, _, _, _)| *finding == Finding::Failed);
-        let menu = div().debug_selector(|| "findings-menu".into()).child(
-            Button::new("findings-menu")
-                .small()
-                .icon(IconName::TriangleAlert)
-                .label(format!("Findings ({total})"))
-                .tooltip("Narrow the list to one finding")
-                .selected(active.is_some())
-                .when(active.is_none(), |button| button.ghost())
-                .when(active.is_some(), |button| button.warning())
-                .disabled(self.converting)
-                .dropdown_menu(move |menu, _, _| {
-                    findings
-                        .iter()
-                        .fold(menu, |menu, (finding, icon, label, _)| {
-                            let finding = *finding;
-                            let label = label.clone();
-                            let source = source.clone();
-                            menu.item(
-                                PopupMenuItem::new(label)
-                                    .icon(icon.clone())
-                                    .checked(active == Some(finding))
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(audit) = source.upgrade() {
-                                            audit.update(cx, |audit, cx| {
-                                                audit.set_finding(finding, cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                        })
-                }),
-        );
-        // The failures keep their own selector in both shapes, so the run that
-        // produced them stays one lookup away however narrow the window is.
-        if has_failed {
-            div()
-                .debug_selector(|| "finding-failed".into())
-                .child(menu)
-                .into_any_element()
-        } else {
-            menu.into_any_element()
-        }
-    }
-
     /// Every shortcut the list answers to, in one place. The window already
     /// moves this way, but nothing said so, and a shortcut nobody names is one
     /// nobody finds. The dialog is state, not a rail: it changes nothing.
@@ -454,13 +366,14 @@ impl Audit {
                             }),
                     ),
             )
-            // The two controls that narrow the list.
+            // The box narrows the list; erasing its text widens it back out.
+            // There is no Clear button: it sat dimmed for most of the audit's
+            // life and duplicated what backspace already does.
             .child(
                 div()
                     .w(px(242.))
                     .flex()
                     .items_center()
-                    .gap_1()
                     .flex_shrink_0()
                     .child(
                         div().flex_1().min_w_0().child(
@@ -469,29 +382,11 @@ impl Audit {
                                 .disabled(self.converting)
                                 .prefix(IconName::Search),
                         ),
-                    )
-                    // Always rendered, disabled when empty: the conditional Clear
-                    // used to pop the filter width on every keystroke.
-                    .child(
-                        div().debug_selector(|| "clear-filter".into()).child(
-                            Button::new("clear-filter")
-                                .small()
-                                .ghost()
-                                .label("Clear")
-                                .disabled(self.converting || self.filter.is_empty())
-                                .on_click(cx.listener(|audit, _, window, cx| {
-                                    let input = audit.filter_input.clone();
-                                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                                    audit.set_filter(String::new(), cx);
-                                    window.focus(&input.read(cx).focus_handle(cx), cx);
-                                })),
-                        ),
                     ),
             )
-            // Scope lives in the Open menu and the status bar now: the header
-            // is for narrowing the list, and scope defines the list itself.
-            // One control per finding on wide windows, one menu below 900px.
-            .child(self.findings_controls(width, cx))
+            // Scope lives in the Open menu and the status bar now, and the
+            // findings moved to the status bar under one icon: the header is
+            // for narrowing the list, and scope and findings define the list itself.
             .when(acquisition::SHOW_ACQUISITION_EXTRAS, |header| {
                 header.child(
                     Button::new("copy-audit-report")

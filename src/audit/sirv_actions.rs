@@ -346,7 +346,7 @@ impl Audit {
                     // be reported as "Sirv pull: 0 of 0, 1 failed", which named the
                     // wrong operation and left `files` looking like a walk still
                     // running.
-                    Err(message) => pairing.files = Listing::Failed(message),
+                    Err(_) => pairing.files = Listing::Failed,
                 }
                 if let Some(message) = walk_failure {
                     audit.notify_error("sirv-listing", "Couldn’t compare with Sirv", message, cx);
@@ -1042,7 +1042,7 @@ impl Audit {
     pub(super) fn refresh_sirv_counts(&mut self) {
         self.sirv_remote_only.clear();
         self.sirv_counts = match self.sirv_pairing.as_ref().map(|pairing| &pairing.files) {
-            None | Some(Listing::Walking) | Some(Listing::Failed(_)) => None,
+            None | Some(Listing::Walking) | Some(Listing::Failed) => None,
             Some(Listing::Ready(files)) => {
                 let mut to_push = 0;
                 let mut changed = 0;

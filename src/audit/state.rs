@@ -290,7 +290,7 @@ impl Audit {
             .as_ref()
             .and_then(|pairing| match &pairing.files {
                 Listing::Ready(files) => Some(files),
-                Listing::Walking | Listing::Failed(_) => None,
+                Listing::Walking | Listing::Failed => None,
             });
         let root = &self.root;
         let show_parent = self.show_parent();

@@ -120,97 +120,18 @@ impl Audit {
         )
     }
 
-    /// Everything the scan could not take at face value, in one line rather than
-    /// three scattered ones. The mislabelled count is a button: it is the audit's best
-    /// finding, and a number you cannot act on is a dead end.
-    pub(super) fn notices(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        let mut parts = Vec::new();
-        // Counts only. The names were announced in the scan toast; inline they
-        // truncate into a blob nobody can read.
-        if !self.unreadable.is_empty() {
-            parts.push(unreadable_summary(self.unreadable.len()));
-        }
-        if !self.walk_errors.is_empty() {
-            parts.push(format!("{} folders unreachable", self.walk_errors.len()));
-        }
-        if !self.failures.is_empty() {
-            parts.push(format!(
-                "{} failed: {}",
-                self.failures.len(),
-                self.failure_summary
-            ));
-        }
-        // Behind the `updater` feature, this is what tells a windowed user their
-        // next launch will be different. Nothing renders while the updater is idle.
-        #[cfg(feature = "updater")]
-        if let Some(line) = crate::update::notice() {
-            parts.push(line);
-        }
-        if let Some(pairing) = &self.sirv_pairing
-            && let Listing::Failed(reason) = &pairing.files
-        {
-            parts.push(format!("could not list {}: {reason}", pairing.dir));
-        }
-        if parts.is_empty() {
-            return None;
-        }
-
-        // Left-aligned and only as wide as its text. A full-bleed box for six words
-        // was a bigger shape on screen than the finding it was reporting. Findings
-        // you can act on (heavy, mislabelled) live as chips in the toolbar; this
-        // row is only for things that went wrong. One line tall unless opened;
-        // scan findings render as counts here because their names live in the toast.
-        let expanded = self.notices_expanded;
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .when(!expanded, |row| row.whitespace_nowrap().text_ellipsis())
-                        .child(
-                            Alert::warning("notices", parts.join("  ·  "))
-                                .icon(IconName::TriangleAlert)
-                                .py_1(),
-                        ),
-                )
-                .child(
-                    Button::new("notices-toggle")
-                        .small()
-                        .ghost()
-                        .label(if expanded { "Less" } else { "Details" })
-                        .tooltip(if expanded {
-                            "Fold the warning back to one line"
-                        } else {
-                            "Show the whole warning"
-                        })
-                        .on_click(cx.listener(|audit, _, _, cx| {
-                            audit.notices_expanded = !audit.notices_expanded;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// Every notice in one stable lane. The workspace used to stack up to five
-    /// blocks that each appeared and vanished on their own, so the list below
-    /// jumped. One lane with a fixed priority order and a minimum height keeps
-    /// the list still: errors first, then the finished run, then Studio, then
-    /// local AI, then the spin preflight behind its extras gate. Each inner
-    /// block keeps its own selector; the lane root carries `notice-lane`.
+    /// Every notice in one stable lane. The workspace used to stack blocks that
+    /// each appeared and vanished on their own, so the list below jumped. One
+    /// lane with a fixed priority order and a minimum height keeps the list
+    /// still: the finished run first, then Studio, then local AI, then the spin
+    /// preflight behind its extras gate. Alerts (scan findings, transfer and
+    /// update outcomes) toast instead of sitting here. Each inner block keeps
+    /// its own selector; the lane root carries `notice-lane`.
     pub(super) fn notice_lane(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         // Element ids never reach `debug_bounds`, so each block rides in a
         // named wrapper: the lane root plus these names are the selector
         // contract the tests assert on.
         let mut blocks: Vec<(&'static str, gpui_kit::AnyElement)> = Vec::new();
-        if let Some(block) = self.notices(cx) {
-            blocks.push(("notice-lane-notices", block));
-        }
         if let Some(block) = self.conversion_notice(cx) {
             blocks.push(("notice-lane-conversion", block));
         }
@@ -228,8 +149,7 @@ impl Audit {
         if blocks.is_empty() {
             return None;
         }
-        // One flag for the whole lane: expanding the lane also unfolds the long
-        // warning text, so Details always means "show everything".
+        // One flag for the whole lane: Details always means "show everything".
         let count = blocks.len();
         let expanded = self.notices_expanded;
         let wrap = |name: &'static str, block: gpui_kit::AnyElement| {
@@ -402,37 +322,96 @@ impl Audit {
             )
             .child(
                 div()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .flex_shrink_0()
-                    .child(right),
+                    .children(self.findings_menu(cx))
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .whitespace_nowrap()
+                            .child(right),
+                    ),
             )
     }
 
-    /// A finding shown as the control that narrows the list to it. Lit while it is the
-    /// one in force, so the count and the list below it never disagree.
-    pub(super) fn finding_button(
-        &self,
-        finding: Finding,
-        icon: IconName,
-        label: String,
-        tooltip: &'static str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.finding == Some(finding);
-        Button::new(("finding", finding as usize))
-            .small()
-            .icon(icon)
-            .label(label)
-            .tooltip(tooltip)
-            // `set_finding` refuses to move the list under a running conversion, so
-            // the chip that asks for it says so rather than looking dead.
-            .disabled(self.converting)
-            .selected(active)
-            .when(!active, |button| button.ghost())
-            .when(active, |button| button.warning())
-            .on_click(cx.listener(move |audit, _, _, cx| audit.set_finding(finding, cx)))
+    /// Every finding under one icon in the bar's right group. The header used
+    /// to carry a chip per finding; chips plus the filter no longer fit the
+    /// header's job, so one menu carries them all. `None` when there is
+    /// nothing to narrow to, so the common case stays quiet. Lit while one is
+    /// in force, so the count and the list below it never disagree.
+    fn findings_menu(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let findings = self.available_findings();
+        if findings.is_empty() {
+            return None;
+        }
+        let total: usize = findings
+            .iter()
+            .map(|(finding, _, _, _)| match finding {
+                Finding::Failed => self.failures.len(),
+                Finding::Heavy => self.heavy,
+                Finding::Mislabelled => self.mislabelled,
+                Finding::Marketplace => self.marketplace,
+            })
+            .sum();
+        let summary = findings
+            .iter()
+            .map(|(_, _, label, _)| label.clone())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let active = self.finding;
+        let source = cx.entity().downgrade();
+        let has_failed = findings
+            .iter()
+            .any(|(finding, _, _, _)| *finding == Finding::Failed);
+        let menu = div().debug_selector(|| "findings-menu".into()).child(
+            Button::new("findings-menu")
+                .small()
+                .icon(IconName::TriangleAlert)
+                .tooltip(format!(
+                    "Findings ({total}): {summary} — narrow the list to one finding"
+                ))
+                .selected(active.is_some())
+                .when(active.is_none(), |button| button.ghost())
+                .when(active.is_some(), |button| button.warning())
+                // `set_finding` refuses to move the list under a running
+                // conversion, so the control that asks for it says so rather
+                // than looking dead.
+                .disabled(self.converting)
+                .dropdown_menu(move |menu, _, _| {
+                    findings
+                        .iter()
+                        .fold(menu, |menu, (finding, icon, label, _)| {
+                            let finding = *finding;
+                            let label = label.clone();
+                            let source = source.clone();
+                            menu.item(
+                                PopupMenuItem::new(label)
+                                    .icon(icon.clone())
+                                    .checked(active == Some(finding))
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(audit) = source.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.set_finding(finding, cx)
+                                            });
+                                        }
+                                    }),
+                            )
+                        })
+                }),
+        );
+        // The failures keep their own selector, so the run that produced them
+        // stays one lookup away.
+        Some(if has_failed {
+            div()
+                .debug_selector(|| "finding-failed".into())
+                .child(menu)
+                .into_any_element()
+        } else {
+            menu.into_any_element()
+        })
     }
 }

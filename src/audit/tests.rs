@@ -1194,12 +1194,6 @@ fn a_report_names_a_few_files_and_then_counts_the_rest() {
     );
 }
 
-#[test]
-fn the_lane_counts_unreadable_files_instead_of_naming_them() {
-    assert_eq!(unreadable_summary(1), "1 would not decode");
-    assert_eq!(unreadable_summary(4), "4 would not decode");
-}
-
 /// The audit's findings have to be reachable. Narrowing to one shows those rows and
 /// nothing else, and asking for the same one again widens the list back out.
 #[gpui_kit::test]
@@ -2240,7 +2234,7 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
-fn named_filter_clear_restores_the_audit(cx: &mut TestAppContext) {
+fn erasing_the_filter_text_restores_the_audit(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update_in(cx, |audit, window, cx| {
         audit
@@ -2254,11 +2248,18 @@ fn named_filter_clear_restores_the_audit(cx: &mut TestAppContext) {
         cx.debug_bounds("filter-empty-result").is_some(),
         "the empty filter result is rendered as a named recovery state"
     );
+    assert!(
+        cx.debug_bounds("clear-filter").is_none(),
+        "there is no Clear button duplicating backspace"
+    );
 
-    let clear = cx
-        .debug_bounds("clear-filter")
-        .expect("a populated filter has a named clear action");
-    cx.simulate_click(clear.center(), gpui_kit::Modifiers::none());
+    // Erasing the box widens the list back out, the way backspace does.
+    audit.update_in(cx, |audit, window, cx| {
+        audit
+            .filter_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        audit.set_filter(String::new(), cx);
+    });
 
     audit.read_with(cx, |audit, cx| {
         assert!(audit.filter.is_empty());
@@ -5961,35 +5962,43 @@ fn sirv_filter_box_owns_its_keys(cx: &mut TestAppContext) {
     });
 }
 #[gpui_kit::test]
-fn the_notice_lane_shows_errors_before_results(cx: &mut TestAppContext) {
+fn the_notice_lane_leads_with_the_finished_run(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
-        audit.unreadable = vec![PathBuf::from("broken.png")];
         audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::Running,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    // Errors outrank the finished run: the lane leads with the warning while
-    // the conversion waits behind Details.
+    // The finished run outranks the live job while both want the lane.
     assert!(cx.debug_bounds("notice-lane").is_some());
-    assert!(cx.debug_bounds("notice-lane-notices").is_some());
-    assert!(cx.debug_bounds("notice-lane-conversion").is_none());
+    assert!(cx.debug_bounds("notice-lane-conversion").is_some());
+    assert!(cx.debug_bounds("notice-lane-studio").is_none());
     assert!(cx.debug_bounds("notice-lane-toggle").is_some());
-    // Expanded on request, errors still on top.
+    // Expanded on request, the run still leads.
     audit.update(cx, |audit, cx| {
         audit.notices_expanded = true;
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let errors = cx
-        .debug_bounds("notice-lane-notices")
-        .expect("the warning block renders when the lane expands");
     let conversion = cx
         .debug_bounds("notice-lane-conversion")
-        .expect("the conversion block renders when the lane expands");
+        .expect("the run block renders when the lane expands");
+    let studio = cx
+        .debug_bounds("notice-lane-studio")
+        .expect("the job block renders when the lane expands");
     assert!(
-        errors.origin.y < conversion.origin.y,
-        "errors outrank results in the open lane"
+        conversion.origin.y < studio.origin.y,
+        "the finished run outranks the live job in the open lane"
     );
 }
 
@@ -6001,22 +6010,47 @@ fn the_notice_lane_holds_its_place_across_states(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("notice-lane").is_none());
     // One notice: the lane appears with its selector contract intact.
     audit.update(cx, |audit, cx| {
-        audit.unreadable = vec![PathBuf::from("broken.png")];
+        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("notice-lane").is_some());
-    assert!(cx.debug_bounds("notice-lane-notices").is_some());
+    assert!(cx.debug_bounds("notice-lane-conversion").is_some());
     assert!(
         cx.debug_bounds("notice-lane-toggle").is_none(),
         "a lone notice needs no overflow toggle"
     );
     // Several notices: still one lane, the overflow behind Details.
     audit.update(cx, |audit, cx| {
-        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::Running,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("notice-lane").is_some());
     assert!(cx.debug_bounds("notice-lane-toggle").is_some());
+}
+
+#[gpui_kit::test]
+fn the_status_bar_carries_findings_under_one_icon(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.heavy > 0 && audit.mislabelled > 0);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // One icon, not a chip per finding; nothing failed, so no failure wrapper.
+    assert!(cx.debug_bounds("findings-menu").is_some());
+    assert!(cx.debug_bounds("finding-failed").is_none());
+    // Narrowing through the menu's contract: the icon lights while one is in force.
+    audit.update(cx, |audit, cx| audit.set_finding(Finding::Heavy, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("findings-menu").is_some());
 }
