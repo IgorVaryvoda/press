@@ -1618,6 +1618,7 @@ mod tests {
 
     /// Stage 1 doubles as the decodable set: files that miss everywhere still
     /// decode, so the later stages compare against the same files.
+    #[cfg(target_os = "linux")]
     fn time_stage(photos: &[PathBuf], cache: &Path, label: &str) -> Vec<PathBuf> {
         let mut decodable = Vec::new();
         let start = std::time::Instant::now();
@@ -1649,6 +1650,7 @@ mod tests {
         decodable
     }
 
+    #[cfg(target_os = "linux")]
     fn stage(files: &[PathBuf], mut load: impl FnMut(&Path) -> bool) -> (std::time::Duration, f64) {
         let start = std::time::Instant::now();
         let mut hits = 0;
@@ -1664,10 +1666,12 @@ mod tests {
         (total, mean_of(total, files.len()))
     }
 
+    #[cfg(target_os = "linux")]
     fn mean_of(total: std::time::Duration, count: usize) -> f64 {
         total.as_secs_f64() * 1000. / count.max(1) as f64
     }
 
+    #[cfg(target_os = "linux")]
     fn report(label: &str, files: usize, total: std::time::Duration, mean: f64) {
         println!("{label} over {files} files: {total:?} total ({mean:.1}ms mean)");
     }
