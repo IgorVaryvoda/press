@@ -207,6 +207,87 @@ impl Audit {
         )
     }
 
+    /// Every notice in one stable lane. The workspace used to stack up to five
+    /// blocks that each appeared and vanished on their own, so the list below
+    /// jumped. One lane with a fixed priority order and a minimum height keeps
+    /// the list still: errors first, then the finished run, then Studio, then
+    /// local AI, then the spin preflight behind its extras gate. Each inner
+    /// block keeps its own selector; the lane root carries `notice-lane`.
+    pub(super) fn notice_lane(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        // Element ids never reach `debug_bounds`, so each block rides in a
+        // named wrapper: the lane root plus these names are the selector
+        // contract the tests assert on.
+        let mut blocks: Vec<(&'static str, gpui_kit::AnyElement)> = Vec::new();
+        if let Some(block) = self.notices(cx) {
+            blocks.push(("notice-lane-notices", block));
+        }
+        if let Some(block) = self.conversion_notice(cx) {
+            blocks.push(("notice-lane-conversion", block));
+        }
+        if let Some(block) = self.studio_notice(cx) {
+            blocks.push(("notice-lane-studio", block));
+        }
+        if let Some(block) = self.local_ai_notice(cx) {
+            blocks.push(("notice-lane-local-ai", block));
+        }
+        if acquisition::SHOW_ACQUISITION_EXTRAS
+            && let Some(block) = self.spin_notice(cx)
+        {
+            blocks.push(("notice-lane-spin", block));
+        }
+        if blocks.is_empty() {
+            return None;
+        }
+        // One flag for the whole lane: expanding the lane also unfolds the long
+        // warning text, so Details always means "show everything".
+        let count = blocks.len();
+        let expanded = self.notices_expanded;
+        let wrap = |name: &'static str, block: gpui_kit::AnyElement| {
+            div().debug_selector(move || name.into()).child(block)
+        };
+        let toggle = |label: String, tooltip: &'static str, cx: &mut Context<Self>| {
+            div().debug_selector(|| "notice-lane-toggle".into()).child(
+                Button::new("notice-lane-toggle")
+                    .small()
+                    .ghost()
+                    .label(label)
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(|audit, _, _, cx| {
+                        audit.notices_expanded = !audit.notices_expanded;
+                        cx.notify();
+                    })),
+            )
+        };
+        let mut lane = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_h(px(36.))
+            .debug_selector(|| "notice-lane".into());
+        if expanded {
+            lane = lane
+                .children(blocks.into_iter().map(|(name, block)| wrap(name, block)))
+                .child(toggle(
+                    "Less".to_string(),
+                    "Fold the extra notices back to one lane",
+                    cx,
+                ));
+        } else {
+            let mut pending = blocks.into_iter();
+            if let Some((name, first)) = pending.next() {
+                lane = lane.child(wrap(name, first));
+            }
+            if count > 1 {
+                lane = lane.child(toggle(
+                    format!("{count} notices · Details"),
+                    "Show every notice at once",
+                    cx,
+                ));
+            }
+        }
+        Some(lane.into_any_element())
+    }
+
     /// Folders behind the current list. A dropped batch names its count
     /// directly; a browsed folder counts the child folders the list can enter,
     /// leaving out the output folder nobody browses into.
