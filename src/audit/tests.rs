@@ -2881,6 +2881,76 @@ fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn studio_confirm_card_shows_upload_and_source_sizes(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selected.insert(0);
+        audit.studio_key = Some("sk_live_test".into());
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::AwaitingConfirmation(studio::PreparedUpload::for_test()),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        audit.rail = Rail::Studio;
+        audit.selection_changed(cx);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("studio-confirm-card").is_some(),
+        "the awaiting Studio job renders its confirm card"
+    );
+    audit.read_with(cx, |audit, _| {
+        let job = audit.studio_job.as_ref().expect("the Studio job is kept");
+        assert!(
+            job.message(&audit.root).contains("1×1"),
+            "the confirm message names the known upload dimensions"
+        );
+        assert_eq!(
+            (audit.entries[0].width, audit.entries[0].height),
+            (1000, 1000),
+            "the source dimensions come from the scan entry without decoding"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn studio_confirm_card_is_absent_while_running(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selected.insert(0);
+        audit.studio_key = Some("sk_live_test".into());
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::Running,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        audit.rail = Rail::Studio;
+        audit.selection_changed(cx);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("studio-confirm-card").is_none(),
+        "the confirm card shows only while awaiting confirmation"
+    );
+}
+
+#[gpui_kit::test]
 fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
