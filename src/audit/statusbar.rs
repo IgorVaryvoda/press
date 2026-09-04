@@ -3,8 +3,9 @@
 use super::*;
 
 impl Audit {
-    /// A local inference result stays visible after its comparison closes. Unlike
-    /// scan notices, this is normal work and uses info/success/error semantics.
+    /// A live local inference run stays visible while it works. Its outcome
+    /// toasts once at the production site; a green block for a finished file
+    /// is just a wide way to say what the toast already said.
     pub(super) fn local_ai_notice(&self, _cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let job = self.local_ai_job.as_ref()?;
         let message = job.message(&self.root);
@@ -12,12 +13,13 @@ impl Audit {
             LocalAiJobState::SettingUp | LocalAiJobState::Running => {
                 Alert::info("local-ai-status", message)
             }
-            LocalAiJobState::Done(_) => Alert::success("local-ai-status", message),
-            LocalAiJobState::Failed(_) => Alert::error("local-ai-status", message),
+            LocalAiJobState::Done(_) | LocalAiJobState::Failed(_) => return None,
         };
         Some(alert.py_1().into_any_element())
     }
 
+    /// The same for a live Studio run, except the confirmation prompt: that is
+    /// a decision the run is waiting on, and it keeps its warning card.
     pub(super) fn studio_notice(&self, _cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let job = self.studio_job.as_ref()?;
         let message = job.message(&self.root);
@@ -26,8 +28,7 @@ impl Audit {
                 Alert::info("studio-status", message)
             }
             StudioJobState::AwaitingConfirmation(_) => Alert::warning("studio-status", message),
-            StudioJobState::Done(_) => Alert::success("studio-status", message),
-            StudioJobState::Failed(_) => Alert::error("studio-status", message),
+            StudioJobState::Done(_) | StudioJobState::Failed(_) => return None,
         };
         Some(alert.py_1().into_any_element())
     }
@@ -254,164 +255,5 @@ impl Audit {
             }
             None => format!("{images}{bytes}{warnings}{scope}"),
         }
-    }
-
-    /// The conversion the verbs beside the list would run, in one glance. The
-    /// right side of the bar would otherwise sit empty until something is
-    /// ticked, and the target is exactly what an empty selection hides.
-    pub(super) fn output_plan(&self) -> String {
-        let edge = match self.max_edge.0 {
-            None => String::new(),
-            Some(edge) => format!(" · {edge}px"),
-        };
-        format!(
-            "{} {}{} → {}",
-            self.format.display(),
-            self.quality.label(),
-            edge,
-            self.output.label(),
-        )
-    }
-
-    /// The bar pinned to the window foot. One fixed height in every state, so
-    /// the list above never moves when the selection or the run state changes.
-    pub(super) fn status_bar(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let left = self.status_line(count);
-        let right = if self.converting {
-            let done = self.results.len() + self.failures.len();
-            let total = self
-                .active_target_count
-                .unwrap_or_else(|| self.target_count());
-            format!("{done} of {total} converting")
-        } else if self.target_count() > 0 {
-            match self.target_count() {
-                1 => "1 selected".to_string(),
-                selected => format!("{selected} selected"),
-            }
-        } else if !self.failures.is_empty() {
-            match self.failures.len() {
-                1 => "1 failed".to_string(),
-                failed => format!("{failed} failed"),
-            }
-        } else {
-            self.output_plan()
-        };
-        div()
-            .debug_selector(|| "status-bar".into())
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_3()
-            .h(px(28.))
-            .flex_shrink_0()
-            .bg(cx.theme().table_head)
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().foreground)
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .min_w_0()
-                    .child(left),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .flex_shrink_0()
-                    .children(self.findings_menu(cx))
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .child(right),
-                    ),
-            )
-    }
-
-    /// Every finding under one icon in the bar's right group. The header used
-    /// to carry a chip per finding; chips plus the filter no longer fit the
-    /// header's job, so one menu carries them all. `None` when there is
-    /// nothing to narrow to, so the common case stays quiet. Lit while one is
-    /// in force, so the count and the list below it never disagree.
-    fn findings_menu(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        let findings = self.available_findings();
-        if findings.is_empty() {
-            return None;
-        }
-        let total: usize = findings
-            .iter()
-            .map(|(finding, _, _, _)| match finding {
-                Finding::Failed => self.failures.len(),
-                Finding::Heavy => self.heavy,
-                Finding::Mislabelled => self.mislabelled,
-                Finding::Marketplace => self.marketplace,
-            })
-            .sum();
-        let summary = findings
-            .iter()
-            .map(|(_, _, label, _)| label.clone())
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let active = self.finding;
-        let source = cx.entity().downgrade();
-        let has_failed = findings
-            .iter()
-            .any(|(finding, _, _, _)| *finding == Finding::Failed);
-        let menu = div().debug_selector(|| "findings-menu".into()).child(
-            Button::new("findings-menu")
-                .small()
-                .icon(IconName::TriangleAlert)
-                .tooltip(format!(
-                    "Findings ({total}): {summary} — narrow the list to one finding"
-                ))
-                .selected(active.is_some())
-                .when(active.is_none(), |button| button.ghost())
-                .when(active.is_some(), |button| button.warning())
-                // `set_finding` refuses to move the list under a running
-                // conversion, so the control that asks for it says so rather
-                // than looking dead.
-                .disabled(self.converting)
-                .dropdown_menu(move |menu, _, _| {
-                    findings
-                        .iter()
-                        .fold(menu, |menu, (finding, icon, label, _)| {
-                            let finding = *finding;
-                            let label = label.clone();
-                            let source = source.clone();
-                            menu.item(
-                                PopupMenuItem::new(label)
-                                    .icon(icon.clone())
-                                    .checked(active == Some(finding))
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(audit) = source.upgrade() {
-                                            audit.update(cx, |audit, cx| {
-                                                audit.set_finding(finding, cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                        })
-                }),
-        );
-        // The failures keep their own selector, so the run that produced them
-        // stays one lookup away.
-        Some(if has_failed {
-            div()
-                .debug_selector(|| "finding-failed".into())
-                .child(menu)
-                .into_any_element()
-        } else {
-            menu.into_any_element()
-        })
     }
 }

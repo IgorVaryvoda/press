@@ -1497,7 +1497,7 @@ fn installing_a_dataset_announces_unreadable_files_once_in_a_toast(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn a_clean_dataset_clears_the_scan_toast(cx: &mut TestAppContext) {
+fn a_clean_dataset_replaces_the_scan_error_with_its_totals(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(cx, Vec::new());
     audit.update_in(cx, |audit, window, cx| {
         audit.install_dataset(
@@ -1538,8 +1538,17 @@ fn a_clean_dataset_clears_the_scan_toast(cx: &mut TestAppContext) {
         );
     });
     cx.run_until_parked();
-    finish_notification_exit(cx);
-    assert_eq!(notification_count(cx), 0);
+    // The error is gone; the clean folder announces its (empty) totals in the
+    // same scope instead.
+    assert_eq!(notification_count(cx), 1);
+    assert!(
+        cx.debug_bounds("error-toast-message:0 images").is_some(),
+        "a clean folder toasts its counts, not the old damage"
+    );
+    assert!(
+        cx.debug_bounds("error-toast-message:would not decode: a.jpg")
+            .is_none()
+    );
 }
 
 #[gpui_kit::test]
@@ -1573,7 +1582,13 @@ fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAp
         .advance_clock(PREVIEW_DELAY + Duration::from_millis(50));
     cx.run_until_parked();
 
-    assert_eq!(notification_count(cx), 0);
+    // The only toast is the new folder's totals: the superseded preview's
+    // failure never reaches the new dataset.
+    assert_eq!(notification_count(cx), 1);
+    assert!(
+        cx.debug_bounds("error-toast-message:0 images").is_some(),
+        "a clean folder toasts its counts"
+    );
 }
 
 #[gpui_kit::test]
@@ -5648,9 +5663,8 @@ fn the_sidebar_tabs_switch_operations_and_collapse(cx: &mut TestAppContext) {
     });
 }
 
-/// The new chrome states its facts in strings the tests can read: the output
-/// plan in the status bar, the savings beside the selection, and the findings
-/// behind both the chips and the narrow-window menu.
+/// The new chrome states its facts in strings the tests can read: the savings
+/// beside the selection, and the findings behind the status-bar menu.
 #[gpui_kit::test]
 fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -5658,12 +5672,6 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
         audit.format = Format::WebP;
         audit.quality = Quality::lossy(80.);
         audit.max_edge = MaxEdge::FULL;
-        assert_eq!(audit.output_plan(), "WEBP q80 → optimized/");
-        audit.max_edge = MaxEdge(Some(2400));
-        assert_eq!(audit.output_plan(), "WEBP q80 · 2400px → optimized/");
-        audit.quality = Quality::LOSSLESS;
-        audit.max_edge = MaxEdge::FULL;
-        assert_eq!(audit.output_plan(), "WEBP lossless → optimized/");
 
         audit.entries = vec![
             entry("a.png", 8, 8, 1000, ImageFormat::Png),
@@ -5694,11 +5702,11 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
         assert_eq!(findings[0].2, "3 mislabelled");
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("status-bar").is_some());
+    assert!(cx.debug_bounds("status-bar").is_none());
     assert!(cx.debug_bounds("audit-header").is_some());
 }
 #[gpui_kit::test]
-fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
+fn the_totals_line_names_folders_and_images(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
         audit.batch_folders = Some(2);
@@ -5719,8 +5727,41 @@ fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(
-        cx.debug_bounds("status-bar").is_some(),
-        "the totals stay pinned to the window foot"
+        cx.debug_bounds("status-bar").is_none(),
+        "there is no status bar anymore"
+    );
+}
+
+#[gpui_kit::test]
+fn installing_a_clean_dataset_toasts_its_totals(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
+    audit.update_in(cx, |audit, window, cx| {
+        audit.install_dataset(
+            scan::Scan {
+                entries: vec![
+                    entry("a.png", 8, 8, 256, ImageFormat::Png),
+                    entry("b.png", 8, 8, 256, ImageFormat::Png),
+                ],
+                skipped_raw: 0,
+                skipped_heic: 0,
+                skipped_packages: 0,
+                unreadable: Vec::new(),
+                walk_errors: Vec::new(),
+                existing_output: 0,
+            },
+            PathBuf::from("/photos"),
+            false,
+            None,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(notification_count(cx), 1);
+    assert!(
+        cx.debug_bounds("error-toast-message:2 images · 512 B")
+            .is_some(),
+        "a clean folder announces its counts once"
     );
 }
 
@@ -6053,4 +6094,34 @@ fn the_status_bar_carries_findings_under_one_icon(cx: &mut TestAppContext) {
     audit.update(cx, |audit, cx| audit.set_finding(Finding::Heavy, cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("findings-menu").is_some());
+}
+
+#[gpui_kit::test]
+fn finished_ai_jobs_leave_the_lane_to_live_work(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
+    audit.update(cx, |audit, cx| {
+        audit.local_ai_job = Some(LocalAiJob {
+            tool: local_ai::Tool::RemoveBackground,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            first_setup: false,
+            state: LocalAiJobState::Done(PathBuf::from("optimized/photo-nobg.png")),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        audit.studio_job = Some(StudioJob {
+            tool: audit.studio_tool,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::Done(PathBuf::from("optimized/photo-studio.png")),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // Outcomes toast at their production sites; the lane is for live work.
+    assert!(cx.debug_bounds("notice-lane").is_none());
 }

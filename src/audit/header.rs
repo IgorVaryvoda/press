@@ -86,6 +86,83 @@ impl Audit {
         findings
     }
 
+    /// Every finding under one icon beside the filter. The header used to carry
+    /// a chip per finding; chips plus the filter no longer fit the header's
+    /// job, so one menu carries them all. `None` when there is nothing to
+    /// narrow to, so the common case stays quiet. Lit while one is in force,
+    /// so the count and the list below it never disagree.
+    fn findings_menu(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let findings = self.available_findings();
+        if findings.is_empty() {
+            return None;
+        }
+        let total: usize = findings
+            .iter()
+            .map(|(finding, _, _, _)| match finding {
+                Finding::Failed => self.failures.len(),
+                Finding::Heavy => self.heavy,
+                Finding::Mislabelled => self.mislabelled,
+                Finding::Marketplace => self.marketplace,
+            })
+            .sum();
+        let summary = findings
+            .iter()
+            .map(|(_, _, label, _)| label.clone())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let active = self.finding;
+        let source = cx.entity().downgrade();
+        let has_failed = findings
+            .iter()
+            .any(|(finding, _, _, _)| *finding == Finding::Failed);
+        let menu = div().debug_selector(|| "findings-menu".into()).child(
+            Button::new("findings-menu")
+                .small()
+                .icon(IconName::TriangleAlert)
+                .tooltip(format!(
+                    "Findings ({total}): {summary} — narrow the list to one finding"
+                ))
+                .selected(active.is_some())
+                .when(active.is_none(), |button| button.ghost())
+                .when(active.is_some(), |button| button.warning())
+                // `set_finding` refuses to move the list under a running
+                // conversion, so the control that asks for it says so rather
+                // than looking dead.
+                .disabled(self.converting)
+                .dropdown_menu(move |menu, _, _| {
+                    findings
+                        .iter()
+                        .fold(menu, |menu, (finding, icon, label, _)| {
+                            let finding = *finding;
+                            let label = label.clone();
+                            let source = source.clone();
+                            menu.item(
+                                PopupMenuItem::new(label)
+                                    .icon(icon.clone())
+                                    .checked(active == Some(finding))
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(audit) = source.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.set_finding(finding, cx)
+                                            });
+                                        }
+                                    }),
+                            )
+                        })
+                }),
+        );
+        // The failures keep their own selector, so the run that produced them
+        // stays one lookup away.
+        Some(if has_failed {
+            div()
+                .debug_selector(|| "finding-failed".into())
+                .child(menu)
+                .into_any_element()
+        } else {
+            menu.into_any_element()
+        })
+    }
+
     /// Every shortcut the list answers to, in one place. The window already
     /// moves this way, but nothing said so, and a shortcut nobody names is one
     /// nobody finds. The dialog is state, not a rail: it changes nothing.
@@ -384,9 +461,9 @@ impl Audit {
                         ),
                     ),
             )
-            // Scope lives in the Open menu and the status bar now, and the
-            // findings moved to the status bar under one icon: the header is
-            // for narrowing the list, and scope and findings define the list itself.
+            // Findings narrow the list too, hidden under one icon beside the
+            // filter now that the per-finding chips are gone.
+            .children(self.findings_menu(cx))
             .when(acquisition::SHOW_ACQUISITION_EXTRAS, |header| {
                 header.child(
                     Button::new("copy-audit-report")

@@ -377,6 +377,13 @@ impl Audit {
                         audit.existing_output = audit.existing_output.saturating_add(1);
                         audit.studio_job.as_mut().unwrap().state =
                             StudioJobState::Done(path.clone());
+                        let message = audit.studio_job.as_ref().unwrap().message(&audit.root);
+                        audit.notify_success(
+                            "studio-job",
+                            format!("{} finished", tool.result_label()),
+                            message,
+                            cx,
+                        );
                         audit.open_written(index, path, Some(ProducedBy::Studio(tool)), cx);
                     }
                     Err(message) => {

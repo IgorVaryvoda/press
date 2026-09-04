@@ -1244,9 +1244,6 @@ impl Audit {
                             )
                     })),
             )
-            // Pinned to the window foot, below the list and the rail alike, so
-            // the folder and image totals stay on screen while the list scrolls.
-            .child(self.status_bar(count, cx))
             .into_any_element()
     }
 

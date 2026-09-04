@@ -1230,9 +1230,9 @@ impl Audit {
         self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
         self.walk_errors = scanned.walk_errors;
-        // The lane keeps counts; the names live in one dismissible toast announced
-        // once per dataset. A name-dump inline pushes the list down and truncates
-        // into a blob nobody can read, which is what the lane used to render.
+        // Unreadable files toast once per dataset with their names. There is
+        // no status bar anymore, so a name-dump inline has nowhere to live —
+        // and truncated into one line it was a blob nobody could read.
         if self.unreadable.is_empty() && self.walk_errors.is_empty() {
             self.clear_error("scan", cx);
         } else {
@@ -1341,6 +1341,17 @@ impl Audit {
         // list again. Ticking before that would tick the rows a stale scope was
         // still hiding, and open the folder with nothing selected.
         self.select_all_visible();
+        // No status bar: the folder totals toast once per dataset, next to the
+        // scan-error toast they replace when the folder reads clean. A clean
+        // folder announces its counts; a dirty one names its damage instead.
+        if self.unreadable.is_empty() && self.walk_errors.is_empty() {
+            let folder = self
+                .root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Folder".to_string());
+            self.notify_success("scan", folder, self.status_line(self.visible.len()), cx);
+        }
         self.schedule_estimate(cx);
         cx.notify();
 
