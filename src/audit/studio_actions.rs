@@ -394,6 +394,25 @@ impl Audit {
                 && job.tool == chosen
                 && matches!(job.state, StudioJobState::AwaitingConfirmation(_))
         });
+        // The confirm card names the trade before a lossy upload copy leaves this
+        // computer. Upload bytes stay private to the studio module, so the card
+        // shows dimensions only; source dimensions and bytes come from the scan
+        // entry without decoding.
+        let awaiting_upload = self.studio_job.as_ref().and_then(|job| {
+            if job.index == index.unwrap_or(usize::MAX) && job.tool == chosen {
+                match &job.state {
+                    StudioJobState::AwaitingConfirmation(upload) => {
+                        Some((upload.width, upload.height))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        });
+        let confirm_source = index
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| (entry.width, entry.height, entry.bytes));
         let written = self
             .studio_source
             .as_ref()
@@ -564,6 +583,57 @@ impl Audit {
                             .whitespace_nowrap()
                             .child(target),
                     )
+                    .when_some(awaiting_upload, |footer, (upload_w, upload_h)| {
+                        footer.child(
+                            div()
+                                .debug_selector(|| "studio-confirm-card".into())
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(format!("Upload copy: {upload_w}x{upload_h} WebP"))
+                                .when_some(
+                                    confirm_source,
+                                    |card, (source_w, source_h, source_bytes)| {
+                                        card.child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "Source: {source_w}×{source_h} · {}",
+                                                    format_bytes(source_bytes)
+                                                )),
+                                        )
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("The original stays untouched."),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("studio-confirm-upload")
+                                                .primary()
+                                                .label("Confirm upload")
+                                                .on_click(cx.listener(|audit, _, _, cx| {
+                                                    audit.confirm_studio(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("studio-cancel-upload")
+                                                .ghost()
+                                                .label("Cancel")
+                                                .on_click(cx.listener(|audit, _, _, cx| {
+                                                    audit.retire_studio_for_scan(cx);
+                                                })),
+                                        ),
+                                ),
+                        )
+                    })
                     .child(
                         div().debug_selector(|| "studio-commit".into()).child(
                             Button::new("studio-commit")
