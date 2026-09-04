@@ -667,100 +667,113 @@ unsafe fn shell_thumb_cached(path: &Path, edge: u32) -> Option<RgbaImage> {
     wide.push(0);
     // Each successful init balances with one uninit, including `S_FALSE`
     // (already initialized on this thread).
-    let init = CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32);
-    if init != S_OK && init != S_FALSE {
-        return None;
+    // SAFETY: the apartment initializes here and uninitializes before every
+    // return below; the inner call cannot outlive it.
+    unsafe {
+        let init = CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32);
+        if init != S_OK && init != S_FALSE {
+            return None;
+        }
+        let thumb = shell_thumb_inner(&wide, edge);
+        CoUninitialize();
+        thumb
     }
-    let thumb = shell_thumb_inner(&wide, edge);
-    CoUninitialize();
-    thumb
 }
 
 #[cfg(target_os = "windows")]
 unsafe fn shell_thumb_inner(wide: &[u16], edge: u32) -> Option<RgbaImage> {
     let mut factory: *mut core::ffi::c_void = std::ptr::null_mut();
-    let status = SHCreateItemFromParsingName(
-        wide.as_ptr() as PCWSTR,
-        std::ptr::null_mut(),
-        &FACTORY_ID,
-        &mut factory,
-    );
-    if status != S_OK || factory.is_null() {
-        return None;
+    // SAFETY: a null factory short-circuits below; the live one releases
+    // exactly once, and the bitmap deletes after its pixels copy out.
+    unsafe {
+        let status = SHCreateItemFromParsingName(
+            wide.as_ptr() as PCWSTR,
+            std::ptr::null_mut(),
+            &FACTORY_ID,
+            &mut factory,
+        );
+        if status != S_OK || factory.is_null() {
+            return None;
+        }
+        let vtbl = *(factory as *const *const FactoryVtbl);
+        let size = SIZE {
+            cx: edge as i32,
+            cy: edge as i32,
+        };
+        let mut bitmap: HBITMAP = std::ptr::null_mut();
+        let flags = SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY;
+        let status = ((*vtbl).image)(factory, std::ptr::null_mut(), &size, flags, &mut bitmap);
+        ((*vtbl).release)(factory);
+        if status != S_OK || bitmap.is_null() {
+            return None;
+        }
+        let image = bitmap_pixels(bitmap, edge);
+        DeleteObject(bitmap as HGDIOBJ);
+        image
     }
-    let vtbl = *(factory as *const *const FactoryVtbl);
-    let size = SIZE {
-        cx: edge as i32,
-        cy: edge as i32,
-    };
-    let mut bitmap: HBITMAP = std::ptr::null_mut();
-    let flags = SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY;
-    let status = ((*vtbl).image)(factory, std::ptr::null_mut(), &size, flags, &mut bitmap);
-    ((*vtbl).release)(factory);
-    if status != S_OK || bitmap.is_null() {
-        return None;
-    }
-    let image = bitmap_pixels(bitmap, edge);
-    DeleteObject(bitmap as HGDIOBJ);
-    image
 }
 
 /// Pixels out of a shell bitmap. GDI hands back BGRA; the same swap `to_bgra`
 /// performs turns it into the RGBA the cache round trip expects.
 #[cfg(target_os = "windows")]
 unsafe fn bitmap_pixels(bitmap: HBITMAP, edge: u32) -> Option<RgbaImage> {
-    let mut info: BITMAP = std::mem::zeroed();
-    if GetObjectW(
-        bitmap as HGDIOBJ,
-        std::mem::size_of::<BITMAP>() as i32,
-        &mut info as *mut BITMAP as *mut core::ffi::c_void,
-    ) == 0
-    {
-        return None;
+    // SAFETY: GDI owns the bitmap; every read stays inside its validated
+    // bounds, the screen DC releases on all paths, and pixels copy out
+    // before anything returns.
+    unsafe {
+        let mut info: BITMAP = std::mem::zeroed();
+        if GetObjectW(
+            bitmap as HGDIOBJ,
+            std::mem::size_of::<BITMAP>() as i32,
+            &mut info as *mut BITMAP as *mut core::ffi::c_void,
+        ) == 0
+        {
+            return None;
+        }
+        if info.bmWidth <= 0
+            || info.bmHeight <= 0
+            || info.bmWidth > 4096
+            || info.bmHeight > 4096
+            || (info.bmBitsPixel != 32 && info.bmBitsPixel != 24)
+        {
+            return None;
+        }
+        let (width, height) = (info.bmWidth as u32, info.bmHeight as u32);
+        let screen: HDC = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let mut format: BITMAPINFO = std::mem::zeroed();
+        format.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        format.bmiHeader.biWidth = info.bmWidth;
+        format.bmiHeader.biHeight = -info.bmHeight;
+        format.bmiHeader.biPlanes = 1;
+        format.bmiHeader.biBitCount = 32;
+        format.bmiHeader.biCompression = BI_RGB;
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        let lines = GetDIBits(
+            screen,
+            bitmap,
+            0,
+            height,
+            pixels.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut format,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(std::ptr::null_mut(), screen);
+        if lines != height as i32 {
+            return None;
+        }
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let image = RgbaImage::from_raw(width, height, pixels)?;
+        Some(
+            DynamicImage::ImageRgba8(image)
+                .thumbnail(edge, edge)
+                .into_rgba8(),
+        )
     }
-    if info.bmWidth <= 0
-        || info.bmHeight <= 0
-        || info.bmWidth > 4096
-        || info.bmHeight > 4096
-        || (info.bmBitsPixel != 32 && info.bmBitsPixel != 24)
-    {
-        return None;
-    }
-    let (width, height) = (info.bmWidth as u32, info.bmHeight as u32);
-    let screen: HDC = GetDC(std::ptr::null_mut());
-    if screen.is_null() {
-        return None;
-    }
-    let mut format: BITMAPINFO = std::mem::zeroed();
-    format.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-    format.bmiHeader.biWidth = info.bmWidth;
-    format.bmiHeader.biHeight = -info.bmHeight;
-    format.bmiHeader.biPlanes = 1;
-    format.bmiHeader.biBitCount = 32;
-    format.bmiHeader.biCompression = BI_RGB;
-    let mut pixels = vec![0u8; width as usize * height as usize * 4];
-    let lines = GetDIBits(
-        screen,
-        bitmap,
-        0,
-        height,
-        pixels.as_mut_ptr() as *mut core::ffi::c_void,
-        &mut format,
-        DIB_RGB_COLORS,
-    );
-    ReleaseDC(std::ptr::null_mut(), screen);
-    if lines != height as i32 {
-        return None;
-    }
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    let image = RgbaImage::from_raw(width, height, pixels)?;
-    Some(
-        DynamicImage::ImageRgba8(image)
-            .thumbnail(edge, edge)
-            .into_rgba8(),
-    )
 }
 
 /// The small preview JPEG cameras embed up front (EXIF tag 0x0201 in IFD1).
@@ -1304,6 +1317,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn with_thumb_home(tag: &str) -> (PathBuf, Option<std::ffi::OsString>) {
         let dir = scratch(tag);
         let home = dir.join("home");
@@ -1316,6 +1330,7 @@ mod tests {
         (dir, previous)
     }
 
+    #[cfg(target_os = "linux")]
     fn restore_thumb_home(previous: Option<std::ffi::OsString>) {
         unsafe {
             match previous {
@@ -1329,10 +1344,8 @@ mod tests {
     /// store entries while Press requests only its viewport; reusing them skips
     /// the decode entirely.
     #[test]
+    #[cfg(target_os = "linux")]
     fn an_os_thumbnail_feeds_a_file_another_app_already_drew() {
-        if !cfg!(target_os = "linux") {
-            return;
-        }
         let (dir, previous) = with_thumb_home("os-thumb");
         let path = dir.join("photo.jpg");
         crate::convert::tests::photo(800, 600).save(&path).unwrap();
@@ -1359,10 +1372,8 @@ mod tests {
     /// A store entry older than the source is the photo as it was, not as it
     /// is. It must miss so the file decodes again.
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_stale_os_entry_never_wears_an_old_face() {
-        if !cfg!(target_os = "linux") {
-            return;
-        }
         let (dir, previous) = with_thumb_home("os-thumb-stale");
         let path = dir.join("photo.jpg");
         crate::convert::tests::photo(400, 300).save(&path).unwrap();
@@ -1459,6 +1470,7 @@ mod tests {
     /// `PRESS_BENCH_FOLDER=~/Pictures cargo test --release --locked -- --ignored --nocapture bench_thumb_sources`
     #[test]
     #[ignore]
+    #[cfg(target_os = "linux")]
     fn bench_thumb_sources() {
         let root = std::env::var_os("PRESS_BENCH_FOLDER")
             .map(PathBuf::from)
