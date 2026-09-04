@@ -5437,3 +5437,64 @@ fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
         "the totals stay pinned to the window foot"
     );
 }
+
+#[gpui_kit::test]
+fn the_notice_lane_shows_errors_before_results(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.unreadable = vec![PathBuf::from("broken.png")];
+        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // Errors outrank the finished run: the lane leads with the warning while
+    // the conversion waits behind Details.
+    assert!(cx.debug_bounds("notice-lane").is_some());
+    assert!(cx.debug_bounds("notice-lane-notices").is_some());
+    assert!(cx.debug_bounds("notice-lane-conversion").is_none());
+    assert!(cx.debug_bounds("notice-lane-toggle").is_some());
+    // Expanded on request, errors still on top.
+    audit.update(cx, |audit, cx| {
+        audit.notices_expanded = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let errors = cx
+        .debug_bounds("notice-lane-notices")
+        .expect("the warning block renders when the lane expands");
+    let conversion = cx
+        .debug_bounds("notice-lane-conversion")
+        .expect("the conversion block renders when the lane expands");
+    assert!(
+        errors.origin.y < conversion.origin.y,
+        "errors outrank results in the open lane"
+    );
+}
+
+#[gpui_kit::test]
+fn the_notice_lane_holds_its_place_across_states(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    // Nothing to say: no lane, so the list starts at the same place as ever.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("notice-lane").is_none());
+    // One notice: the lane appears with its selector contract intact.
+    audit.update(cx, |audit, cx| {
+        audit.unreadable = vec![PathBuf::from("broken.png")];
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("notice-lane").is_some());
+    assert!(cx.debug_bounds("notice-lane-notices").is_some());
+    assert!(
+        cx.debug_bounds("notice-lane-toggle").is_none(),
+        "a lone notice needs no overflow toggle"
+    );
+    // Several notices: still one lane, the overflow behind Details.
+    audit.update(cx, |audit, cx| {
+        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("notice-lane").is_some());
+    assert!(cx.debug_bounds("notice-lane-toggle").is_some());
+}
