@@ -4947,6 +4947,28 @@ fn replacing_converts_in_place_and_the_rail_offers_the_originals_back(cx: &mut T
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[gpui_kit::test]
+fn a_clean_run_toasts_the_same_sentence_as_the_results_bar(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    let summary = audit.read_with(cx, |audit, _| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(audit.results.len(), 3);
+        audit.conversion_summary()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(notification_count(cx), 1);
+    // The toast carries this exact sentence (one shared helper builds both),
+    // so pinning the sentence pins the toast.
+    assert!(
+        summary.starts_with("Converted 3 images to "),
+        "a clean run announces its outcome once: {summary}"
+    );
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A run that finishes after its folder is gone belongs to the old dataset:
 /// its trailing recount must not become the new folder's undo count.
 #[gpui_kit::test]

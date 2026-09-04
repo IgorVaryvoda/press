@@ -33,17 +33,12 @@ impl Audit {
         Some(alert.py_1().into_any_element())
     }
 
-    /// A finished run, still said after its results view is closed. A fast
-    /// conversion can be over before you have looked up, and "it worked" plus
-    /// the way to the files is what you want to find when you look back.
-    pub(super) fn conversion_notice(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        if self.converting || self.results.is_empty() {
-            return None;
-        }
+    /// One sentence for a finished run, shared by the lane bar and the
+    /// completion toast so they can never disagree.
+    pub(super) fn conversion_summary(&self) -> String {
         let (before, after) = self.converted_totals();
-        let grew = after > before;
         let delta = before.abs_diff(after);
-        let message = format!(
+        format!(
             "Converted {} {} to {} · {} {} · in {}",
             self.results.len(),
             if self.results.len() == 1 {
@@ -53,9 +48,20 @@ impl Audit {
             },
             self.format.display(),
             format_bytes(delta),
-            if grew { "larger" } else { "saved" },
+            if after > before { "larger" } else { "saved" },
             self.output.label(),
-        );
+        )
+    }
+
+    /// A finished run, still said after its results view is closed. A fast
+    /// conversion can be over before you have looked up, and "it worked" plus
+    /// the way to the files is what you want to find when you look back.
+    pub(super) fn conversion_notice(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        if self.converting || self.results.is_empty() {
+            return None;
+        }
+        let grew = self.converted_totals().1 > self.converted_totals().0;
+        let message = self.conversion_summary();
         Some(
             div()
                 .flex()

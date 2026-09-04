@@ -251,6 +251,14 @@ impl Audit {
                         );
                     } else {
                         audit.clear_error("conversion", cx);
+                        // A clean run toasts the same sentence the lane bar
+                        // carries, so the outcome survives the bar scrolling by.
+                        // A stopped run stays silent: stopping is a request to
+                        // stop, not a completion worth announcing.
+                        if !stopped && !audit.results.is_empty() {
+                            let summary = audit.conversion_summary();
+                            audit.notify_success("conversion", "Conversion complete", summary, cx);
+                        }
                     }
                     // A finished run has produced something to look at, and
                     // until now the app said so in a column and left you to
