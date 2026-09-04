@@ -5437,3 +5437,72 @@ fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
         "the totals stay pinned to the window foot"
     );
 }
+
+/// The header keeps one persistent Sirv entry outside the Open menu, so
+/// pairing is discoverable before the reconciliation strip exists. Unpaired
+/// it opens the browser; while converting it is disabled like the menu item.
+#[gpui_kit::test]
+fn the_unpaired_header_sirv_button_opens_the_browser(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_pairing.is_none()));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let button = cx
+        .debug_bounds("sirv-pair-header")
+        .expect("the unpaired header names its Sirv control");
+    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.sirv_browser.is_some(),
+            "the enabled header button reaches the Sirv browser"
+        )
+    });
+
+    // Disabled while converting: a click lands nowhere, the same rule the
+    // Open menu's Pair item follows.
+    audit.update(cx, |audit, cx| {
+        audit.sirv_browser = None;
+        audit.converting = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("sirv-pair-header").is_some(),
+        "a disabled control stays visible rather than vanishing"
+    );
+    let button = cx
+        .debug_bounds("sirv-pair-header")
+        .expect("the disabled header control keeps its name");
+    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.sirv_browser.is_none(),
+            "the converting header button does not open the browser"
+        )
+    });
+}
+
+/// Paired, the same header button stays put and reads selected, so the
+/// paired state is visible above the reconciliation strip.
+#[gpui_kit::test]
+fn the_paired_header_sirv_button_stays_visible(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(test_pairing());
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("sirv-pair-header").is_some(),
+        "the paired header keeps its Sirv control"
+    );
+    // Selected follows the pairing: the button renders selected exactly
+    // when this is set, so asserting the driver asserts the state.
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.sirv_pairing.is_some(),
+            "the paired header button reads selected"
+        )
+    });
+}
