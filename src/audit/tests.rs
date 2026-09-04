@@ -393,7 +393,7 @@ fn screenshot() {
         scanned.entries.clear();
         PathBuf::new()
     } else {
-        folder.clone()
+        folder
     };
 
     // A real platform, only for its text system: glyph metrics decide every
@@ -5685,8 +5685,9 @@ fn the_sidebar_tabs_switch_operations_and_collapse(cx: &mut TestAppContext) {
     });
 }
 
-/// The new chrome states its facts in strings the tests can read: the savings
-/// beside the selection, and the findings behind the status-bar menu.
+/// The new chrome states its facts in strings the tests can read: the output
+/// plan in the status bar, the savings beside the selection, and the findings
+/// behind the status-bar menu.
 #[gpui_kit::test]
 fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -5694,6 +5695,12 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
         audit.format = Format::WebP;
         audit.quality = Quality::lossy(80.);
         audit.max_edge = MaxEdge::FULL;
+        assert_eq!(audit.output_plan(), "WEBP q80 → optimized/");
+        audit.max_edge = MaxEdge(Some(2400));
+        assert_eq!(audit.output_plan(), "WEBP q80 · 2400px → optimized/");
+        audit.quality = Quality::LOSSLESS;
+        audit.max_edge = MaxEdge::FULL;
+        assert_eq!(audit.output_plan(), "WEBP lossless → optimized/");
 
         audit.entries = vec![
             entry("a.png", 8, 8, 1000, ImageFormat::Png),
@@ -5724,11 +5731,11 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
         assert_eq!(findings[0].2, "3 mislabelled");
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("status-bar").is_none());
+    assert!(cx.debug_bounds("status-bar").is_some());
     assert!(cx.debug_bounds("audit-header").is_some());
 }
 #[gpui_kit::test]
-fn the_totals_line_names_folders_and_images(cx: &mut TestAppContext) {
+fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
         audit.batch_folders = Some(2);
@@ -5749,8 +5756,8 @@ fn the_totals_line_names_folders_and_images(cx: &mut TestAppContext) {
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(
-        cx.debug_bounds("status-bar").is_none(),
-        "there is no status bar anymore"
+        cx.debug_bounds("status-bar").is_some(),
+        "the totals stay pinned to the window foot"
     );
 }
 
@@ -6024,83 +6031,6 @@ fn sirv_filter_box_owns_its_keys(cx: &mut TestAppContext) {
         );
     });
 }
-#[gpui_kit::test]
-fn the_notice_lane_leads_with_the_finished_run(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, cx| {
-        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
-        audit.studio_job = Some(StudioJob {
-            tool: audit.studio_tool,
-            index: 0,
-            dataset_generation: audit.dataset_generation,
-            source_name: "photo.jpg".into(),
-            output_source: PathBuf::from("photo.jpg"),
-            prompt: String::new(),
-            state: StudioJobState::Running,
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    // The finished run outranks the live job while both want the lane.
-    assert!(cx.debug_bounds("notice-lane").is_some());
-    assert!(cx.debug_bounds("notice-lane-conversion").is_some());
-    assert!(cx.debug_bounds("notice-lane-studio").is_none());
-    assert!(cx.debug_bounds("notice-lane-toggle").is_some());
-    // Expanded on request, the run still leads.
-    audit.update(cx, |audit, cx| {
-        audit.notices_expanded = true;
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    let conversion = cx
-        .debug_bounds("notice-lane-conversion")
-        .expect("the run block renders when the lane expands");
-    let studio = cx
-        .debug_bounds("notice-lane-studio")
-        .expect("the job block renders when the lane expands");
-    assert!(
-        conversion.origin.y < studio.origin.y,
-        "the finished run outranks the live job in the open lane"
-    );
-}
-
-#[gpui_kit::test]
-fn the_notice_lane_holds_its_place_across_states(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    // Nothing to say: no lane, so the list starts at the same place as ever.
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("notice-lane").is_none());
-    // One notice: the lane appears with its selector contract intact.
-    audit.update(cx, |audit, cx| {
-        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("notice-lane").is_some());
-    assert!(cx.debug_bounds("notice-lane-conversion").is_some());
-    assert!(
-        cx.debug_bounds("notice-lane-toggle").is_none(),
-        "a lone notice needs no overflow toggle"
-    );
-    // Several notices: still one lane, the overflow behind Details.
-    audit.update(cx, |audit, cx| {
-        audit.studio_job = Some(StudioJob {
-            tool: audit.studio_tool,
-            index: 0,
-            dataset_generation: audit.dataset_generation,
-            source_name: "photo.jpg".into(),
-            output_source: PathBuf::from("photo.jpg"),
-            prompt: String::new(),
-            state: StudioJobState::Running,
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("notice-lane").is_some());
-    assert!(cx.debug_bounds("notice-lane-toggle").is_some());
-}
 
 #[gpui_kit::test]
 fn the_status_bar_carries_findings_under_one_icon(cx: &mut TestAppContext) {
@@ -6112,6 +6042,7 @@ fn the_status_bar_carries_findings_under_one_icon(cx: &mut TestAppContext) {
     // One icon, not a chip per finding; nothing failed, so no failure wrapper.
     assert!(cx.debug_bounds("findings-menu").is_some());
     assert!(cx.debug_bounds("finding-failed").is_none());
+    assert!(cx.debug_bounds("status-bar").is_some());
     // Narrowing through the menu's contract: the icon lights while one is in force.
     audit.update(cx, |audit, cx| audit.set_finding(Finding::Heavy, cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -6119,31 +6050,19 @@ fn the_status_bar_carries_findings_under_one_icon(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn finished_ai_jobs_leave_the_lane_to_live_work(cx: &mut TestAppContext) {
-    let (audit, cx) = notification_audit(cx, Vec::new());
+fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
-        audit.local_ai_job = Some(LocalAiJob {
-            tool: local_ai::Tool::RemoveBackground,
-            index: 0,
-            dataset_generation: audit.dataset_generation,
-            source_name: "photo.jpg".into(),
-            first_setup: false,
-            state: LocalAiJobState::Done(PathBuf::from("optimized/photo-nobg.png")),
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        audit.studio_job = Some(StudioJob {
-            tool: audit.studio_tool,
-            index: 0,
-            dataset_generation: audit.dataset_generation,
-            source_name: "photo.jpg".into(),
-            output_source: PathBuf::from("photo.jpg"),
-            prompt: String::new(),
-            state: StudioJobState::Done(PathBuf::from("optimized/photo-studio.png")),
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
+        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    // Outcomes toast at their production sites; the lane is for live work.
-    assert!(cx.debug_bounds("notice-lane").is_none());
+    assert!(cx.debug_bounds("conversion-publish").is_some());
+    audit.update(cx, |audit, cx| {
+        audit.published_results = vec!["https://demo.sirv.com/a.webp".into()];
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("conversion-copy-embed").is_some());
+    assert!(cx.debug_bounds("conversion-publish").is_none());
 }

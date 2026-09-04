@@ -934,6 +934,7 @@ impl Render for Audit {
 
         if let Some(browser) = self.sirv_browser.take() {
             let view = self.sirv_browser_view(&browser, cx);
+            let focus = browser.focus.clone();
             self.sirv_browser = Some(browser);
             // The click that opened the browser left focus on the header
             // button it replaced, so Escape had nowhere to land. Same fix as
@@ -946,7 +947,6 @@ impl Render for Audit {
                     window.focus(&browser.focus, cx);
                 }
             });
-            let focus = self.sirv_browser.as_ref().unwrap().focus.clone();
             let workspace = self.audit_workspace(count, window, cx);
             return div()
                 .size_full()
@@ -1178,7 +1178,7 @@ impl Audit {
                             .min_w_0()
                             .overflow_hidden()
                             .children(self.sirv_reconciliation(cx))
-                            .children(self.notice_lane(cx))
+                            .children(self.spin_notice(cx))
                             .child(self.audit_content(count, window, cx))
                             .children(
                                 (self.sirv_scope != Some(SirvScope::OnlyRemote)
@@ -1244,6 +1244,9 @@ impl Audit {
                             )
                     })),
             )
+            // Pinned to the window foot, below the list and the rail alike, so
+            // the folder and image totals stay on screen while the list scrolls.
+            .child(self.status_bar(count, cx))
             .into_any_element()
     }
 

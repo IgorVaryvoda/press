@@ -659,9 +659,6 @@ pub(crate) struct Audit {
     sidebar_open: bool,
     /// The keyboard shortcut list, open over the workspace like settings.
     shortcuts_open: bool,
-    /// The lane's overflow toggle. One flag for the whole lane, never per block,
-    /// so the count and the list below it never disagree.
-    notices_expanded: bool,
 }
 
 /// List order. Every column is sortable, and clicking the active one reverses it.
@@ -1080,7 +1077,7 @@ impl Audit {
             .content(move |_, _, _| {
                 let selector = format!("error-toast-message:{message}");
                 div()
-                    .debug_selector(move || selector.clone())
+                    .debug_selector(move || selector)
                     .text_sm()
                     .child(message.clone())
                     .into_any_element()
@@ -1303,10 +1300,8 @@ impl Audit {
         // A finding belongs to the folder it was found in. Carrying it over would show
         // the new folder narrowed to something nobody asked about.
         self.finding = None;
-        // The notices belong to the last folder too, and an open dialog or an
-        // expanded warning must not outlive the dataset it described.
+        // An open dialog must not outlive the dataset it described.
         self.shortcuts_open = false;
-        self.notices_expanded = false;
         self.filter_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
@@ -1570,7 +1565,9 @@ impl Audit {
         paths.sort();
         paths.dedup();
         if paths.len() == 1 {
-            let path = paths.pop().unwrap();
+            let Some(path) = paths.pop() else {
+                return;
+            };
             if path.is_file() || path.is_dir() {
                 self.request_path(path, cx);
             } else {
@@ -2345,7 +2342,6 @@ pub(crate) fn build_audit(
             rail: Rail::None,
             sidebar_open,
             shortcuts_open: false,
-            notices_expanded: false,
         };
         audit.refresh_visible();
         audit.select_all_visible();

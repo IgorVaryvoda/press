@@ -1179,10 +1179,63 @@ impl Audit {
                             .child(detail),
                     )
             })
+            .when(!self.results.is_empty() && !self.converting, |block| {
+                block
+                    .children((self.published_results.is_empty()).then(|| {
+                        // Element ids never reach `debug_bounds`: the wrapper
+                        // is the selector contract the tests assert on.
+                        let waiting = self.publish_waiting();
+                        div().debug_selector(|| "conversion-publish".into()).child(
+                            Button::new("conversion-publish")
+                                .outline()
+                                .small()
+                                .w_full()
+                                .icon(IconName::ArrowUp)
+                                .label(if self.sirv_pairing.is_some() {
+                                    "Publish to Sirv"
+                                } else {
+                                    "Connect & publish"
+                                })
+                                .tooltip(waiting.clone().unwrap_or_else(|| {
+                                    "Upload the converted files to optimized/ on Sirv".into()
+                                }))
+                                .disabled(
+                                    self.scan_blocks_delivery()
+                                        || self.sirv_busy()
+                                        || waiting.is_some(),
+                                )
+                                .on_click(cx.listener(|audit, _, _, cx| audit.publish_results(cx))),
+                        )
+                    }))
+                    .children((!self.published_results.is_empty()).then(|| {
+                        div()
+                            .debug_selector(|| "conversion-copy-embed".into())
+                            .child(
+                                Button::new("conversion-copy-embed")
+                                    .outline()
+                                    .small()
+                                    .w_full()
+                                    .icon(IconName::Copy)
+                                    .label("Copy embed")
+                                    .tooltip("Copy responsive Sirv image markup")
+                                    .on_click(
+                                        cx.listener(|audit, _, _, cx| audit.copy_result_embeds(cx)),
+                                    ),
+                            )
+                    }))
+                    .child(
+                        Button::new("reveal")
+                            .outline()
+                            .small()
+                            .w_full()
+                            .icon(IconName::FolderOpen)
+                            .label("Show output")
+                            .on_click(cx.listener(|audit, _, _, cx| audit.reveal_output(cx))),
+                    )
+            })
             .when(
-                (!self.results.is_empty()
-                    || !self.completed_outputs.is_empty()
-                    || self.existing_output > 0)
+                (self.results.is_empty()
+                    && (!self.completed_outputs.is_empty() || self.existing_output > 0))
                     && !self.converting,
                 |block| {
                     block.child(

@@ -379,7 +379,9 @@ impl Audit {
     }
 
     pub(super) fn spin_notice(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        if self.spins.is_empty() {
+        // Dormant until the acquisition extras return; the notice lane that
+        // used to own this gate is gone, so the notice carries it itself.
+        if !SHOW_ACQUISITION_EXTRAS || self.spins.is_empty() {
             return None;
         }
         let ready = self.spins.iter().filter(|spin| spin.ready()).count();
