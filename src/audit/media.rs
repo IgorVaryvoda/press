@@ -735,7 +735,24 @@ impl Audit {
                         .filter(|row| !visible.contains(row))
                         .filter_map(|row| audit.entry_at(row))
                         .collect::<Vec<_>>();
-                    for index in visible_indices {
+                    // Fast decoders first: JPEG and WebP fill the viewport
+                    // while PNG and AVIF wait behind them, not beside them.
+                    let (fast, slow): (Vec<usize>, Vec<usize>) =
+                        visible_indices.into_iter().partition(|index| {
+                            audit.entries.get(*index).is_some_and(|entry| {
+                                matches!(
+                                    entry.format,
+                                    scan::FileFormat::Image(
+                                        image::ImageFormat::Jpeg | image::ImageFormat::WebP
+                                    )
+                                )
+                            })
+                        });
+                    for index in fast {
+                        audit.promote_thumb(index);
+                        audit.queue_thumb(index, true);
+                    }
+                    for index in slow {
                         audit.promote_thumb(index);
                         audit.queue_thumb(index, true);
                     }
@@ -791,6 +808,26 @@ impl Audit {
     }
 
     pub(super) fn start_thumb_jobs(&mut self, cx: &mut Context<Self>) {
+        // A fast scroll queues rows the view has already left. Drop them here,
+        // before they take a worker slot, and forget them in `requested` so a
+        // scroll back requeues rather than finding a permanent gap.
+        let wanted: std::collections::HashSet<usize> = self
+            .thumb_queue
+            .iter()
+            .map(|request| request.index)
+            .filter(|index| self.thumb_is_wanted(*index, cx))
+            .collect();
+        if wanted.len() != self.thumb_queue.len() {
+            let mut kept = std::collections::VecDeque::with_capacity(wanted.len());
+            while let Some(request) = self.thumb_queue.pop_front() {
+                if wanted.contains(&request.index) {
+                    kept.push_back(request);
+                } else {
+                    self.requested.remove(&request.index);
+                }
+            }
+            self.thumb_queue = kept;
+        }
         while self.thumb_inflight < THUMB_WORKERS && !self.thumb_queue.is_empty() {
             let Some(position) = self.thumb_queue.iter().position(|request| {
                 !request.fallback || self.thumb_slow_inflight < THUMB_SLOW_WORKERS

@@ -4,6 +4,16 @@
 //! decoding instead of allocating every source pixel just to throw most of them away.
 //! Other formats retain the general decoder. Work stays off the main thread and the
 //! scaled result is cached on disk for later opens.
+//!
+//! Before any decode runs, two cheaper sources get their turn: the desktop's own
+//! thumbnail store (another app has often drawn this exact file already) and the
+//! sibling cache entry for the other view edge (a 224px entry downscales to 96px
+//! for nearly nothing). Both feed the same disk write as a fresh decode, so the
+//! saving repeats on every later open.
+//!
+//! Each platform reuses its own store: the freedesktop cache on Linux, Quick Look
+//! on macOS, the shell thumbnail cache on Windows. All three are best-effort and
+//! miss on any error, and all three validate before they draw.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -18,6 +28,18 @@ use libwebp_sys::{
     VP8StatusCode, WEBP_CSP_MODE, WebPDecode, WebPDecoderConfig, WebPFreeDecBuffer,
     WebPGetFeatures, WebPRGBABuffer,
 };
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::{HWND, S_FALSE, S_OK, SIZE},
+    Graphics::Gdi::{
+        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+        GetDIBits, GetObjectW, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
+    },
+    System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+    UI::Shell::{SHCreateItemFromParsingName, SIIGBF_INCACHEONLY, SIIGBF_THUMBNAILONLY},
+};
+#[cfg(target_os = "windows")]
+use windows_sys::core::{GUID, HRESULT, PCWSTR};
 
 /// Longest edge of a generated thumbnail, in pixels.
 ///
@@ -95,6 +117,11 @@ fn load_fast_using(cache: Option<&Path>, path: &Path, edge: u32, native_scaled: 
             cache: None,
         });
     }
+    if let Some(thumbnail) =
+        read_os_thumb(path, edge).or_else(|| read_other_edge(cache, path, edge))
+    {
+        return FastLoad::Ready(loaded(thumbnail, cached));
+    }
 
     if !native_scaled {
         return FastLoad::Fallback;
@@ -119,6 +146,11 @@ fn load_fallback_using(cache: Option<&Path>, path: &Path, edge: u32) -> Option<L
             image: drawable(thumbnail),
             cache: None,
         });
+    }
+    if let Some(thumbnail) =
+        read_os_thumb(path, edge).or_else(|| read_other_edge(cache, path, edge))
+    {
+        return Some(loaded(thumbnail, cached));
     }
 
     // `thumbnail` preserves the aspect ratio and fits inside the box. RGBA, not RGB:
@@ -218,6 +250,14 @@ pub(crate) fn jpeg_scaling_factor(longest: usize, edge: u32) -> turbojpeg::Scali
 }
 
 fn decode_jpeg(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
+    // A camera JPEG often carries a small preview of itself up front. Decoding
+    // that instead of the full frame skips the Huffman pass over tens of
+    // megapixels; at thumb size nobody can tell the pixels apart.
+    if let Some(edge) = edge
+        && let Some(preview) = decode_embedded_preview(bytes, edge)
+    {
+        return orient(preview, bytes, ImageFormat::Jpeg);
+    }
     let mut decoder = turbojpeg::Decompressor::new().ok()?;
     let header = decoder.read_header(bytes).ok()?;
     let factor = edge.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
@@ -277,6 +317,614 @@ pub(crate) fn fit(width: u32, height: u32, edge: u32) -> (u32, u32) {
 
 fn drawable(thumbnail: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![Frame::new(to_bgra(thumbnail))]))
+}
+
+/// A downscaled copy of the sibling edge entry. The gallery entry covers the
+/// list size, so switching views reuses pixels instead of decoding again.
+/// Only downscales: a 96px entry blown up to 224px would look worse than the
+/// decode it replaces.
+fn read_other_edge(cache: Option<&Path>, path: &Path, edge: u32) -> Option<RgbaImage> {
+    let dir = cache?;
+    let other = if edge == TABLE_THUMB_EDGE {
+        THUMB_EDGE
+    } else {
+        return None;
+    };
+    let thumbnail = cache_file(dir, path, other)
+        .as_deref()
+        .and_then(read_cached)?;
+    Some(
+        DynamicImage::ImageRgba8(thumbnail)
+            .thumbnail(edge, edge)
+            .into_rgba8(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+/// The desktop thumbnail store's file URI for `path`. Percent-encoding follows
+/// the file URI rule: unreserved bytes pass through, all else escapes as
+/// uppercase hex. Only ASCII paths need this to be exact, and those are the
+/// ones photo folders hold.
+fn os_thumb_uri(path: &Path) -> Option<String> {
+    let absolute = std::fs::canonicalize(path)
+        .ok()
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            let mut base = std::env::current_dir().ok()?;
+            base.push(path);
+            Some(base)
+        })?;
+    let mut uri = String::from("file://");
+    for byte in absolute.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'/' | b'-' | b'.' | b'_' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
+                uri.push(*byte as char);
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    Some(uri)
+}
+
+#[cfg(target_os = "linux")]
+/// Candidate store entries, largest first. A 256px store entry covers both of
+/// this app's edges; a 128px one covers the list but never feeds the gallery.
+fn os_thumb_candidates(path: &Path) -> Vec<PathBuf> {
+    let Some(uri) = os_thumb_uri(path) else {
+        return Vec::new();
+    };
+    let digest = md5::compute(uri.as_bytes());
+    let name = format!("{digest:x}.png");
+    let Some(mut base) = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+    else {
+        return Vec::new();
+    };
+    base.push("thumbnails");
+    let sizes: &[&str] = if TABLE_THUMB_EDGE > 128 {
+        &["x-large", "large", "normal"]
+    } else {
+        &["large", "normal", "x-large"]
+    };
+    // `x-large` exists on newer desktops only; missing folders simply miss.
+    sizes
+        .iter()
+        .map(|size| base.join(size).join(&name))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+/// The `Thumb::URI` and `Thumb::MTime` text entries inside a store PNG.
+/// Plain pairs, in order: the store writes few, and the caller wants at most two.
+fn png_text_entries(bytes: &[u8]) -> Vec<(String, String)> {
+    const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+    if bytes.len() < 8 || bytes[..8] != SIGNATURE {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    let mut offset = 8;
+    while offset + 8 <= bytes.len() {
+        let length =
+            u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap_or([0; 4])) as usize;
+        let kind = &bytes[offset + 4..offset + 8];
+        offset += 8;
+        if offset + length + 4 > bytes.len() {
+            return entries;
+        }
+        if kind == b"tEXt"
+            && let Some(split) = bytes[offset..offset + length]
+                .iter()
+                .position(|byte| *byte == 0)
+        {
+            let keyword = String::from_utf8_lossy(&bytes[offset..offset + split]).into_owned();
+            let value =
+                String::from_utf8_lossy(&bytes[offset + split + 1..offset + length]).into_owned();
+            entries.push((keyword, value));
+        }
+        offset += length + 4;
+        if kind == b"IEND" {
+            break;
+        }
+    }
+    entries
+}
+
+/// A thumbnail the desktop already drew for this file, from whichever store the
+/// platform keeps. Best-effort: any failure is a miss, and the decode runs.
+fn read_os_thumb(path: &Path, edge: u32) -> Option<RgbaImage> {
+    #[cfg(target_os = "linux")]
+    {
+        read_freedesktop_thumb(path, edge)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        read_quicklook_thumb(path, edge)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        read_shell_thumb(path, edge)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (path, edge);
+        None
+    }
+}
+
+/// JPEG and WebP own their fast decoders, so the OS stores never see them: a
+/// process spawn or COM round trip cannot beat the scaled native decode, and
+/// trying would only slow the format that needs no help.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn os_store_skips(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let sniffed = std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut head).map(|_| head))
+        .ok();
+    sniffed.is_some_and(|head| {
+        image::guess_format(&head)
+            .is_ok_and(|format| matches!(format, ImageFormat::Jpeg | ImageFormat::WebP))
+    })
+}
+
+/// The freedesktop entry for this file. Validated against the source's
+/// modification time, so an edited photo never wears its old face. Accepted
+/// without store metadata only when the entry itself is newer than the source.
+/// Returns pixels at `edge`, scaled down from the store size.
+#[cfg(target_os = "linux")]
+fn read_freedesktop_thumb(path: &Path, edge: u32) -> Option<RgbaImage> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let uri = os_thumb_uri(path);
+    for candidate in os_thumb_candidates(path) {
+        let bytes = std::fs::read(&candidate).ok()?;
+        let entries = png_text_entries(&bytes);
+        let stored_uri = entries
+            .iter()
+            .find(|(keyword, _)| keyword == "Thumb::URI")
+            .map(|(_, value)| value.as_str());
+        let stored_time = entries
+            .iter()
+            .find(|(keyword, _)| keyword == "Thumb::MTime")
+            .and_then(|(_, value)| value.parse::<u64>().ok());
+        match (stored_uri, stored_time, uri.as_deref()) {
+            (Some(stored), Some(when), _) if Some(stored) != uri.as_deref() || when != modified => {
+                continue;
+            }
+            (Some(_), None, _) | (None, Some(_), _) => continue,
+            (None, None, _) => {
+                let fresh = std::fs::metadata(&candidate)
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| since.as_secs())
+                    .unwrap_or(0);
+                if fresh < modified {
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        let decoded = image::load_from_memory(&bytes).ok()?;
+        // A store entry smaller than the box is another app's small idea of
+        // this file, not a source: decoding the file itself stays truer.
+        if decoded.width().max(decoded.height()) < edge {
+            continue;
+        }
+        return Some(decoded.thumbnail(edge, edge).into_rgba8());
+    }
+    None
+}
+
+/// The `qlmanage` tool, looked up once. It lives in `/usr/bin` on every macOS,
+/// but the lookup still goes through `PATH` so a missing tool is a miss rather
+/// than a spawn error on every thumb.
+#[cfg(target_os = "macos")]
+fn quicklook_tool() -> Option<std::path::PathBuf> {
+    static TOOL: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    TOOL.get_or_init(|| {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("qlmanage"))
+                .find(|tool| {
+                    std::fs::metadata(tool).is_ok_and(|meta| !meta.is_dir()) && is_executable(tool)
+                })
+        })
+    })
+    .clone()
+}
+
+/// Executable bit set for the owner, group or world. `qlmanage` is world
+/// executable, so any set bit counts.
+#[cfg(target_os = "macos")]
+fn is_executable(tool: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(tool)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// A thumbnail Quick Look draws for this file. Unlike the Linux store this
+/// generates rather than reuses: macOS keeps no readable cache, so the tool is
+/// the cache. It runs only for formats the native decoders do not own, with a
+/// bounded wait on the slow worker, and anything it draws feeds the Press disk
+/// cache like any other decode.
+#[cfg(target_os = "macos")]
+fn read_quicklook_thumb(path: &Path, edge: u32) -> Option<RgbaImage> {
+    if os_store_skips(path) {
+        return None;
+    }
+    let tool = quicklook_tool()?;
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!("press-ql-{}-{id}", std::process::id()));
+    std::fs::create_dir_all(&out).ok()?;
+    let size = edge.max(512).to_string();
+    let mut child = std::process::Command::new(&tool)
+        .args(["-t", "-s", &size, "-o"])
+        .arg(&out)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // Five seconds for one thumb: a stuck generator must never hold the slow
+    // worker past the next viewport.
+    let mut waited = 0;
+    let status = loop {
+        if let Some(status) = child.try_wait().ok().flatten() {
+            break Some(status);
+        }
+        if waited >= 100 {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        waited += 1;
+    };
+    let ok = status.is_some_and(|status| status.success());
+    // `qlmanage` names its output after the source with `.png` added, but the
+    // lookup takes whatever single PNG it left: the name is a detail, the
+    // pixels are the contract.
+    let drawn = ok.then(|| {
+        std::fs::read_dir(&out)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .find_map(|entry| {
+                let file = entry.path();
+                (file.extension() == Some(std::ffi::OsStr::new("png"))
+                    && entry.metadata().is_ok_and(|meta| meta.is_file()))
+                .then(|| std::fs::read(&file).ok())
+                .flatten()
+            })
+    });
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes = drawn??;
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    if decoded.width().max(decoded.height()) == 0 {
+        return None;
+    }
+    Some(decoded.thumbnail(edge, edge).into_rgba8())
+}
+
+/// The shell thumbnail cache, read-only. `INCACHEONLY` asks only for what
+/// Explorer already drew: a generation would block the slow worker on another
+/// app's decoder, while a hit is just a small bitmap copy. Anything the cache
+/// does not hold falls through to the general decode.
+#[cfg(target_os = "windows")]
+fn read_shell_thumb(path: &Path, edge: u32) -> Option<RgbaImage> {
+    if os_store_skips(path) {
+        return None;
+    }
+    // SAFETY: every raw pointer below stays inside this call. COM references
+    // release before return on all paths, the bitmap deletes after its pixels
+    // are copied out, and a miss never draws.
+    unsafe { shell_thumb_cached(path, edge) }
+}
+
+/// `IShellItemImageFactory`, hand-declared. `windows-sys` ships the shell
+/// functions but not this interface, and a tiny local vtable beats a new
+/// wrapper crate for one method past `IUnknown`.
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct FactoryVtbl {
+    query: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *const GUID,
+        *mut *mut core::ffi::c_void,
+    ) -> HRESULT,
+    add: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+    image: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        HWND,
+        *const SIZE,
+        i32,
+        *mut HBITMAP,
+    ) -> HRESULT,
+}
+
+#[cfg(target_os = "windows")]
+const FACTORY_ID: GUID = GUID {
+    data1: 0xbcc1_8b79,
+    data2: 0xba16,
+    data3: 0x442f,
+    data4: [0x80, 0xc4, 0x19, 0xa5, 0xea, 0xad, 0x13, 0x2b],
+};
+
+#[cfg(target_os = "windows")]
+unsafe fn shell_thumb_cached(path: &Path, edge: u32) -> Option<RgbaImage> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    // Each successful init balances with one uninit, including `S_FALSE`
+    // (already initialized on this thread).
+    let init = CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32);
+    if init != S_OK && init != S_FALSE {
+        return None;
+    }
+    let thumb = shell_thumb_inner(&wide, edge);
+    CoUninitialize();
+    thumb
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn shell_thumb_inner(wide: &[u16], edge: u32) -> Option<RgbaImage> {
+    let mut factory: *mut core::ffi::c_void = std::ptr::null_mut();
+    let status = SHCreateItemFromParsingName(
+        wide.as_ptr() as PCWSTR,
+        std::ptr::null_mut(),
+        &FACTORY_ID,
+        &mut factory,
+    );
+    if status != S_OK || factory.is_null() {
+        return None;
+    }
+    let vtbl = *(factory as *const *const FactoryVtbl);
+    let size = SIZE {
+        cx: edge as i32,
+        cy: edge as i32,
+    };
+    let mut bitmap: HBITMAP = std::ptr::null_mut();
+    let flags = SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY;
+    let status = ((*vtbl).image)(factory, std::ptr::null_mut(), &size, flags, &mut bitmap);
+    ((*vtbl).release)(factory);
+    if status != S_OK || bitmap.is_null() {
+        return None;
+    }
+    let image = bitmap_pixels(bitmap, edge);
+    DeleteObject(bitmap as HGDIOBJ);
+    image
+}
+
+/// Pixels out of a shell bitmap. GDI hands back BGRA; the same swap `to_bgra`
+/// performs turns it into the RGBA the cache round trip expects.
+#[cfg(target_os = "windows")]
+unsafe fn bitmap_pixels(bitmap: HBITMAP, edge: u32) -> Option<RgbaImage> {
+    let mut info: BITMAP = std::mem::zeroed();
+    if GetObjectW(
+        bitmap as HGDIOBJ,
+        std::mem::size_of::<BITMAP>() as i32,
+        &mut info as *mut BITMAP as *mut core::ffi::c_void,
+    ) == 0
+    {
+        return None;
+    }
+    if info.bmWidth <= 0
+        || info.bmHeight <= 0
+        || info.bmWidth > 4096
+        || info.bmHeight > 4096
+        || (info.bmBitsPixel != 32 && info.bmBitsPixel != 24)
+    {
+        return None;
+    }
+    let (width, height) = (info.bmWidth as u32, info.bmHeight as u32);
+    let screen: HDC = GetDC(std::ptr::null_mut());
+    if screen.is_null() {
+        return None;
+    }
+    let mut format: BITMAPINFO = std::mem::zeroed();
+    format.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    format.bmiHeader.biWidth = info.bmWidth;
+    format.bmiHeader.biHeight = -info.bmHeight;
+    format.bmiHeader.biPlanes = 1;
+    format.bmiHeader.biBitCount = 32;
+    format.bmiHeader.biCompression = BI_RGB;
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    let lines = GetDIBits(
+        screen,
+        bitmap,
+        0,
+        height,
+        pixels.as_mut_ptr() as *mut core::ffi::c_void,
+        &mut format,
+        DIB_RGB_COLORS,
+    );
+    ReleaseDC(std::ptr::null_mut(), screen);
+    if lines != height as i32 {
+        return None;
+    }
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let image = RgbaImage::from_raw(width, height, pixels)?;
+    Some(
+        DynamicImage::ImageRgba8(image)
+            .thumbnail(edge, edge)
+            .into_rgba8(),
+    )
+}
+
+/// The small preview JPEG cameras embed up front (EXIF tag 0x0201 in IFD1).
+/// Offsets count from the TIFF header inside APP1, so the base travels with
+/// the parse. `None` for files without one, which is most of the web.
+fn decode_embedded_preview(bytes: &[u8], edge: u32) -> Option<RgbaImage> {
+    let segment = exif_segment(bytes)?;
+    let thumbnail = exif_thumbnail(&segment)?;
+    if thumbnail.len() < 64 {
+        return None;
+    }
+    // The preview is already small; a scaled DCT decode keeps it that way.
+    // A corrupt preview must never fail the thumb: the caller falls through
+    // to the full decode.
+    let preview = decode_jpeg_bytes(&thumbnail, Some(edge)).or_else(|| {
+        image::load_from_memory(&thumbnail)
+            .ok()
+            .map(|image| image.thumbnail(edge, edge).into_rgba8())
+    })?;
+    (preview.width().max(preview.height()) >= edge / 2).then_some(preview)
+}
+
+/// The APP1 segment body holding `Exif\0\0`, if the file carries one.
+fn exif_segment(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 4 || bytes[0..2] != [0xFF, 0xD8] {
+        return None;
+    }
+    let mut offset = 2;
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] != 0xFF {
+            return None;
+        }
+        let marker = bytes[offset + 1];
+        // Standalone markers carry no length: SOI, EOI, RSTn, TEM.
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            offset += 2;
+            continue;
+        }
+        let length = u16::from_be_bytes([bytes[offset + 2], bytes[offset + 3]]) as usize;
+        if length < 2 || offset + 2 + length > bytes.len() {
+            return None;
+        }
+        if marker == 0xE1 {
+            let body = &bytes[offset + 4..offset + 2 + length];
+            if body.starts_with(b"Exif\0\0") {
+                return Some(body[6..].to_vec());
+            }
+        }
+        if marker == 0xDA {
+            return None;
+        }
+        offset += 2 + length;
+    }
+    None
+}
+
+/// Byte order inside the TIFF header.
+#[derive(Clone, Copy)]
+enum TiffOrder {
+    Little,
+    Big,
+}
+
+fn tiff_u16(tiff: &[u8], offset: usize, order: TiffOrder) -> Option<u16> {
+    let pair: [u8; 2] = tiff.get(offset..offset + 2)?.try_into().ok()?;
+    Some(match order {
+        TiffOrder::Little => u16::from_le_bytes(pair),
+        TiffOrder::Big => u16::from_be_bytes(pair),
+    })
+}
+
+fn tiff_u32(tiff: &[u8], offset: usize, order: TiffOrder) -> Option<u32> {
+    let quad: [u8; 4] = tiff.get(offset..offset + 4)?.try_into().ok()?;
+    Some(match order {
+        TiffOrder::Little => u32::from_le_bytes(quad),
+        TiffOrder::Big => u32::from_be_bytes(quad),
+    })
+}
+
+/// The value of one LONG entry: inline when the count is one, an offset into
+/// the TIFF body otherwise.
+fn tiff_long(tiff: &[u8], entry: usize, order: TiffOrder) -> Option<u32> {
+    let kind = tiff_u16(tiff, entry + 2, order)?;
+    let count = tiff_u32(tiff, entry + 4, order)?;
+    if kind != 4 || count == 0 {
+        return None;
+    }
+    if count == 1 {
+        return tiff_u32(tiff, entry + 8, order);
+    }
+    let at = tiff_u32(tiff, entry + 8, order)? as usize;
+    tiff_u32(tiff, at, order)
+}
+
+/// Offset and length of the IFD1 thumbnail, read off the directory chain.
+fn exif_thumbnail(tiff: &[u8]) -> Option<Vec<u8>> {
+    if tiff.len() < 8 {
+        return None;
+    }
+    let order = match &tiff[0..4] {
+        [0x49, 0x49, 0x2A, 0x00] => TiffOrder::Little,
+        [0x4D, 0x4D, 0x00, 0x2A] => TiffOrder::Big,
+        _ => return None,
+    };
+    let mut directory = tiff_u32(tiff, 4, order)? as usize;
+    for _ in 0..2 {
+        let count = tiff_u16(tiff, directory, order)? as usize;
+        if directory + 2 + count * 12 + 4 > tiff.len() {
+            return None;
+        }
+        if directory == tiff_u32(tiff, 4, order)? as usize {
+            // IFD0's own offset lives here; IFD1 follows its entries.
+            directory = tiff_u32(tiff, directory + 2 + count * 12, order)? as usize;
+            continue;
+        }
+        let mut offset = None;
+        let mut length = None;
+        for index in 0..count {
+            let entry = directory + 2 + index * 12;
+            match tiff_u16(tiff, entry, order)? {
+                0x0201 => offset = tiff_long(tiff, entry, order),
+                0x0202 => length = tiff_long(tiff, entry, order),
+                _ => {}
+            }
+        }
+        let (offset, length) = (offset? as usize, length? as usize);
+        if length == 0 || offset + length > tiff.len() {
+            return None;
+        }
+        return Some(tiff[offset..offset + length].to_vec());
+    }
+    None
+}
+
+/// A JPEG decode shared by the full frame and the embedded preview, without
+/// the preview shortcut itself.
+fn decode_jpeg_bytes(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
+    let mut decoder = turbojpeg::Decompressor::new().ok()?;
+    let header = decoder.read_header(bytes).ok()?;
+    let factor = edge.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
+        jpeg_scaling_factor(header.width.max(header.height), edge)
+    });
+    decoder.set_scaling_factor(factor).ok()?;
+    let (width, height) = (factor.scale(header.width), factor.scale(header.height));
+    let mut pixels = vec![0; width.checked_mul(height)?.checked_mul(4)?];
+    decoder
+        .decompress(
+            bytes,
+            turbojpeg::Image {
+                pixels: &mut pixels,
+                width,
+                pitch: width.checked_mul(4)?,
+                height,
+                format: turbojpeg::PixelFormat::RGBA,
+            },
+        )
+        .ok()?;
+    let image = RgbaImage::from_raw(width.try_into().ok()?, height.try_into().ok()?, pixels)?;
+    Some(match edge {
+        Some(edge) => DynamicImage::ImageRgba8(image)
+            .thumbnail(edge, edge)
+            .into_rgba8(),
+        None => image,
+    })
 }
 
 /// Where this file's thumbnail lives, or `None` when the environment offers nowhere to
@@ -654,5 +1302,361 @@ mod tests {
             "the budget holds both edges of only {} images",
             CACHE_BYTES / per_image
         );
+    }
+
+    fn with_thumb_home(tag: &str) -> (PathBuf, Option<std::ffi::OsString>) {
+        let dir = scratch(tag);
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("XDG_CACHE_HOME");
+        // `set_var` is `unsafe` on this toolchain: the test harness owns the
+        // process, and no other thread reads this variable without holding the
+        // same fixture path.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", home.join("cache")) };
+        (dir, previous)
+    }
+
+    fn restore_thumb_home(previous: Option<std::ffi::OsString>) {
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
+        }
+    }
+
+    /// Another app often draws the same file first. Dolphin writes hundreds of
+    /// store entries while Press requests only its viewport; reusing them skips
+    /// the decode entirely.
+    #[test]
+    fn an_os_thumbnail_feeds_a_file_another_app_already_drew() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let (dir, previous) = with_thumb_home("os-thumb");
+        let path = dir.join("photo.jpg");
+        crate::convert::tests::photo(800, 600).save(&path).unwrap();
+        // Age the source so the fresh store entry below counts as newer.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("the fixture opens")
+            .set_modified(old)
+            .expect("the mtime is set");
+
+        let candidates = os_thumb_candidates(&path);
+        assert!(!candidates.is_empty(), "the store names this file");
+        let first = &candidates[0];
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        crate::convert::tests::photo(256, 192).save(first).unwrap();
+
+        let found = read_os_thumb(&path, TABLE_THUMB_EDGE).expect("the store hits");
+        assert_eq!(found.dimensions(), (96, 72));
+        restore_thumb_home(previous);
+    }
+
+    /// A store entry older than the source is the photo as it was, not as it
+    /// is. It must miss so the file decodes again.
+    #[test]
+    fn a_stale_os_entry_never_wears_an_old_face() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let (dir, previous) = with_thumb_home("os-thumb-stale");
+        let path = dir.join("photo.jpg");
+        crate::convert::tests::photo(400, 300).save(&path).unwrap();
+        let candidates = os_thumb_candidates(&path);
+        let first = &candidates[0];
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        crate::convert::tests::photo(256, 192).save(first).unwrap();
+        // Backdate the entry below the source: the source is newer.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(first)
+            .expect("the fixture opens")
+            .set_modified(old)
+            .expect("the mtime is set");
+
+        assert!(
+            read_os_thumb(&path, TABLE_THUMB_EDGE).is_none(),
+            "the stale entry must miss"
+        );
+        restore_thumb_home(previous);
+    }
+
+    /// Switching views must not decode again: the 224px entry downscales to
+    /// the 96px list size for nearly nothing.
+    #[test]
+    fn the_list_edge_reuses_the_gallery_entry() {
+        let dir = scratch("cross-edge");
+        let cache = dir.join("cache");
+        let path = dir.join("photo.png");
+        crate::convert::tests::photo(800, 600).save(&path).unwrap();
+        load_using(Some(&cache), &path, THUMB_EDGE).expect("the gallery decodes");
+
+        let reused = read_other_edge(Some(&cache), &path, TABLE_THUMB_EDGE)
+            .expect("the gallery entry feeds the list");
+        assert_eq!(reused.dimensions(), (96, 72));
+    }
+
+    /// Most web images carry no preview. The lookup must say so fast and let
+    /// the normal decode run.
+    #[test]
+    fn a_jpeg_without_a_preview_falls_through() {
+        let dir = scratch("no-preview");
+        let path = dir.join("plain.jpg");
+        crate::convert::tests::photo(400, 300).save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            decode_embedded_preview(&bytes, TABLE_THUMB_EDGE).is_none(),
+            "an encoder-written JPEG holds no EXIF preview"
+        );
+    }
+
+    /// Camera files hold a small JPEG up front. Decoding it skips the Huffman
+    /// pass over the full frame.
+    #[test]
+    fn an_embedded_preview_decodes_at_thumb_size() {
+        let mut thumb_jpeg = Vec::new();
+        crate::convert::tests::photo(160, 120)
+            .write_to(
+                &mut std::io::Cursor::new(&mut thumb_jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let length = thumb_jpeg.len() as u32;
+        // Minimal TIFF: empty IFD0 that points at an IFD1 with the two tags a
+        // preview needs, then the preview bytes themselves.
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
+        tiff.extend_from_slice(&[0x00, 0x00]);
+        tiff.extend_from_slice(&14u32.to_le_bytes());
+        tiff.extend_from_slice(&[0x02, 0x00]);
+        tiff.extend_from_slice(&[0x01, 0x02, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&44u32.to_le_bytes());
+        tiff.extend_from_slice(&[0x02, 0x02, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&length.to_le_bytes());
+        tiff.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&thumb_jpeg);
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        let segment = (tiff.len() + 8) as u16;
+        bytes.extend_from_slice(&segment.to_be_bytes());
+        bytes.extend_from_slice(b"Exif\0\0");
+        bytes.extend_from_slice(&tiff);
+        bytes.extend_from_slice(&[0xFF, 0xD9]);
+
+        let preview =
+            decode_embedded_preview(&bytes, TABLE_THUMB_EDGE).expect("the preview decodes");
+        assert_eq!(preview.dimensions(), (96, 72));
+    }
+
+    /// Times each thumb source against a real folder. Ignored by default: it
+    /// needs a folder of real photos and prints timings instead of asserting
+    /// them. Run it in release mode, or debug overhead drowns every stage:
+    ///
+    /// `PRESS_BENCH_FOLDER=~/Pictures cargo test --release --locked -- --ignored --nocapture bench_thumb_sources`
+    #[test]
+    #[ignore]
+    fn bench_thumb_sources() {
+        let root = std::env::var_os("PRESS_BENCH_FOLDER")
+            .map(PathBuf::from)
+            .expect("set PRESS_BENCH_FOLDER to a folder of real photos");
+        let mut photos: Vec<PathBuf> = walkdir::WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.into_path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "jpg" | "jpeg" | "png" | "webp"
+                        )
+                    })
+            })
+            .collect();
+        photos.sort();
+        photos.truncate(160);
+        assert!(
+            photos.len() >= 20,
+            "the bench needs at least 20 photos, found {}",
+            photos.len()
+        );
+
+        let dir = scratch("bench");
+        let cold_cache = dir.join("cold");
+        // Stage 1: cold. Empty Press cache, empty OS store: every file decodes.
+        // `with_thumb_home` points the store at a scratch home; the empty home
+        // below keeps stage 1 honest.
+        let (_home_dir, previous) = with_thumb_home("bench");
+        let empty_home = dir.join("empty-home");
+        std::fs::create_dir_all(&empty_home).unwrap();
+        // SAFETY: same rule as the helper above — the harness owns the process.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", &empty_home) };
+        let timed = time_stage(&photos, &cold_cache, "cold full decode");
+        let decodable = timed;
+        assert!(
+            !decodable.is_empty(),
+            "no photo in {root:?} decoded, the bench measures nothing"
+        );
+
+        // Stage 2: Press cache warm. Same folder, same cache: every file hits.
+        let (total, mean) = stage(&decodable, |path| {
+            matches!(
+                load_fast_using(Some(&cold_cache), path, TABLE_THUMB_EDGE, true),
+                FastLoad::Ready(_)
+            )
+        });
+        report("press cache hit", decodable.len(), total, mean);
+
+        // Stage 3: OS store. Fresh Press cache, planted store entries at 256px:
+        // this is the folder after Dolphin looked at it. The planted home is
+        // the scratch home `with_thumb_home` already installed.
+        let planted_home = dir.join("home").join("cache");
+        // SAFETY: same rule as the helper above — the harness owns the process.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", &planted_home) };
+        let mut planted = 0;
+        for path in &decodable {
+            if load_fallback_using(None, path, 256).is_none() {
+                continue;
+            }
+            for candidate in os_thumb_candidates(path).into_iter().take(1) {
+                if std::fs::create_dir_all(candidate.parent().unwrap()).is_ok()
+                    && image::open(path)
+                        .map(|image| image.thumbnail(256, 256))
+                        .and_then(|small| small.save(&candidate))
+                        .is_ok()
+                {
+                    planted += 1;
+                    break;
+                }
+            }
+        }
+        let store_cache = dir.join("store");
+        let (total, mean) = stage(&decodable, |path| {
+            match load_fast_using(Some(&store_cache), path, TABLE_THUMB_EDGE, true) {
+                FastLoad::Ready(loaded) => {
+                    if let Some(cache) = loaded.cache {
+                        persist(cache);
+                    }
+                    true
+                }
+                FastLoad::Fallback => false,
+            }
+        });
+        println!("planted {planted} of {} store entries", decodable.len());
+        report("os store hit", decodable.len(), total, mean);
+
+        // Stage 4: cross-edge. Only 224px entries primed, the list asks for 96.
+        let cross_cache = dir.join("cross");
+        for path in &decodable {
+            if let Some(loaded) = load_fallback_using(Some(&cross_cache), path, THUMB_EDGE)
+                && let Some(cache) = loaded.cache
+            {
+                persist(cache);
+            }
+        }
+        let (total, mean) = stage(&decodable, |path| {
+            matches!(
+                load_fast_using(Some(&cross_cache), path, TABLE_THUMB_EDGE, true),
+                FastLoad::Ready(_)
+            )
+        });
+        report("cross-edge 224 to 96", decodable.len(), total, mean);
+
+        // Stage 5: embedded preview against the full decode, on files that
+        // actually carry one.
+        let previewed: Vec<Vec<u8>> = decodable
+            .iter()
+            .filter_map(|path| std::fs::read(path).ok())
+            .filter(|bytes| exif_thumbnail(&exif_segment(bytes).unwrap_or_default()).is_some())
+            .collect();
+        if previewed.is_empty() {
+            println!("no embedded previews in this folder, stage skipped");
+        } else {
+            let start = std::time::Instant::now();
+            for bytes in &previewed {
+                assert!(decode_embedded_preview(bytes, TABLE_THUMB_EDGE).is_some());
+            }
+            let preview_total = start.elapsed();
+            let start = std::time::Instant::now();
+            for bytes in &previewed {
+                assert!(decode_jpeg_bytes(bytes, Some(TABLE_THUMB_EDGE)).is_some());
+            }
+            let full_total = start.elapsed();
+            println!(
+                "embedded preview over {} files: {:?} total ({:.1}ms mean)",
+                previewed.len(),
+                preview_total,
+                preview_total.as_secs_f64() * 1000. / previewed.len() as f64
+            );
+            println!(
+                "full decode over {} files: {:?} total ({:.1}ms mean)",
+                previewed.len(),
+                full_total,
+                full_total.as_secs_f64() * 1000. / previewed.len() as f64
+            );
+        }
+        restore_thumb_home(previous);
+    }
+
+    /// Stage 1 doubles as the decodable set: files that miss everywhere still
+    /// decode, so the later stages compare against the same files.
+    fn time_stage(photos: &[PathBuf], cache: &Path, label: &str) -> Vec<PathBuf> {
+        let mut decodable = Vec::new();
+        let start = std::time::Instant::now();
+        for path in photos {
+            match load_fast_using(Some(cache), path, TABLE_THUMB_EDGE, true) {
+                FastLoad::Ready(loaded) => {
+                    if let Some(cache) = loaded.cache {
+                        persist(cache);
+                    }
+                    decodable.push(path.clone());
+                }
+                FastLoad::Fallback => {
+                    if let Some(loaded) = load_fallback_using(Some(cache), path, TABLE_THUMB_EDGE) {
+                        if let Some(cache) = loaded.cache {
+                            persist(cache);
+                        }
+                        decodable.push(path.clone());
+                    }
+                }
+            }
+        }
+        let total = start.elapsed();
+        report(
+            label,
+            decodable.len(),
+            total,
+            mean_of(total, decodable.len()),
+        );
+        decodable
+    }
+
+    fn stage(files: &[PathBuf], mut load: impl FnMut(&Path) -> bool) -> (std::time::Duration, f64) {
+        let start = std::time::Instant::now();
+        let mut hits = 0;
+        for path in files {
+            hits += usize::from(load(path));
+        }
+        assert_eq!(
+            hits,
+            files.len(),
+            "a reuse stage must hit every decodable file"
+        );
+        let total = start.elapsed();
+        (total, mean_of(total, files.len()))
+    }
+
+    fn mean_of(total: std::time::Duration, count: usize) -> f64 {
+        total.as_secs_f64() * 1000. / count.max(1) as f64
+    }
+
+    fn report(label: &str, files: usize, total: std::time::Duration, mean: f64) {
+        println!("{label} over {files} files: {total:?} total ({mean:.1}ms mean)");
     }
 }

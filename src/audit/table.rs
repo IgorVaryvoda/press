@@ -513,19 +513,38 @@ impl TableDelegate for AuditTable {
                     )
                     .into_any_element()
             }
-            TableColumn::Thumb => div()
-                .w(px(THUMB_SLOT))
-                .h(px(THUMB_SLOT))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .bg(cx.theme().background)
-                // A fixed slot, so rows do not jump as thumbnails arrive.
-                .when_some(audit.thumbs.get(&index).cloned(), |slot, image| {
-                    slot.child(img(image).max_w(px(THUMB_SLOT)).max_h(px(THUMB_SLOT)))
-                })
-                .into_any_element(),
+            TableColumn::Thumb => {
+                let image = audit.thumbs.get(&index).cloned();
+                div()
+                    .w(px(THUMB_SLOT))
+                    .h(px(THUMB_SLOT))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .bg(cx.theme().background)
+                    // A fixed slot, so rows do not jump as thumbnails arrive.
+                    // A static file mark stands in until the decode lands, so a
+                    // missing thumb reads as loading rather than as a gap.
+                    .when(image.is_none(), |slot| {
+                        slot.child(
+                            div()
+                                .debug_selector(move || format!("thumb-placeholder-{index}"))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::File)
+                                        .size_4()
+                                        .text_color(cx.theme().muted_foreground.opacity(0.45)),
+                                ),
+                        )
+                    })
+                    .when_some(image, |slot, image| {
+                        slot.child(img(image).max_w(px(THUMB_SLOT)).max_h(px(THUMB_SLOT)))
+                    })
+                    .into_any_element()
+            }
             TableColumn::Name => {
                 // The finding, in the row that has it. `heavy` used to be a number
                 // in a column you had to know how to read; a file can be both

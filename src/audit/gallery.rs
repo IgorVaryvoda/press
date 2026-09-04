@@ -118,6 +118,22 @@ impl Audit {
                     .rounded_md()
                     .overflow_hidden()
                     .bg(cx.theme().background)
+                    // A static file mark until the decode lands. Same rule as
+                    // the list slot: loading reads as loading, not as a gap.
+                    .when(thumb.is_none(), |slot| {
+                        slot.child(
+                            div()
+                                .debug_selector(move || format!("thumb-placeholder-{index}"))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::File)
+                                        .size_5()
+                                        .text_color(cx.theme().muted_foreground.opacity(0.45)),
+                                ),
+                        )
+                    })
                     .when_some(thumb, |slot, image| {
                         slot.child(
                             img(image)

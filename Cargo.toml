@@ -28,6 +28,7 @@ turbojpeg = { version = "1.5.1", default-features = false, features = ["cmake"] 
 ureq = { version = "2.10", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+md5 = "0.7"
 parking_lot = "0.12"
 flate2 = "1"
 sha2 = "0.10"
@@ -47,9 +48,10 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 rfd = "0.17.2"
 
 # Atomic settings replacement calls ReplaceFileW/MoveFileExW directly; the std
-# rename will not replace an existing file on Windows.
+# rename will not replace an existing file on Windows. The thumbnail reuse also
+# reads the shell image factory plus GDI, so those API sets join the same pin.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Gdi"] }
 
 # gpui can render a frame to an image and hand back the pixels, but only with
 # `test-support` on. That is how `cargo test --bin press -- --ignored
