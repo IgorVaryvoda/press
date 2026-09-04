@@ -248,12 +248,20 @@ impl Audit {
             format!(" · {}", format_bytes(self.visible_bytes()))
         };
         let warnings = self.warning_stats();
+        // Scope reads where the totals are: the header chip is gone, and the
+        // menu owns the decision, so the bar says what the numbers cover.
+        // Quiet when off, like every other default.
+        let scope = if self.dataset_subfolders {
+            " · including subfolders"
+        } else {
+            ""
+        };
         match self.status_folder_count() {
             Some(folders) => {
                 let noun = if folders == 1 { "folder" } else { "folders" };
-                format!("{folders} {noun}, {images}{bytes}{warnings}")
+                format!("{folders} {noun}, {images}{bytes}{warnings}{scope}")
             }
-            None => format!("{images}{bytes}{warnings}"),
+            None => format!("{images}{bytes}{warnings}{scope}"),
         }
     }
 

@@ -22,6 +22,10 @@ pub struct Settings {
     /// Whether the window walks the whole tree like the command line does. Off
     /// by default so a folder opens exactly as it did before the choice existed.
     pub include_subfolders: bool,
+    /// The right sidebar starts collapsed. Open on first launch: the sidebar
+    /// carries every operation, and a collapsed default would hide the app's
+    /// job behind one more click. Stored collapsed so absence stays open.
+    pub sidebar_collapsed: bool,
     /// libaom's speed dial for AVIF output. `None` is the built-in default; the
     /// window has no control for it, so this and `--avif-speed` are the two ways
     /// to say anything else. Range-checked once, in `avif::set_speed`.
@@ -567,6 +571,7 @@ fn parse(text: &str) -> Settings {
             "recent_folder" => settings.recent_folders.push(PathBuf::from(value.trim())),
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "subfolders" => settings.include_subfolders = value.trim() == "1",
+            "sidebar_collapsed" => settings.sidebar_collapsed = value.trim() == "1",
             // Range-checked in `avif::set_speed`, which is where every source of this
             // value goes through. Parsing only has to reject what is not a number.
             "avif_speed" => settings.avif_speed = value.trim().parse().ok(),
@@ -613,6 +618,10 @@ fn render(settings: &Settings) -> String {
     // choice existed keeps opening one level at a time.
     if settings.include_subfolders {
         out.push_str("subfolders=1\n");
+    }
+    // Same shape: open writes nothing, so older files open with the sidebar.
+    if settings.sidebar_collapsed {
+        out.push_str("sidebar_collapsed=1\n");
     }
     if let Some(speed) = settings.avif_speed {
         out.push_str(&format!("avif_speed={speed}\n"));
@@ -714,6 +723,7 @@ mod tests {
             columns: ColumnPrefs::default(),
             output: Output::Folder(PathBuf::from("/exports/web")),
             include_subfolders: true,
+            sidebar_collapsed: true,
             avif_speed: Some(8),
         };
         assert_eq!(parse(&render(&settings)), settings);
@@ -820,6 +830,21 @@ mod tests {
         assert!(!render(&default).contains("subfolders="));
         assert!(!parse(&render(&default)).include_subfolders);
         assert!(!parse("subfolders=maybe\n").include_subfolders);
+    }
+
+    #[test]
+    fn the_collapsed_sidebar_round_trips() {
+        let collapsed = Settings {
+            sidebar_collapsed: true,
+            ..Settings::default()
+        };
+        assert!(render(&collapsed).contains("sidebar_collapsed=1\n"));
+        assert!(parse(&render(&collapsed)).sidebar_collapsed);
+
+        let default = Settings::default();
+        assert!(!render(&default).contains("sidebar_collapsed="));
+        assert!(!parse(&render(&default)).sidebar_collapsed);
+        assert!(!parse("sidebar_collapsed=maybe\n").sidebar_collapsed);
     }
 
     #[test]

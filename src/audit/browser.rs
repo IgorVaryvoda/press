@@ -81,7 +81,6 @@ impl Audit {
 
     pub(super) fn browser_persistent(&self, window: &Window) -> bool {
         self.batch_size.is_none()
-            && self.rail == Rail::None
             && f32::from(window.viewport_size().width) >= SIDEBAR_MIN_WINDOW_WIDTH
     }
 

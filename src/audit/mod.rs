@@ -218,8 +218,9 @@ fn thumb_cache_limit(edge: u32) -> usize {
     (THUMB_CACHE_BYTES / bytes).max(THUMB_WORKERS)
 }
 
-/// The open rail. Every operation with settings owns one, so the action bar
-/// can hold verbs alone and no operation borrows another's controls.
+/// The sidebar tab: one operation each. Every operation with settings owns
+/// one, so the action bar can hold verbs alone and no operation borrows
+/// another's controls. `None` is no choice yet, and reads as Convert.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) enum Rail {
     #[default]
@@ -646,6 +647,10 @@ pub(crate) struct Audit {
     /// The open rail, if any. A folder opens on Convert: it is the app's job,
     /// and an empty right-hand edge on launch would hide it.
     rail: Rail,
+    /// The right sidebar with one tab per operation. Open on launch and
+    /// collapsible, never gone: the operations are the app, and a rail that
+    /// only appears after the right click already happened helps nobody.
+    sidebar_open: bool,
     /// The keyboard shortcut list, open over the workspace like settings.
     shortcuts_open: bool,
     /// The notices row spills past one line. Collapsed, it holds its height
@@ -2018,6 +2023,7 @@ pub(crate) fn build_audit(
         columns: column_prefs,
         output,
         include_subfolders,
+        sidebar_open,
     } = launch;
     let root = navigation_path(root);
     let recent_folders = recent_folders
@@ -2271,6 +2277,7 @@ pub(crate) fn build_audit(
             column_prefs,
             output,
             rail: Rail::None,
+            sidebar_open,
             shortcuts_open: false,
             notices_expanded: false,
         };

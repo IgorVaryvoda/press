@@ -232,12 +232,14 @@ impl Audit {
         ticked.next().is_none().then_some(first)
     }
 
-    /// Open a rail, or close it when its own verb is clicked again.
+    /// Select a sidebar tab. The sidebar opens with it; collapsing is the
+    /// header toggle's job, so a verb never hides the surface it just chose.
+    /// Clicking the active verb keeps the tab rather than closing the rail:
+    /// with the sidebar always present there is nothing to toggle back to.
     pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
-        self.rail = if self.rail == rail { Rail::None } else { rail };
-        if self.rail != Rail::None {
-            self.browser_overlay = false;
-        }
+        self.rail = rail;
+        self.sidebar_open = true;
+        self.browser_overlay = false;
         cx.notify();
     }
 
@@ -258,15 +260,16 @@ impl Audit {
         self.studio_source = written.map(|path| (index, path));
         self.compare = None;
         self.rail = Rail::Studio;
+        self.sidebar_open = true;
         self.selection_changed(cx);
     }
 
-    /// What an open rail takes from the list. Zero when none is open.
+    /// What the sidebar takes from the list. Zero while collapsed.
     pub(super) fn rail_width(&self) -> f32 {
-        if self.rail == Rail::None {
-            0.
-        } else {
+        if self.sidebar_open {
             panel::RAIL_WIDTH
+        } else {
+            0.
         }
     }
 

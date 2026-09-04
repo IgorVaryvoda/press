@@ -428,6 +428,7 @@ fn screenshot() {
                     columns: ColumnPrefs::default(),
                     output: crate::settings::Output::default(),
                     include_subfolders: false,
+                    sidebar_open: true,
                 },
                 window,
                 cx,
@@ -632,6 +633,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
         include_subfolders: false,
+        sidebar_open: true,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -742,6 +744,7 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
         include_subfolders: false,
+        sidebar_open: true,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -1368,6 +1371,7 @@ fn notification_audit(
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
+                sidebar_open: true,
             },
             window,
             cx,
@@ -1760,6 +1764,7 @@ fn finding_launch() -> Launch {
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
         include_subfolders: false,
+        sidebar_open: true,
     }
 }
 
@@ -2574,6 +2579,7 @@ fn pointer_checkbox_audit(
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
         include_subfolders: false,
+        sidebar_open: true,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| {
         let built = build_audit(launch, window, cx);
@@ -3394,8 +3400,10 @@ fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAp
     audit.update(cx, |audit, cx| audit.open_rail(Rail::Convert, cx));
     cx.simulate_resize(size(px(1100.), px(720.)));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("folder-sidebar").is_none());
-    assert!(cx.debug_bounds("folder-tree-toggle").is_some());
+    // The operations sidebar no longer evicts the folder sidebar: both share
+    // the window and the list takes what is left.
+    assert!(cx.debug_bounds("folder-sidebar").is_some());
+    assert!(cx.debug_bounds("folder-tree-toggle").is_none());
 }
 
 #[gpui_kit::test]
@@ -3854,12 +3862,15 @@ fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestA
         assert!(!audit.include_subfolders);
         assert_eq!(audit.entries.len(), 1);
         assert_eq!(audit.folders, vec![child.clone()]);
+        assert!(
+            !audit.status_line(1).contains("including subfolders"),
+            "one level reads as one level"
+        );
     });
 
-    let chip = cx
-        .debug_bounds("include-subfolders")
-        .expect("the header offers the scope chip");
-    cx.simulate_click(chip.center(), gpui_kit::Modifiers::default());
+    // Scope moved from the header chip to the Open menu; the toggle itself is
+    // unchanged, so the test drives it directly and reads the status line.
+    audit.update(cx, |audit, cx| audit.toggle_subfolders(cx));
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
     audit.read_with(cx, |audit, _| {
@@ -3870,6 +3881,10 @@ fn the_subfolders_toggle_lists_nested_images_with_relative_labels(cx: &mut TestA
         );
         assert_eq!(audit.root, root);
         assert_eq!(audit.entries.len(), whole);
+        assert!(
+            audit.status_line(whole).contains("including subfolders"),
+            "the status bar says what the numbers cover"
+        );
         assert_eq!(
             audit.folders,
             vec![child.clone()],
@@ -4259,6 +4274,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
+                sidebar_open: true,
             },
             window,
             cx,
@@ -4371,6 +4387,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
+                sidebar_open: true,
             },
             window,
             cx,
@@ -4451,6 +4468,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui_kit::TestAppCo
                 columns: ColumnPrefs::default(),
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
+                sidebar_open: true,
             },
             window,
             cx,
@@ -4535,6 +4553,7 @@ fn convertible_audit(
         columns: ColumnPrefs::default(),
         output: crate::settings::Output::default(),
         include_subfolders: false,
+        sidebar_open: true,
     };
     let mut built = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
@@ -4972,7 +4991,7 @@ fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext
     audit.read_with(cx, |audit, _| assert_eq!(audit.rail, Rail::Convert));
     assert!(
         cx.debug_bounds("convert-stop").is_some(),
-        "the way out of a run cannot be closed away: the tab that reopens the rail \
+        "the way out of a run cannot be collapsed away: the collapse control \
          is disabled while it runs"
     );
     audit.update(cx, |audit, _| audit.converting = false);
@@ -5293,6 +5312,54 @@ fn a_run_that_converted_nothing_still_lays_out_the_column_holding_its_failures(
         "the list still shows the row its run failed"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The sidebar opens on Convert, retabs on a verb, collapses on request, and
+/// the resize-only preset lights as one of the named rows.
+#[gpui_kit::test]
+fn the_sidebar_tabs_switch_operations_and_collapse(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sidebar_open, "the operations sidebar starts open");
+        assert_eq!(audit.active_tab(), Rail::Convert);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("rail").is_some());
+
+    audit.update(cx, |audit, cx| audit.open_rail(Rail::RemoveBackground, cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.active_tab(), Rail::RemoveBackground)
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.sidebar_open = false;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("rail").is_none(),
+        "a collapsed sidebar leaves the window"
+    );
+    // A verb reopens the sidebar on its own tab.
+    audit.update(cx, |audit, cx| audit.open_rail(Rail::Studio, cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sidebar_open);
+        assert_eq!(audit.active_tab(), Rail::Studio);
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.format = Format::Same;
+        audit.quality = Quality::lossy(80.);
+        audit.max_edge = MaxEdge(Some(2400));
+        cx.notify();
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            panel::active_preset(audit.format, audit.quality, audit.max_edge),
+            Some(3),
+            "keeping the container at a smaller edge is a named preset"
+        );
+    });
 }
 
 /// The new chrome states its facts in strings the tests can read: the output

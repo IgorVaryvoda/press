@@ -1278,6 +1278,7 @@ fn main() {
                 columns: remembered.columns,
                 output: remembered.output.clone(),
                 include_subfolders: remembered.include_subfolders,
+                sidebar_open: !remembered.sidebar_collapsed,
             },
             None,
             pending_crash,
@@ -1319,6 +1320,7 @@ fn main() {
                 columns: remembered.columns,
                 output: remembered.output.clone(),
                 include_subfolders: remembered.include_subfolders,
+                sidebar_open: !remembered.sidebar_collapsed,
             },
             Some(target),
             pending_crash,
@@ -1692,6 +1694,7 @@ struct Launch {
     columns: settings::ColumnPrefs,
     output: settings::Output,
     include_subfolders: bool,
+    sidebar_open: bool,
 }
 
 /// `Root` owns these overlays but leaves their placement to the app's content view.

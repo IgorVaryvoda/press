@@ -333,6 +333,10 @@ impl Audit {
         let can_reveal = reveal_root.is_dir();
         let sirv_disabled =
             self.converting || self.batch_folders.is_some() || self.scan_blocks_delivery();
+        // Scope rides with opening: it decides what a folder open covers, the
+        // way the command line decides it with a flag.
+        let scope_checked = self.include_subfolders;
+        let scope_disabled = self.converting || self.single_file;
         div()
             .debug_selector(|| "audit-header".into())
             .flex()
@@ -380,6 +384,7 @@ impl Audit {
                             .dropdown_menu(move |menu, _, _| {
                                 let open_folder = source_menu.clone();
                                 let open_images = source_menu.clone();
+                                let toggle_scope = source_menu.clone();
                                 let pair_sirv = source_menu.clone();
                                 let reveal_root = reveal_root.clone();
                                 let reveal_source = reveal_source.clone();
@@ -398,6 +403,20 @@ impl Audit {
                                         .on_click(move |_, _, cx| {
                                             if let Some(audit) = open_images.upgrade() {
                                                 audit.update(cx, |audit, cx| audit.pick(false, cx));
+                                            }
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Include subfolders")
+                                        .icon(IconName::Network)
+                                        .checked(scope_checked)
+                                        .disabled(scope_disabled)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = toggle_scope.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.toggle_subfolders(cx)
+                                                });
                                             }
                                         }),
                                 )
@@ -469,28 +488,8 @@ impl Audit {
                         ),
                     ),
             )
-            // The one scope choice, beside the counts it changes. A lit chip rather
-            // than a checkbox: the header is a row of chips, and a checkbox here
-            // would also need the Space/Enter ownership wrapper the list rows carry.
-            .child(
-                div().debug_selector(|| "include-subfolders".into()).child(
-                    Button::new("include-subfolders")
-                        .small()
-                        .icon(IconName::Network)
-                        .label("Subfolders")
-                        .tooltip(if self.include_subfolders {
-                            "Every folder below this one is in the list, as on the \
-                             command line. Click to read this folder only."
-                        } else {
-                            "This folder only. Click to include every folder below it, \
-                             as the command line does."
-                        })
-                        .selected(self.include_subfolders)
-                        .when(!self.include_subfolders, |button| button.ghost())
-                        .disabled(self.converting || self.single_file)
-                        .on_click(cx.listener(|audit, _, _, cx| audit.toggle_subfolders(cx))),
-                ),
-            )
+            // Scope lives in the Open menu and the status bar now: the header
+            // is for narrowing the list, and scope defines the list itself.
             // One control per finding on wide windows, one menu below 900px.
             .child(self.findings_controls(width, cx))
             .when(acquisition::SHOW_ACQUISITION_EXTRAS, |header| {
@@ -538,6 +537,21 @@ impl Audit {
                             return;
                         }
                         audit.set_grid(!audit.grid, cx);
+                    })),
+            )
+            .child(
+                // The operations sidebar, always a click away. Collapsed, the
+                // list takes the room; the verbs in the action bar reopen it
+                // on the tab they need.
+                Button::new("toggle-sidebar")
+                    .small()
+                    .ghost()
+                    .icon(IconName::PanelRight)
+                    .tooltip("Toggle operations sidebar")
+                    .selected(self.sidebar_open)
+                    .on_click(cx.listener(|audit, _, _, cx| {
+                        audit.sidebar_open = !audit.sidebar_open;
+                        cx.notify();
                     })),
             )
             .child(

@@ -550,6 +550,7 @@ impl Render for Audit {
                 ref output => output.clone(),
             },
             include_subfolders: self.include_subfolders,
+            sidebar_collapsed: !self.sidebar_open,
             // Read back from the process rather than kept a second time here: the
             // speed is set once at startup and nothing in the window changes it, so
             // a copy on `Audit` would only be a copy to forget to update.

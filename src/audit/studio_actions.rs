@@ -245,6 +245,7 @@ impl Audit {
                         audit.studio_job.as_mut().unwrap().state =
                             StudioJobState::AwaitingConfirmation(upload);
                         audit.rail = Rail::Studio;
+                        audit.sidebar_open = true;
                     }
                     Err(message) => {
                         audit.studio_job.as_mut().unwrap().state = StudioJobState::Failed(message);

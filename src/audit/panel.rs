@@ -27,7 +27,7 @@ const BAR_READOUT_WIDTH: f32 = 560.;
 
 /// The named outputs most runs want. Listed once; the rows and the settings
 /// they apply cannot disagree.
-const PRESETS: [(&str, &str, Format, Quality, MaxEdge); 3] = [
+const PRESETS: [(&str, &str, Format, Quality, MaxEdge); 4] = [
     (
         "Recommended",
         "WebP · quality 80 · original size",
@@ -48,6 +48,15 @@ const PRESETS: [(&str, &str, Format, Quality, MaxEdge); 3] = [
         Format::WebP,
         Quality::LOSSLESS,
         MaxEdge::FULL,
+    ),
+    // The resize-only run: each file keeps its container and just gets
+    // smaller, so every `<img src>` that named it still resolves.
+    (
+        "Resize only",
+        "Keep format · quality 80 · max 2400px",
+        Format::Same,
+        Quality(Some(80.)),
+        MaxEdge(Some(2400)),
     ),
 ];
 
@@ -323,18 +332,83 @@ impl Audit {
             .on_click(cx.listener(move |audit, _, _, cx| audit.open_rail(rail, cx)))
     }
 
-    /// The open rail. Header, the operation's own settings, and its commit at
+    /// The tab the sidebar shows. Nothing chosen yet means Convert: it is the
+    /// app's job, and the sidebar opens on it.
+    pub(super) fn active_tab(&self) -> Rail {
+        match self.rail {
+            Rail::None => Rail::Convert,
+            tab => tab,
+        }
+    }
+
+    /// One tab per operation, always present above the settings. The sidebar
+    /// stays open, so switching ops is one click, not a verb plus a rail.
+    fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active_tab();
+        // Two fixed rows of two: four tabs never fit 300px in one row, and a
+        // wrapping row leaves Studio alone on a second line by accident.
+        let tab = |tab: Rail, label: &'static str, tooltip: &'static str| {
+            Button::new(("rail-tab", tab as usize))
+                .small()
+                .flex_1()
+                .label(label)
+                .tooltip(tooltip)
+                .selected(active == tab)
+                .when(active != tab, |button| button.ghost())
+                .disabled(self.converting)
+                .on_click(cx.listener(move |audit, _, _, cx| audit.open_rail(tab, cx)))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(tab(
+                        Rail::Convert,
+                        "Convert",
+                        "Convert images to WebP, AVIF, or their own format",
+                    ))
+                    .child(tab(
+                        Rail::RemoveBackground,
+                        "Remove bg",
+                        "Remove the background on this computer",
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(tab(Rail::Upscale, "Upscale", "Upscale 4× on this computer"))
+                    .child(tab(
+                        Rail::Studio,
+                        "Studio",
+                        "AI operations with Sirv Studio",
+                    )),
+            )
+    }
+
+    /// The sidebar: tabs, the active operation's settings, and its commit at
     /// the foot — the same shape whichever operation it belongs to.
     pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        if self.rail == Rail::None {
+        if !self.sidebar_open {
             return None;
         }
-        let title = self.rail.title();
-        let body = match self.rail {
+        let tab = self.active_tab();
+        let title = tab.title();
+        let body = match tab {
             Rail::Convert => self.convert_rail(cx).into_any_element(),
-            Rail::RemoveBackground | Rail::Upscale => self.local_ai_rail(self.rail, cx),
+            Rail::RemoveBackground | Rail::Upscale => self.local_ai_rail(tab, cx),
             Rail::Studio => self.studio_rail(cx),
-            Rail::None => return None,
+            Rail::None => self.convert_rail(cx).into_any_element(),
         };
         Some(
             div()
@@ -366,23 +440,24 @@ impl Audit {
                                 .child(title),
                         )
                         .child(
-                            // Closing the rail mid-run would take Stop away with
-                            // it, and the tab that reopens the rail is disabled
-                            // while converting: there would be no way back.
+                            // Collapse, not close: the sidebar is the operations
+                            // home, and closing it mid-run would take Stop away
+                            // with it. The header toggle brings it back.
                             div().debug_selector(|| "close-rail".into()).child(
                                 Button::new("close-rail")
                                     .small()
                                     .ghost()
                                     .icon(IconName::Close)
-                                    .tooltip("Close")
+                                    .tooltip("Collapse sidebar")
                                     .disabled(self.converting)
                                     .on_click(cx.listener(|audit, _, _, cx| {
-                                        audit.rail = Rail::None;
+                                        audit.sidebar_open = false;
                                         cx.notify();
                                     })),
                             ),
                         ),
                 )
+                .child(self.tab_bar(cx))
                 .child(body)
                 .into_any_element(),
         )
@@ -416,7 +491,8 @@ impl Audit {
                             .gap_1()
                             .child(self.preset_row(0, cx))
                             .child(self.preset_row(1, cx))
-                            .child(self.preset_row(2, cx)),
+                            .child(self.preset_row(2, cx))
+                            .child(self.preset_row(3, cx)),
                     )
                     .child(div().h(px(1.)).bg(cx.theme().border))
                     .child(
