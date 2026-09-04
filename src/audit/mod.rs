@@ -1229,6 +1229,38 @@ impl Audit {
         self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
         self.walk_errors = scanned.walk_errors;
+        // The lane keeps counts; the names live in one dismissible toast announced
+        // once per dataset. A name-dump inline pushes the list down and truncates
+        // into a blob nobody can read, which is what the lane used to render.
+        if self.unreadable.is_empty() && self.walk_errors.is_empty() {
+            self.clear_error("scan", cx);
+        } else {
+            let mut parts = Vec::new();
+            if !self.unreadable.is_empty() {
+                parts.push(format!(
+                    "would not decode: {}",
+                    named(self.unreadable.iter().filter_map(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    }))
+                ));
+            }
+            if !self.walk_errors.is_empty() {
+                parts.push(format!(
+                    "could not enter: {}",
+                    named(self.walk_errors.iter().filter_map(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    }))
+                ));
+            }
+            self.notify_error(
+                "scan",
+                "Some files could not be read",
+                parts.join("  ·  "),
+                cx,
+            );
+        }
         self.existing_output = scanned.existing_output;
         // A new folder answers this question itself: the previous one's backups are
         // not something this one can put back. Reading the answer is a file read,
@@ -1892,6 +1924,11 @@ enum Finding {
     /// than the file, so a folder of 6,000 images with 40 failures has somewhere to
     /// put them instead of three names on a toast nobody kept.
     Failed,
+}
+/// The lane's share of an unreadable-files finding: a count, never names. The
+/// names were announced in the scan toast; inline they truncate into a blob.
+fn unreadable_summary(count: usize) -> String {
+    format!("{count} would not decode")
 }
 
 impl Finding {

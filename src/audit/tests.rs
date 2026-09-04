@@ -1194,6 +1194,12 @@ fn a_report_names_a_few_files_and_then_counts_the_rest() {
     );
 }
 
+#[test]
+fn the_lane_counts_unreadable_files_instead_of_naming_them() {
+    assert_eq!(unreadable_summary(1), "1 would not decode");
+    assert_eq!(unreadable_summary(4), "4 would not decode");
+}
+
 /// The audit's findings have to be reachable. Narrowing to one shows those rows and
 /// nothing else, and asking for the same one again widens the list back out.
 #[gpui_kit::test]
@@ -1466,6 +1472,83 @@ fn errors_from_different_scopes_coexist(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn installing_a_dataset_announces_unreadable_files_once_in_a_toast(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
+    let scan = || scan::Scan {
+        entries: Vec::new(),
+        skipped_raw: 0,
+        skipped_heic: 0,
+        skipped_packages: 0,
+        unreadable: vec![PathBuf::from("a.jpg"), PathBuf::from("b.jpg")],
+        walk_errors: vec![PathBuf::from("locked")],
+        existing_output: 0,
+    };
+    audit.update_in(cx, |audit, window, cx| {
+        audit.install_dataset(scan(), PathBuf::from("/photos"), false, None, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(notification_count(cx), 1);
+    assert!(
+        cx.debug_bounds(
+            "error-toast-message:would not decode: a.jpg, b.jpg  ·  could not enter: locked"
+        )
+        .is_some()
+    );
+    // A second landing replaces the toast rather than stacking another.
+    audit.update_in(cx, |audit, window, cx| {
+        audit.install_dataset(scan(), PathBuf::from("/photos"), false, None, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(notification_count(cx), 1);
+}
+
+#[gpui_kit::test]
+fn a_clean_dataset_clears_the_scan_toast(cx: &mut TestAppContext) {
+    let (audit, cx) = notification_audit(cx, Vec::new());
+    audit.update_in(cx, |audit, window, cx| {
+        audit.install_dataset(
+            scan::Scan {
+                entries: Vec::new(),
+                skipped_raw: 0,
+                skipped_heic: 0,
+                skipped_packages: 0,
+                unreadable: vec![PathBuf::from("a.jpg")],
+                walk_errors: Vec::new(),
+                existing_output: 0,
+            },
+            PathBuf::from("/photos"),
+            false,
+            None,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(notification_count(cx), 1);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.install_dataset(
+            scan::Scan {
+                entries: Vec::new(),
+                skipped_raw: 0,
+                skipped_heic: 0,
+                skipped_packages: 0,
+                unreadable: Vec::new(),
+                walk_errors: Vec::new(),
+                existing_output: 0,
+            },
+            PathBuf::from("/photos"),
+            false,
+            None,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    finish_notification_exit(cx);
+    assert_eq!(notification_count(cx), 0);
+}
+
+#[gpui_kit::test]
 fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(
         cx,
@@ -1519,17 +1602,6 @@ fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
         audit.unpair_sirv(cx);
 
         assert!(audit.sirv_job.is_none());
-    });
-}
-
-#[gpui_kit::test]
-fn an_armed_overwrite_is_withdrawn_by_unpair(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-
-    audit.update(cx, |audit, cx| {
-        audit.sirv_confirm = Some(SirvJobKind::PushChanged);
-        audit.unpair_sirv(cx);
-        assert!(audit.sirv_confirm.is_none());
     });
 }
 

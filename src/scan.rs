@@ -158,9 +158,9 @@ pub struct Scan {
     /// macOS packages the walk never entered, counted like raw for the same
     /// reason: they are excluded by design and the total says so.
     pub skipped_packages: usize,
-    /// Files that look like images by extension but would not decode. Named, not
-    /// counted: "3 would not decode" tells you a folder has a problem and gives you
-    /// nowhere to look for it.
+    /// Files that look like images by extension but would not decode. Counted in
+    /// the lane, named in the scan toast: "3 would not decode" tells you a folder
+    /// has a problem, and the toast says where to look for it.
     pub unreadable: Vec<PathBuf>,
     /// Directories the walk could not enter, named like `unreadable`: "permission
     /// denied" somewhere in the tree means every number above is short, and a count

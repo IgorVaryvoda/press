@@ -125,23 +125,13 @@ impl Audit {
     /// finding, and a number you cannot act on is a dead end.
     pub(super) fn notices(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let mut parts = Vec::new();
+        // Counts only. The names were announced in the scan toast; inline they
+        // truncate into a blob nobody can read.
         if !self.unreadable.is_empty() {
-            parts.push(format!(
-                "would not decode: {}",
-                named(self.unreadable.iter().filter_map(|path| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                }))
-            ));
+            parts.push(unreadable_summary(self.unreadable.len()));
         }
         if !self.walk_errors.is_empty() {
-            parts.push(format!(
-                "could not enter: {}",
-                named(self.walk_errors.iter().filter_map(|path| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                }))
-            ));
+            parts.push(format!("{} folders unreachable", self.walk_errors.len()));
         }
         if !self.failures.is_empty() {
             parts.push(format!(
@@ -168,8 +158,8 @@ impl Audit {
         // Left-aligned and only as wide as its text. A full-bleed box for six words
         // was a bigger shape on screen than the finding it was reporting. Findings
         // you can act on (heavy, mislabelled) live as chips in the toolbar; this
-        // row is only for things that went wrong. One line tall unless opened:
-        // a long file list used to push the whole list down.
+        // row is only for things that went wrong. One line tall unless opened;
+        // scan findings render as counts here because their names live in the toast.
         let expanded = self.notices_expanded;
         Some(
             div()
@@ -196,7 +186,7 @@ impl Audit {
                         .tooltip(if expanded {
                             "Fold the warning back to one line"
                         } else {
-                            "Show every file the warning names"
+                            "Show the whole warning"
                         })
                         .on_click(cx.listener(|audit, _, _, cx| {
                             audit.notices_expanded = !audit.notices_expanded;
