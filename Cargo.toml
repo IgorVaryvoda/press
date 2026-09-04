@@ -124,3 +124,11 @@ info-plist-path = "assets/macos/Info.plist"
 
 [profile.release]
 opt-level = 3
+
+# Skill-driven lint discipline (rust-best-practices ch2): these stay `deny` so
+# plain `cargo check` catches what CI's `-D warnings` misses. Nursery lints
+# are allow-by-default, so each one here is a deliberate, already-triaged rule.
+[lints.clippy]
+redundant_clone = "deny"
+clone_on_copy = "deny"
+needless_collect = "deny"

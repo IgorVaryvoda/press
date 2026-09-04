@@ -3032,7 +3032,7 @@ pub(crate) mod tests {
         write_webp(&webp, &photo(64, 64));
 
         // Run one: one source changes its name on the way out, one keeps it.
-        for source in [png.clone(), webp.clone()] {
+        for source in [png, webp.clone()] {
             let recorded = crate::manifest::load(&dir);
             let destination = Destination {
                 out_dir: &dir,
@@ -3092,7 +3092,7 @@ pub(crate) mod tests {
         let taken = destination.backup(&dir, &webp).unwrap();
         assert!(taken.moved);
         let refused = convert_recorded(&dir, &dir, &webp, &webp, Some(&taken), Quality::lossy(30.));
-        assert_eq!(refused, Err(Failure::BackupOccupied(taken.path.clone())));
+        assert_eq!(refused, Err(Failure::BackupOccupied(taken.path)));
         assert_eq!(
             std::fs::read(&webp).unwrap(),
             edits[1],

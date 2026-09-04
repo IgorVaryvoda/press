@@ -148,9 +148,14 @@ impl Audit {
                             dataset_generation,
                             tool,
                         ) {
-                            audit.local_ai_job.as_mut().unwrap().state =
-                                LocalAiJobState::Failed(message);
-                            let message = audit.local_ai_job.as_ref().unwrap().message(&audit.root);
+                            let Some(job) = audit.local_ai_job.as_mut() else {
+                                return;
+                            };
+                            job.state = LocalAiJobState::Failed(message);
+                            let Some(job) = audit.local_ai_job.as_ref() else {
+                                return;
+                            };
+                            let message = job.message(&audit.root);
                             audit.notify_error("local-ai", "Local AI failed", message, cx);
                             cx.notify();
                         }
@@ -168,7 +173,10 @@ impl Audit {
                         tool,
                     ) && !audit.scan_blocks_delivery();
                     if applies {
-                        audit.local_ai_job.as_mut().unwrap().state = LocalAiJobState::Running;
+                        let Some(job) = audit.local_ai_job.as_mut() else {
+                            return false;
+                        };
+                        job.state = LocalAiJobState::Running;
                         cx.notify();
                     } else if audit.scan_blocks_delivery() {
                         if let Some(job) = audit.local_ai_job.as_ref() {
@@ -206,9 +214,14 @@ impl Audit {
                     Ok(path) => {
                         audit.clear_error("local-ai", cx);
                         audit.existing_output = audit.existing_output.saturating_add(1);
-                        audit.local_ai_job.as_mut().unwrap().state =
-                            LocalAiJobState::Done(path.clone());
-                        let message = audit.local_ai_job.as_ref().unwrap().message(&audit.root);
+                        let Some(job) = audit.local_ai_job.as_mut() else {
+                            return;
+                        };
+                        job.state = LocalAiJobState::Done(path.clone());
+                        let Some(job) = audit.local_ai_job.as_ref() else {
+                            return;
+                        };
+                        let message = job.message(&audit.root);
                         let title = match tool {
                             local_ai::Tool::RemoveBackground => "Background removal finished",
                             local_ai::Tool::Upscale => "Upscale finished",
@@ -220,9 +233,14 @@ impl Audit {
                         audit.open_written(index, path, Some(ProducedBy::Local(tool)), cx);
                     }
                     Err(message) => {
-                        audit.local_ai_job.as_mut().unwrap().state =
-                            LocalAiJobState::Failed(message);
-                        let message = audit.local_ai_job.as_ref().unwrap().message(&audit.root);
+                        let Some(job) = audit.local_ai_job.as_mut() else {
+                            return;
+                        };
+                        job.state = LocalAiJobState::Failed(message);
+                        let Some(job) = audit.local_ai_job.as_ref() else {
+                            return;
+                        };
+                        let message = job.message(&audit.root);
                         audit.notify_error("local-ai", "Local AI failed", message, cx);
                     }
                 }

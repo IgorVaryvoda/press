@@ -751,7 +751,14 @@ fn is_default_output(root: &Path, output_root: &Path) -> bool {
 /// the existing audit rows truthful without decoding image pixels or walking the
 /// directory tree. The command line uses it for `--no-subfolders`.
 pub fn browse(root: &Path, output_root: &Path) -> std::io::Result<Browse> {
-    Ok(browse_page(root, output_root, None)?.expect("an uncancellable browse completes"))
+    // `cancelled` is `None`, so `browse_page` never reports cancellation. The
+    // `None` arm keeps a future refactor from reintroducing a panic here.
+    match browse_page(root, output_root, None)? {
+        Some(browse) => Ok(browse),
+        None => Err(std::io::Error::other(
+            "an uncancellable browse reported cancellation",
+        )),
+    }
 }
 
 pub(crate) fn browse_cancellable(
@@ -1755,20 +1762,20 @@ mod tests {
 
         let liar = Entry {
             path: PathBuf::from("/photos/promo.webp"),
-            ..png.clone()
+            ..png
         };
         assert!(liar.extension_lies(), "a PNG named .webp is the finding");
 
         let shouty = Entry {
             path: PathBuf::from("/photos/PROMO.PNG"),
-            ..png.clone()
+            ..png
         };
         assert!(!shouty.extension_lies(), "case is not a disagreement");
 
         let jpeg = Entry {
             path: PathBuf::from("/photos/shot.jpg"),
             format: ImageFormat::Jpeg.into(),
-            ..png.clone()
+            ..png
         };
         assert!(!jpeg.extension_lies(), "jpg and jpeg are one format");
 
@@ -2543,7 +2550,6 @@ mod tests {
             Arc::new(move || walker_ready.wait())
         };
         hooks.before_path_send = {
-            let path_sends = path_sends.clone();
             Arc::new(move || {
                 if path_sends.fetch_add(1, Ordering::Relaxed) == 1 {
                     path_attempt_sender.send(()).unwrap();
@@ -2551,7 +2557,7 @@ mod tests {
             })
         };
         let (outcome_sender, outcome_receiver) = mpsc::channel();
-        let root = dir.clone();
+        let root = dir;
         let run_cancelled = cancelled.clone();
         std::thread::spawn(move || {
             outcome_sender
@@ -2606,7 +2612,6 @@ mod tests {
             })
         };
         hooks.before_result_send = {
-            let result_sends = result_sends.clone();
             Arc::new(move || {
                 if result_sends.fetch_add(1, Ordering::Relaxed) == 1 {
                     result_attempt_sender.send(()).unwrap();
@@ -2614,7 +2619,7 @@ mod tests {
             })
         };
         let (outcome_sender, outcome_receiver) = mpsc::channel();
-        let root = dir.clone();
+        let root = dir;
         let run_cancelled = cancelled.clone();
         std::thread::spawn(move || {
             outcome_sender

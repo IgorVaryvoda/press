@@ -211,7 +211,7 @@ impl Audit {
                         .w(px(image_w))
                         .h(px(image_h))
                         .child(img(preview.image.clone()).w(px(image_w)).h(px(image_h)))
-                        .when_some(processing.clone(), |image, message| {
+                        .when_some(processing, |image, message| {
                             image.child(
                                 div()
                                     .debug_selector(|| "preview-processing-overlay".into())
@@ -433,7 +433,7 @@ impl Audit {
                             .text_ellipsis()
                             .text_color(cx.theme().foreground)
                             .font_weight(FontWeight::MEDIUM)
-                            .child(name.clone()),
+                            .child(name),
                     )
                     .child(
                         div()
@@ -442,7 +442,7 @@ impl Audit {
                             .text_size(px(11.))
                             .text_color(rgba(0xffffffcc))
                             .whitespace_nowrap()
-                            .child(position.clone()),
+                            .child(position),
                     )
                     .child(
                         Button::new("compare-prev")

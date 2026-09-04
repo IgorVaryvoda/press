@@ -120,7 +120,9 @@ impl Audit {
             browser.path = pairing.dir.clone();
         }
         self.sirv_browser = Some(browser);
-        let state = self.sirv_browser.as_mut().unwrap();
+        let Some(state) = self.sirv_browser.as_mut() else {
+            return;
+        };
         Self::browse_sirv_path(state, cx);
         cx.notify();
     }
@@ -256,7 +258,7 @@ impl Audit {
         self.cancel_sirv_transfer();
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = Some(SirvPairing {
-            dir: dir.clone(),
+            dir,
             files: Listing::Walking,
             cdn_host: CdnHost::Loading,
             client,
@@ -452,7 +454,9 @@ impl Audit {
             )
         };
         if !credentials_complete(&client_id, &client_secret) {
-            let panel = self.settings_panel.as_mut().unwrap();
+            let Some(panel) = self.settings_panel.as_mut() else {
+                return;
+            };
             let message = "Both fields are required.";
             panel.cdn_status = Some((false, message.into()));
             self.notify_error("sirv-settings", "Couldn’t save Sirv settings", message, cx);
@@ -485,7 +489,10 @@ impl Audit {
                 cx,
             );
         }
-        self.settings_panel.as_mut().unwrap().cdn_status = Some(status);
+        let Some(panel) = self.settings_panel.as_mut() else {
+            return;
+        };
+        panel.cdn_status = Some(status);
         if let Some(credentials) = new_credentials {
             self.adopt_new_credentials(credentials, cx);
         }

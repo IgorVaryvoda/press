@@ -217,10 +217,10 @@ mod tests {
         let payload = Arc::new(InjectedShowCrashReportsError);
         let reported = Rc::new(RefCell::new(Vec::new()));
         let handler_calls = calls.clone();
-        let handler_fail = fail.clone();
+        let handler_fail = fail;
         let handler_payload = payload.clone();
         let reporter_calls = reported.clone();
-        let reporter_payload = payload.clone();
+        let reporter_payload = payload;
 
         cx.update(|cx| {
             register_show_crash_reports(
@@ -284,7 +284,7 @@ mod tests {
         let handler_calls = calls.clone();
         let handler_payload = payload.clone();
         let reporter_calls = reported.clone();
-        let reporter_payload = payload.clone();
+        let reporter_payload = payload;
 
         cx.update(|cx| {
             register_email_crash_report(

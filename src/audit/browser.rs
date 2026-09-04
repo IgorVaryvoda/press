@@ -128,12 +128,14 @@ impl Audit {
         }
 
         if paths.len() > 4 {
-            let hidden_parent = paths[paths.len() - 3].clone();
+            // A `Vec` index cannot move, so the keepers are taken: each slot
+            // keeps its position and the vec is rebuilt below.
+            let last = paths.len() - 1;
             paths = vec![
-                paths[0].clone(),
-                hidden_parent.clone(),
-                paths[paths.len() - 2].clone(),
-                paths[paths.len() - 1].clone(),
+                std::mem::take(&mut paths[0]),
+                std::mem::take(&mut paths[last - 2]),
+                std::mem::take(&mut paths[last - 1]),
+                std::mem::take(&mut paths[last]),
             ];
             return paths
                 .into_iter()
@@ -354,7 +356,7 @@ impl Audit {
             .child(
                 div()
                     .id(format!("nav-label-{tip}"))
-                    .debug_selector(move || selector.clone())
+                    .debug_selector(move || selector)
                     .flex()
                     .items_center()
                     .gap_2()

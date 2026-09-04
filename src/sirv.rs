@@ -1395,10 +1395,7 @@ mod tests {
             client_secret: "s3cret/with:colons".into(),
         };
         write_credentials(&path, &credentials).expect("the store is writable");
-        assert_eq!(
-            load_credentials_from(Some(&path)),
-            Some(credentials.clone())
-        );
+        assert_eq!(load_credentials_from(Some(&path)), Some(credentials));
 
         // The file holds an API secret, so it must not be readable by anyone else on
         // the machine. The usual umask would have written it 0644.

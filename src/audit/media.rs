@@ -250,7 +250,9 @@ impl Audit {
                 ) {
                     return;
                 }
-                let comparison = audit.compare.as_mut().unwrap();
+                let Some(comparison) = audit.compare.as_mut() else {
+                    return;
+                };
                 comparison.failed = built.is_none();
                 comparison.pair = built;
                 if comparison.failed {
@@ -359,7 +361,9 @@ impl Audit {
                 if let Some(preview) = built.as_ref() {
                     audit.cached = Some((key.clone(), CachedMedia::Preview(preview.clone())));
                 }
-                let comparison = audit.compare.as_mut().unwrap();
+                let Some(comparison) = audit.compare.as_mut() else {
+                    return;
+                };
                 comparison.failed = built.is_none();
                 comparison.preview = built;
                 if comparison.failed {
@@ -483,7 +487,9 @@ impl Audit {
                     if let Some(pair) = built.as_ref() {
                         audit.cached = Some((key.clone(), CachedMedia::Pair(pair.clone())));
                     }
-                    let comparison = audit.compare.as_mut().unwrap();
+                    let Some(comparison) = audit.compare.as_mut() else {
+                        return;
+                    };
                     comparison.failed = built.is_none();
                     comparison.pair = built;
                     if comparison.failed {
@@ -674,7 +680,9 @@ impl Audit {
                     if let Some(media) = built.as_ref() {
                         audit.cached = Some((key.clone(), media.clone()));
                     }
-                    let comparison = audit.compare.as_mut().unwrap();
+                    let Some(comparison) = audit.compare.as_mut() else {
+                        return;
+                    };
                     comparison.failed = built.is_none();
                     match built {
                         Some(CachedMedia::Preview(preview)) => {
@@ -727,10 +735,7 @@ impl Audit {
                         audit.visible.len(),
                         thumb_cache_limit(audit.thumb_edge()),
                     );
-                    let visible_indices = visible
-                        .clone()
-                        .filter_map(|row| audit.entry_at(row))
-                        .collect::<Vec<_>>();
+                    let visible_indices = visible.clone().filter_map(|row| audit.entry_at(row));
                     let wanted_indices = wanted
                         .filter(|row| !visible.contains(row))
                         .filter_map(|row| audit.entry_at(row))
@@ -738,7 +743,7 @@ impl Audit {
                     // Fast decoders first: JPEG and WebP fill the viewport
                     // while PNG and AVIF wait behind them, not beside them.
                     let (fast, slow): (Vec<usize>, Vec<usize>) =
-                        visible_indices.into_iter().partition(|index| {
+                        visible_indices.partition(|index| {
                             audit.entries.get(*index).is_some_and(|entry| {
                                 matches!(
                                     entry.format,

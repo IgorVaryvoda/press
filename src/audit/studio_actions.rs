@@ -266,14 +266,22 @@ impl Audit {
                         audit.run_prepared_studio(upload, cx);
                     }
                     Ok(studio::Preflight::NeedsConfirmation(upload)) => {
-                        audit.studio_job.as_mut().unwrap().state =
-                            StudioJobState::AwaitingConfirmation(upload);
+                        let Some(job) = audit.studio_job.as_mut() else {
+                            return;
+                        };
+                        job.state = StudioJobState::AwaitingConfirmation(upload);
                         audit.rail = Rail::Studio;
                         audit.sidebar_open = true;
                     }
                     Err(message) => {
-                        audit.studio_job.as_mut().unwrap().state = StudioJobState::Failed(message);
-                        let message = audit.studio_job.as_ref().unwrap().message(&audit.root);
+                        let Some(job) = audit.studio_job.as_mut() else {
+                            return;
+                        };
+                        job.state = StudioJobState::Failed(message);
+                        let Some(job) = audit.studio_job.as_ref() else {
+                            return;
+                        };
+                        let message = job.message(&audit.root);
                         audit.notify_error("studio-job", "AI operation failed", message, cx);
                     }
                 }
@@ -375,9 +383,14 @@ impl Audit {
                     Ok(path) => {
                         audit.clear_error("studio-job", cx);
                         audit.existing_output = audit.existing_output.saturating_add(1);
-                        audit.studio_job.as_mut().unwrap().state =
-                            StudioJobState::Done(path.clone());
-                        let message = audit.studio_job.as_ref().unwrap().message(&audit.root);
+                        let Some(job) = audit.studio_job.as_mut() else {
+                            return;
+                        };
+                        job.state = StudioJobState::Done(path.clone());
+                        let Some(job) = audit.studio_job.as_ref() else {
+                            return;
+                        };
+                        let message = job.message(&audit.root);
                         audit.notify_success(
                             "studio-job",
                             format!("{} finished", tool.result_label()),
@@ -387,8 +400,14 @@ impl Audit {
                         audit.open_written(index, path, Some(ProducedBy::Studio(tool)), cx);
                     }
                     Err(message) => {
-                        audit.studio_job.as_mut().unwrap().state = StudioJobState::Failed(message);
-                        let message = audit.studio_job.as_ref().unwrap().message(&audit.root);
+                        let Some(job) = audit.studio_job.as_mut() else {
+                            return;
+                        };
+                        job.state = StudioJobState::Failed(message);
+                        let Some(job) = audit.studio_job.as_ref() else {
+                            return;
+                        };
+                        let message = job.message(&audit.root);
                         audit.notify_error("studio-job", "AI operation failed", message, cx);
                     }
                 }

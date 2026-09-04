@@ -363,7 +363,7 @@ impl TableDelegate for AuditTable {
             }
             _ => div()
                 .size_full()
-                .child(self.column(col_ix, cx).name.clone())
+                .child(self.column(col_ix, cx).name)
                 .into_any_element(),
         }
     }

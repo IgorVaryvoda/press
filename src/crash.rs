@@ -656,7 +656,7 @@ mod tests {
 
         let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let opened_by_email = opened.clone();
-        let expected_target = target.clone();
+        let expected_target = target;
         email_report_with(
             || Ok(()),
             move |actual| {

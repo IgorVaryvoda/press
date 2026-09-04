@@ -961,7 +961,6 @@ mod tests {
         };
         let flushing = {
             let writer = writer.clone();
-            let flushed = flushed.clone();
             std::thread::spawn(move || writer.flush(&flushed))
         };
         drop(_held);
