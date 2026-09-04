@@ -77,6 +77,30 @@ impl Audit {
         self.studio_key_checking || self.studio_job.as_ref().is_some_and(StudioJob::busy)
     }
 
+    /// One status line for under the commit button: the live job message while
+    /// a job exists, else the first blocker that keeps Run disabled. Static
+    /// strings only — never key material.
+    pub(super) fn studio_run_status(
+        &self,
+        index: Option<usize>,
+        has_key: bool,
+        prompt_missing: bool,
+    ) -> Option<String> {
+        if let Some(job) = self.studio_job.as_ref() {
+            return Some(job.message(&self.root));
+        }
+        if !has_key {
+            return Some("Add an API key to run".into());
+        }
+        if index.is_none() {
+            return Some("Select one image to run".into());
+        }
+        if prompt_missing {
+            return Some("Add a prompt to run".into());
+        }
+        None
+    }
+
     fn studio_prompt_text(&self, cx: &App) -> String {
         self.studio_prompt.read(cx).value().trim().to_string()
     }
@@ -503,6 +527,26 @@ impl Audit {
                                 )
                             }),
                     )
+                    .when(self.studio_key_checking, |panel| {
+                        panel.child(
+                            div()
+                                .debug_selector(|| "studio-key-status".into())
+                                .pt_1()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Checking key…"),
+                        )
+                    })
+                    .when(!self.studio_key_checking && has_key, |panel| {
+                        panel.child(
+                            div()
+                                .debug_selector(|| "studio-key-status".into())
+                                .pt_1()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Key saved on this computer"),
+                        )
+                    })
                     .when(!has_key, |panel| {
                         panel
                             .child(
@@ -548,19 +592,11 @@ impl Audit {
                     .when_some(self.studio_status.clone(), |panel, (ok, message)| {
                         panel.child(
                             div()
+                                .debug_selector(|| "studio-key-feedback".into())
                                 .pt_1()
                                 .text_size(px(11.))
                                 .text_color(if ok { cx.theme().green } else { cx.theme().red })
                                 .child(message),
-                        )
-                    })
-                    .when_some(self.studio_job.as_ref(), |panel, job| {
-                        panel.child(
-                            div()
-                                .pt_1()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(job.message(&self.root)),
                         )
                     }),
             )
@@ -663,6 +699,21 @@ impl Audit {
                                     }
                                 })),
                         ),
+                    )
+                    .when_some(
+                        self.studio_run_status(index, has_key, prompt_missing),
+                        |panel, message| {
+                            panel.child(
+                                div()
+                                    .debug_selector(|| "studio-run-status".into())
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(message),
+                            )
+                        },
                     ),
             )
             .into_any_element()

@@ -2949,6 +2949,78 @@ fn studio_confirm_card_is_absent_while_running(cx: &mut TestAppContext) {
         "the confirm card shows only while awaiting confirmation"
     );
 }
+fn studio_key_status_renders_checking_saved_and_failure_inline(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selected.insert(0);
+        audit.rail = Rail::Studio;
+        audit.selection_changed(cx);
+    });
+
+    // While the key verifies, the rail names the checking state.
+    audit.update(cx, |audit, cx| {
+        audit.studio_key = None;
+        audit.studio_key_checking = true;
+        audit.studio_status = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("studio-key-status").is_some());
+
+    // Once stored, the rail says the key is saved on this computer.
+    audit.update(cx, |audit, cx| {
+        audit.studio_key_checking = false;
+        audit.studio_key = Some("sk_live_sentinel".into());
+        audit.studio_status = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("studio-key-status").is_some());
+
+    // A failure reuses the single status channel, and neither line leaks key
+    // material.
+    audit.update(cx, |audit, cx| {
+        audit.studio_key = None;
+        audit.studio_status = Some((false, "Could not verify the key".into()));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("studio-key-feedback").is_some());
+    audit.read_with(cx, |audit, _| {
+        let (_, message) = audit
+            .studio_status
+            .clone()
+            .expect("the failure status is set");
+        assert!(!message.contains("sk_live_sentinel"), "{message:?}");
+        assert!(!message.contains("sk_live_"), "{message:?}");
+    });
+}
+
+#[gpui_kit::test]
+fn studio_run_status_names_the_key_blocker(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selected.insert(0);
+        audit.rail = Rail::Studio;
+        audit.studio_key = None;
+        audit.studio_job = None;
+        audit.studio_status = None;
+        audit.selection_changed(cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        let index = audit.single_target();
+        assert_eq!(index, Some(0));
+        assert!(audit.studio_commit_disabled(index, false, false, false));
+        assert_eq!(
+            audit.studio_run_status(index, false, false),
+            Some("Add an API key to run".to_string())
+        );
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("studio-run-status").is_some());
+}
 
 #[gpui_kit::test]
 fn scan_blocked_sirv_pair_is_disabled(cx: &mut TestAppContext) {
