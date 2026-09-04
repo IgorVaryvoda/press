@@ -2949,6 +2949,7 @@ fn studio_confirm_card_is_absent_while_running(cx: &mut TestAppContext) {
         "the confirm card shows only while awaiting confirmation"
     );
 }
+#[gpui_kit::test]
 fn studio_key_status_renders_checking_saved_and_failure_inline(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
