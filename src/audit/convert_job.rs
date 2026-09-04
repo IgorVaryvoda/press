@@ -12,6 +12,49 @@ struct Planned {
     backup: Option<convert::Backup>,
 }
 
+/// This is filesystem work, even though it does not encode: loading the run
+/// record and proving name ownership can stat every recorded output. Call it
+/// on the background executor, never from a click handler.
+fn plan_sources(
+    root: &Path,
+    out_dir: &Path,
+    backups: Option<&Path>,
+    sources: Vec<(usize, PathBuf)>,
+    audited: &[PathBuf],
+    format: Format,
+) -> Vec<Planned> {
+    let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
+    let recorded = manifest::load(out_dir);
+    let destination = convert::Destination {
+        out_dir,
+        backups,
+        manifest: &recorded,
+    };
+    let planned = convert::plan_outputs(root, &paths, audited, &destination, format);
+    sources
+        .into_iter()
+        .zip(planned)
+        .map(|((index, source), written)| Planned {
+            backup: destination.backup(root, &source),
+            index,
+            source,
+            written,
+        })
+        .collect()
+}
+
+/// A dataset may start another job without changing folders. The cancellation
+/// token identifies the run as well as the dataset, including during preflight.
+fn conversion_landing_applies(
+    current_generation: u64,
+    current_cancel: Option<&Arc<AtomicBool>>,
+    dataset_generation: u64,
+    cancel: &Arc<AtomicBool>,
+) -> bool {
+    current_generation == dataset_generation
+        && current_cancel.is_some_and(|current| Arc::ptr_eq(current, cancel))
+}
+
 impl Audit {
     pub(super) fn start_conversion(&mut self, cx: &mut Context<Self>) {
         if self.converting || self.local_ai_busy() || self.studio_busy() || self.scanning.is_some()
@@ -62,9 +105,6 @@ impl Audit {
             .into_iter()
             .filter_map(|index| Some((index, self.entries.get(index)?.path.clone())))
             .collect();
-        // Two sources can want one output name, so the whole run picks its names
-        // together before any of it writes.
-        let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
         // Every audited image is protected, not only the ticked ones: writing into a
         // subfolder of the audited tree would otherwise land on an original nobody
         // selected, and this run would never see it.
@@ -73,29 +113,45 @@ impl Audit {
             .iter()
             .map(|entry| entry.path.clone())
             .collect();
-        // What earlier runs left here. An output one of them wrote from another
-        // image is not this run's to overwrite, and the folder is the only place
-        // that fact survives.
-        let recorded = manifest::load(&out_dir);
-        let destination = convert::Destination {
-            out_dir: &out_dir,
-            backups: backups.as_deref(),
-            manifest: &recorded,
-        };
-        let planned = convert::plan_outputs(&root, &paths, &audited, &destination, format);
-        let sources: Vec<Planned> = sources
-            .into_iter()
-            .zip(planned)
-            .map(|((index, source), written)| Planned {
-                backup: destination.backup(&root, &source),
-                index,
-                source,
-                written,
-            })
-            .collect();
         let stamp = manifest::Stamp::new(format, quality, max_edge);
 
         cx.spawn(async move |this, cx| {
+            let plan_root = root.clone();
+            let plan_out_dir = out_dir.clone();
+            let planning_cancel = cancel.clone();
+            let sources = cx
+                .background_executor()
+                .spawn(async move {
+                    if planning_cancel.load(Ordering::Acquire) {
+                        return Vec::new();
+                    }
+                    plan_sources(
+                        &plan_root,
+                        &plan_out_dir,
+                        backups.as_deref(),
+                        sources,
+                        &audited,
+                        format,
+                    )
+                })
+                .await;
+            // A replaced dataset or run must not start writing after a slow plan
+            // lands. A stopped current run falls through to normal stop reporting;
+            // its queue will not start even one encode.
+            let current = this
+                .read_with(cx, |audit, _| {
+                    conversion_landing_applies(
+                        audit.dataset_generation,
+                        audit.convert_cancel.as_ref(),
+                        dataset_generation,
+                        &cancel,
+                    )
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+
             // A sliding window rather than batches. Batching waited for all eight of a
             // chunk before starting the ninth, so one 40MB photo held seven workers
             // idle; here a finished file is replaced immediately. The window is what
@@ -169,7 +225,12 @@ impl Audit {
 
                 if this
                     .update(cx, |audit, cx| {
-                        if audit.dataset_generation != dataset_generation {
+                        if !conversion_landing_applies(
+                            audit.dataset_generation,
+                            audit.convert_cancel.as_ref(),
+                            dataset_generation,
+                            &cancel,
+                        ) {
                             return;
                         }
                         for (index, result) in batch {
@@ -217,7 +278,12 @@ impl Audit {
                 .await;
 
             let _ = this.update(cx, |audit, cx| {
-                if audit.dataset_generation == dataset_generation {
+                if conversion_landing_applies(
+                    audit.dataset_generation,
+                    audit.convert_cancel.as_ref(),
+                    dataset_generation,
+                    &cancel,
+                ) {
                     audit.restorable = restorable;
                     audit.converting = false;
                     audit.active_target_count = None;
@@ -290,5 +356,95 @@ impl Audit {
         self.convert_cancel
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_conversion_completion_belongs_to_its_dataset_and_run() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let replacement = Arc::new(AtomicBool::new(false));
+        assert!(conversion_landing_applies(7, Some(&cancel), 7, &cancel));
+        assert!(!conversion_landing_applies(8, Some(&cancel), 7, &cancel));
+        assert!(!conversion_landing_applies(7, Some(&replacement), 7, &cancel));
+        assert!(!conversion_landing_applies(7, None, 7, &cancel));
+        // Stop reporting still belongs to the current job after its flag is set.
+        cancel.store(true, Ordering::Release);
+        assert!(conversion_landing_applies(7, Some(&cancel), 7, &cancel));
+    }
+
+    #[test]
+    fn background_planning_preserves_row_identity_and_collision_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let out_dir = root.join("optimized");
+        let png = root.join("shot.png");
+        let jpeg = root.join("shot.jpg");
+        let audited = vec![png.clone(), jpeg.clone()];
+        let planned = plan_sources(
+            root,
+            &out_dir,
+            None,
+            vec![(42, png.clone()), (3, jpeg.clone())],
+            &audited,
+            Format::WebP,
+        );
+        assert_eq!(planned.len(), 2);
+        assert_eq!((planned[0].index, &planned[0].source), (42, &png));
+        assert_eq!((planned[1].index, &planned[1].source), (3, &jpeg));
+        assert_eq!(planned[0].written, Ok(out_dir.join("shot-png.webp")));
+        assert_eq!(planned[1].written, Ok(out_dir.join("shot.webp")));
+        assert!(planned.iter().all(|plan| plan.backup.is_none()));
+        assert!(
+            !out_dir.exists(),
+            "planning must not write outputs or a manifest"
+        );
+    }
+
+    #[test]
+    fn background_planning_protects_an_unselected_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let source = root.join("shot.png");
+        let untouched = root.join("shot.webp");
+        let planned = plan_sources(
+            root,
+            root,
+            None,
+            vec![(4, source.clone())],
+            &[source, untouched],
+            Format::WebP,
+        );
+        assert_eq!(planned[0].written, Err(convert::Failure::OverwritesSource));
+    }
+
+    #[test]
+    fn background_planning_retains_replace_backups_without_moving_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let source = root.join("shot.png");
+        let backups = manifest::backup_root(root);
+        std::fs::write(&source, b"untouched source").unwrap();
+        let planned = plan_sources(
+            root,
+            root,
+            Some(&backups),
+            vec![(9, source.clone())],
+            std::slice::from_ref(&source),
+            Format::WebP,
+        );
+        assert_eq!(
+            planned[0].backup,
+            Some(convert::Backup {
+                path: backups.join("shot.png"),
+                moved: true,
+            })
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"untouched source");
+        assert!(!backups.exists());
+        assert!(!manifest::path(root).exists());
     }
 }

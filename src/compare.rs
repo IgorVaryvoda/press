@@ -100,6 +100,23 @@ fn rgba(image: &RenderImage) -> Option<RgbaImage> {
     )?))
 }
 
+/// The writer refuses a lossless encode that would reduce sample depth. Preview
+/// calls the lower-level encoder directly, so it must refuse the same request.
+/// The cross-path regression below keeps this guard aligned with `convert_to`.
+fn preserves_lossless_depth(image: &DynamicImage, format: Format, quality: Quality) -> bool {
+    if quality != Quality::LOSSLESS {
+        return true;
+    }
+    match format {
+        Format::WebP => image.color().bytes_per_pixel() == image.color().channel_count(),
+        Format::JpegXl => !matches!(
+            image,
+            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+        ),
+        _ => true,
+    }
+}
+
 /// Decode `path`, encode it at `quality`, and decode that back, so both sides are
 /// real pixels rather than a promise.
 ///
@@ -141,6 +158,9 @@ pub fn build(
         // to fail the comparison.
         .or_else(|| crate::scan::decode_for_conversion(path, max_edge).ok())?;
     let original = max_edge.apply(decoded);
+    if !preserves_lossless_depth(&original, format, quality) {
+        return None;
+    }
     let encoded = convert::encode(&original, format, quality, profile.as_deref()).ok()?;
     let decoded = crate::scan::decode_bytes(&encoded)?;
 
@@ -475,5 +495,65 @@ mod tests {
         assert_eq!(pair.saving_percent(1000), 75.);
         assert_eq!(pair.saving_percent(0), 0.);
         assert!(pair.saving_percent(100) < 0., "growth reads as negative");
+    }
+
+    #[test]
+    fn a_lossless_webp_comparison_refuses_the_same_depth_change_as_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("sixteen-bit.png");
+        let out_dir = dir.path().join("optimized");
+        let written = out_dir.join("sixteen-bit.webp");
+        ImageBuffer::from_pixel(8, 6, Rgb([1025u16, 32001, 65001]))
+            .save(&source)
+            .unwrap();
+        let original = std::fs::read(&source).unwrap();
+        let preview = preview(&source).unwrap();
+        assert!(
+            !preview.decoded,
+            "the display buffer must not replace 16-bit samples"
+        );
+
+        for max_edge in [MaxEdge::FULL, MaxEdge(Some(4))] {
+            for cached in [None, Some(&preview)] {
+                assert!(
+                    build(&source, Format::WebP, Quality::LOSSLESS, max_edge, cached).is_none(),
+                    "comparison accepted an encode the writer refuses"
+                );
+            }
+            assert_eq!(
+                convert::convert_to(
+                    &out_dir,
+                    &source,
+                    &written,
+                    None,
+                    Format::WebP,
+                    Quality::LOSSLESS,
+                    max_edge,
+                ),
+                Err(convert::Failure::LosslessNeedsEightBit)
+            );
+        }
+        assert!(
+            !out_dir.exists(),
+            "a refused comparison or export must not write"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(
+            build(&source, Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None).is_some(),
+            "an explicit lossy request remains supported"
+        );
+    }
+
+    #[test]
+    fn lossless_depth_checks_preserve_supported_integer_paths() {
+        let eight = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(2, 2, Rgb([1u8, 2, 3])));
+        let sixteen = DynamicImage::ImageRgb16(ImageBuffer::from_pixel(2, 2, Rgb([1u16, 2, 3])));
+        let float =
+            DynamicImage::ImageRgb32F(ImageBuffer::from_pixel(2, 2, Rgb([0.1f32, 0.2, 0.3])));
+        assert!(preserves_lossless_depth(&eight, Format::WebP, Quality::LOSSLESS));
+        assert!(!preserves_lossless_depth(&sixteen, Format::WebP, Quality::LOSSLESS));
+        assert!(preserves_lossless_depth(&sixteen, Format::JpegXl, Quality::LOSSLESS));
+        assert!(!preserves_lossless_depth(&float, Format::JpegXl, Quality::LOSSLESS));
+        assert!(preserves_lossless_depth(&float, Format::JpegXl, Quality::lossy(80.)));
     }
 }
