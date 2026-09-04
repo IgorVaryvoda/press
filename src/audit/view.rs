@@ -2,12 +2,36 @@ use super::*;
 
 /// The sentence under "No supported images found". A folder straight off a phone is
 /// all HEIC, and there "no images" is true, useless, and looks like a broken app.
-pub(super) fn empty_folder_detail(folder: &str, skipped_heic: usize) -> String {
-    match skipped_heic {
+/// Raw files and macOS packages are counted but never listed, so their counts
+/// append the same way rather than leaving a bare "no images".
+pub(super) fn empty_folder_detail(
+    folder: &str,
+    skipped_heic: usize,
+    skipped_raw: usize,
+    skipped_packages: usize,
+) -> String {
+    let mut detail = match skipped_heic {
         0 => format!("The “{folder}” folder has no direct supported images."),
         1 => format!("The “{folder}” folder has 1 HEIC file, not supported yet."),
         many => format!("The “{folder}” folder has {many} HEIC files, not supported yet."),
+    };
+    if skipped_raw > 0 {
+        detail.push_str(&format!(
+            " Plus {skipped_raw} camera raw {} (counted, not listed).",
+            if skipped_raw == 1 { "file" } else { "files" }
+        ));
     }
+    if skipped_packages > 0 {
+        detail.push_str(&format!(
+            " Plus {skipped_packages} macOS {} (counted, not listed).",
+            if skipped_packages == 1 {
+                "package"
+            } else {
+                "packages"
+            }
+        ));
+    }
+    detail
 }
 
 /// The line under "Opening…" while a tree walk runs. The same plain figure as the
@@ -1265,6 +1289,11 @@ impl Audit {
         }
         let has_visible_folders = self.has_visible_folders();
         if self.entries.is_empty() && !has_visible_folders {
+            // A bare list stalls first contact: the startup state offers the next
+            // move, and this one names the counts and does the same. The
+            // subfolders way out only shows when it can change the list — scope
+            // off with child folders on disk to walk into.
+            let offer_subfolders = !self.include_subfolders && !self.folders.is_empty();
             let folder = self
                 .root
                 .file_name()
@@ -1291,7 +1320,48 @@ impl Audit {
                     div()
                         .text_size(px(12.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(empty_folder_detail(&folder, self.skipped_heic)),
+                        .child(empty_folder_detail(
+                            &folder,
+                            self.skipped_heic,
+                            self.skipped_raw,
+                            self.skipped_packages,
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .pt_2()
+                        .child(
+                            div().debug_selector(|| "empty-open-other".into()).child(
+                                Button::new("empty-open-other")
+                                    .outline()
+                                    .label("Open another folder…")
+                                    .on_click(cx.listener(|audit, _, _, cx| audit.pick(true, cx))),
+                            ),
+                        )
+                        .child(
+                            div().debug_selector(|| "empty-open-images".into()).child(
+                                Button::new("empty-open-images")
+                                    .outline()
+                                    .label("Open images…")
+                                    .on_click(cx.listener(|audit, _, _, cx| audit.pick(false, cx))),
+                            ),
+                        )
+                        .when(offer_subfolders, |row| {
+                            row.child(
+                                div()
+                                    .debug_selector(|| "empty-include-subfolders".into())
+                                    .child(
+                                        Button::new("empty-include-subfolders")
+                                            .outline()
+                                            .label("Include subfolders")
+                                            .on_click(cx.listener(|audit, _, _, cx| {
+                                                audit.toggle_subfolders(cx)
+                                            })),
+                                    ),
+                            )
+                        }),
                 )
                 .into_any_element();
         }

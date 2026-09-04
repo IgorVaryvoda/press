@@ -4295,17 +4295,41 @@ fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
         .to_string_lossy()
         .into_owned();
     let detail = audit.read_with(cx, |audit, _| {
-        view::empty_folder_detail(&folder, audit.skipped_heic)
+        view::empty_folder_detail(&folder, audit.skipped_heic, audit.skipped_raw, 0)
     });
     assert_eq!(
         detail,
         format!("The “{folder}” folder has 1 HEIC file, not supported yet.")
     );
     assert_eq!(
-        view::empty_folder_detail("shoot", 12),
+        view::empty_folder_detail("shoot", 12, 0, 0),
         "The “shoot” folder has 12 HEIC files, not supported yet."
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn empty_folder_detail_names_raw_and_package_counts() {
+    assert_eq!(
+        view::empty_folder_detail("shoot", 0, 0, 0),
+        "The “shoot” folder has no direct supported images."
+    );
+    assert_eq!(
+        view::empty_folder_detail("shoot", 0, 1, 0),
+        "The “shoot” folder has no direct supported images. \
+         Plus 1 camera raw file (counted, not listed)."
+    );
+    assert_eq!(
+        view::empty_folder_detail("shoot", 0, 3, 2),
+        "The “shoot” folder has no direct supported images. \
+         Plus 3 camera raw files (counted, not listed). \
+         Plus 2 macOS packages (counted, not listed)."
+    );
+    assert_eq!(
+        view::empty_folder_detail("shoot", 2, 0, 1),
+        "The “shoot” folder has 2 HEIC files, not supported yet. \
+         Plus 1 macOS package (counted, not listed)."
+    );
 }
 
 #[gpui_kit::test]
@@ -4325,6 +4349,52 @@ fn a_folder_containing_only_output_uses_the_empty_state(cx: &mut TestAppContext)
     });
     assert!(cx.debug_bounds("empty-folder-message").is_some());
     assert!(cx.debug_bounds("child-folders").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[gpui_kit::test]
+fn empty_state_offers_next_moves_and_conditional_subfolders(cx: &mut TestAppContext) {
+    // A truly empty folder names no counts and has no child folders to walk
+    // into, so the way out is opening something else — never subfolders.
+    let bare = scan_fixture("empty-actions-bare");
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| audit.request_path(bare.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.entries.is_empty());
+        assert!(audit.folders.is_empty());
+        assert!(!audit.include_subfolders);
+    });
+    assert!(cx.debug_bounds("empty-folder-message").is_some());
+    assert!(cx.debug_bounds("empty-open-other").is_some());
+    assert!(cx.debug_bounds("empty-open-images").is_some());
+    assert!(cx.debug_bounds("empty-include-subfolders").is_none());
+    std::fs::remove_dir_all(bare).unwrap();
+
+    // Child folders on disk with subfolders off: the walk-into-them way out
+    // shows. Flipping scope on removes it, since it can no longer change the
+    // list.
+    let root = scan_fixture("empty-actions-nested");
+    let output = root.join(scan::OUTPUT_DIR);
+    std::fs::create_dir_all(&output).unwrap();
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.entries.is_empty());
+        assert!(!audit.folders.is_empty());
+        assert!(!audit.include_subfolders);
+    });
+    assert!(cx.debug_bounds("empty-folder-message").is_some());
+    assert!(cx.debug_bounds("empty-open-other").is_some());
+    assert!(cx.debug_bounds("empty-open-images").is_some());
+    assert!(cx.debug_bounds("empty-include-subfolders").is_some());
+    audit.update(cx, |audit, cx| audit.toggle_subfolders(cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    audit.read_with(cx, |audit, _| assert!(audit.include_subfolders));
+    assert!(cx.debug_bounds("empty-include-subfolders").is_none());
     std::fs::remove_dir_all(root).unwrap();
 }
 
