@@ -1,6 +1,6 @@
 [package]
 name = "press"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 authors = ["Igor Varyvoda <igor@varyvoda.com>"]
 description = "Audit and optimise images locally, with optional Sirv and Studio actions"
