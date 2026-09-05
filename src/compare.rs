@@ -100,23 +100,6 @@ fn rgba(image: &RenderImage) -> Option<RgbaImage> {
     )?))
 }
 
-/// The writer refuses a lossless encode that would reduce sample depth. Preview
-/// calls the lower-level encoder directly, so it must refuse the same request.
-/// The cross-path regression below keeps this guard aligned with `convert_to`.
-fn preserves_lossless_depth(image: &DynamicImage, format: Format, quality: Quality) -> bool {
-    if quality != Quality::LOSSLESS {
-        return true;
-    }
-    match format {
-        Format::WebP => image.color().bytes_per_pixel() == image.color().channel_count(),
-        Format::JpegXl => !matches!(
-            image,
-            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
-        ),
-        _ => true,
-    }
-}
-
 /// Decode `path`, encode it at `quality`, and decode that back, so both sides are
 /// real pixels rather than a promise.
 ///
@@ -158,9 +141,9 @@ pub fn build(
         // to fail the comparison.
         .or_else(|| crate::scan::decode_for_conversion(path, max_edge).ok())?;
     let original = max_edge.apply(decoded);
-    if !preserves_lossless_depth(&original, format, quality) {
-        return None;
-    }
+    // The one lossless-depth verdict, shared with the disk writer: a refused
+    // request builds no comparison rather than a quiet eight-bit stand-in.
+    convert::check_lossless_depth(&original, format, quality).ok()?;
     let encoded = convert::encode(&original, format, quality, profile.as_deref()).ok()?;
     let decoded = crate::scan::decode_bytes(&encoded)?;
 
@@ -552,35 +535,43 @@ mod tests {
     }
 
     #[test]
-    fn lossless_depth_checks_preserve_supported_integer_paths() {
-        let eight = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(2, 2, Rgb([1u8, 2, 3])));
+    fn the_shared_depth_check_keeps_supported_paths_and_refuses_the_rest() {
+        use image::{Luma, Rgba};
+        let rgb8 = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(2, 2, Rgb([1u8, 2, 3])));
+        let gray8 = DynamicImage::ImageLuma8(ImageBuffer::from_pixel(2, 2, Luma([4u8])));
         let sixteen = DynamicImage::ImageRgb16(ImageBuffer::from_pixel(2, 2, Rgb([1u16, 2, 3])));
+        let gray16 = DynamicImage::ImageLuma16(ImageBuffer::from_pixel(2, 2, Luma([5u16])));
+        let rgba16 =
+            DynamicImage::ImageRgba16(ImageBuffer::from_pixel(2, 2, Rgba([1u16, 2, 3, 4])));
         let float =
             DynamicImage::ImageRgb32F(ImageBuffer::from_pixel(2, 2, Rgb([0.1f32, 0.2, 0.3])));
-        assert!(preserves_lossless_depth(
-            &eight,
-            Format::WebP,
-            Quality::LOSSLESS
-        ));
-        assert!(!preserves_lossless_depth(
-            &sixteen,
-            Format::WebP,
-            Quality::LOSSLESS
-        ));
-        assert!(preserves_lossless_depth(
-            &sixteen,
-            Format::JpegXl,
-            Quality::LOSSLESS
-        ));
-        assert!(!preserves_lossless_depth(
-            &float,
-            Format::JpegXl,
-            Quality::LOSSLESS
-        ));
-        assert!(preserves_lossless_depth(
-            &float,
-            Format::JpegXl,
-            Quality::lossy(80.)
-        ));
+        // Eight-bit sources survive every lossless request the app makes.
+        for image in [&rgb8, &gray8] {
+            for format in [Format::WebP, Format::JpegXl, Format::Avif] {
+                assert!(
+                    convert::check_lossless_depth(image, format, Quality::LOSSLESS).is_ok(),
+                    "the shared check must keep an eight-bit source"
+                );
+            }
+        }
+        // Sixteen-bit sources refuse lossless WebP, the one depth libwebp drops.
+        for image in [&sixteen, &gray16, &rgba16] {
+            assert_eq!(
+                convert::check_lossless_depth(image, Format::WebP, Quality::LOSSLESS),
+                Err(convert::Failure::LosslessNeedsEightBit)
+            );
+            assert!(
+                convert::check_lossless_depth(image, Format::JpegXl, Quality::LOSSLESS).is_ok(),
+                "JPEG XL keeps sixteen-bit integer samples"
+            );
+        }
+        assert_eq!(
+            convert::check_lossless_depth(&float, Format::JpegXl, Quality::LOSSLESS),
+            Err(convert::Failure::LosslessNeedsIntegerSamples)
+        );
+        assert!(
+            convert::check_lossless_depth(&float, Format::JpegXl, Quality::lossy(80.)).is_ok(),
+            "a lossy request promises nothing about depth"
+        );
     }
 }

@@ -905,31 +905,39 @@ fn project_run(
                         return;
                     };
                     let entry = entries[sample];
-                    let encoded = scan::decode_for_conversion(&entry.path, max_edge)
+                    // The same verdict the window and the run give: a refused
+                    // sample stays out of the average and the total, so the
+                    // projection never spends savings a refused file will not
+                    // deliver. A backend failure is not a verdict — that sample
+                    // stays unknown and borrows the average, as before.
+                    let outcome = scan::decode_for_conversion(&entry.path, max_edge)
                         .ok()
                         .zip(format.resolve(&entry.path).ok())
-                        .and_then(|((image, profile), format)| {
-                            convert::encode(
-                                &max_edge.apply(image),
-                                format,
-                                quality,
-                                profile.as_deref(),
-                            )
-                            .ok()
+                        .map(|((image, profile), format)| {
+                            let image = max_edge.apply(image);
+                            match convert::check_lossless_depth(&image, format, quality).and_then(
+                                |()| {
+                                    convert::encode(&image, format, quality, profile.as_deref())
+                                        .map(|encoded| encoded.len() as u64)
+                                },
+                            ) {
+                                Ok(encoded) => audit::SampleOutcome::Encoded(entry.bytes, encoded),
+                                Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
+                                Err(_) => audit::SampleOutcome::Refused,
+                            }
                         })
-                        .map(|encoded| encoded.len() as u64);
-                    sampled.lock()[job] =
-                        Some((slice_bytes, encoded.map(|encoded| (entry.bytes, encoded))));
+                        .unwrap_or(audit::SampleOutcome::Unknown);
+                    sampled.lock()[job] = Some((slice_bytes, outcome));
                 }
             });
         }
     });
-    let sampled: Vec<(u64, Option<(u64, u64)>)> = sampled
+    let sampled: Vec<(u64, audit::SampleOutcome)> = sampled
         .lock()
         .iter()
-        .map(|slot| slot.expect("every sample was encoded"))
+        .map(|slot| slot.expect("every sample finished"))
         .collect();
-    audit::project_total(&sampled)
+    audit::project_total(&sampled).map(|(projected, counted, _)| (projected, counted))
 }
 
 /// Say what a conversion would do and what it would cost, without writing anything.
@@ -939,10 +947,12 @@ fn project_run(
 /// counted. `Format::resolve` runs here too, which is what catches `--format same`
 /// over a container with no encoder and over a file whose extension lies.
 ///
-/// The refusals a dry run cannot make are the ones that need the pixels: JPEG over a
-/// source with real transparency, an animated GIF, PNG, WebP or JPEG XL, and a
-/// lossless request over a depth the format cannot keep. Those still fail on the real
-/// run, so a clean dry run is not a promise that every file converts.
+/// The per-file refusals a dry run cannot make are the ones that need the
+/// pixels of every file: JPEG over a source with real transparency, an
+/// animated GIF, PNG, WebP or JPEG XL. Those still fail on the real run, so a
+/// clean dry run is not a promise that every file converts. What the samples
+/// prove — including a lossless request over a depth the format cannot keep —
+/// stays out of the projection instead of borrowing the average.
 fn dry_run_headless(
     queued: &Queued,
     format: Format,

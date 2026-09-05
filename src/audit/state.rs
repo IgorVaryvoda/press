@@ -497,7 +497,7 @@ impl Audit {
             // 32 WebP samples of a 3.0GB folder take 0.9s, inside the wait the status
             // bar already shows as "Sizing it up…".
             let concurrency = convert::workers(format);
-            let mut inflight: Vec<gpui_kit::Task<(u64, u64, Option<u64>)>> = Vec::new();
+            let mut inflight: Vec<gpui_kit::Task<(u64, SampleOutcome)>> = Vec::new();
             let mut queued = samples.iter();
             let mut sampled = Vec::with_capacity(samples.len());
 
@@ -551,25 +551,41 @@ impl Audit {
                                 },
                             ),
                         };
-                        let encoded = decoded
-                            .zip(format.resolve(&path).ok())
-                            .and_then(|(sample, format)| {
-                                convert::encode(&sample.0, format, quality, sample.1.as_deref())
-                                    .ok()
-                            })
-                            .map(|encoded| encoded.len() as u64);
-                        (slice_bytes, bytes, encoded)
+                        // The same verdict the run would give, so the total never
+                        // projects success across a file the recipe refuses. A
+                        // backend failure is not a verdict — that sample stays
+                        // unknown and borrows the average, as before.
+                        let outcome = match decoded.zip(format.resolve(&path).ok()) {
+                            Some((sample, format)) => {
+                                match convert::check_lossless_depth(&sample.0, format, quality)
+                                    .and_then(|()| {
+                                        convert::encode(
+                                            &sample.0,
+                                            format,
+                                            quality,
+                                            sample.1.as_deref(),
+                                        )
+                                        .map(|encoded| encoded.len() as u64)
+                                    }) {
+                                    Ok(encoded) => SampleOutcome::Encoded(bytes, encoded),
+                                    Err(convert::Failure::Failed) => SampleOutcome::Unknown,
+                                    Err(_) => SampleOutcome::Refused,
+                                }
+                            }
+                            None => SampleOutcome::Unknown,
+                        };
+                        (slice_bytes, outcome)
                     }));
                 }
                 if inflight.is_empty() {
                     break;
                 }
-                let ((slice_bytes, bytes, encoded), _, remaining) = select_all(inflight).await;
+                let ((slice_bytes, outcome), _, remaining) = select_all(inflight).await;
                 inflight = remaining;
-                sampled.push((slice_bytes, encoded.map(|encoded| (bytes, encoded))));
+                sampled.push((slice_bytes, outcome));
             }
 
-            let Some((projected, counted)) = project_total(&sampled) else {
+            let Some((projected, counted, refused)) = project_total(&sampled) else {
                 return;
             };
             let _ = this.update(cx, |audit, cx| {
@@ -577,7 +593,7 @@ impl Audit {
                 if audit.estimate_generation == generation
                     && audit.dataset_generation == dataset_generation
                 {
-                    audit.estimate = Some((projected, counted));
+                    audit.estimate = Some((projected, counted, refused));
                     cx.notify();
                 }
             });

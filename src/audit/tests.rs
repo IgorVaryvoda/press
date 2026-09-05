@@ -508,13 +508,17 @@ fn names(entries: &[Entry]) -> Vec<String> {
 fn each_slice_is_projected_by_its_own_sample() {
     // A gigabyte of images that compress 100:1, then a gigabyte that does not
     // compress at all.
-    let (projected, counted) = project_total(&[
-        (1_000_000_000, Some((10_000_000, 100_000))),
-        (1_000_000_000, Some((10_000_000, 10_000_000))),
+    let (projected, counted, refused) = project_total(&[
+        (1_000_000_000, SampleOutcome::Encoded(10_000_000, 100_000)),
+        (
+            1_000_000_000,
+            SampleOutcome::Encoded(10_000_000, 10_000_000),
+        ),
     ])
     .expect("two samples encoded");
 
     assert_eq!(counted, 2);
+    assert_eq!(refused, 0);
     assert_eq!(
         projected, 1_010_000_000,
         "10 MB from the first slice and the whole gigabyte from the second"
@@ -525,21 +529,55 @@ fn each_slice_is_projected_by_its_own_sample() {
 
 #[test]
 fn a_slice_whose_sample_would_not_decode_borrows_the_average() {
-    let (projected, counted) = project_total(&[
-        (100, Some((1000, 100))),
-        (100, Some((1000, 300))),
-        (100, None),
+    let (projected, counted, refused) = project_total(&[
+        (100, SampleOutcome::Encoded(1000, 100)),
+        (100, SampleOutcome::Encoded(1000, 300)),
+        (100, SampleOutcome::Unknown),
     ])
     .expect("two of three encoded");
 
     assert_eq!(counted, 2, "the broken file is not counted as evidence");
+    assert_eq!(refused, 0);
     assert_eq!(projected, 10 + 30 + 20, "its slice takes the 0.2 average");
 }
 
 #[test]
 fn nothing_encoded_is_no_estimate() {
-    assert!(project_total(&[(1000, None), (2000, None)]).is_none());
+    assert!(
+        project_total(&[
+            (1000, SampleOutcome::Unknown),
+            (2000, SampleOutcome::Unknown)
+        ])
+        .is_none()
+    );
     assert!(project_total(&[]).is_none());
+}
+
+#[test]
+fn a_refused_slice_claims_nothing_and_is_counted() {
+    let (projected, counted, refused) = project_total(&[
+        (100, SampleOutcome::Encoded(1000, 100)),
+        (100, SampleOutcome::Encoded(1000, 300)),
+        (10_000, SampleOutcome::Refused),
+    ])
+    .expect("two encoded, one refused");
+
+    assert_eq!(counted, 2, "the refused file is not counted as evidence");
+    assert_eq!(refused, 1);
+    assert_eq!(
+        projected,
+        10 + 30,
+        "the refused slice borrows no average and projects no success"
+    );
+}
+
+#[test]
+fn an_all_refused_folder_still_names_its_refusals() {
+    assert_eq!(
+        project_total(&[(1000, SampleOutcome::Refused)]),
+        Some((0, 0, 1)),
+        "no average exists, but the refusal must survive"
+    );
 }
 
 #[test]
@@ -2675,7 +2713,7 @@ fn pointer_checkbox_audit(
     });
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
     // Both rows are already ticked: opening the folder did that.
-    audit.update(cx, |audit, _| audit.estimate = Some((123, 2)));
+    audit.update(cx, |audit, _| audit.estimate = Some((123, 2, 0)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     (audit, cx)
 }
@@ -5108,7 +5146,7 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
         assert!(
             audit
                 .estimate
-                .is_some_and(|(projected, counted)| projected > 0 && counted == 1),
+                .is_some_and(|(projected, counted, _)| projected > 0 && counted == 1),
             "the sample projected a real total"
         );
     });
@@ -5139,7 +5177,9 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
     assert_eq!(redecoded.0.width(), 4);
     audit.read_with(cx, |audit, _| {
         assert!(
-            audit.estimate.is_some_and(|(projected, _)| projected > 0),
+            audit
+                .estimate
+                .is_some_and(|(projected, _, _)| projected > 0),
             "the resized sample projected a real total"
         );
     });
@@ -5160,7 +5200,7 @@ fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContex
         assert!(
             audit
                 .estimate
-                .is_some_and(|(projected, counted)| projected > 0 && counted > 0),
+                .is_some_and(|(projected, counted, _)| projected > 0 && counted > 0),
             "an untouched folder already projects what a run would write"
         );
         assert_eq!(
@@ -5710,18 +5750,27 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
         audit.selected = HashSet::from([0, 1]);
         audit.selected_target_count = 2;
         audit.selected_target_bytes = 2000;
-        audit.estimate = Some((160, 2));
+        audit.estimate = Some((160, 2, 0));
         assert_eq!(
             audit.savings_note(),
             Some("· ≈160 B output, 92% saved".to_string())
         );
-        audit.estimate = Some((2200, 2));
+        audit.estimate = Some((2200, 2, 0));
         assert_eq!(
             audit.savings_note(),
             Some("· ≈2.1 KB output, 10% larger".to_string())
         );
+        audit.estimate = Some((160, 2, 1));
+        assert_eq!(
+            audit.savings_note(),
+            Some("· ≈160 B output, 92% saved · 1 refused".to_string())
+        );
+        audit.estimate = Some((0, 0, 2));
+        assert_eq!(
+            audit.savings_note(),
+            Some("· 2 refused at these settings".to_string())
+        );
         audit.estimate = None;
-        assert_eq!(audit.savings_note(), None);
 
         audit.heavy = 0;
         audit.mislabelled = 3;

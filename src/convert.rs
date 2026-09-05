@@ -1316,6 +1316,38 @@ fn ensure_directory(
     }
 }
 
+/// The one verdict on whether a lossless request survives its source's sample
+/// depth. "Lossless" is a promise of unchanged pixels: WebP cannot carry more
+/// than eight bits per channel, and JPEG XL's 16-bit path cannot carry float
+/// samples, so over those sources the label would survive and half the depth
+/// would not. Lossy quality promises nothing and is left alone.
+///
+/// Every caller that encodes at a requested recipe answers through here — the
+/// disk writer, the comparison preview, the estimate sampler, and Studio
+/// preparation — so the same source and request gets the same refusal
+/// everywhere instead of each path keeping its own copy of the rule.
+pub fn check_lossless_depth(
+    image: &DynamicImage,
+    format: Format,
+    quality: Quality,
+) -> Result<(), Failure> {
+    if quality != Quality::LOSSLESS {
+        return Ok(());
+    }
+    if format == Format::WebP && is_high_depth(image) {
+        return Err(Failure::LosslessNeedsEightBit);
+    }
+    if format == Format::JpegXl
+        && matches!(
+            image,
+            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+        )
+    {
+        return Err(Failure::LosslessNeedsIntegerSamples);
+    }
+    Ok(())
+}
+
 /// Read, encode, and write one file to the path `plan_outputs` chose for it.
 ///
 /// `recording` is what the run owes the folder before the new file takes the name:
@@ -1342,23 +1374,7 @@ pub fn convert_to(
             crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
         })?;
     let decoded = max_edge.apply(decoded);
-    // "lossless" is a promise of unchanged pixels. WebP cannot carry more than eight
-    // bits per channel, and JPEG XL's 16-bit path cannot carry float samples, so over
-    // those sources the label would survive and half the depth would not. Lossy
-    // quality promises nothing and is left alone.
-    if quality == Quality::LOSSLESS {
-        if format == Format::WebP && is_high_depth(&decoded) {
-            return Err(Failure::LosslessNeedsEightBit);
-        }
-        if format == Format::JpegXl
-            && matches!(
-                decoded,
-                DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
-            )
-        {
-            return Err(Failure::LosslessNeedsIntegerSamples);
-        }
-    }
+    check_lossless_depth(&decoded, format, quality)?;
     let (width, height) = (decoded.width(), decoded.height());
     let encoded = encode(&decoded, format, quality, profile.as_deref())?;
     match recording {

@@ -412,6 +412,16 @@ fn prepare_upload_using(
         })?;
     check_cancelled(cancelled)?;
 
+    // The same depth verdict the writer gives, before spending an encode: a
+    // source the recipe cannot keep refuses here with its reason instead of
+    // behind the generic fallback below. This changes no acceptance — only
+    // the sentence — and no lossy fallback: §2 owns that decision.
+    convert::check_lossless_depth(&image, convert::Format::WebP, convert::Quality::LOSSLESS)
+        .map_err(|error| {
+            error
+                .reason()
+                .unwrap_or_else(|| "Press could not prepare a lossless Studio upload copy".into())
+        })?;
     let lossless = convert::encode(
         &image,
         convert::Format::WebP,
@@ -705,6 +715,28 @@ mod tests {
             std::process::id(),
             BOUNDARY_ID.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn a_sixteen_bit_source_refuses_with_the_writer_sentence() {
+        use image::{ImageBuffer, Rgb};
+        let dir = scratch("sixteen-bit-refusal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("sixteen.png");
+        ImageBuffer::from_pixel(4, 4, Rgb([1025u16, 32001, 65001]))
+            .save(&source)
+            .unwrap();
+        // Below the real upload limit so preparation must re-encode, and the
+        // shared depth verdict refuses before the generic fallback can speak.
+        let cancelled = AtomicBool::new(false);
+        let Err(refused) = prepare_upload_using(&source, &cancelled, 10) else {
+            panic!("a sixteen-bit lossless upload must refuse");
+        };
+        assert_eq!(
+            refused,
+            "lossless WebP cannot keep more than 8 bits per colour channel"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

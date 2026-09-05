@@ -552,9 +552,12 @@ pub(crate) struct Audit {
     gallery_columns: Option<usize>,
     /// Bands GPUI asked the virtualised gallery to render this frame.
     gallery_visible: std::ops::Range<usize>,
-    /// Projected output size for the current settings, and how many files were
-    /// actually encoded to get it.
-    estimate: Option<(u64, usize)>,
+    /// Projected output size for the current settings, how many files were
+    /// actually encoded to get it, and how many samples the recipe refused.
+    /// Refused slices contribute nothing to the total: a run would write
+    /// nothing for them either, and the readout names the count instead of
+    /// projecting success across it.
+    estimate: Option<(u64, usize, usize)>,
     /// Bumped on every settings change so a slow sample can tell it is stale. Dragging
     /// the quality slider fires dozens of these.
     estimate_generation: u64,
@@ -2004,33 +2007,66 @@ struct Stratum {
     slice_bytes: u64,
 }
 
+/// What one estimate sample proved about its slice: its own source and encoded
+/// size, a recipe refusal the real run will repeat, or a file that would not
+/// decode and the projection still has to guess at. Refused and undecodable
+/// are different promises. A refusal is the shared encode policy answering
+/// early, so its slice is kept out of the average and the total and counted
+/// where the window can name it. A file that would not decode says nothing
+/// about the recipe, so its slice still borrows the average.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SampleOutcome {
+    Encoded(u64, u64),
+    Refused,
+    Unknown,
+}
+
 /// Project the encoded size of a whole list from a few real encodes.
 ///
-/// Each entry is one slice's bytes and, when its sample encoded, that sample's own
-/// source and encoded size. A slice is scaled by its own sample; a slice whose sample
-/// would not decode is scaled by the average of the ones that did. Returns the total
-/// and how many samples stood behind it, or `None` when nothing encoded at all.
+/// Each entry is one slice's bytes and what its sample proved. A slice is
+/// scaled by its own sample; a slice whose sample would not decode is scaled
+/// by the average of the ones that did; a slice whose sample the recipe
+/// refused contributes nothing, because a run would write nothing for it
+/// either. Returns the total, how many samples stood behind it, and how many
+/// slices refused — or `None` when nothing encoded and nothing refused.
 ///
-/// The old version divided the summed sample bytes by the summed source bytes and
-/// applied that one ratio to the folder. On a weight-sorted list of 5,739 photos the
-/// heaviest file was 109MB of a 110MB sample, so its 300:1 compression became the
-/// forecast for all 3GB and the window promised "3.0 GB to save, −100%".
-pub(crate) fn project_total(slices: &[(u64, Option<(u64, u64)>)]) -> Option<(u64, usize)> {
+/// The old version divided the summed sample bytes by the summed source bytes
+/// and applied that one ratio to the folder. On a weight-sorted list of 5,739
+/// photos the heaviest file was 109MB of a 110MB sample, so its 300:1
+/// compression became the forecast for all 3GB and the window promised
+/// "3.0 GB to save, −100%".
+pub(crate) fn project_total(slices: &[(u64, SampleOutcome)]) -> Option<(u64, usize, usize)> {
     let ratio = |(source, encoded): (u64, u64)| encoded as f64 / source.max(1) as f64;
     let sampled: Vec<f64> = slices
         .iter()
-        .filter_map(|(_, sample)| sample.map(ratio))
+        .filter_map(|(_, sample)| match sample {
+            SampleOutcome::Encoded(source, encoded) => Some(ratio((*source, *encoded))),
+            SampleOutcome::Refused | SampleOutcome::Unknown => None,
+        })
         .collect();
-    if sampled.is_empty() {
+    let refused = slices
+        .iter()
+        .filter(|(_, sample)| matches!(sample, SampleOutcome::Refused))
+        .count();
+    if sampled.is_empty() && refused == 0 {
         return None;
     }
-
-    let average = sampled.iter().sum::<f64>() / sampled.len() as f64;
+    let average = if sampled.is_empty() {
+        0.
+    } else {
+        sampled.iter().sum::<f64>() / sampled.len() as f64
+    };
     let projected: f64 = slices
         .iter()
-        .map(|(slice_bytes, sample)| *slice_bytes as f64 * sample.map_or(average, ratio))
+        .map(|(slice_bytes, sample)| match sample {
+            SampleOutcome::Encoded(source, encoded) => {
+                *slice_bytes as f64 * ratio((*source, *encoded))
+            }
+            SampleOutcome::Refused => 0.,
+            SampleOutcome::Unknown => *slice_bytes as f64 * average,
+        })
         .sum();
-    Some((projected as u64, sampled.len()))
+    Some((projected as u64, sampled.len(), refused))
 }
 
 fn conversion_targets(visible: &[usize], selected: &HashSet<usize>) -> Vec<usize> {

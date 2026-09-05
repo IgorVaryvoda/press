@@ -172,7 +172,10 @@ impl Audit {
     /// carries the same numbers, but the decision happens here, next to the
     /// verbs, so the readout earns its width by answering it.
     pub(super) fn savings_note(&self) -> Option<String> {
-        let (projected, _) = self.estimate?;
+        let (projected, counted, refused) = self.estimate?;
+        if counted == 0 && refused > 0 {
+            return Some(format!("· {refused} refused at these settings"));
+        }
         let source = self.selected_target_bytes;
         if source == 0 {
             return None;
@@ -180,10 +183,15 @@ impl Audit {
         let growth = projected > source;
         let percent = source.abs_diff(projected) as f32 / source as f32 * 100.;
         Some(format!(
-            "· ≈{} output, {:.0}% {}",
+            "· ≈{} output, {:.0}% {}{}",
             format_bytes(projected),
             percent,
             if growth { "larger" } else { "saved" },
+            if refused > 0 {
+                format!(" · {refused} refused")
+            } else {
+                String::new()
+            },
         ))
     }
 
@@ -1071,7 +1079,7 @@ impl Audit {
                 )),
                 Some((growth, percent)),
             )
-        } else if let Some((projected, sampled)) = self.estimate {
+        } else if let Some((projected, sampled, refused)) = self.estimate {
             let growth = projected > source;
             let delta = source.abs_diff(projected);
             let percent = delta as f32 / source.max(1) as f32 * 100.;
@@ -1084,19 +1092,35 @@ impl Audit {
                     cx.theme().green
                 },
                 format!(
-                    "from {}{}",
+                    "from {}{}{}",
                     format_bytes(source),
                     sampling_note(sampled, target_count),
-                ),
-                Some((
-                    projected as f32 / source.max(1) as f32,
-                    if growth {
-                        cx.theme().yellow
+                    if refused > 0 {
+                        format!(" · {refused} refused")
                     } else {
-                        cx.theme().green
+                        String::new()
                     },
-                )),
-                Some((growth, percent)),
+                ),
+                if sampled == 0 {
+                    None
+                } else {
+                    Some((
+                        projected as f32 / source.max(1) as f32,
+                        if growth {
+                            cx.theme().yellow
+                        } else {
+                            cx.theme().green
+                        },
+                    ))
+                },
+                // Everything refused means no ratio to brag about: the detail
+                // line already names the refusals, and a −100% tag would claim
+                // savings a run will never deliver.
+                if sampled == 0 {
+                    None
+                } else {
+                    Some((growth, percent))
+                },
             )
         } else {
             (
