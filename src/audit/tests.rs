@@ -5241,6 +5241,79 @@ fn the_quality_knob_names_forced_lossless_for_webp(cx: &mut TestAppContext) {
     );
 }
 
+/// The window loop and the headless loop are different schedulers around one
+/// policy: planning, backup claims, recording, encoding and failure reasons.
+/// The same sources at the same recipe must write byte-identical outputs, or
+/// the two paths have diverged.
+#[gpui_kit::test]
+fn window_and_headless_runs_write_identical_bytes(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    let (root, sources, gui) = audit.read_with(cx, |audit, _| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(audit.results.len(), 3);
+        let gui: Vec<(PathBuf, Vec<u8>)> = audit
+            .result_paths
+            .iter()
+            .map(|(index, written)| {
+                let source = audit.entries[*index].path.clone();
+                (
+                    source,
+                    std::fs::read(written).expect("the window output is on disk"),
+                )
+            })
+            .collect();
+        let sources: Vec<PathBuf> = audit
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        (audit.root.clone(), sources, gui)
+    });
+    // Same sources, same recipe, a separate output root, the headless loop.
+    // Its manifest starts empty: only the bytes are compared, never the stamps.
+    let out_dir = root.join("headless");
+    let manifest = crate::manifest::Manifest::default();
+    let destination = convert::Destination {
+        out_dir: &out_dir,
+        backups: None,
+        manifest: &manifest,
+    };
+    let planned = convert::plan_outputs(&root, &sources, &sources, &destination, Format::WebP);
+    let written = parking_lot::Mutex::new(Vec::new());
+    convert::convert_each(
+        &root,
+        &sources,
+        &planned,
+        &destination,
+        Format::WebP,
+        Quality::lossy(80.),
+        MaxEdge::FULL,
+        |source, converted| {
+            let converted = converted.expect("the headless file converts");
+            written.lock().push((
+                source.to_path_buf(),
+                std::fs::read(&converted.written).expect("the headless output is on disk"),
+            ));
+        },
+    );
+    let headless = written.into_inner();
+    for (source, bytes) in &gui {
+        let (_, expected) = headless
+            .iter()
+            .find(|(path, _)| path == source)
+            .expect("both runs convert every source");
+        assert_eq!(
+            bytes,
+            expected,
+            "{} differs between window and headless",
+            source.display()
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
     let stopped = panel::conversion_result_state(Some(36), 12);

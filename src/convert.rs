@@ -832,12 +832,7 @@ pub fn convert_each(
                         return;
                     };
                     let backup = destination.backup(root, source);
-                    let recording = Recording {
-                        root,
-                        out_dir,
-                        stamp,
-                        backup: backup.as_ref(),
-                    };
+                    let recording = Recording::for_source(root, out_dir, stamp, backup.as_ref());
                     let converted = match written {
                         Ok(written) => convert_to(
                             out_dir,
@@ -911,6 +906,26 @@ pub struct Recording<'a> {
     pub out_dir: &'a Path,
     pub stamp: &'a crate::manifest::Stamp,
     pub backup: Option<&'a Backup>,
+}
+
+impl<'a> Recording<'a> {
+    /// The record one file's write owes the folder, with its backup claim.
+    /// Both loops build it the same way: the record goes down before anything
+    /// moves, so a run killed mid-file leaves a record for every original it
+    /// moved and moved none it has no record for.
+    pub fn for_source(
+        root: &'a Path,
+        out_dir: &'a Path,
+        stamp: &'a crate::manifest::Stamp,
+        backup: Option<&'a Backup>,
+    ) -> Self {
+        Self {
+            root,
+            out_dir,
+            stamp,
+            backup,
+        }
+    }
 }
 
 /// One spelling of a path for comparison. Case-insensitive, because `Shot.png` and

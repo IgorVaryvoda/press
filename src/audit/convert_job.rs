@@ -223,12 +223,12 @@ impl Audit {
                         // The record and the backup move belong to the write, one
                         // file at a time: a run killed here has a record for every
                         // original it moved and moved none it has no record for.
-                        let recording = convert::Recording {
-                            root: &root,
-                            out_dir: &out_dir,
-                            stamp: &stamp,
-                            backup: backup.as_ref(),
-                        };
+                        let recording = convert::Recording::for_source(
+                            &root,
+                            &out_dir,
+                            &stamp,
+                            backup.as_ref(),
+                        );
                         let converted = match written {
                             Ok(written) => convert::convert_to(
                                 &out_dir,
