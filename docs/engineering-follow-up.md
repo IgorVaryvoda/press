@@ -1,137 +1,100 @@
-# Processing trust: review follow-up
+# Processing trust: current baseline and follow-up
 
-Status: code changes plus an ordered remaining backlog. Reference: Press
-`583a1c1f` (2026-09-04). A source observation is not a reproduced runtime failure.
-The full feature direction is in the [roadmap](../ROADMAP.md).
+Updated 2026-09-05 against Press
+`ec9794bad7a6115a2fe1cd8313ca623ae6420699`. Source inspection is not a reproduced
+runtime result. The [roadmap](../ROADMAP.md) owns direction and the
+[execution plan](workbench-execution-plan.md) owns feature sequencing.
 
-## Included in this PR
+## Preserve what has already landed
 
-`src/audit/convert_job.rs` now does manifest loading, output-name planning, and
-backup-chain lookup on the background executor. Planning still uses a snapshot of
-all audited paths, including unselected originals. Before starting writes it checks
-both dataset generation and run-token identity; progress and completion use the
-same ownership check. Stop during planning reaches the existing stopped-run path
-without starting an encode after the stop is observed.
+The original [PR #3](https://github.com/IgorVaryvoda/press/pull/3) is merged. It moved
+manifest-backed output/backup planning onto the background executor and added
+run-token plus dataset ownership checks. The initial destination-context proof
+was not part of that off-thread move. Its comparison depth guard was an interim fix.
 
-The initial `Output::context` check remains synchronous. This PR is not a claim
-that every preflight filesystem operation is now off-thread, and cannot interrupt
-an operating-system metadata call already in progress.
+Since then, `convert::check_lossless_depth` is shared by processing paths, including
+comparison and Studio preparation; the estimate path also has the shared check.
+Studio preparation retains the extracted ICC profile when encoding lossless, lossy
+and resized copies, and counts the resulting bytes against its upload limit.
+Accepted original bytes keep their passthrough path. Do not rebuild either fix.
 
-`src/compare.rs` now applies the disk writer's existing lossless-depth restrictions
-before directly encoding a comparison. The cross-path test covers a 16-bit PNG,
-with and without a cached preview, at full and reduced dimensions, and confirms
-that refused work writes nothing. A separate predicate test covers supported
-integer inputs and JPEG XL's float restriction.
+Reference changes:
+[shared depth work](https://github.com/IgorVaryvoda/press/commit/46e4bf5d3fd5f03c7fb16b12cfaade1af7c0ab3d)
+and [ICC preservation](https://github.com/IgorVaryvoda/press/commit/ec9794bad7a6115a2fe1cd8313ca623ae6420699).
+The source includes new regression coverage; this documentation pass did not execute
+it and does not claim end-to-end color correctness or complete preparation parity.
 
-This is a tactical comparison guard. It does not make estimation or Studio upload
-preparation share the same validation layer yet. Existing comparison errors also
-still use the current generic failure UI.
+`main.rs::queue_run` already compares recorded format, quality and maximum edge for
+recognized managed outputs. Unrecorded or externally edited outputs keep legacy
+skip behavior. Extend full source/recipe identity rather than creating another
+settings-aware skip mechanism from an outdated README or review paragraph.
 
-## Correct one finding before adding work
+## Remaining implementation increments
 
-`main.rs::queue_run` already compares recorded format, quality, and maximum edge
-when `Record::installed` identifies the recorded output. Changing those settings
-rebuilds such a managed output. An unrecorded or externally edited output retains
-the older timestamp-based skip behavior. Do not implement a second settings-aware
-skip mechanism based on the older README paragraph or the original review.
+### 1. Complete a shared recipe/result contract
 
-The remaining work is fuller source/recipe identity, safe legacy handling, and
-updating documentation to describe this existing distinction accurately.
+The shared depth predicate is not the whole requested/effective transform contract.
+Make supported format, resize, alpha, depth, profile handling, warnings and refusal
+consistent across preview, estimates, export and prepared upload. Extend the existing
+boundary; do not add a second encoder path. Inspect actual outputs and name any files
+excluded from estimates rather than projecting success across unsupported work.
 
-## Next engineering increments
+Cover 8/16-bit RGB and grayscale, float sources, opaque alpha, real cutout edges,
+animated containers and genuine ICC profiles. Profile transport tests are useful but
+not proof of color-managed rendering. Preserving a profile is not converting pixels
+to sRGB. Keep refusal of unsupported lossless depth changes explicit; any future lossy
+fallback needs a separate informed decision, not a silent reinterpretation.
 
-### 1. Share preparation and validation before expanding presets
+Exit: accepted/refused requests and effective transformations agree across entry
+points, with realistic fixtures and no writes or uploads before required consent.
+Do not weaken current high-depth refusal to make a new preset appear supported.
 
-Move transform validation to the common encoding/preparation boundary used by
-comparison, estimation, export, and Studio preparation. The validated result should
-record requested versus effective format, sample depth, alpha policy, resize,
-profile handling, warnings, and structured failure. Do not re-decode or write a
-file just to discover whether a transformation is permitted.
+### 2. Finish asynchronous planning and freshness
 
-Remove the tactical comparison guard only when this shared path owns the same
-restriction. Keep cross-path tests so a future bypass cannot quietly return.
+Revalidate and move any remaining destination-context filesystem work off the click
+handler with an explicit planning phase. Preserve prior results if the destination
+is refused. Cancellation, a changed dataset and a replaced run must not leave stuck
+busy state or permit a stale plan to start writes.
 
-Exit: the same source and request receives the same acceptance/refusal and effective
-transform across callers. Cover 8/16-bit RGB and grayscale, float input, genuine ICC
-profiles, real transparency, opaque alpha, and animated containers. Pixel-preserving
-encoding is not a promise of correctly color-managed screen rendering; test those
-separately. Estimates must not silently omit unsupported files and then project
-success across them.
+`compare::Key` has conversion settings and path rather than complete source revision.
+Add freshness checks outside rendering and at job boundaries; do not stat every
+visible row on each frame. Include all output-affecting options, including AVIF
+speed and processing revision, in the recipe identity. Keep edited and unrecorded
+outputs protected rather than blindly overwriting them after a settings change.
 
-### 2. Fix prepared Studio upload fidelity
+Exit: edited/deleted/same-name-replaced sources, recipe changes, invalid/slow output
+folders, cancel and restart have truthful states. The workbench's source/master,
+deliverable and remote-attempt identities reuse this foundation.
 
-In `studio.rs::prepare_upload_using`, the conversion fallback currently discards the
-decoded profile and calls the low-level encoder for a purported lossless WebP copy.
-Accepted original bytes take a different passthrough path. Preserve that distinction;
-do not unnecessarily re-encode ordinary accepted originals.
+### 3. Honest labels and useful scope
 
-Preserve the ICC profile on a prepared copy, or explicitly transform pixels when a
-supported color conversion was selected. Refuse unsupported lossless depth changes,
-or obtain an explicit lossy/depth-reduction decision through a clearly labeled path.
-Do not turn a failed lossless attempt into an unannounced lossy upload. Include actual
-profile bytes in size-limit checks and preserve source files throughout.
+Recheck built-in labels while converting them to the common recipe model. `Resize
+only` must not conceal recompression; `Pixel-perfect` must not claim unsupported
+source-depth preservation. Explain effective forced-lossless behavior for transparent
+WebP. A convenient default is not a recipient's validated requirement.
 
-Exit: passthrough bytes are identical; an oversized tagged image retains its profile
-or records an explicit transformation; 16-bit fallback cannot masquerade as lossless;
-no upload occurs before any required confirmation. Use a loopback service and fixtures,
-not production credentials or billable Studio calls, for these regression tests.
+Keep selected count, effective settings, destination, original handling and local/cloud
+execution legible together. Verify keyboard/focus, filter/selection interaction,
+narrow windows, failed-file recovery and scale-aware thumbnail rendering with the
+actual app. Do not redesign the shell merely to expose more features.
 
-### 3. Finish asynchronous preflight and source/recipe identity
+### 4. Aggregate memory and ownership
 
-Move the initial output-context proof off-thread with an explicit planning phase;
-retain prior results if that destination is refused. Cancellation and source changes
-must retire planning without leaving busy state stuck or starting a stale write.
+Retain format-aware workers and existing thumbnail/estimate/prefetch budgets. Add
+admission by estimated decoded memory where needed, including transient buffers,
+rather than assuming a worker count alone bounds all input sizes. Header estimates
+are not a guarantee that arbitrary decoders cannot allocate more. Measure peak RSS
+on a named reference machine with large images and rapid interaction.
 
-`compare::Key` currently has path and conversion settings but no source revision.
-Add freshness checks outside rendering, then revalidate at job boundaries. Do not
-add `stat()` calls to every row render or assume a filename uniquely identifies its
-current contents. Include all output-affecting recipe settings, including AVIF
-speed, in managed-output identity. Keep edited and unrecorded outputs protected.
+Keep the single crate. Extract product-job state, shared recipe planning and service
+lifecycle only as ownership requires them; do not let every new responsibility expand
+Audit. GUI and CLI may report differently but must share safety and transform policy.
+No microservices, database replacement or generic execution graph is required.
 
-Exit: edits, deletion, same-name replacement, recipe changes, revoked/invalid output
-folders, and a stopped preflight yield truthful results. Exercise slow destinations
-and a restart; compare before/after behavior on the same hardware.
+## Validation obligations
 
-### 4. Make operation labels and scope honest
-
-In `audit/panel.rs`, the `Resize only` preset keeps format but still recompresses at
-quality 80. Rename it to describe that behavior, or implement a true unchanged-file
-path when resizing is unnecessary. Scope `Pixel-perfect` to supported input types
-and make forced lossless encoding visible. A general `Recommended` preset is a
-convenient default, not proof it meets a marketplace's requirements.
-
-Keep selection, effective settings, destination, original handling, and local/cloud
-execution legible together. Verify keyboard focus, selection/filter interaction,
-failed-file recovery, narrow windows, and scale-aware thumbnails on real screens.
-Do not redesign the shell without task evidence.
-
-### 5. Bound aggregate memory, not just worker count
-
-Retain the format-aware worker limits and existing cache budgets. Add admission by
-estimated decoded bytes across active conversion/preview/estimate work, with a named
-refusal or explicitly limited path for an oversized image. Codec working buffers
-and transient copies count too. Header-based estimates are admission hints, not a
-claim that an untrusted decoder can never allocate more.
-
-Exit: representative large images and rapid preview/slider changes do not create an
-unbounded set of stale decodes. Record peak RSS and cancellation behavior on a named
-reference machine; do not infer performance solely from source constants.
-
-### 6. Extract ownership only where it removes duplicated behavior
-
-Keep the single crate. Extract a common validated conversion plan and reusable job
-semantics as the recipe work needs them. Let audit/session state own selection and
-navigation; keep remote credentials and transfer state with their respective
-integration. GUI and CLI may report progress differently, but must not develop
-different file-safety or transformation policies. No framework rewrite, service
-split, or generic workflow graph is needed.
-
-## Validation and merge gate
-
-The six added Rust regression tests have not been executed for this PR. See the
-PR validation record for authoring-environment limitations. Before merge, run the
-complete suite with the pinned toolchain and native dependencies, not only the
-new tests:
+This docs update changes no Rust code and makes no claim about current native test
+results. For implementation changes, run the pinned-toolchain gates:
 
 ```sh
 cargo test --locked
@@ -139,11 +102,12 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Before merge, also exercise a real window: start a large-folder conversion, stop
-while planning, reopen a different dataset, and confirm there are no stale writes,
-wrong row associations, or stuck controls. Compare a 16-bit PNG as lossless WebP
-and then request its export; both must refuse without creating an output. Recheck
-ordinary 8-bit conversion and replace/restore flows.
+Exercise the real window: stop during slow planning, change/reopen the dataset,
+check ordinary conversion and replace/restore, and compare/export unsupported
+lossless source depths. Add fake-service tests for upload preparation; production
+credentials and billable Studio calls are not regression fixtures. Preserve sources,
+name failures and record actual results, not just the existence of tests.
 
-Do not report GitHub Actions status, model-generated UX opinions, a syntax scan,
-or the presence of test code as successful local or native runtime validation.
+The wider [connected-services plan](studio-connected-services.md) adds separate
+native-auth, spend and server-recovery gates. A new product view does not imply those
+services are ready; a passing local codec test does not certify supplier authorization.
