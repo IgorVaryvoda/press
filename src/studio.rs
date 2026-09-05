@@ -358,7 +358,8 @@ fn process_prepared_with_api(
 }
 
 /// Build the smallest truthful upload path: accepted bytes pass through unchanged;
-/// anything else first gets a pixel-preserving WebP copy. Only a lossy or resized
+/// anything else first gets a pixel-preserving WebP copy that keeps the source's
+/// ICC profile, so the copy renders in the same colours. Only a lossy or resized
 /// copy asks the user before it leaves this computer.
 pub fn prepare_upload(source: &Path, cancelled: &AtomicBool) -> Result<Preflight, String> {
     prepare_upload_using(source, cancelled, MAX_UPLOAD)
@@ -388,28 +389,25 @@ fn prepare_upload_using(
     }
 
     check_cancelled(cancelled)?;
-    let (mut image, _profile) = scan::decode_for_conversion(source, crate::convert::MaxEdge::FULL)
+    let (mut image, profile) = scan::decode_for_conversion(source, crate::convert::MaxEdge::FULL)
         .map_err(|error| match error {
-            scan::ConversionDecodeError::AnimatedGif => {
-                "this animated GIF is too large for Studio without dropping its animation"
-                    .to_string()
-            }
-            scan::ConversionDecodeError::AnimatedPng => {
-                "this animated PNG is too large for Studio without dropping its animation"
-                    .to_string()
-            }
-            scan::ConversionDecodeError::AnimatedWebP => {
-                "this animated WebP is too large for Studio without dropping its animation"
-                    .to_string()
-            }
-            scan::ConversionDecodeError::AnimatedJpegXl => {
-                "this animated JPEG XL is too large for Studio without dropping its animation"
-                    .to_string()
-            }
-            scan::ConversionDecodeError::Failed => {
-                "Press could not decode this image to prepare it for Studio".to_string()
-            }
-        })?;
+        scan::ConversionDecodeError::AnimatedGif => {
+            "this animated GIF is too large for Studio without dropping its animation".to_string()
+        }
+        scan::ConversionDecodeError::AnimatedPng => {
+            "this animated PNG is too large for Studio without dropping its animation".to_string()
+        }
+        scan::ConversionDecodeError::AnimatedWebP => {
+            "this animated WebP is too large for Studio without dropping its animation".to_string()
+        }
+        scan::ConversionDecodeError::AnimatedJpegXl => {
+            "this animated JPEG XL is too large for Studio without dropping its animation"
+                .to_string()
+        }
+        scan::ConversionDecodeError::Failed => {
+            "Press could not decode this image to prepare it for Studio".to_string()
+        }
+    })?;
     check_cancelled(cancelled)?;
 
     // The same depth verdict the writer gives, before spending an encode: a
@@ -426,7 +424,7 @@ fn prepare_upload_using(
         &image,
         convert::Format::WebP,
         convert::Quality::LOSSLESS,
-        None,
+        profile.as_deref(),
     )
     .ok()
     .ok_or_else(|| "Press could not prepare a lossless Studio upload copy".to_string())?;
@@ -445,7 +443,7 @@ fn prepare_upload_using(
         &image,
         convert::Format::WebP,
         convert::Quality::lossy(90.),
-        None,
+        profile.as_deref(),
     )
     .ok()
     .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
@@ -471,7 +469,7 @@ fn prepare_upload_using(
             &image,
             convert::Format::WebP,
             convert::Quality::lossy(90.),
-            None,
+            profile.as_deref(),
         )
         .ok()
         .ok_or_else(|| "Press could not prepare a Studio upload copy".to_string())?;
@@ -736,6 +734,137 @@ mod tests {
             refused,
             "lossless WebP cannot keep more than 8 bits per colour channel"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A minimal ICC profile that passes `rgb_profile`: the size header agrees
+    /// with the length and the data colour space is RGB. Not a real
+    /// calibration — only the preservation plumbing is under test.
+    fn rgb_profile_fixture(len: usize) -> Vec<u8> {
+        let mut profile = vec![0u8; len.max(132)];
+        let len = profile.len();
+        profile[0..4].copy_from_slice(&(len as u32).to_be_bytes());
+        profile[16..20].copy_from_slice(b"RGB ");
+        profile
+    }
+
+    fn tagged_png_with(profile: &[u8], pixels: &RgbaImage) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new_with_quality(
+            &mut bytes,
+            image::codecs::png::CompressionType::Best,
+            image::codecs::png::FilterType::Adaptive,
+        );
+        image::ImageEncoder::set_icc_profile(&mut encoder, profile.to_vec()).unwrap();
+        image::ImageEncoder::write_image(
+            encoder,
+            pixels.as_raw(),
+            pixels.width(),
+            pixels.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn tagged_png(profile: &[u8]) -> Vec<u8> {
+        tagged_png_with(
+            profile,
+            &RgbaImage::from_pixel(16, 16, Rgba([200u8, 30, 40, 255])),
+        )
+    }
+
+    #[test]
+    fn passthrough_bytes_are_identical() {
+        let dir = scratch("passthrough-identical");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("photo.png");
+        let original = png();
+        std::fs::write(&source, &original).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let Preflight::Ready(upload) =
+            prepare_upload_using(&source, &cancelled, original.len() as u64).unwrap()
+        else {
+            panic!("an accepted file passes through without asking");
+        };
+        assert_eq!(upload.bytes, original, "passthrough must not re-encode");
+        assert_eq!(upload.mime, "image/png");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_oversized_tagged_copy_keeps_its_profile() {
+        let profile = rgb_profile_fixture(132);
+        let pixels = RgbaImage::from_fn(256, 256, |x, y| {
+            Rgba([x as u8, y as u8, ((x + y) / 2) as u8, 255])
+        });
+        let original = tagged_png_with(&profile, &pixels);
+        let dir = scratch("tagged-keeps-profile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("tagged.png");
+        std::fs::write(&source, &original).unwrap();
+        // One byte under the source size forces the re-encode path. The
+        // gradient compresses far better in WebP than PNG, so the tagged
+        // lossless copy still fits with room the test asserts on: a platform
+        // that encoded differently must fail here, not silently elsewhere.
+        let max_upload = original.len() as u64 - 1;
+        let (image, extracted) =
+            crate::scan::decode_for_conversion(&source, crate::convert::MaxEdge::FULL).unwrap();
+        assert_eq!(
+            extracted.as_deref(),
+            Some(profile.as_slice()),
+            "the fixture is really tagged"
+        );
+        let lossless_len = crate::convert::encode(
+            &image,
+            crate::convert::Format::WebP,
+            crate::convert::Quality::LOSSLESS,
+            extracted.as_deref(),
+        )
+        .unwrap()
+        .len() as u64;
+        assert!(
+            lossless_len <= max_upload,
+            "lossless {lossless_len} must fit in {max_upload}"
+        );
+        let cancelled = AtomicBool::new(false);
+        let Preflight::Ready(upload) =
+            prepare_upload_using(&source, &cancelled, max_upload).unwrap()
+        else {
+            panic!("a tagged lossless copy that fits must not ask");
+        };
+        assert!(
+            upload.bytes.windows(profile.len()).any(|w| w == profile),
+            "the prepared copy must carry the source profile"
+        );
+        assert_eq!((upload.width, upload.height), (256, 256));
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            original,
+            "preparation never touches the source"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn profile_bytes_count_toward_the_upload_limit() {
+        let profile = rgb_profile_fixture(1024);
+        let original = tagged_png(&profile);
+        let dir = scratch("profile-counts-in-limit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("tagged.png");
+        std::fs::write(&source, &original).unwrap();
+        // The flat pixels alone would fit in 100 bytes; the kilobyte of
+        // profile must not slip past the limit uncounted. Without it the
+        // lossless copy is Ready, so this fails if the profile is dropped.
+        let cancelled = AtomicBool::new(false);
+        let outcome = prepare_upload_using(&source, &cancelled, 100);
+        assert!(
+            !matches!(outcome, Ok(Preflight::Ready(_))),
+            "a copy the limit cannot hold with its profile is not ready"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
