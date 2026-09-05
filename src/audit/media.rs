@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Reopen the view with a fresh key when its file changed mid-job. The stale
+/// task's own landing then misses, so old pixels never show. Callers have
+/// already proven navigation still applies; only the contents moved.
+fn reopen_stale_media(audit: &mut Audit, cx: &mut Context<Audit>) {
+    let Some(comparison) = audit.compare.as_ref() else {
+        return;
+    };
+    let (index, mode, written, produced_by) = (
+        comparison.index,
+        comparison.mode,
+        comparison.written.clone(),
+        comparison.produced_by,
+    );
+    match (mode, written) {
+        (MediaMode::Preview, _) => audit.open_preview(index, cx),
+        (MediaMode::Compare, Some(written)) => audit.open_written(index, written, produced_by, cx),
+        (MediaMode::Compare, None) => audit.open_compare(index, cx),
+    }
+}
+
 pub(super) fn comparison_landing_applies(
     open: Option<&Comparison>,
     index: usize,
@@ -198,7 +218,7 @@ impl Audit {
         };
         self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
-        let key = compare::Key::new(&written, self.format, self.quality, self.max_edge);
+        let key = compare::Key::new(&written, &source, self.format, self.quality, self.max_edge);
         self.compare = Some(Comparison {
             index,
             dataset_generation,
@@ -250,6 +270,10 @@ impl Audit {
                 ) {
                     return;
                 }
+                if !key.fresh() {
+                    reopen_stale_media(audit, cx);
+                    return;
+                }
                 let Some(comparison) = audit.compare.as_mut() else {
                     return;
                 };
@@ -282,7 +306,7 @@ impl Audit {
         };
         self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
-        let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
+        let key = compare::Key::new(&path, &path, self.format, self.quality, self.max_edge);
         let cached = self.take_cached_preview(&key);
         let full_resolution = cached.is_some();
         let preview = cached.or_else(|| {
@@ -342,6 +366,20 @@ impl Audit {
             if !still_open {
                 return;
             }
+            if !key.fresh() {
+                let _ = this.update(cx, |audit, cx| {
+                    if comparison_landing_applies(
+                        audit.compare.as_ref(),
+                        index,
+                        dataset_generation,
+                        MediaMode::Preview,
+                        &key,
+                    ) {
+                        reopen_stale_media(audit, cx);
+                    }
+                });
+                return;
+            }
 
             let built = cx
                 .background_executor()
@@ -360,6 +398,10 @@ impl Audit {
                 }
                 if let Some(preview) = built.as_ref() {
                     audit.cached = Some((key.clone(), CachedMedia::Preview(preview.clone())));
+                }
+                if !key.fresh() {
+                    reopen_stale_media(audit, cx);
+                    return;
                 }
                 let Some(comparison) = audit.compare.as_mut() else {
                     return;
@@ -404,7 +446,7 @@ impl Audit {
         };
         self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
-        let key = compare::Key::new(&path, self.format, self.quality, self.max_edge);
+        let key = compare::Key::new(&path, &path, self.format, self.quality, self.max_edge);
         // Read before the comparison replaces it: the preview of this same file, at
         // these same settings, has already decoded it.
         let previewed = self.previewed_source(&key);
@@ -465,6 +507,20 @@ impl Audit {
             if !still_open {
                 return;
             }
+            if !key.fresh() {
+                let _ = this.update(cx, |audit, cx| {
+                    if comparison_landing_applies(
+                        audit.compare.as_ref(),
+                        index,
+                        dataset_generation,
+                        MediaMode::Compare,
+                        &key,
+                    ) {
+                        reopen_stale_media(audit, cx);
+                    }
+                });
+                return;
+            }
 
             let built = cx
                 .background_executor()
@@ -483,6 +539,10 @@ impl Audit {
                     MediaMode::Compare,
                     &key,
                 );
+                if applies && !key.fresh() {
+                    reopen_stale_media(audit, cx);
+                    return;
+                }
                 if applies {
                     if let Some(pair) = built.as_ref() {
                         audit.cached = Some((key.clone(), CachedMedia::Pair(pair.clone())));
@@ -617,6 +677,7 @@ impl Audit {
         let path = entry.path.clone();
         let key = compare::Key::new(
             written.as_deref().unwrap_or(&path),
+            &path,
             self.format,
             self.quality,
             self.max_edge,
@@ -669,13 +730,17 @@ impl Audit {
                 }
                 audit.prefetch_key = None;
 
-                if comparison_landing_applies(
-                    audit.compare.as_ref(),
-                    target,
-                    dataset_generation,
-                    mode,
-                    &key,
-                ) {
+                // A prefetch that raced an edit is dropped silently: the cache
+                // simply misses and the visible open rebuilds with a fresh key.
+                if key.fresh()
+                    && comparison_landing_applies(
+                        audit.compare.as_ref(),
+                        target,
+                        dataset_generation,
+                        mode,
+                        &key,
+                    )
+                {
                     let failed = built.is_none();
                     if let Some(media) = built.as_ref() {
                         audit.cached = Some((key.clone(), media.clone()));
@@ -710,7 +775,9 @@ impl Audit {
                     }
                     audit.prefetch_media(cx);
                     cx.notify();
-                } else if let Some(media) = built {
+                } else if key.fresh()
+                    && let Some(media) = built
+                {
                     audit.ahead = Some((key, media));
                 }
             });

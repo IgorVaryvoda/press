@@ -110,7 +110,7 @@ const HELP: &str = concat!(
     "  --replace                 Convert in place; originals move to press-originals/\n",
     "  -o, --output <dir>        Write converted files here instead of optimized/\n",
     "  --skip-existing           Skip a source whose output already matches this\n",
-    "                            format, quality and max edge\n",
+    "                            format, quality, max edge and AVIF speed\n",
     "  --dry-run                 Plan and project a conversion, write nothing\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
@@ -778,6 +778,7 @@ fn queue_run<'a>(
 ) -> Queued<'a> {
     debug_assert_eq!(entries.len(), planned.len(), "one plan per audited source");
     let wanted = (format.label().to_string(), quality.label(), max_edge.0);
+    let wanted_speed = avif::configured_speed();
     let matched = format!(
         "the output already matches {} {} {}",
         format.label(),
@@ -812,7 +813,8 @@ fn queue_run<'a>(
             Some(record) if record.installed(written) => {
                 let same = record.format == wanted.0
                     && record.quality == wanted.1
-                    && record.max_edge == wanted.2;
+                    && record.max_edge == wanted.2
+                    && record.avif_speed == wanted_speed;
                 (same, !same)
             }
             _ => (false, false),
@@ -2495,6 +2497,66 @@ mod tests {
             queued.skipped[0].reason.as_deref(),
             Some("the output already matches webp q80 full")
         );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn skip_existing_rebuilds_when_the_avif_speed_changed() {
+        let base = temp_root("skip-speed");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        write_photo(&root.join("shot.png"), 64, 64);
+        let entries = probe_all(&[root.join("shot.png")]);
+        std::fs::write(out_dir.join("shot.avif"), b"already converted").unwrap();
+        backdate(&root.join("shot.png"));
+        // The record is stamped at speed 9; the run wants the default.
+        crate::avif::set_speed(9);
+        record_at(
+            &root,
+            &out_dir,
+            &root.join("shot.png"),
+            &out_dir.join("shot.avif"),
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+        );
+        crate::avif::set_speed(crate::avif::DEFAULT_SPEED);
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            true,
+        );
+        assert!(queued.skipped.is_empty(), "a speed change rebuilds");
+        assert_eq!(queued.entries.len(), 1);
+        // And back: a default-speed record is stale under a speed-9 run.
+        record_at(
+            &root,
+            &out_dir,
+            &root.join("shot.png"),
+            &out_dir.join("shot.avif"),
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+        );
+        crate::avif::set_speed(9);
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            true,
+        );
+        crate::avif::set_speed(crate::avif::DEFAULT_SPEED);
+        assert!(queued.skipped.is_empty(), "a speed change rebuilds");
+        assert_eq!(queued.entries.len(), 1);
         std::fs::remove_dir_all(&base).unwrap();
     }
 

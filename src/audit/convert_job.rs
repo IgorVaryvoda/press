@@ -66,21 +66,6 @@ impl Audit {
             return;
         }
         self.clear_error("conversion", cx);
-        // Prove the destination before anything moves. A refused output leaves the
-        // previous run's results on screen instead of clearing them for a run that
-        // was never going to write a file.
-        let context = match self.output.context(&self.root) {
-            Ok(context) => context,
-            Err(message) => {
-                self.notify_error(
-                    "conversion",
-                    "Couldn’t use the output folder",
-                    format!("{}: {message}", self.output.label()),
-                    cx,
-                );
-                return;
-            }
-        };
         let target_count = targets.len();
         let dataset_generation = self.dataset_generation;
         self.converting = true;
@@ -90,14 +75,13 @@ impl Audit {
         // The run wants every byte the samples are sitting on: it holds a decoded
         // image per worker of its own.
         self.estimate_decodes.lock().clear();
-        self.clear_results();
         cx.notify();
 
         let root = self.root.clone();
-        let out_dir = context.output_root().to_path_buf();
+        let output = self.output.clone();
         // Replace mode is the only run that moves an original, and it moves it
         // into one mirror of the audited tree that the scan steps over.
-        let backups = (self.output == Output::Replace).then(|| manifest::backup_root(&out_dir));
+        let replace = self.output == Output::Replace;
         let quality = self.quality;
         let format = self.format;
         let max_edge = self.max_edge;
@@ -115,9 +99,65 @@ impl Audit {
             .collect();
         let stamp = manifest::Stamp::new(format, quality, max_edge);
 
+        let plan_root = root.clone();
+        let proof_root = root.clone();
         cx.spawn(async move |this, cx| {
-            let plan_root = root.clone();
+            // Filesystem proof off the click handler: a slow or revoked
+            // destination must not hang the window. Prior results stay on
+            // screen until a destination proves itself.
+            let proof = cx
+                .background_executor()
+                .spawn(async move { output.context(&proof_root) })
+                .await;
+            let context = match proof {
+                Ok(context) => context,
+                Err(message) => {
+                    let _ = this.update(cx, |audit, cx| {
+                        if !conversion_landing_applies(
+                            audit.dataset_generation,
+                            audit.convert_cancel.as_ref(),
+                            dataset_generation,
+                            &cancel,
+                        ) {
+                            return;
+                        }
+                        audit.converting = false;
+                        audit.active_target_count = None;
+                        audit.convert_cancel = None;
+                        audit.notify_error(
+                            "conversion",
+                            "Couldn’t use the output folder",
+                            format!("{}: {message}", audit.output.label()),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+            };
+            let current = this
+                .update(cx, |audit, cx| {
+                    if !conversion_landing_applies(
+                        audit.dataset_generation,
+                        audit.convert_cancel.as_ref(),
+                        dataset_generation,
+                        &cancel,
+                    ) {
+                        return false;
+                    }
+                    // A stop during proof lands here with nothing planned: the
+                    // queue below stays empty and the tail reports it stopped.
+                    audit.clear_results();
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let out_dir = context.output_root().to_path_buf();
+
             let plan_out_dir = out_dir.clone();
+            let backups = replace.then(|| manifest::backup_root(&out_dir));
             let planning_cancel = cancel.clone();
             let sources = cx
                 .background_executor()

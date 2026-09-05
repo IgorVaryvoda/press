@@ -14,23 +14,81 @@ use crate::thumbs::to_bgra;
 
 /// Everything that changes what a `Pair` contains. Reopening the same image with the
 /// same settings should not re-encode it, which at AVIF speeds is a two-second wait.
+/// The revision is what the file was when the comparison was asked for — bytes and
+/// mtime read once at the request, never per render. A reopened file with new
+/// contents misses the cache instead of wearing old pixels, and a result landing
+/// re-stats before it trusts the pair. `None` is a file that could not be stated;
+/// the comparison it builds still fails on decode rather than on the key.
+/// `avif_speed` is the encoder input: another speed writes other bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Key {
     pub path: std::path::PathBuf,
+    pub source: std::path::PathBuf,
     pub format: Format,
     /// Quality as raw bits, because f32 is not `Eq`.
     pub quality: Option<u32>,
     pub max_edge: Option<u32>,
+    pub revision: Option<SourceRevision>,
+    pub source_revision: Option<SourceRevision>,
+    pub avif_speed: u8,
+}
+
+/// Bytes and mtime of one file at one moment. Best effort on filesystems with
+/// coarse timestamps: same size within one tick still reads as unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceRevision {
+    pub bytes: u64,
+    pub modified: Option<(u64, u32)>,
+}
+
+impl SourceRevision {
+    /// One stat call. Callers do this once per compare request — at a job
+    /// boundary, never once per row render.
+    pub fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|age| (age.as_secs(), age.subsec_nanos()));
+        Some(Self {
+            bytes: metadata.len(),
+            modified,
+        })
+    }
 }
 
 impl Key {
-    pub fn new(path: &Path, format: Format, quality: Quality, max_edge: MaxEdge) -> Self {
+    pub fn new(
+        path: &Path,
+        source: &Path,
+        format: Format,
+        quality: Quality,
+        max_edge: MaxEdge,
+    ) -> Self {
+        let revision = SourceRevision::of(path);
+        let source_revision = if source == path {
+            revision
+        } else {
+            SourceRevision::of(source)
+        };
         Self {
             path: path.to_path_buf(),
+            source: source.to_path_buf(),
             format,
             quality: quality.0.map(f32::to_bits),
             max_edge: max_edge.0,
+            revision,
+            source_revision,
+            avif_speed: crate::avif::speed(),
         }
+    }
+
+    /// Re-stat both files the pair depends on. True when neither changed since
+    /// the request. Landing checks call this; renders never do.
+    pub fn fresh(&self) -> bool {
+        SourceRevision::of(&self.path) == self.revision
+            && SourceRevision::of(&self.source) == self.source_revision
     }
 }
 
@@ -394,40 +452,74 @@ mod tests {
     #[test]
     fn cache_keys_separate_every_setting() {
         let path = Path::new("/photos/one.png");
-        let base = Key::new(path, Format::WebP, Quality::lossy(80.), MaxEdge::FULL);
+        let base = Key::new(path, path, Format::WebP, Quality::lossy(80.), MaxEdge::FULL);
 
         assert_eq!(
             base,
-            Key::new(path, Format::WebP, Quality::lossy(80.), MaxEdge::FULL)
+            Key::new(path, path, Format::WebP, Quality::lossy(80.), MaxEdge::FULL)
         );
         assert_ne!(
             base,
-            Key::new(path, Format::Avif, Quality::lossy(80.), MaxEdge::FULL)
+            Key::new(path, path, Format::Avif, Quality::lossy(80.), MaxEdge::FULL)
         );
         assert_ne!(
             base,
-            Key::new(path, Format::JpegXl, Quality::lossy(80.), MaxEdge::FULL)
+            Key::new(
+                path,
+                path,
+                Format::JpegXl,
+                Quality::lossy(80.),
+                MaxEdge::FULL
+            )
         );
         assert_ne!(
             base,
-            Key::new(path, Format::WebP, Quality::lossy(60.), MaxEdge::FULL)
+            Key::new(path, path, Format::WebP, Quality::lossy(60.), MaxEdge::FULL)
         );
         assert_ne!(
             base,
-            Key::new(path, Format::WebP, Quality::LOSSLESS, MaxEdge::FULL)
+            Key::new(path, path, Format::WebP, Quality::LOSSLESS, MaxEdge::FULL)
         );
         assert_ne!(
             base,
-            Key::new(path, Format::WebP, Quality::lossy(80.), MaxEdge(Some(1600)))
+            Key::new(
+                path,
+                path,
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge(Some(1600))
+            )
         );
         assert_ne!(
             base,
             Key::new(
                 Path::new("/photos/two.png"),
+                Path::new("/photos/two.png"),
                 Format::WebP,
                 Quality::lossy(80.),
                 MaxEdge::FULL
             )
+        );
+        // A speed change writes other bytes; an edit or replace re-stats.
+        // Either must miss the cache instead of wearing the old pair.
+        assert_ne!(
+            base,
+            Key {
+                avif_speed: base.avif_speed.wrapping_add(1),
+                ..base.clone()
+            }
+        );
+        let edited = SourceRevision {
+            bytes: 1,
+            modified: None,
+        };
+        assert_ne!(
+            base,
+            Key {
+                revision: Some(edited),
+                source_revision: Some(edited),
+                ..base.clone()
+            }
         );
     }
 

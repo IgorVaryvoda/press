@@ -935,6 +935,7 @@ fn conversion_progress_publishes_by_worker_window_and_flushes_the_tail() {
 fn a_comparison_result_only_belongs_to_its_exact_request() {
     let key = compare::Key::new(
         Path::new("photo.jpg"),
+        Path::new("photo.jpg"),
         Format::WebP,
         Quality::lossy(80.),
         MaxEdge::FULL,
@@ -2819,6 +2820,7 @@ fn a_running_ai_job_overlays_only_its_own_preview(cx: &mut TestAppContext) {
             mode: MediaMode::Preview,
             key: compare::Key::new(
                 Path::new("photo.jpg"),
+                Path::new("photo.jpg"),
                 Format::WebP,
                 Quality::lossy(80.),
                 MaxEdge::FULL,
@@ -3288,6 +3290,7 @@ fn source_preview_has_ai_actions_but_compare_mode_does_not(cx: &mut TestAppConte
             mode: MediaMode::Preview,
             focused: false,
             key: compare::Key::new(
+                Path::new("photo.jpg"),
                 Path::new("photo.jpg"),
                 Format::WebP,
                 Quality::lossy(80.),
@@ -5099,6 +5102,105 @@ fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppConte
         0,
         "a stopped run raises no failure notice"
     );
+}
+
+/// The destination can die between selection and Convert: a revoked share, a
+/// file where the folder was. The proof runs off the click handler now, but a
+/// refusal must still leave the last good results alone and hand back controls.
+#[gpui_kit::test]
+fn a_revoked_destination_keeps_prior_results_and_hands_back_controls(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert_eq!(audit.results.len(), 2));
+
+    let out_dir = audit.read_with(cx, |audit, _| audit.root.join("optimized"));
+    std::fs::remove_dir_all(&out_dir).ok();
+    std::fs::write(&out_dir, b"not a directory").expect("the destination is revoked");
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.results.len(),
+            2,
+            "the refused run keeps prior results"
+        );
+        assert!(!audit.converting, "the refusal hands back the controls");
+        assert!(audit.convert_cancel.is_none());
+        assert!(audit.active_target_count.is_none());
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Cancel lands before the background proof even polls: planning stays empty,
+/// nothing is written, and the tail still reports the stop honestly.
+#[gpui_kit::test]
+fn stopping_during_proof_reports_zero_of_n_and_writes_nothing(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| {
+        audit.start_conversion(cx);
+        audit.cancel_conversion(cx);
+    });
+    cx.run_until_parked();
+
+    let root = audit.read_with(cx, |audit, _| {
+        assert!(!audit.converting, "the stop ends the run");
+        assert!(audit.convert_cancel.is_none());
+        assert_eq!(audit.stopped_run, Some(3));
+        assert!(audit.results.is_empty());
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert!(audit.compare.is_none());
+        audit.root.clone()
+    });
+    assert!(
+        !root.join("optimized").exists(),
+        "a run stopped in proof writes nothing"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Same name, new pixels: the edited file re-stats, misses the cache, and the
+/// reopened comparison is built from the current bytes — never the old pair.
+#[gpui_kit::test]
+fn an_edited_source_rebuilds_its_comparison(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    audit.update(cx, |audit, cx| audit.open_compare(0, cx));
+    cx.executor()
+        .advance_clock(COMPARE_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+    let (path, first) = audit
+        .read_with(cx, |audit, _| {
+            audit.compare.as_ref().and_then(|comparison| {
+                comparison
+                    .pair
+                    .clone()
+                    .map(|pair| (audit.entries[0].path.clone(), pair.converted_bytes))
+            })
+        })
+        .expect("the first pair is built");
+    image::RgbImage::from_pixel(8, 8, image::Rgb([200u8, 10, 10]))
+        .save(&path)
+        .expect("the same name carries new pixels");
+    audit.update(cx, |audit, cx| audit.open_compare(0, cx));
+    cx.executor()
+        .advance_clock(COMPARE_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        let second = audit
+            .compare
+            .as_ref()
+            .and_then(|comparison| comparison.pair.clone())
+            .expect("the edited file rebuilds its pair");
+        assert_ne!(
+            second.converted_bytes, first,
+            "noise and flat red never encode alike"
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

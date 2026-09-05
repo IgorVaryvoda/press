@@ -48,6 +48,12 @@ pub struct Record {
     pub format: String,
     pub quality: String,
     pub max_edge: Option<u32>,
+    /// The libaom speed the AVIF output was encoded at, when it was not the
+    /// default. Another speed writes other bytes, so a record without it only
+    /// matches a run that also used the default. Absent on lines written
+    /// before the field existed, which therefore match default-speed runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avif_speed: Option<u8>,
     pub written: u64,
     /// Relative to the backup root, and to where the original belongs when it
     /// comes back. Only replace mode moves an original.
@@ -140,6 +146,7 @@ pub struct Stamp {
     format: String,
     quality: String,
     max_edge: Option<u32>,
+    avif_speed: Option<u8>,
     written: u64,
 }
 
@@ -149,6 +156,7 @@ impl Stamp {
             format: format.label().to_string(),
             quality: quality.label(),
             max_edge: max_edge.0,
+            avif_speed: crate::avif::configured_speed(),
             written: now(),
         }
     }
@@ -186,6 +194,7 @@ impl Stamp {
             format: self.format.clone(),
             quality: self.quality.clone(),
             max_edge: self.max_edge,
+            avif_speed: self.avif_speed,
             written: self.written,
             backup,
             void: false,
@@ -519,6 +528,7 @@ mod tests {
             format: Format::WebP.label().to_string(),
             quality: Quality::lossy(80.).label(),
             max_edge: MaxEdge::FULL.0,
+            avif_speed: None,
             written,
             backup: backup.map(PathBuf::from),
             void: false,
@@ -541,6 +551,37 @@ mod tests {
         let loaded = load(&dir);
         assert_eq!(loaded.outputs, vec![first, second, third]);
         assert!(loaded.rejected.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn avif_speed_round_trips_and_old_lines_match_default() {
+        let dir = test_dir("speed-round-trip");
+        let mut fast = record("one.png", "one.avif", None, 1);
+        fast.avif_speed = Some(9);
+        append_record(&dir, &fast).expect("the fast record appends");
+        // A line from before the field existed carries no speed key at all.
+        // `skip_serializing_if` already omits a `None`, so this plain record
+        // is exactly what an old writer left behind.
+        let plain = record("two.png", "two.avif", None, 2);
+        assert_eq!(plain.avif_speed, None);
+        append_record(&dir, &plain).expect("the plain record appends");
+        let raw = std::fs::read_to_string(path(&dir)).expect("the manifest reads");
+        let mut lines = raw.lines();
+        assert!(
+            lines.next().is_some_and(|line| line.contains("avif_speed")),
+            "an explicit speed is written down"
+        );
+        assert!(
+            lines
+                .next()
+                .is_some_and(|line| !line.contains("avif_speed")),
+            "a default run leaves no speed key behind"
+        );
+        let loaded = load(&dir);
+        assert_eq!(loaded.outputs.len(), 2);
+        assert_eq!(loaded.outputs[0].avif_speed, Some(9));
+        assert_eq!(loaded.outputs[1].avif_speed, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
