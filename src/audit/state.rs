@@ -558,6 +558,7 @@ impl Audit {
                         let outcome = match decoded.zip(format.resolve(&path).ok()) {
                             Some((sample, format)) => {
                                 match convert::check_lossless_depth(&sample.0, format, quality)
+                                    .and_then(|()| convert::check_image_budget(&sample.0))
                                     .and_then(|()| {
                                         convert::encode(
                                             &sample.0,

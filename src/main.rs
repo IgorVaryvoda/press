@@ -917,12 +917,12 @@ fn project_run(
                         .zip(format.resolve(&entry.path).ok())
                         .map(|((image, profile), format)| {
                             let image = max_edge.apply(image);
-                            match convert::check_lossless_depth(&image, format, quality).and_then(
-                                |()| {
+                            match convert::check_lossless_depth(&image, format, quality)
+                                .and_then(|()| convert::check_image_budget(&image))
+                                .and_then(|()| {
                                     convert::encode(&image, format, quality, profile.as_deref())
                                         .map(|encoded| encoded.len() as u64)
-                                },
-                            ) {
+                                }) {
                                 Ok(encoded) => audit::SampleOutcome::Encoded(entry.bytes, encoded),
                                 Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
                                 Err(_) => audit::SampleOutcome::Refused,

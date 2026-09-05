@@ -53,6 +53,8 @@ pub enum Failure {
     Failed,
     LosslessNeedsEightBit,
     LosslessNeedsIntegerSamples,
+    /// The image would need more decoded memory than one file may hold.
+    TooLarge,
     ProfileNotAttached,
     JpegNeedsOpaque,
     KeepFormatUnavailable(String),
@@ -82,6 +84,7 @@ impl Failure {
             Self::LosslessNeedsIntegerSamples => {
                 Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
             }
+            Self::TooLarge => Some("this image is too large to convert".into()),
             Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
             Self::JpegNeedsOpaque => Some("JPEG cannot keep transparency".into()),
             Self::KeepFormatUnavailable(name) => {
@@ -1316,6 +1319,49 @@ fn ensure_directory(
     }
 }
 
+/// The most decoded bytes one image may hold: 1 GiB, or 128 megapixels of
+/// eight-bit RGBA. Past this a single file stops being a conversion and starts
+/// being a denial of service against the rest of the run.
+///
+/// The bound is per image, and the worker counts bound how many images fly at
+/// once — eight WebP files at most, two AVIF, one JPEG XL — so the sum stays
+/// inside a desktop machine: smaller machines have fewer cores and therefore
+/// fewer workers. Codec working copies ride on top of the decoded frame
+/// (AVIF and JPEG XL copy full buffers where WebP encodes in place), which is
+/// why the cap sits an order of magnitude below physical RAM rather than at it.
+pub const MAX_DECODE_BYTES: u64 = 1 << 30;
+
+/// Header evidence for the budget: dimensions times eight bytes a pixel, the
+/// costliest frame these dimensions could decode to (sixteen-bit RGBA).
+/// Saturated, so a lying header refuses instead of overflowing. A hint, not a
+/// promise — float samples cost sixteen — which is why the precise check runs
+/// again after the decode.
+pub fn decode_budget_estimate(width: u32, height: u32) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(8)
+}
+
+/// Refuse an image that already spent the budget, by header hint or decoded
+/// frame alike. One deterministic verdict for the writer, the comparison, and
+/// the estimate sampler, so a giant projects no savings anywhere.
+pub fn check_budget_bytes(bytes: u64) -> Result<(), Failure> {
+    if bytes > MAX_DECODE_BYTES {
+        return Err(Failure::TooLarge);
+    }
+    Ok(())
+}
+
+/// The precise form: what this decoded frame actually costs in memory.
+pub fn check_image_budget(image: &DynamicImage) -> Result<(), Failure> {
+    let color = image.color();
+    check_budget_bytes(
+        u64::from(image.width())
+            .saturating_mul(u64::from(image.height()))
+            .saturating_mul(u64::from(color.bytes_per_pixel())),
+    )
+}
+
 /// The one verdict on whether a lossless request survives its source's sample
 /// depth. "Lossless" is a promise of unchanged pixels: WebP cannot carry more
 /// than eight bits per channel, and JPEG XL's 16-bit path cannot carry float
@@ -1365,6 +1411,11 @@ pub fn convert_to(
     max_edge: MaxEdge,
 ) -> Result<Converted, Failure> {
     let format = format.resolve(source)?;
+    // A lying header refuses here, before any decoder allocates on its word.
+    // The precise check runs again on the decoded frame below.
+    if let Some(header) = crate::scan::probe(source) {
+        check_budget_bytes(decode_budget_estimate(header.width, header.height))?;
+    }
     let (decoded, profile) =
         crate::scan::decode_for_conversion(source, max_edge).map_err(|error| match error {
             crate::scan::ConversionDecodeError::Failed => Failure::Failed,
@@ -1374,6 +1425,7 @@ pub fn convert_to(
             crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
         })?;
     let decoded = max_edge.apply(decoded);
+    check_image_budget(&decoded)?;
     check_lossless_depth(&decoded, format, quality)?;
     let (width, height) = (decoded.width(), decoded.height());
     let encoded = encode(&decoded, format, quality, profile.as_deref())?;
@@ -2008,6 +2060,72 @@ pub(crate) mod tests {
         assert_eq!(
             Failure::LosslessNeedsIntegerSamples.reason(),
             Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
+        );
+    }
+
+    #[test]
+    fn decode_budgets_saturate_instead_of_overflowing() {
+        assert_eq!(decode_budget_estimate(0, 0), 0);
+        assert_eq!(decode_budget_estimate(100, 100), 100 * 100 * 8);
+        assert_eq!(
+            decode_budget_estimate(u32::MAX, u32::MAX),
+            u64::MAX,
+            "a lying header refuses instead of overflowing"
+        );
+        assert_eq!(check_budget_bytes(MAX_DECODE_BYTES), Ok(()));
+        assert_eq!(
+            check_budget_bytes(MAX_DECODE_BYTES + 1),
+            Err(Failure::TooLarge)
+        );
+        let small = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(8, 8, Rgba([1u8, 2, 3, 4])));
+        assert_eq!(check_image_budget(&small), Ok(()));
+        assert_eq!(
+            Failure::TooLarge.reason(),
+            Some("this image is too large to convert".into())
+        );
+    }
+
+    /// A PNM header claiming dimensions no decoder could hold. PNM readers
+    /// take the width and height on trust, so without the budget probe this
+    /// file would try a multi-gigabyte allocation; with it, the claim refuses
+    /// before any pixel buffer exists. (Container decoders with their own
+    /// bomb fuses, like PNG's, reject absurd headers themselves.)
+    pub(crate) fn lying_dimensions(path: &Path, width: u32, height: u32) {
+        let header = format!("P6\n{width} {height}\n255\n");
+        std::fs::write(path, header.as_bytes()).unwrap();
+    }
+
+    /// The header claim refuses before any decoder allocates on its word, at
+    /// any quality: the budget is about memory, not fidelity. A 20000x20000
+    /// claim estimates past the cap while staying survivable if the probe
+    /// ever regressed.
+    #[test]
+    fn a_gigapixel_header_refuses_without_decoding() {
+        let dir = temp_dir("lying-header");
+        let source = dir.join("huge.pnm");
+        lying_dimensions(&source, 20_000, 20_000);
+        let out_dir = dir.join("optimized");
+        for quality in [Quality::lossy(80.), Quality::LOSSLESS] {
+            assert_eq!(
+                convert_to(
+                    &dir,
+                    &source,
+                    &out_dir.join("huge.webp"),
+                    Format::WebP,
+                    quality,
+                    MaxEdge::FULL,
+                ),
+                Err(Failure::TooLarge),
+                "a 20000x20000 claim never reaches a decoder"
+            );
+        }
+        assert_eq!(
+            Failure::TooLarge.reason(),
+            Some("this image is too large to convert".into())
+        );
+        assert!(
+            !out_dir.exists(),
+            "a refused giant writes nothing and decodes nothing"
         );
     }
 

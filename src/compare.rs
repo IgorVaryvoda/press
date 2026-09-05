@@ -128,10 +128,16 @@ impl Pair {
 
 pub fn preview(path: &Path) -> Option<Preview> {
     // The native decoders first, as before. Both of them are eight-bit, so what they
-    // hand back is the whole source and a comparison can be built from it. The general
-    // fallback has already lost anything deeper to `into_rgba8`, and re-encoding those
-    // pixels would quietly write an eight-bit file from a sixteen-bit source, so it
-    // stays a picture to look at.
+    // hand back is the whole source and a comparison can be built from it. A
+    // lying header refuses before any decoder allocates on its word; the
+    // preview is only a picture, so an over-budget file simply has none.
+    if let Some(header) = crate::scan::probe(path) {
+        convert::check_budget_bytes(convert::decode_budget_estimate(header.width, header.height))
+            .ok()?;
+    }
+    // The general fallback has already lost anything deeper to `into_rgba8`, and
+    // re-encoding those pixels would quietly write an eight-bit file from a
+    // sixteen-bit source, so it stays a picture to look at.
     let (image, decoded) = match crate::thumbs::decode_native(path, None) {
         Some(image) => (image, true),
         None => (crate::scan::decode(path)?.into_rgba8(), false),
@@ -187,6 +193,12 @@ pub fn build(
     // The same decode and the same profile the writer uses, so the size shown beside
     // the comparison is the size the file would actually be.
     let format = format.resolve(path).ok()?;
+    if preview.is_none()
+        && let Some(header) = crate::scan::probe(path)
+    {
+        convert::check_budget_bytes(convert::decode_budget_estimate(header.width, header.height))
+            .ok()?;
+    }
     let (decoded, profile) = preview
         .filter(|preview| preview.decoded && max_edge == MaxEdge::FULL)
         .and_then(|preview| {
@@ -199,6 +211,7 @@ pub fn build(
         // to fail the comparison.
         .or_else(|| crate::scan::decode_for_conversion(path, max_edge).ok())?;
     let original = max_edge.apply(decoded);
+    convert::check_image_budget(&original).ok()?;
     // The one lossless-depth verdict, shared with the disk writer: a refused
     // request builds no comparison rather than a quiet eight-bit stand-in.
     convert::check_lossless_depth(&original, format, quality).ok()?;
@@ -623,6 +636,31 @@ mod tests {
             )
             .is_some(),
             "an explicit lossy request remains supported"
+        );
+    }
+
+    /// The writer refuses a gigapixel header without decoding; the comparison
+    /// must give the same answer rather than allocating eighty gigabytes to
+    /// look at it.
+    #[test]
+    fn a_gigapixel_header_builds_no_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("huge.png");
+        crate::convert::tests::lying_dimensions(&source, 100_000, 100_000);
+        assert!(
+            build(
+                &source,
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+                None
+            )
+            .is_none(),
+            "a 100000x100000 claim never reaches a decoder"
+        );
+        assert!(
+            preview(&source).is_none(),
+            "an over-budget file has no preview either"
         );
     }
 
