@@ -5203,6 +5203,44 @@ fn an_edited_source_rebuilds_its_comparison(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The slider number must not imply control it lacks: WebP saves transparency
+/// lossless at any quality, so the knob owns that fact — except when lossless
+/// already says the word, or the format never forces it.
+#[gpui_kit::test]
+fn the_quality_knob_names_forced_lossless_for_webp(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    audit.update(cx, |audit, cx| {
+        audit.rail = Rail::Convert;
+        audit.format = Format::WebP;
+        audit.quality = Quality::lossy(80.);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("quality-transparency-note").is_some(),
+        "a lossy WebP recipe names the transparency override"
+    );
+    audit.update(cx, |audit, cx| {
+        audit.quality = Quality::LOSSLESS;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("quality-transparency-note").is_none(),
+        "lossless already says the word"
+    );
+    audit.update(cx, |audit, cx| {
+        audit.format = Format::Avif;
+        audit.quality = Quality::lossy(60.);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("quality-transparency-note").is_none(),
+        "AVIF keeps alpha planes at quality"
+    );
+}
+
 #[test]
 fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
     let stopped = panel::conversion_result_state(Some(36), 12);

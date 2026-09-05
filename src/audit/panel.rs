@@ -44,15 +44,16 @@ const PRESETS: [(&str, &str, Format, Quality, MaxEdge); 4] = [
     ),
     (
         "Pixel-perfect",
-        "WebP · lossless · original size",
+        "WebP · lossless · original size · 8-bit sources",
         Format::WebP,
         Quality::LOSSLESS,
         MaxEdge::FULL,
     ),
-    // The resize-only run: each file keeps its container and just gets
-    // smaller, so every `<img src>` that named it still resolves.
+    // The resize run: each file keeps its container, capped at 2400px — and
+    // every file is re-encoded at quality 80, even one already under the
+    // edge, so every `<img src>` that named it still resolves at a cost.
     (
-        "Resize only",
+        "Resize + recompress",
         "Keep format · quality 80 · max 2400px",
         Format::Same,
         Quality(Some(80.)),
@@ -1007,6 +1008,16 @@ impl Audit {
                         audit.schedule_estimate(cx);
                         cx.notify();
                     }))
+            }))
+            // WebP saves transparency lossless no matter what the slider says.
+            // The caption owns that fact next to the knob, so the number above
+            // never implies control it does not have over see-through pixels.
+            .children((self.format == Format::WebP && !lossless).then(|| {
+                div()
+                    .debug_selector(|| "quality-transparency-note".into())
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Transparency stays lossless")
             }))
     }
 
