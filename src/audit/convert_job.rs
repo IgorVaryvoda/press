@@ -369,7 +369,12 @@ mod tests {
         let replacement = Arc::new(AtomicBool::new(false));
         assert!(conversion_landing_applies(7, Some(&cancel), 7, &cancel));
         assert!(!conversion_landing_applies(8, Some(&cancel), 7, &cancel));
-        assert!(!conversion_landing_applies(7, Some(&replacement), 7, &cancel));
+        assert!(!conversion_landing_applies(
+            7,
+            Some(&replacement),
+            7,
+            &cancel
+        ));
         assert!(!conversion_landing_applies(7, None, 7, &cancel));
         // Stop reporting still belongs to the current job after its flag is set.
         cancel.store(true, Ordering::Release);

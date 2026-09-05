@@ -539,7 +539,14 @@ mod tests {
         );
         assert_eq!(std::fs::read(&source).unwrap(), original);
         assert!(
-            build(&source, Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None).is_some(),
+            build(
+                &source,
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+                None
+            )
+            .is_some(),
             "an explicit lossy request remains supported"
         );
     }
@@ -550,10 +557,30 @@ mod tests {
         let sixteen = DynamicImage::ImageRgb16(ImageBuffer::from_pixel(2, 2, Rgb([1u16, 2, 3])));
         let float =
             DynamicImage::ImageRgb32F(ImageBuffer::from_pixel(2, 2, Rgb([0.1f32, 0.2, 0.3])));
-        assert!(preserves_lossless_depth(&eight, Format::WebP, Quality::LOSSLESS));
-        assert!(!preserves_lossless_depth(&sixteen, Format::WebP, Quality::LOSSLESS));
-        assert!(preserves_lossless_depth(&sixteen, Format::JpegXl, Quality::LOSSLESS));
-        assert!(!preserves_lossless_depth(&float, Format::JpegXl, Quality::LOSSLESS));
-        assert!(preserves_lossless_depth(&float, Format::JpegXl, Quality::lossy(80.)));
+        assert!(preserves_lossless_depth(
+            &eight,
+            Format::WebP,
+            Quality::LOSSLESS
+        ));
+        assert!(!preserves_lossless_depth(
+            &sixteen,
+            Format::WebP,
+            Quality::LOSSLESS
+        ));
+        assert!(preserves_lossless_depth(
+            &sixteen,
+            Format::JpegXl,
+            Quality::LOSSLESS
+        ));
+        assert!(!preserves_lossless_depth(
+            &float,
+            Format::JpegXl,
+            Quality::LOSSLESS
+        ));
+        assert!(preserves_lossless_depth(
+            &float,
+            Format::JpegXl,
+            Quality::lossy(80.)
+        ));
     }
 }
