@@ -54,6 +54,10 @@ pub struct Record {
     /// before the field existed, which therefore match default-speed runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avif_speed: Option<u8>,
+    /// Hex fingerprint of the normalized effective settings that produced
+    /// this output. Absent on lines written before fingerprints existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
     pub written: u64,
     /// Relative to the backup root, and to where the original belongs when it
     /// comes back. Only replace mode moves an original.
@@ -147,16 +151,29 @@ pub struct Stamp {
     quality: String,
     max_edge: Option<u32>,
     avif_speed: Option<u8>,
+    recipe: String,
     written: u64,
 }
 
 impl Stamp {
     pub fn new(format: Format, quality: Quality, max_edge: MaxEdge) -> Self {
+        Self::with_speed(format, quality, max_edge, crate::avif::configured_speed())
+    }
+
+    /// The same stamp with an explicit speed, so tests pin identity without
+    /// touching the process-wide dial that parallel tests share.
+    pub fn with_speed(
+        format: Format,
+        quality: Quality,
+        max_edge: MaxEdge,
+        avif_speed: Option<u8>,
+    ) -> Self {
         Self {
             format: format.label().to_string(),
             quality: quality.label(),
             max_edge: max_edge.0,
-            avif_speed: crate::avif::configured_speed(),
+            avif_speed,
+            recipe: crate::recipe::fingerprint_settings(format, quality, max_edge, avif_speed),
             written: now(),
         }
     }
@@ -195,6 +212,7 @@ impl Stamp {
             quality: self.quality.clone(),
             max_edge: self.max_edge,
             avif_speed: self.avif_speed,
+            recipe: Some(self.recipe.clone()),
             written: self.written,
             backup,
             void: false,
@@ -529,6 +547,7 @@ mod tests {
             quality: Quality::lossy(80.).label(),
             max_edge: MaxEdge::FULL.0,
             avif_speed: None,
+            recipe: None,
             written,
             backup: backup.map(PathBuf::from),
             void: false,

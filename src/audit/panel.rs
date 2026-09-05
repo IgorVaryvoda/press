@@ -25,48 +25,17 @@ const BAR_LABELS_WIDTH: f32 = 720.;
 /// Below this, the readout goes too: the verbs are what the bar is for.
 const BAR_READOUT_WIDTH: f32 = 560.;
 
-/// The named outputs most runs want. Listed once; the rows and the settings
-/// they apply cannot disagree.
-const PRESETS: [(&str, &str, Format, Quality, MaxEdge); 4] = [
-    (
-        "Recommended",
-        "WebP · quality 80 · original size",
-        Format::WebP,
-        Quality(Some(80.)),
-        MaxEdge::FULL,
-    ),
-    (
-        "Small files",
-        "AVIF · quality 60 · max 2400px",
-        Format::Avif,
-        Quality(Some(60.)),
-        MaxEdge(Some(2400)),
-    ),
-    (
-        "Pixel-perfect",
-        "WebP · lossless · original size · 8-bit sources",
-        Format::WebP,
-        Quality::LOSSLESS,
-        MaxEdge::FULL,
-    ),
-    // The resize run: each file keeps its container, capped at 2400px — and
-    // every file is re-encoded at quality 80, even one already under the
-    // edge, so every `<img src>` that named it still resolves at a cost.
-    (
-        "Resize + recompress",
-        "Keep format · quality 80 · max 2400px",
-        Format::Same,
-        Quality(Some(80.)),
-        MaxEdge(Some(2400)),
-    ),
-];
+/// The named outputs most runs want, through the recipe model personal rows
+/// share: the rows and the settings they apply cannot disagree.
+fn builtin_recipes() -> [crate::recipe::Recipe; 4] {
+    crate::recipe::Recipe::builtins()
+}
 
 pub(super) fn active_preset(format: Format, quality: Quality, edge: MaxEdge) -> Option<usize> {
-    PRESETS
-        .iter()
-        .position(|(_, _, preset_format, preset_quality, preset_edge)| {
-            format == *preset_format && quality == *preset_quality && edge == *preset_edge
-        })
+    builtin_recipes().iter().position(|row| {
+        let (row_format, row_quality, row_edge, _) = row.effective();
+        format == row_format && quality == row_quality && edge == row_edge
+    })
 }
 
 /// What the summary calls a run that has ended. A run the user stopped kept every
@@ -473,6 +442,12 @@ impl Audit {
     }
 
     fn convert_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Personal rows render eagerly: a lazy iterator would carry the
+        // borrowed context into the element tree.
+        let mut personal_rows = Vec::with_capacity(self.recipes.len());
+        for index in 0..self.recipes.len() {
+            personal_rows.push(self.personal_row(index, cx));
+        }
         div()
             .flex()
             .flex_col()
@@ -501,7 +476,19 @@ impl Audit {
                             .child(self.preset_row(0, cx))
                             .child(self.preset_row(1, cx))
                             .child(self.preset_row(2, cx))
-                            .child(self.preset_row(3, cx)),
+                            .child(self.preset_row(3, cx))
+                            .children(personal_rows)
+                            .children((!self.recipes_skipped.is_empty()).then(|| {
+                                div()
+                                    .debug_selector(|| "recipes-skipped".into())
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} recipe files unreadable",
+                                        self.recipes_skipped.len()
+                                    ))
+                            }))
+                            .child(self.recipe_actions(cx)),
                     )
                     .child(div().h(px(1.)).bg(cx.theme().border))
                     .child(
@@ -879,7 +866,8 @@ impl Audit {
     /// exact settings it applies — no memory required. Lit only while the live
     /// settings are exactly what it names, so a hand-tuned output lights none.
     fn preset_row(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let (name, summary, _, _, _) = PRESETS[index];
+        let row = &builtin_recipes()[index];
+        let (name, summary) = (row.name.clone(), row.summary());
         let selected = active_preset(self.format, self.quality, self.max_edge) == Some(index);
         div()
             .id(("preset", index))
@@ -915,7 +903,7 @@ impl Audit {
                 if audit.converting {
                     return;
                 }
-                let (_, _, format, quality, edge) = PRESETS[index];
+                let (format, quality, edge, _) = builtin_recipes()[index].effective();
                 audit.format = format;
                 audit.quality = quality;
                 audit.max_edge = edge;
@@ -930,8 +918,174 @@ impl Audit {
                 }
                 audit.clear_results();
                 audit.schedule_estimate(cx);
+
                 cx.notify();
             }))
+    }
+
+    /// One saved recipe as a full-width selectable row, shaped like a preset
+    /// row so the two lists read as one library. A selected row that no
+    /// longer matches the live settings owns the fact with a modified mark
+    /// instead of rewriting itself behind the click.
+    fn personal_row(&self, index: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let Some(recipe) = self.recipes.get(index) else {
+            return div().into_any_element();
+        };
+        let (id, name, summary) = (recipe.id.clone(), recipe.name.clone(), recipe.summary());
+        let selected = self.selected_recipe.as_deref() == Some(id.as_str());
+        let modified = selected && self.recipe_modified(recipe);
+        div()
+            .id(("preset-personal", index))
+            .flex()
+            .flex_col()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .when(selected, |row| {
+                row.bg(cx.theme().list_active)
+                    .border_1()
+                    .border_color(cx.theme().list_active_border)
+            })
+            .when(!selected, |row| {
+                row.border_1()
+                    .border_color(gpui_kit::transparent_black())
+                    .hover(|row| row.bg(cx.theme().list_hover))
+            })
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().foreground)
+                    .child(name),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(summary),
+            )
+            .children(modified.then(|| {
+                div()
+                    .debug_selector(|| "recipe-modified".into())
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("· modified")
+            }))
+            .on_click(cx.listener(move |audit, _, window, cx| {
+                if audit.converting {
+                    return;
+                }
+                let Some(recipe) = audit.recipes.iter().find(|recipe| recipe.id == id).cloned()
+                else {
+                    return;
+                };
+                audit.apply_recipe(&recipe, &recipe.id.clone(), window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Save the live settings under a name, and the row operations around the
+    /// selected personal recipe. Import and export move bytes through pickers;
+    /// everything else resolves against the on-disk library.
+    fn recipe_actions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let busy = self.converting;
+        let personal = self.selected_personal().is_some();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(|| "recipe-name-input".into())
+                            .child(Input::new(&self.recipe_name_input).small().disabled(busy)),
+                    )
+                    .child(
+                        Button::new("recipe-save")
+                            .small()
+                            .outline()
+                            .label("Save")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, window, cx| {
+                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.save_current_recipe(&dir, window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .child(
+                        Button::new("recipe-duplicate")
+                            .small()
+                            .ghost()
+                            .label("Duplicate")
+                            .disabled(busy || self.selected_recipe.is_none())
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.duplicate_recipe(&dir, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("recipe-rename")
+                            .small()
+                            .ghost()
+                            .label("Rename")
+                            .disabled(busy || !personal)
+                            .on_click(cx.listener(|audit, _, window, cx| {
+                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.rename_recipe(&dir, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("recipe-delete")
+                            .small()
+                            .ghost()
+                            .label("Delete")
+                            .disabled(busy || !personal)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.delete_recipe(&dir, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("recipe-import")
+                            .small()
+                            .ghost()
+                            .label("Import")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.import_recipe_file(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("recipe-export")
+                            .small()
+                            .ghost()
+                            .label("Export")
+                            .disabled(busy || !personal)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.export_recipe_file(cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// The quality knob: label and value on one line, the slider full-width

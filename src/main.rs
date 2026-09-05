@@ -16,6 +16,7 @@ mod local_ai;
 mod manifest;
 mod menus;
 mod output;
+mod recipe;
 mod scan;
 mod settings;
 mod sirv;
@@ -114,6 +115,8 @@ const HELP: &str = concat!(
     "  --dry-run                 Plan and project a conversion, write nothing\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
+    "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
+    "                            explicit flags override it field by field\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -177,6 +180,11 @@ struct Args {
     /// Plan and project the conversion without writing anything.
     dry_run: bool,
     unknown: Vec<String>,
+    /// A preset file resolved as the recipe base. Explicit flags override it
+    /// field by field; the window never reads it implicitly.
+    preset: Option<crate::recipe::Recipe>,
+    /// Canonical flags that overrode the preset, for the resolved-plan line.
+    preset_overrides: Vec<&'static str>,
 }
 
 fn parse_args() -> Args {
@@ -220,6 +228,11 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut dry_run = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
+    let mut preset = None;
+    let mut format_set = false;
+    let mut quality_set = false;
+    let mut edge_set = false;
+    let mut speed_set = false;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -234,6 +247,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--audit" => select_command(&mut command, Command::Audit, "--audit")?,
             "--format" => {
                 conversion_option = true;
+                format_set = true;
                 let value = next_value(&mut rest, "--format", "webp, avif, jxl, jpeg, or same")?;
                 format = match value.as_str() {
                     "webp" => Format::WebP,
@@ -250,18 +264,22 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--avif" => {
                 conversion_option = true;
+                format_set = true;
                 format = Format::Avif;
             }
             "--jxl" => {
                 conversion_option = true;
+                format_set = true;
                 format = Format::JpegXl;
             }
             "--jpeg" => {
                 conversion_option = true;
+                format_set = true;
                 format = Format::Jpeg;
             }
             "--max-edge" => {
                 conversion_option = true;
+                edge_set = true;
                 let value = next_value(&mut rest, "--max-edge", "a positive number")?;
                 let edge = value
                     .parse()
@@ -278,6 +296,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--avif-speed" => {
                 conversion_option = true;
+                speed_set = true;
                 let value = next_value(&mut rest, "--avif-speed", "a number from 0 to 10")?;
                 let speed: u8 = value
                     .parse()
@@ -287,8 +306,23 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 }
                 avif_speed = Some(speed);
             }
+            "--preset-file" => {
+                conversion_option = true;
+                let value = next_value(&mut rest, "--preset-file", "a recipe file")?;
+                let bytes = std::fs::metadata(&value)
+                    .ok()
+                    .filter(|metadata| metadata.len() <= crate::recipe::MAX_FILE_BYTES)
+                    .and_then(|_| std::fs::read(&value).ok());
+                let bytes = bytes.ok_or_else(|| {
+                    format!("--preset-file cannot be read as a recipe: {value:?}")
+                })?;
+                let recipe = crate::recipe::parse_bytes(&bytes)
+                    .map_err(|error| format!("--preset-file {value:?}: {error}"))?;
+                preset = Some(recipe);
+            }
             "--webp" => {
                 conversion_option = true;
+                format_set = true;
                 format = Format::WebP;
             }
             "--replace" => {
@@ -309,9 +343,11 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--lossless" => {
                 conversion_option = true;
                 quality = Quality::LOSSLESS;
+                quality_set = true;
             }
             "--quality" => {
                 conversion_option = true;
+                quality_set = true;
                 let value = next_value(&mut rest, "--quality", "a number from 1 to 100")?;
                 let quality_value: f32 = value
                     .parse()
@@ -352,8 +388,37 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             output,
             skip_existing,
             dry_run,
+            preset: None,
+            preset_overrides: Vec::new(),
             unknown,
         });
+    }
+    // A preset file is the base recipe; explicit flags override it field by
+    // field, in any order. Anything still unset keeps the parsed default.
+    let mut preset_overrides = Vec::new();
+    if let Some(recipe) = preset.as_ref() {
+        let (recipe_format, recipe_quality, recipe_edge, recipe_speed) = recipe.effective();
+        if !format_set {
+            format = recipe_format;
+        }
+        if !quality_set {
+            quality = recipe_quality;
+        }
+        if !edge_set {
+            max_edge = recipe_edge;
+        }
+        if !speed_set {
+            avif_speed = recipe_speed;
+        }
+        if quality_set {
+            preset_overrides.push("--quality");
+        }
+        if edge_set {
+            preset_overrides.push("--max-edge");
+        }
+        if speed_set {
+            preset_overrides.push("--avif-speed");
+        }
     }
     if command == Command::Restore && (conversion_option || grid) {
         return Err("restore takes only a folder".into());
@@ -425,6 +490,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         output,
         skip_existing,
         dry_run,
+        preset,
+        preset_overrides,
         unknown,
     })
 }
@@ -775,10 +842,15 @@ fn queue_run<'a>(
     format: Format,
     quality: Quality,
     max_edge: MaxEdge,
+    // The AVIF speed this run encodes at. Explicit like the rest of the
+    // identity: the process-wide dial is main's business, not the planner's.
+    avif_speed: Option<u8>,
 ) -> Queued<'a> {
     debug_assert_eq!(entries.len(), planned.len(), "one plan per audited source");
     let wanted = (format.label().to_string(), quality.label(), max_edge.0);
-    let wanted_speed = avif::configured_speed();
+    let wanted_speed = avif_speed;
+    let wanted_recipe =
+        crate::recipe::fingerprint_settings(format, quality, max_edge, wanted_speed);
     let matched = format!(
         "the output already matches {} {} {}",
         format.label(),
@@ -811,10 +883,19 @@ fn queue_run<'a>(
             .and_then(|(source, output)| manifest.latest(&source, &output));
         let (matches, stale) = match record {
             Some(record) if record.installed(written) => {
-                let same = record.format == wanted.0
-                    && record.quality == wanted.1
-                    && record.max_edge == wanted.2
-                    && record.avif_speed == wanted_speed;
+                let same = match &record.recipe {
+                    // A fingerprinted record matches one fingerprint: any
+                    // output-affecting setting changes it.
+                    Some(fingerprint) => fingerprint == &wanted_recipe,
+                    // Lines from before fingerprints fall back to the fields
+                    // they kept, with an absent speed meaning the default.
+                    None => {
+                        record.format == wanted.0
+                            && record.quality == wanted.1
+                            && record.max_edge == wanted.2
+                            && record.avif_speed == wanted_speed
+                    }
+                };
                 (same, !same)
             }
             _ => (false, false),
@@ -1459,7 +1540,20 @@ fn main() {
         args.format,
         args.quality,
         args.max_edge,
+        avif::configured_speed(),
     );
+    if let Some(recipe) = &args.preset
+        && !args.json
+    {
+        let mut line = format!(
+            "recipe {} ({} rev {})",
+            recipe.name, recipe.id, recipe.revision
+        );
+        if !args.preset_overrides.is_empty() {
+            line.push_str(&format!(" + {}", args.preset_overrides.join(" ")));
+        }
+        outln!("{line}");
+    }
     let skipped = queued.skipped.len();
 
     let mut run = if args.dry_run {
@@ -1931,6 +2025,7 @@ mod tests {
     }
 
     /// Plan a run over every entry, the way `main` does.
+    #[allow(clippy::too_many_arguments)]
     fn plan_queue<'a>(
         root: &Path,
         destination: &convert::Destination,
@@ -1939,6 +2034,7 @@ mod tests {
         quality: Quality,
         max_edge: MaxEdge,
         skip_existing: bool,
+        avif_speed: Option<u8>,
     ) -> Queued<'a> {
         let sources: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
         let planned = convert::plan_outputs(root, &sources, &sources, destination, format);
@@ -1954,6 +2050,7 @@ mod tests {
             format,
             quality,
             max_edge,
+            avif_speed,
         )
     }
 
@@ -1974,6 +2071,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             skip_existing,
+            None,
         )
     }
 
@@ -1992,6 +2090,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             false,
+            None,
         );
         convert_headless(
             root,
@@ -2139,12 +2238,76 @@ mod tests {
         assert!(parse(&["audit", "x", "--avif-speed", "8"]).is_err());
     }
 
+    fn preset_fixture(dir: &std::path::Path) -> String {
+        let path = dir.join("night.json");
+        std::fs::write(
+            &path,
+            r#"{"schema":1,"id":"night","name":"Night","revision":2,"provenance":"personal","format":"avif","quality":{"lossy":60.0},"max_edge":2400,"avif_speed":9}"#,
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn preset_file_resolves_base_and_explicit_flags_override_in_any_order() {
+        let base = temp_root("preset-base");
+        let file = preset_fixture(&base);
+        let args = parse(&["--preset-file", &file, "x"]).unwrap();
+        assert_eq!(args.format, Format::Avif);
+        assert_eq!(args.quality, Quality::lossy(60.));
+        assert_eq!(args.max_edge, MaxEdge(Some(2400)));
+        assert_eq!(args.avif_speed, Some(9));
+        let preset = args.preset.expect("the base recipe is kept");
+        assert_eq!((preset.name.as_str(), preset.revision), ("Night", 2));
+        assert!(args.preset_overrides.is_empty());
+        // An explicit flag wins no matter which side of the file it stands on.
+        for argv in [
+            vec!["--preset-file", file.as_str(), "--quality", "70", "x"],
+            vec!["--quality", "70", "--preset-file", file.as_str(), "x"],
+        ] {
+            let args = parse(&argv).unwrap();
+            assert_eq!(args.quality, Quality::lossy(70.));
+            assert_eq!(
+                args.format,
+                Format::Avif,
+                "the base still provides the rest"
+            );
+            assert_eq!(args.preset_overrides, ["--quality"]);
+        }
+        // The window resolves the same base through the same code.
+        let args = parse(&["--preset-file", &file, "--max-edge", "1600"]).unwrap();
+        assert_eq!(args.max_edge, MaxEdge(Some(1600)));
+        assert_eq!(args.preset_overrides, ["--max-edge"]);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn preset_file_failures_name_the_file() {
+        let base = temp_root("preset-bad");
+        assert!(parse(&["--preset-file", "--quality"]).is_err());
+        let missing = base.join("missing.json");
+        match parse(&["--preset-file", &missing.to_string_lossy(), "x"]) {
+            Err(error) => assert!(error.contains("--preset-file"), "{error}"),
+            Ok(_) => panic!("a missing preset file must fail"),
+        }
+        let bad = base.join("bad.json");
+        std::fs::write(&bad, b"{\"schema\":99}").unwrap();
+        match parse(&["--preset-file", &bad.to_string_lossy(), "x"]) {
+            Err(error) => assert!(error.contains("--preset-file"), "{error}"),
+            Ok(_) => panic!("a future-schema preset must fail"),
+        }
+        assert!(parse(&["audit", "x", "--preset-file", "f"]).is_err());
+        assert!(parse(&["restore", "x", "--preset-file", "f"]).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     #[test]
     fn a_missing_value_is_an_error() {
         for arguments in [
             ["--quality"].as_slice(),
             ["--max-edge"].as_slice(),
             ["--avif-speed"].as_slice(),
+            ["--preset-file"].as_slice(),
         ] {
             assert!(parse(arguments).is_err());
         }
@@ -2369,6 +2532,7 @@ mod tests {
     }
 
     /// Plan with the manifest the out dir actually holds, the way `main` does.
+    #[allow(clippy::too_many_arguments)]
     fn plan_history<'a>(
         root: &Path,
         out_dir: &Path,
@@ -2377,6 +2541,7 @@ mod tests {
         quality: Quality,
         max_edge: MaxEdge,
         skip_existing: bool,
+        avif_speed: Option<u8>,
     ) -> Queued<'a> {
         let recorded = manifest::load(out_dir);
         let destination = convert::Destination {
@@ -2398,6 +2563,7 @@ mod tests {
             format,
             quality,
             max_edge,
+            avif_speed,
         )
     }
 
@@ -2412,6 +2578,7 @@ mod tests {
             .expect("the mtime is set");
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_at(
         root: &Path,
         out_dir: &Path,
@@ -2420,8 +2587,9 @@ mod tests {
         format: Format,
         quality: Quality,
         max_edge: MaxEdge,
+        avif_speed: Option<u8>,
     ) {
-        let record = manifest::Stamp::new(format, quality, max_edge)
+        let record = manifest::Stamp::with_speed(format, quality, max_edge, avif_speed)
             .record((root, out_dir), source, output, output, None)
             .expect("the run records");
         manifest::append_record(out_dir, &record).expect("the record appends");
@@ -2447,6 +2615,7 @@ mod tests {
             Format::WebP,
             Quality::lossy(60.),
             MaxEdge::FULL,
+            None,
         );
         let queued = plan_history(
             &root,
@@ -2456,6 +2625,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             true,
+            None,
         );
         assert!(queued.skipped.is_empty(), "a quality change rebuilds");
         assert_eq!(queued.entries.len(), 1);
@@ -2481,6 +2651,7 @@ mod tests {
             Format::WebP,
             Quality::lossy(80.),
             MaxEdge::FULL,
+            None,
         );
         let queued = plan_history(
             &root,
@@ -2490,6 +2661,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             true,
+            None,
         );
         assert_eq!(queued.skipped.len(), 1);
         assert!(queued.entries.is_empty());
@@ -2512,7 +2684,6 @@ mod tests {
         std::fs::write(out_dir.join("shot.avif"), b"already converted").unwrap();
         backdate(&root.join("shot.png"));
         // The record is stamped at speed 9; the run wants the default.
-        crate::avif::set_speed(9);
         record_at(
             &root,
             &out_dir,
@@ -2521,8 +2692,8 @@ mod tests {
             Format::Avif,
             Quality::lossy(60.),
             MaxEdge::FULL,
+            Some(9),
         );
-        crate::avif::set_speed(crate::avif::DEFAULT_SPEED);
         let queued = plan_history(
             &root,
             &out_dir,
@@ -2531,9 +2702,21 @@ mod tests {
             Quality::lossy(60.),
             MaxEdge::FULL,
             true,
+            None,
         );
         assert!(queued.skipped.is_empty(), "a speed change rebuilds");
         assert_eq!(queued.entries.len(), 1);
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            true,
+            Some(9),
+        );
+        assert_eq!(queued.skipped.len(), 1, "the same speed still skips");
         // And back: a default-speed record is stale under a speed-9 run.
         record_at(
             &root,
@@ -2543,8 +2726,8 @@ mod tests {
             Format::Avif,
             Quality::lossy(60.),
             MaxEdge::FULL,
+            None,
         );
-        crate::avif::set_speed(9);
         let queued = plan_history(
             &root,
             &out_dir,
@@ -2553,8 +2736,8 @@ mod tests {
             Quality::lossy(60.),
             MaxEdge::FULL,
             true,
+            Some(9),
         );
-        crate::avif::set_speed(crate::avif::DEFAULT_SPEED);
         assert!(queued.skipped.is_empty(), "a speed change rebuilds");
         assert_eq!(queued.entries.len(), 1);
         std::fs::remove_dir_all(&base).unwrap();
@@ -2580,6 +2763,7 @@ mod tests {
             Format::WebP,
             Quality::lossy(80.),
             MaxEdge::FULL,
+            None,
         );
         let queued = plan_history(
             &root,
@@ -2589,6 +2773,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             true,
+            None,
         );
         assert!(queued.skipped.is_empty(), "a stale output converts");
         assert_eq!(queued.entries.len(), 1);
@@ -2895,6 +3080,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             false,
+            None,
         );
         let run = convert_headless(
             &root,

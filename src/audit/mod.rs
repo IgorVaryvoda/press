@@ -9,6 +9,7 @@ mod header;
 mod local_ai_actions;
 mod media;
 mod panel;
+mod recipe_actions;
 mod sirv_actions;
 mod sirv_view;
 mod state;
@@ -412,6 +413,16 @@ pub(crate) struct Audit {
     quality_slider: gpui_kit::Entity<SliderState>,
     /// Rows explicitly ticked for conversion.
     selected: HashSet<usize>,
+    /// Saved personal recipes, loaded once and refreshed after every mutation.
+    /// Built-ins come from the recipe model, not from disk.
+    recipes: Vec<crate::recipe::Recipe>,
+    /// Recipe files that would not parse, named so the row can say so.
+    recipes_skipped: Vec<String>,
+    /// The last applied preset row, built-in or personal. Settings edits never
+    /// rewrite it: a diverged row reads as modified, never as a silent edit.
+    selected_recipe: Option<String>,
+    /// The name Save and Rename read. Unfocused text, applied on click.
+    recipe_name_input: gpui_kit::Entity<InputState>,
     /// Bounds of the rendered rows or tiles. Marquee selection only needs the
     /// visible objects, so virtualised items never get measured eagerly.
     selection_bounds: Rc<RefCell<HashMap<usize, gpui_kit::Bounds<gpui_kit::Pixels>>>>,
@@ -2150,6 +2161,7 @@ pub(crate) fn build_audit(
             .detach();
         }
 
+        let recipe_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Recipe name"));
         let quality_slider = cx.new(|_| {
             SliderState::new()
                 .min(1.)
@@ -2245,6 +2257,11 @@ pub(crate) fn build_audit(
             .filter(|entry| acquisition::marketplace_fails(entry))
             .count();
         let spins = acquisition::detect_spins(&root, &entries);
+        // The personal library rarely changes: read it once here, then again
+        // after every mutation action. Missing folders read as empty.
+        let (recipes, recipes_skipped) = crate::recipe::dir()
+            .map(|dir| crate::recipe::list(&dir))
+            .unwrap_or_default();
         let mut audit = Audit {
             window: window.window_handle(),
             table: None,
@@ -2301,6 +2318,9 @@ pub(crate) fn build_audit(
             max_edge_input,
             quality_slider,
             selected: HashSet::new(),
+            recipes,
+            recipes_skipped,
+            selected_recipe: None,
             selection_bounds: Rc::new(RefCell::new(HashMap::new())),
             selection_surface: Rc::new(Cell::new(gpui_kit::Bounds::default())),
             marquee: None,
@@ -2312,6 +2332,7 @@ pub(crate) fn build_audit(
             filter: String::new(),
             finding: None,
             filter_input,
+            recipe_name_input,
             cursor: 0,
             cursor_redraw_pending: false,
             anchor: 0,

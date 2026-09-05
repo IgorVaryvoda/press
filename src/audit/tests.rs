@@ -5314,6 +5314,182 @@ fn window_and_headless_runs_write_identical_bytes(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Applying a personal row resolves exactly its stored settings and remembers
+/// the row. Nothing writes back to the file.
+#[gpui_kit::test]
+fn applying_a_personal_row_sets_settings_and_selects_it(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    let recipe = crate::recipe::Recipe {
+        schema: crate::recipe::SCHEMA_VERSION,
+        id: "mine".into(),
+        name: "Mine".into(),
+        revision: 1,
+        provenance: crate::recipe::Provenance::Personal,
+        format: crate::recipe::RecipeFormat::Avif,
+        quality: crate::recipe::RecipeQuality::Lossy(60.),
+        max_edge: Some(2400),
+        avif_speed: None,
+    };
+    audit.update(cx, |audit, _| {
+        audit.recipes = vec![recipe.clone()];
+    });
+    audit.update_in(cx, |audit, window, cx| {
+        audit.apply_recipe(&recipe, &recipe.id.clone(), window, cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.format, Format::Avif);
+        assert_eq!(audit.quality, Quality::lossy(60.));
+        assert_eq!(audit.max_edge, MaxEdge(Some(2400)));
+        assert_eq!(audit.selected_recipe.as_deref(), Some("mine"));
+    });
+}
+
+/// A selected row that no longer matches the controls owns the fact on screen
+/// instead of rewriting its file behind the click.
+#[gpui_kit::test]
+fn a_diverged_row_reads_modified_not_silent(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    let recipe = crate::recipe::Recipe {
+        schema: crate::recipe::SCHEMA_VERSION,
+        id: "mine".into(),
+        name: "Mine".into(),
+        revision: 1,
+        provenance: crate::recipe::Provenance::Personal,
+        format: crate::recipe::RecipeFormat::WebP,
+        quality: crate::recipe::RecipeQuality::Lossy(80.),
+        max_edge: None,
+        avif_speed: None,
+    };
+    audit.update(cx, |audit, _| {
+        audit.rail = Rail::Convert;
+        audit.recipes = vec![recipe.clone()];
+    });
+    audit.update_in(cx, |audit, window, cx| {
+        audit.apply_recipe(&recipe, &recipe.id.clone(), window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("recipe-modified").is_none(),
+        "a just-applied row is current"
+    );
+    audit.update(cx, |audit, cx| {
+        audit.quality = Quality::lossy(60.);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("recipe-modified").is_some(),
+        "the diverged row marks itself instead of editing its file"
+    );
+    let stored = audit.read_with(cx, |audit, _| {
+        audit
+            .recipes
+            .iter()
+            .find(|row| row.id == "mine")
+            .cloned()
+            .expect("the row keeps its stored settings")
+    });
+    assert_eq!(stored.quality, crate::recipe::RecipeQuality::Lossy(80.));
+}
+
+/// Save, duplicate, rename and delete against an isolated library: the files
+/// on disk follow the clicks, and the selection follows the files.
+#[gpui_kit::test]
+fn recipe_files_follow_save_duplicate_rename_delete(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    let dir = crate::recipe::temp_store("gui-actions");
+    audit.update_in(cx, |audit, window, cx| {
+        audit.recipe_name_input.update(cx, |input, cx| {
+            input.set_value("First", window, cx);
+        });
+        audit.save_current_recipe(&dir, window, cx);
+    });
+    let first = audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected_recipe.as_deref(), Some("first"));
+        audit
+            .recipes
+            .iter()
+            .find(|row| row.id == "first")
+            .cloned()
+            .expect("save selects its row")
+    });
+    assert_eq!(first.name, "First");
+    audit.update(cx, |audit, cx| audit.duplicate_recipe(&dir, cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected_recipe.as_deref(), Some("first-copy"));
+        assert_eq!(audit.recipes.len(), 2);
+    });
+    audit.update_in(cx, |audit, window, cx| {
+        audit.recipe_name_input.update(cx, |input, cx| {
+            input.set_value("Renamed", window, cx);
+        });
+        audit.rename_recipe(&dir, window, cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit
+                .recipes
+                .iter()
+                .find(|row| row.id == "first-copy")
+                .expect("rename keeps the id")
+                .name,
+            "Renamed"
+        );
+    });
+    audit.update(cx, |audit, cx| audit.delete_recipe(&dir, cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.selected_recipe.is_none(),
+            "deleting clears the selection"
+        );
+        assert_eq!(audit.recipes.len(), 1);
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Import takes outside bytes through the strict door; export hands back the
+/// stored file byte for byte.
+#[gpui_kit::test]
+fn recipe_import_export_round_trip(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    let dir = crate::recipe::temp_store("gui-import-export");
+    let mut recipe = crate::recipe::Recipe {
+        schema: crate::recipe::SCHEMA_VERSION,
+        id: "shared".into(),
+        name: "Shared".into(),
+        revision: 1,
+        provenance: crate::recipe::Provenance::Personal,
+        format: crate::recipe::RecipeFormat::Jpeg,
+        quality: crate::recipe::RecipeQuality::Lossy(90.),
+        max_edge: None,
+        avif_speed: None,
+    };
+    recipe.provenance = crate::recipe::Provenance::Builtin;
+    let bytes = serde_json::to_vec(&recipe).unwrap();
+    audit.update(cx, |audit, cx| {
+        audit.import_recipe_bytes(&dir, &bytes, cx);
+        audit.import_recipe_bytes(&dir, b"{\"schema\":99}", cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected_recipe.as_deref(), Some("shared"));
+        assert_eq!(audit.recipes.len(), 1, "the refused import writes nothing");
+        assert_eq!(
+            audit.recipes[0].provenance,
+            crate::recipe::Provenance::Personal
+        );
+    });
+    let target = dir.join("out.json");
+    audit.update(cx, |audit, cx| audit.export_selected_to(&dir, &target, cx));
+    audit.read_with(cx, |_audit, _| {
+        assert_eq!(
+            std::fs::read(&target).expect("the export lands"),
+            std::fs::read(dir.join("shared.json")).expect("the stored file"),
+            "export hands back stored bytes"
+        );
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
     let stopped = panel::conversion_result_state(Some(36), 12);
