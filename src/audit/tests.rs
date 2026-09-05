@@ -1936,24 +1936,6 @@ fn tree_row_bounds(
 }
 
 #[gpui_kit::test]
-fn acquisition_extras_stay_off_the_primary_surface(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    audit.update(cx, |audit, cx| {
-        audit.spins = vec![acquisition::SpinSet {
-            name: "shoe".into(),
-            indices: (0..8).collect(),
-            remote_folder: "press-spins/shoe".into(),
-            issue: None,
-        }];
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-
-    assert!(cx.debug_bounds("copy-audit-report").is_none());
-    assert!(cx.debug_bounds("spin-preflight").is_none());
-}
-
-#[gpui_kit::test]
 fn a_desktop_drop_opens_every_dropped_file_and_no_neighbours(cx: &mut TestAppContext) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3237,23 +3219,6 @@ fn scan_blocked_context_actions_leave_state_unchanged(grid: bool, cx: &mut TestA
         assert_eq!(audit.rail, Rail::Convert);
         assert!(!audit.converting);
     });
-}
-
-#[gpui_kit::test]
-fn an_incomplete_scan_cannot_copy_a_report(cx: &mut TestAppContext) {
-    let (audit, cx) = finding_audit(cx);
-    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("sentinel".into()));
-    audit.update(cx, |audit, cx| {
-        audit.report_copied = true;
-        retained_scan(audit);
-        audit.copy_audit_report(cx);
-        assert!(audit.report_copied);
-    });
-    assert_eq!(
-        cx.read_from_clipboard()
-            .and_then(|clipboard| clipboard.text()),
-        Some("sentinel".into())
-    );
 }
 
 #[gpui_kit::test]
@@ -5918,21 +5883,6 @@ fn a_failed_row_wears_its_reason_and_the_failed_chip_collects_it(cx: &mut TestAp
     assert!(
         cx.debug_bounds("finding-failed").is_some(),
         "the failures have a chip to reach them by"
-    );
-
-    audit.update(cx, |audit, cx| {
-        audit.copy_audit_report(cx);
-        assert!(audit.report_copied);
-    });
-    let report = cx
-        .read_from_clipboard()
-        .and_then(|clipboard| clipboard.text())
-        .expect("the report reaches the clipboard");
-    assert!(
-        report.contains("Could not convert (1):")
-            && report
-                .contains("- liar.jpg (named .jpg but the bytes are PNG; convert it explicitly)"),
-        "{report}"
     );
 
     audit.update(cx, |audit, cx| {

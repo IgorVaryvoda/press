@@ -190,15 +190,7 @@ unpair controls stay in the audit instead of hiding inside the folder browser. L
 the local audit, pairing compares the current folder only, not its subfolders.
 
 A completed conversion can publish its outputs to `optimized/` in the paired Sirv
-folder and copy responsive image markup. Press also detects numbered image sequences:
-complete, consistently sized sets of 8–1000 frames can be published to
-`press-spins/`, where Sirv creates the `.spin` file, then copied as a Sirv JS v3
-embed. Incomplete or inconsistent sets are named instead of uploaded.
-
-The **preflight** finding applies the file checks Press can prove without decoding:
-1400×1400 pixels, no more than 250 KB, and a truthful extension. Background colour
-still needs a visual review. **Copy audit** creates a shareable Markdown summary with
-the findings, conversion result, heaviest files, and Sirv/Sirv Studio next steps.
+folder and copy responsive image markup.
 
 The comparison has two local actions that never upload the source:
 **Remove background** uses BiRefNet Lite and **Upscale 4×** uses tiled Real-ESRGAN.

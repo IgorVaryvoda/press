@@ -64,7 +64,7 @@ impl Output {
     }
 
     /// Establish the selected output boundary without creating a path or file.
-    pub fn context(&self, audited: &Path) -> Result<Arc<crate::output::Context>, String> {
+    pub fn context(&self, audited: &Path) -> Result<crate::output::Context, String> {
         let working_directory = std::env::current_dir().map_err(|error| error.to_string())?;
         self.context_with_working_directory(audited, working_directory)
     }
@@ -73,7 +73,7 @@ impl Output {
         &self,
         audited: &Path,
         working_directory: PathBuf,
-    ) -> Result<Arc<crate::output::Context>, String> {
+    ) -> Result<crate::output::Context, String> {
         let audited = if audited.as_os_str().is_empty() {
             working_directory.clone()
         } else {
@@ -81,28 +81,18 @@ impl Output {
                 .map_err(|error| error.to_string())?
         };
         let context = match self {
-            Output::Optimized => {
-                crate::output::Context::establish_default_child_with_working_directory(
-                    &audited,
-                    Path::new(crate::scan::OUTPUT_DIR),
-                    working_directory,
-                )
-            }
+            Output::Optimized => crate::output::Context::establish_default_child(
+                &audited,
+                Path::new(crate::scan::OUTPUT_DIR),
+            ),
             Output::Folder(output) => {
                 let output = crate::output::lexical_normalize_against(output, &working_directory)
                     .map_err(|error| error.to_string())?;
-                crate::output::Context::establish_with_working_directory(
-                    &audited,
-                    &output,
-                    working_directory,
-                )
+                crate::output::Context::establish(&audited, &output)
             }
-            Output::Replace => crate::output::Context::establish_replace_with_working_directory(
-                &audited,
-                working_directory,
-            ),
+            Output::Replace => crate::output::Context::establish_replace(&audited),
         };
-        context.map(Arc::new).map_err(|error| error.to_string())
+        context.map_err(|error| error.to_string())
     }
 
     /// How the destination reads in the window: a name for the default, the
@@ -283,24 +273,12 @@ impl std::error::Error for SaveError {
     }
 }
 
-/// What one ordered write did. Every variant carries the revision it acted on,
-/// so a caller can tell a superseded drag from a failed disk.
-// Revisions are asserted by the contract tests; production routes on the
-// variant and only the notice path reads the error.
-#[allow(dead_code)]
+/// The outcome of a settings write; revisions stay inside the writer.
 #[derive(Debug)]
 pub enum WriteOutcome {
-    Written {
-        revision: u64,
-        warning: Option<crate::output::DurabilityWarning>,
-    },
-    Superseded {
-        revision: u64,
-    },
-    Failed {
-        revision: u64,
-        error: SaveError,
-    },
+    Written { warning: Option<String> },
+    Superseded,
+    Failed { error: SaveError },
 }
 
 /// One lock plus a revision counter for every settings write the process does.
@@ -334,30 +312,29 @@ impl SettingsWriter {
     pub fn write_if_latest(&self, revision: u64, settings: &Settings) -> WriteOutcome {
         let _guard = self.lock.lock();
         if revision < self.latest.load(Ordering::SeqCst) {
-            return WriteOutcome::Superseded { revision };
+            return WriteOutcome::Superseded;
         }
-        self.write_locked(revision, settings)
+        self.write_locked(settings)
     }
 
     /// Claim a newer revision and write it now, waiting for the same lock.
     /// Unconditional: quit and updater restart must persist, and the fresh
     /// revision keeps any older task superseded after it.
     pub fn flush(&self, settings: &Settings) -> WriteOutcome {
-        let revision = self.next_revision();
+        self.next_revision();
         let _guard = self.lock.lock();
-        self.write_locked(revision, settings)
+        self.write_locked(settings)
     }
 
-    fn write_locked(&self, revision: u64, settings: &Settings) -> WriteOutcome {
+    fn write_locked(&self, settings: &Settings) -> WriteOutcome {
         let Some(path) = self.path.as_ref() else {
             return WriteOutcome::Failed {
-                revision,
                 error: SaveError::NoConfigDir,
             };
         };
         match save_to(path, settings, Fault::None) {
-            Ok(warning) => WriteOutcome::Written { revision, warning },
-            Err(error) => WriteOutcome::Failed { revision, error },
+            Ok(warning) => WriteOutcome::Written { warning },
+            Err(error) => WriteOutcome::Failed { error },
         }
     }
 }
@@ -383,11 +360,7 @@ fn injected(stage: &str) -> io::Error {
     io::Error::other(format!("injected {stage} failure"))
 }
 
-fn save_to(
-    path: &Path,
-    settings: &Settings,
-    fault: Fault,
-) -> Result<Option<crate::output::DurabilityWarning>, SaveError> {
+fn save_to(path: &Path, settings: &Settings, fault: Fault) -> Result<Option<String>, SaveError> {
     if fault == Fault::Parent {
         return Err(SaveError::ParentCreation {
             path: path.to_path_buf(),
@@ -458,34 +431,26 @@ fn save_to(
 /// missing, retrying the replace once on a race. Never delete-first: a crash
 /// between delete and rename would leave no settings at all.
 #[cfg(not(windows))]
-fn replace(
-    from: &Path,
-    to: &Path,
-    fault: Fault,
-) -> Result<Option<crate::output::DurabilityWarning>, SaveError> {
+fn replace(from: &Path, to: &Path, fault: Fault) -> Result<Option<String>, SaveError> {
     std::fs::rename(from, to).map_err(|error| SaveError::Replace { error })?;
     if fault == Fault::ParentSync {
-        return Ok(Some(crate::output::DurabilityWarning(format!(
+        return Ok(Some(format!(
             "could not sync the settings directory: {}",
             injected("parent sync")
-        ))));
+        )));
     }
     let parent = to.parent().unwrap_or(to);
     match std::fs::File::open(parent).and_then(|file| file.sync_all()) {
         Ok(()) => Ok(None),
-        Err(error) => Ok(Some(crate::output::DurabilityWarning(format!(
+        Err(error) => Ok(Some(format!(
             "could not sync the settings directory {}: {error}",
             parent.display()
-        )))),
+        ))),
     }
 }
 
 #[cfg(windows)]
-fn replace(
-    from: &Path,
-    to: &Path,
-    fault: Fault,
-) -> Result<Option<crate::output::DurabilityWarning>, SaveError> {
+fn replace(from: &Path, to: &Path, fault: Fault) -> Result<Option<String>, SaveError> {
     let _ = fault;
     windows_replace(from, to).map_err(|error| SaveError::Replace { error })?;
     Ok(None)
@@ -651,7 +616,6 @@ mod tests {
         let context = Output::Optimized
             .context_with_working_directory(Path::new("."), base.clone())
             .unwrap();
-        assert_eq!(context.source_root(), base);
         assert_eq!(context.output_root(), base.join(crate::scan::OUTPUT_DIR));
         assert!(!context.output_root().exists());
         std::fs::remove_dir_all(base).unwrap();
@@ -667,7 +631,6 @@ mod tests {
         let context = Output::Optimized
             .context_with_working_directory(Path::new("../folder"), working_directory)
             .unwrap();
-        assert_eq!(context.source_root(), source);
         assert_eq!(context.output_root(), source.join(crate::scan::OUTPUT_DIR));
         assert!(!context.output_root().exists());
         std::fs::remove_dir_all(base).unwrap();
@@ -683,7 +646,6 @@ mod tests {
         let context = Output::Folder(PathBuf::from("exports"))
             .context_with_working_directory(Path::new("../photos"), working_directory.clone())
             .unwrap();
-        assert_eq!(context.source_root(), source);
         assert_eq!(context.output_root(), working_directory.join("exports"));
         assert!(!context.output_root().exists());
         std::fs::remove_dir_all(base).unwrap();
@@ -700,12 +662,7 @@ mod tests {
         let context = Output::Optimized
             .context_with_working_directory(&alias, base.clone())
             .unwrap();
-        assert_eq!(context.source_root(), target);
         assert_eq!(context.output_root(), target.join(crate::scan::OUTPUT_DIR));
-        assert_eq!(
-            context.relative_source(&alias.join("image.png")).unwrap(),
-            Path::new("image.png")
-        );
         assert!(!context.output_root().exists());
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -793,12 +750,7 @@ mod tests {
         let context = Output::Replace
             .context_with_working_directory(&base, base.clone())
             .expect("replace mode establishes");
-        assert_eq!(context.source_root(), base);
         assert_eq!(context.output_root(), base);
-        assert_eq!(
-            context.final_path(Path::new("shot.webp")).unwrap(),
-            base.join("shot.webp")
-        );
         assert!(
             Output::Folder(base.clone())
                 .context_with_working_directory(&base, base.clone())
@@ -893,8 +845,7 @@ mod tests {
 
         let first = writer.next_revision();
         match writer.write_if_latest(first, &widths(100.)) {
-            WriteOutcome::Written { revision, warning } => {
-                assert_eq!(revision, first);
+            WriteOutcome::Written { warning } => {
                 assert!(warning.is_none());
             }
             outcome => panic!("the first claim writes: {outcome:?}"),
@@ -907,7 +858,7 @@ mod tests {
         // A newer claim retires the older one without touching the disk.
         let second = writer.next_revision();
         match writer.write_if_latest(first, &widths(200.)) {
-            WriteOutcome::Superseded { revision } => assert_eq!(revision, first),
+            WriteOutcome::Superseded => {}
             outcome => panic!("the older claim is retired: {outcome:?}"),
         }
         assert_eq!(
@@ -922,7 +873,7 @@ mod tests {
 
         // The synchronous flush always writes its own newer revision.
         match writer.flush(&widths(300.)) {
-            WriteOutcome::Written { revision, .. } => assert!(revision > second),
+            WriteOutcome::Written { .. } => assert!(writer.latest.load(Ordering::SeqCst) > second),
             outcome => panic!("the flush writes: {outcome:?}"),
         }
         assert_eq!(
@@ -930,7 +881,7 @@ mod tests {
             Some(300.)
         );
 
-        // Without a config directory the revision still comes back, as a failure.
+        // A missing config directory remains a typed failure.
         let homeless = SettingsWriter::new(None);
         match homeless.write_if_latest(homeless.next_revision(), &widths(1.)) {
             WriteOutcome::Failed { error, .. } => {
@@ -967,7 +918,7 @@ mod tests {
         let delayed = queued.join().expect("the delayed write finishes");
         let outcome = flushing.join().expect("the flush finishes");
         assert!(
-            matches!(delayed, WriteOutcome::Superseded { .. }),
+            matches!(delayed, WriteOutcome::Superseded),
             "the delayed write never lands: {delayed:?}"
         );
         assert!(
@@ -1056,10 +1007,7 @@ mod tests {
         let path = dir.join("settings");
         let outcome = save_to(&path, &widths(1.), Fault::ParentSync).unwrap();
         let warning = outcome.expect("a sync failure is not a save failure");
-        assert!(
-            warning.0.contains("sync"),
-            "the warning says what: {warning}"
-        );
+        assert!(warning.contains("sync"), "the warning says what: {warning}");
         assert_eq!(
             parse(&std::fs::read_to_string(&path).unwrap()).width,
             Some(1.)

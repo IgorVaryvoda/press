@@ -1,4 +1,4 @@
-//! The status bar: summary counts and finding buttons.
+//! The status bar: summary counts and finding filters.
 
 use super::*;
 
@@ -163,11 +163,7 @@ impl Audit {
             )
     }
 
-    /// Every finding under one icon in the bar's right group. The header used
-    /// to carry a chip per finding; chips plus the filter no longer fit the
-    /// header's job, so one menu carries them all. `None` when there is
-    /// nothing to narrow to, so the common case stays quiet. Lit while one is
-    /// in force, so the count and the list below it never disagree.
+    /// Hide the finding menu when empty; highlight it while a filter is active.
     fn findings_menu(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let findings = self.available_findings();
         if findings.is_empty() {
@@ -175,23 +171,22 @@ impl Audit {
         }
         let total: usize = findings
             .iter()
-            .map(|(finding, _, _, _)| match finding {
+            .map(|(finding, _, _)| match finding {
                 Finding::Failed => self.failures.len(),
                 Finding::Heavy => self.heavy,
                 Finding::Mislabelled => self.mislabelled,
-                Finding::Marketplace => self.marketplace,
             })
             .sum();
         let summary = findings
             .iter()
-            .map(|(_, _, label, _)| label.clone())
+            .map(|(_, _, label)| label.as_str())
             .collect::<Vec<_>>()
             .join(" · ");
         let active = self.finding;
         let source = cx.entity().downgrade();
         let has_failed = findings
             .iter()
-            .any(|(finding, _, _, _)| *finding == Finding::Failed);
+            .any(|(finding, _, _)| *finding == Finding::Failed);
         let menu = div().debug_selector(|| "findings-menu".into()).child(
             Button::new("findings-menu")
                 .small()
@@ -207,25 +202,22 @@ impl Audit {
                 // than looking dead.
                 .disabled(self.converting)
                 .dropdown_menu(move |menu, _, _| {
-                    findings
-                        .iter()
-                        .fold(menu, |menu, (finding, icon, label, _)| {
-                            let finding = *finding;
-                            let label = label.clone();
-                            let source = source.clone();
-                            menu.item(
-                                PopupMenuItem::new(label)
-                                    .icon(icon.clone())
-                                    .checked(active == Some(finding))
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(audit) = source.upgrade() {
-                                            audit.update(cx, |audit, cx| {
-                                                audit.set_finding(finding, cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                        })
+                    findings.iter().fold(menu, |menu, (finding, icon, label)| {
+                        let finding = *finding;
+                        let label = label.clone();
+                        let source = source.clone();
+                        menu.item(
+                            PopupMenuItem::new(label)
+                                .icon(icon.clone())
+                                .checked(active == Some(finding))
+                                .on_click(move |_, _, cx| {
+                                    if let Some(audit) = source.upgrade() {
+                                        audit
+                                            .update(cx, |audit, cx| audit.set_finding(finding, cx));
+                                    }
+                                }),
+                        )
+                    })
                 }),
         );
         // The failures keep their own selector, so the run that produced them

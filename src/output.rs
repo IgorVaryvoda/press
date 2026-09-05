@@ -9,13 +9,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
-
-use sha2::{Digest, Sha256};
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 /// Why a source/output boundary could not be established.
 #[derive(Debug)]
@@ -26,9 +20,6 @@ pub enum Error {
     SourceNotAbsolute,
     OutputNotAbsolute,
     SourceNotDirectory,
-    WorkingDirectory {
-        error: io::Error,
-    },
     SourceLookup {
         path: PathBuf,
         error: io::Error,
@@ -45,10 +36,8 @@ pub enum Error {
     },
     OutputContainsSource,
     SourceOutsideRoot,
-    SourceIsRoot,
     RelativePathEmpty,
     RelativePathNotNormal,
-    FinalPathOutsideOutput,
     #[cfg_attr(not(windows), allow(dead_code))]
     WindowsNamespace,
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -70,12 +59,6 @@ impl fmt::Display for Error {
             Self::SourceNotAbsolute => write!(formatter, "the source directory is not absolute"),
             Self::OutputNotAbsolute => write!(formatter, "the output directory is not absolute"),
             Self::SourceNotDirectory => write!(formatter, "the source path is not a directory"),
-            Self::WorkingDirectory { error } => {
-                write!(
-                    formatter,
-                    "could not determine the working directory: {error}"
-                )
-            }
             Self::SourceLookup { path, error } => {
                 write!(
                     formatter,
@@ -110,12 +93,8 @@ impl fmt::Display for Error {
             Self::SourceOutsideRoot => {
                 write!(formatter, "the source is outside the source directory")
             }
-            Self::SourceIsRoot => write!(formatter, "the source is the source directory"),
             Self::RelativePathEmpty => write!(formatter, "the relative path is empty"),
             Self::RelativePathNotNormal => write!(formatter, "the relative path is not normal"),
-            Self::FinalPathOutsideOutput => {
-                write!(formatter, "the final path is outside the output directory")
-            }
             Self::WindowsNamespace => write!(formatter, "the path is not a disk filesystem path"),
             Self::WindowsComponent => {
                 write!(formatter, "the path contains an invalid Windows component")
@@ -137,596 +116,76 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A validated source directory and output boundary.
+/// An output directory validated against the source without creating either path.
 #[derive(Debug)]
 pub struct Context {
-    source_root: PathBuf,
-    lexical_source_root: PathBuf,
-    working_directory: PathBuf,
     output_root: PathBuf,
 }
 
 impl Context {
-    /// Establish the boundary without creating an output directory or file.
-    // First consumed by plan 1420; plan 1452 adds identity aliases.
-    #[allow(dead_code)]
     pub fn establish(source: &Path, output: &Path) -> Result<Self, Error> {
-        Self::establish_with_current_dir(source, output, std::env::current_dir)
-    }
-
-    pub(crate) fn establish_with_current_dir(
-        source: &Path,
-        output: &Path,
-        current_dir: impl FnOnce() -> io::Result<PathBuf>,
-    ) -> Result<Self, Error> {
-        let working_directory = current_dir().map_err(|error| Error::WorkingDirectory { error })?;
-        Self::establish_with_working_directory(source, output, working_directory)
-    }
-
-    pub(crate) fn establish_with_working_directory(
-        source: &Path,
-        output: &Path,
-        working_directory: PathBuf,
-    ) -> Result<Self, Error> {
-        validate_raw(source)?;
+        let source_root = canonical_source(source)?;
         validate_raw(output)?;
-        if !source.is_absolute() {
-            return Err(Error::SourceNotAbsolute);
-        }
         if !output.is_absolute() {
             return Err(Error::OutputNotAbsolute);
         }
-        validate_existing_windows_components(source, false)?;
         validate_existing_windows_components(output, true)?;
-
-        let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
-            path: source.to_path_buf(),
-            error,
-        })?;
-        let source_metadata = fs::metadata(&source_root).map_err(|error| Error::SourceLookup {
-            path: source_root.clone(),
-            error,
-        })?;
-        if !source_metadata.is_dir() {
-            return Err(Error::SourceNotDirectory);
-        }
-
         let output_root = canonical_output(output)?;
         if source_root.starts_with(&output_root) {
             return Err(Error::OutputContainsSource);
         }
+        Ok(Self { output_root })
+    }
 
+    /// Replace mode permits the source as output; the writer backs up each original.
+    pub(crate) fn establish_replace(source: &Path) -> Result<Self, Error> {
         Ok(Self {
-            source_root,
-            lexical_source_root: source.to_path_buf(),
-            working_directory,
-            output_root,
+            output_root: canonical_source(source)?,
         })
     }
 
-    /// Establish the boundary for replace mode, where the output root *is* the
-    /// audited root.
-    ///
-    /// Every other destination is refused when it contains the source, and that
-    /// rule is what stops a chosen folder from re-encoding originals onto
-    /// themselves. Replace mode does exactly that on purpose, one file at a time
-    /// and only after the original is safe in the backup, so it gets its own door
-    /// rather than a hole in the rule everything else relies on.
-    pub(crate) fn establish_replace_with_working_directory(
-        source: &Path,
-        working_directory: PathBuf,
-    ) -> Result<Self, Error> {
-        validate_raw(source)?;
-        if !source.is_absolute() {
-            return Err(Error::SourceNotAbsolute);
-        }
-        validate_existing_windows_components(source, false)?;
-        let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
-            path: source.to_path_buf(),
-            error,
-        })?;
-        let source_metadata = fs::metadata(&source_root).map_err(|error| Error::SourceLookup {
-            path: source_root.clone(),
-            error,
-        })?;
-        if !source_metadata.is_dir() {
-            return Err(Error::SourceNotDirectory);
-        }
-        validate_raw(&working_directory)?;
-        if !working_directory.is_absolute() {
-            return Err(Error::SourceNotAbsolute);
-        }
-        Ok(Self {
-            output_root: source_root.clone(),
-            source_root,
-            lexical_source_root: source.to_path_buf(),
-            working_directory,
-        })
-    }
-
-    pub(crate) fn establish_default_child_with_working_directory(
-        source: &Path,
-        child: &Path,
-        working_directory: PathBuf,
-    ) -> Result<Self, Error> {
-        Self::establish_default_child_with_hook(source, child, working_directory, || {})
+    pub(crate) fn establish_default_child(source: &Path, child: &Path) -> Result<Self, Error> {
+        Self::establish_default_child_with_hook(source, child, || {})
     }
 
     fn establish_default_child_with_hook(
         source: &Path,
         child: &Path,
-        working_directory: PathBuf,
         after_source_lookup: impl FnOnce(),
     ) -> Result<Self, Error> {
-        validate_raw(source)?;
-        if !source.is_absolute() {
-            return Err(Error::SourceNotAbsolute);
-        }
-        validate_existing_windows_components(source, false)?;
         normal_relative(child)?;
-
-        let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
-            path: source.to_path_buf(),
-            error,
-        })?;
-        let source_metadata = fs::metadata(&source_root).map_err(|error| Error::SourceLookup {
-            path: source_root.clone(),
-            error,
-        })?;
-        if !source_metadata.is_dir() {
-            return Err(Error::SourceNotDirectory);
-        }
+        let source_root = canonical_source(source)?;
         after_source_lookup();
-
-        validate_raw(&working_directory)?;
-        if !working_directory.is_absolute() {
-            return Err(Error::SourceNotAbsolute);
-        }
         let output_root = canonical_output_child(&source_root, child)?;
         if source_root.starts_with(&output_root) {
             return Err(Error::OutputContainsSource);
         }
-
-        Ok(Self {
-            source_root,
-            lexical_source_root: source.to_path_buf(),
-            working_directory,
-            output_root,
-        })
-    }
-
-    // First consumed by plan 1433 when GUI sources are normalized at capture time.
-    #[allow(dead_code)]
-    pub fn source_root(&self) -> &Path {
-        &self.source_root
+        Ok(Self { output_root })
     }
 
     pub fn output_root(&self) -> &Path {
         &self.output_root
     }
-
-    /// Return a normalized source-relative path from the audited path spelling.
-    ///
-    /// Relative source spellings resolve from the working directory captured when the
-    /// context was established. This is lexical only: the source need not still exist.
-    // First consumed by plan 1433 for GUI routing.
-    #[allow(dead_code)]
-    pub fn relative_source(&self, source: &Path) -> Result<PathBuf, Error> {
-        if source.as_os_str().is_empty() {
-            return Err(Error::EmptyPath);
-        }
-        let source = if source.is_absolute() {
-            source.to_path_buf()
-        } else {
-            // `current_dir` follows source-root aliases on Unix. Restore the audited
-            // spelling before resolving a relative source so its output name remains
-            // lexical even when the process was started through that alias.
-            let working_directory = self
-                .working_directory
-                .strip_prefix(&self.source_root)
-                .map(|relative| self.lexical_source_root.join(relative))
-                .unwrap_or_else(|_| self.working_directory.clone());
-            working_directory.join(source)
-        };
-        let root = lexical_normalize(&self.lexical_source_root)?;
-        let source = lexical_normalize(&source)?;
-        let relative = source
-            .strip_prefix(root)
-            .map_err(|_| Error::SourceOutsideRoot)?;
-        if relative.as_os_str().is_empty() {
-            return Err(Error::SourceIsRoot);
-        }
-        normal_relative(relative)?;
-        Ok(relative.to_path_buf())
-    }
-
-    /// Join a normal source-relative path while retaining the proven output boundary.
-    // First consumed by plan 1434 for CLI routing.
-    #[allow(dead_code)]
-    pub fn final_path(&self, relative: &Path) -> Result<PathBuf, Error> {
-        normal_relative(relative)?;
-        let final_path = self.output_root.join(relative);
-        validate_raw(&final_path)?;
-        validate_existing_windows_components(&final_path, true)?;
-        if !final_path.starts_with(&self.output_root) {
-            return Err(Error::FinalPathOutsideOutput);
-        }
-        Ok(final_path)
-    }
 }
 
-/// What a create-new install wrote back: where the complete file is, what it
-/// hashes to, and how many bytes it holds.
-// First consumed by plan 1421; plan 1401 adds owned replacement beside it.
-#[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
-pub struct InstalledOutput {
-    pub path: PathBuf,
-    pub sha256: String,
-    pub bytes: u64,
-}
-
-/// must never read as a file that did not.
-// First consumed by plan 1421 with its receipt.
-#[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
-pub struct DurabilityWarning(pub String);
-
-impl std::fmt::Display for DurabilityWarning {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.0)
+fn canonical_source(source: &Path) -> Result<PathBuf, Error> {
+    validate_raw(source)?;
+    if !source.is_absolute() {
+        return Err(Error::SourceNotAbsolute);
     }
-}
-
-/// the name, which is [`InstallError::ForeignOutput`] instead of a failure.
-// First consumed by plan 1421; variants stay distinct for its diagnostics.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub enum InstallError {
-    OutsideOutput { path: PathBuf },
-    ParentSymlink { path: PathBuf },
-    ParentNotDirectory { path: PathBuf },
-    ParentCreation { path: PathBuf, error: io::Error },
-    TempCreation { error: io::Error },
-    Write { error: io::Error },
-    FileSync { error: io::Error },
-    Commit { error: io::Error },
-    ForeignOutput { path: PathBuf },
-}
-
-impl InstallError {
-    /// The `io::ErrorKind` behind the failure: the preserved kind for every
-    /// I/O stage, `AlreadyExists` for a name somebody else owns, and
-    /// `InvalidInput` for a path the boundary refuses.
-    // First consumed by plan 1421 with its error.
-    #[allow(dead_code)]
-    pub fn kind(&self) -> io::ErrorKind {
-        match self {
-            Self::OutsideOutput { .. }
-            | Self::ParentSymlink { .. }
-            | Self::ParentNotDirectory { .. } => io::ErrorKind::InvalidInput,
-            Self::ParentCreation { error, .. }
-            | Self::TempCreation { error }
-            | Self::Write { error }
-            | Self::FileSync { error }
-            | Self::Commit { error } => error.kind(),
-            Self::ForeignOutput { .. } => io::ErrorKind::AlreadyExists,
-        }
-    }
-}
-
-impl std::fmt::Display for InstallError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::OutsideOutput { path } => {
-                write!(
-                    formatter,
-                    "the target is outside the output folder: {}",
-                    path.display()
-                )
-            }
-            Self::ParentSymlink { path } => {
-                write!(
-                    formatter,
-                    "a folder on the way to the target is a symlink: {}",
-                    path.display()
-                )
-            }
-            Self::ParentNotDirectory { path } => {
-                write!(
-                    formatter,
-                    "a folder on the way to the target is not a directory: {}",
-                    path.display()
-                )
-            }
-            Self::ParentCreation { path, error } => {
-                write!(
-                    formatter,
-                    "could not create the folder {}: {error}",
-                    path.display()
-                )
-            }
-            Self::TempCreation { error } => {
-                write!(formatter, "could not stage the output: {error}")
-            }
-            Self::Write { error } => {
-                write!(formatter, "could not write the staged output: {error}")
-            }
-            Self::FileSync { error } => {
-                write!(formatter, "could not sync the staged output: {error}")
-            }
-            Self::Commit { error } => {
-                write!(formatter, "could not install the staged output: {error}")
-            }
-            Self::ForeignOutput { path } => {
-                write!(formatter, "an earlier run already wrote {}", path.display())
-            }
-        }
-    }
-}
-
-impl std::error::Error for InstallError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ParentCreation { error, .. }
-            | Self::TempCreation { error }
-            | Self::Write { error }
-            | Self::FileSync { error }
-            | Self::Commit { error } => Some(error),
-            _ => None,
-        }
-    }
-}
-
-/// Test-only failure injection for [`install`]. Each variant fails exactly one
-/// stage; production always runs `Fault::None`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Fault {
-    #[default]
-    None,
-    Parent,
-    Temp,
-    Write,
-    FileSync,
-    Persist,
-    /// Never constructed on Windows: directory sync is an explicit no-warning
-    /// platform outcome there, and only the non-Windows warning test builds it.
-    #[cfg_attr(windows, allow(dead_code))]
-    ParentSync,
-    /// Not a failure: creates the final after staging, so the commit really
-    /// races and only `AlreadyExists` may map to [`InstallError::ForeignOutput`].
-    CommitConflict,
-}
-
-fn injected(stage: &str) -> io::Error {
-    io::Error::other(format!("injected {stage} failure"))
-}
-
-/// Install finished bytes as a new file that appears complete or not at all.
-///
-/// Parents are created component by component inside the context's output root
-/// and rechecked immediately before staging; an existing final — found before
-/// staging or raced in after it — is refused as [`InstallError::ForeignOutput`]
-/// and left byte-identical. Routing a relative source onto its final name stays
-/// with the producers (plans 1433/1434); this owns the last mile.
-// First consumed by plan 1421; tested directly until then.
-#[allow(dead_code)]
-pub fn install(
-    context: &Context,
-    final_path: &Path,
-    bytes: &[u8],
-) -> Result<(InstalledOutput, Option<DurabilityWarning>), InstallError> {
-    install_with_fault(context, final_path, bytes, Fault::None)
-}
-
-fn install_with_fault(
-    context: &Context,
-    final_path: &Path,
-    bytes: &[u8],
-    fault: Fault,
-) -> Result<(InstalledOutput, Option<DurabilityWarning>), InstallError> {
-    let output_root = context.output_root();
-    let relative =
-        final_path
-            .strip_prefix(output_root)
-            .map_err(|_| InstallError::OutsideOutput {
-                path: final_path.to_path_buf(),
-            })?;
-    if relative.as_os_str().is_empty() {
-        return Err(InstallError::OutsideOutput {
-            path: final_path.to_path_buf(),
-        });
-    }
-    for component in relative.components() {
-        if !matches!(component, Component::Normal(_)) {
-            return Err(InstallError::OutsideOutput {
-                path: final_path.to_path_buf(),
-            });
-        }
-    }
-    let parent = final_path
-        .parent()
-        .ok_or_else(|| InstallError::OutsideOutput {
-            path: final_path.to_path_buf(),
-        })?;
-    ensure_parent_dir(output_root, parent, fault)?;
-    if fs::symlink_metadata(final_path).is_ok() {
-        return Err(InstallError::ForeignOutput {
-            path: final_path.to_path_buf(),
-        });
-    }
-
-    if fault == Fault::Temp {
-        return Err(InstallError::TempCreation {
-            error: injected("temp creation"),
-        });
-    }
-    let mut staged = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|error| InstallError::TempCreation { error })?;
-    #[cfg(unix)]
-    staged
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o666))
-        .map_err(|error| InstallError::TempCreation { error })?;
-    if fault == Fault::Write {
-        return Err(InstallError::Write {
-            error: injected("write"),
-        });
-    }
-    staged
-        .write_all(bytes)
-        .map_err(|error| InstallError::Write { error })?;
-    staged
-        .flush()
-        .map_err(|error| InstallError::Write { error })?;
-    if fault == Fault::FileSync {
-        return Err(InstallError::FileSync {
-            error: injected("file sync"),
-        });
-    }
-    staged
-        .as_file()
-        .sync_all()
-        .map_err(|error| InstallError::FileSync { error })?;
-    if fault == Fault::CommitConflict {
-        fs::write(final_path, b"somebody else won the race").ok();
-    }
-
-    if fault == Fault::Persist {
-        return Err(InstallError::Commit {
-            error: injected("commit"),
-        });
-    }
-    if let Err(persisted) = staged.persist_noclobber(final_path) {
-        let kind = persisted.error.kind();
-        drop(persisted.file);
-        if kind == io::ErrorKind::AlreadyExists {
-            return Err(InstallError::ForeignOutput {
-                path: final_path.to_path_buf(),
-            });
-        }
-        return Err(InstallError::Commit {
-            error: persisted.error,
-        });
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let receipt = InstalledOutput {
-        path: final_path.to_path_buf(),
-        sha256: format!("{:x}", hasher.finalize()),
-        bytes: bytes.len() as u64,
-    };
-    Ok((receipt, sync_parent_warning(parent, fault)))
-}
-/// Create the output root and every parent below it, refusing symlinks and
-/// non-directories before each creation and use. Levels grow top-down from the
-/// filesystem root, so a missing output root grows its own chain one level at
-/// a time; the last check stats the staged file's parent immediately before
-/// the commit, narrowing the swap window to the commit itself. Every ancestor
-/// of a canonical path is canonical, so the walk above the output root meets
-/// no symlinks it did not already prove away at establishment.
-fn ensure_parent_dir(output_root: &Path, parent: &Path, fault: Fault) -> Result<(), InstallError> {
-    if fault == Fault::Parent {
-        return Err(InstallError::ParentCreation {
-            path: parent.to_path_buf(),
-            error: injected("parent creation"),
-        });
-    }
-    if parent.strip_prefix(output_root).is_err() {
-        return Err(InstallError::OutsideOutput {
-            path: parent.to_path_buf(),
-        });
-    }
-    let mut current = PathBuf::new();
-    for component in parent.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => current.push(component),
-            Component::Normal(_) => {
-                current.push(component);
-                ensure_one_dir(&current)?;
-            }
-            Component::CurDir | Component::ParentDir => {
-                return Err(InstallError::OutsideOutput {
-                    path: parent.to_path_buf(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn ensure_one_dir(path: &Path) -> Result<(), InstallError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => check_dir(path, &metadata),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match fs::create_dir(path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    // Raced with another creator; judge what is there now.
-                    let metadata = fs::symlink_metadata(path).map_err(|error| {
-                        InstallError::ParentCreation {
-                            path: path.to_path_buf(),
-                            error,
-                        }
-                    })?;
-                    check_dir(path, &metadata)
-                }
-                Err(error) => Err(InstallError::ParentCreation {
-                    path: path.to_path_buf(),
-                    error,
-                }),
-            }
-        }
-        Err(error) => Err(InstallError::ParentCreation {
-            path: path.to_path_buf(),
-            error,
-        }),
-    }
-}
-
-fn check_dir(path: &Path, metadata: &fs::Metadata) -> Result<(), InstallError> {
-    if metadata.file_type().is_symlink() {
-        return Err(InstallError::ParentSymlink {
-            path: path.to_path_buf(),
-        });
-    }
+    validate_existing_windows_components(source, false)?;
+    let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
+        path: source.to_path_buf(),
+        error,
+    })?;
+    let metadata = fs::metadata(&source_root).map_err(|error| Error::SourceLookup {
+        path: source_root.clone(),
+        error,
+    })?;
     if !metadata.is_dir() {
-        return Err(InstallError::ParentNotDirectory {
-            path: path.to_path_buf(),
-        });
+        return Err(Error::SourceNotDirectory);
     }
-    Ok(())
-}
-
-/// Sync the finished file's parent so the rename survives an OS crash. A
-/// failure keeps the install successful and comes back as a warning instead:
-/// the bytes are complete, and a warning must never read as a file that did
-/// not convert. Directory sync is not supported on Windows, which is an
-/// explicit no-warning platform outcome rather than a silent skip.
-fn sync_parent_warning(parent: &Path, fault: Fault) -> Option<DurabilityWarning> {
-    #[cfg(windows)]
-    {
-        let _ = (parent, fault);
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        if fault == Fault::ParentSync {
-            return Some(DurabilityWarning(format!(
-                "could not sync the output directory {}: {}",
-                parent.display(),
-                injected("parent sync")
-            )));
-        }
-        match fs::File::open(parent).and_then(|file| file.sync_all()) {
-            Ok(()) => None,
-            Err(error) => Some(DurabilityWarning(format!(
-                "could not sync the output directory {}: {error}",
-                parent.display()
-            ))),
-        }
-    }
+    Ok(source_root)
 }
 
 pub(crate) fn lexical_normalize_against(path: &Path, base: &Path) -> Result<PathBuf, Error> {
@@ -1253,24 +712,6 @@ mod tests {
     }
 
     #[test]
-    fn output_path_boundary_final_path_is_strict() {
-        let base = temp_dir("helpers");
-        let source = base.join("source");
-        let output = base.join("output");
-        fs::create_dir(&source).unwrap();
-        let context = Context::establish(&source, &output).unwrap();
-        assert_eq!(
-            context.final_path(Path::new("album/image.webp")).unwrap(),
-            output.join("album/image.webp")
-        );
-        assert!(matches!(
-            context.final_path(Path::new("../escape.webp")),
-            Err(Error::RelativePathNotNormal)
-        ));
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
     fn context_rejects_a_relative_source_root() {
         let base = temp_dir("relative-root");
         assert!(matches!(
@@ -1281,19 +722,20 @@ mod tests {
     }
 
     #[test]
-    fn context_reports_a_working_directory_failure() {
-        let base = temp_dir("working-directory");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        assert!(matches!(
-            Context::establish_with_current_dir(&source, &base.join("output"), || {
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "injected failure",
-                ))
-            }),
-            Err(Error::WorkingDirectory { .. })
-        ));
+    fn every_destination_rejects_a_file_as_its_source_root() {
+        let base = temp_dir("source-file");
+        let source = base.join("photo.jpg");
+        let output = base.join("output");
+        fs::write(&source, b"original").unwrap();
+        for result in [
+            Context::establish(&source, &output),
+            Context::establish_replace(&source),
+            Context::establish_default_child(&source, Path::new("optimized")),
+        ] {
+            assert!(matches!(result, Err(Error::SourceNotDirectory)));
+        }
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        assert!(!output.exists());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1308,179 +750,14 @@ mod tests {
         fs::create_dir(&second).unwrap();
         std::os::unix::fs::symlink(&first, &alias).unwrap();
 
-        let context = Context::establish_default_child_with_hook(
-            &alias,
-            Path::new("optimized"),
-            base.clone(),
-            || {
+        let context =
+            Context::establish_default_child_with_hook(&alias, Path::new("optimized"), || {
                 fs::remove_file(&alias).unwrap();
                 std::os::unix::fs::symlink(&second, &alias).unwrap();
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
-        assert_eq!(context.source_root(), first);
         assert_eq!(context.output_root(), first.join("optimized"));
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_preserves_an_absolute_name() {
-        let base = temp_dir("absolute-source");
-        let source = base.join("source");
-        let entry = source.join("album/image.png");
-        fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        let context =
-            Context::establish_with_current_dir(&source, &base.join("output"), || Ok(base.clone()))
-                .unwrap();
-        assert_eq!(
-            context.relative_source(&entry).unwrap(),
-            Path::new("album/image.png")
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_preserves_a_bare_relative_file() {
-        let base = temp_dir("bare-relative");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
-            Ok(source.clone())
-        })
-        .unwrap();
-        assert_eq!(
-            context.relative_source(Path::new("image.png")).unwrap(),
-            Path::new("image.png")
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_preserves_a_dot_relative_file() {
-        let base = temp_dir("dot-relative");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
-            Ok(source.clone())
-        })
-        .unwrap();
-        assert_eq!(
-            context.relative_source(Path::new("./image.png")).unwrap(),
-            Path::new("image.png")
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_preserves_a_parent_relative_folder_entry() {
-        let base = temp_dir("parent-relative");
-        let source = base.join("source");
-        let working_directory = source.join("album");
-        fs::create_dir_all(&working_directory).unwrap();
-        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
-            Ok(working_directory.clone())
-        })
-        .unwrap();
-        assert_eq!(
-            context.relative_source(Path::new("../cover.png")).unwrap(),
-            Path::new("cover.png")
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_rejects_an_empty_path() {
-        let base = temp_dir("empty-relative");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let context = Context::establish(&source, &base.join("output")).unwrap();
-        assert!(matches!(
-            context.relative_source(Path::new("")),
-            Err(Error::EmptyPath)
-        ));
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_rejects_a_lexical_escape() {
-        let base = temp_dir("lexical-escape");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
-            Ok(source.clone())
-        })
-        .unwrap();
-        assert!(matches!(
-            context.relative_source(Path::new("../outside.png")),
-            Err(Error::SourceOutsideRoot)
-        ));
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn relative_source_does_not_require_the_source_to_still_exist() {
-        let base = temp_dir("removed-source");
-        let source = base.join("source");
-        let entry = source.join("removed/image.png");
-        fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        fs::write(&entry, b"image").unwrap();
-        let context = Context::establish(&source, &base.join("output")).unwrap();
-        fs::remove_file(&entry).unwrap();
-        assert_eq!(
-            context.relative_source(&entry).unwrap(),
-            Path::new("removed/image.png")
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn relative_source_under_a_symlinked_root_keeps_the_audited_name() {
-        let base = temp_dir("symlinked-source");
-        let target = base.join("target");
-        let source = base.join("source");
-        fs::create_dir(&target).unwrap();
-        std::os::unix::fs::symlink(&target, &source).unwrap();
-        let context = Context::establish_with_current_dir(&source, &base.join("output"), || {
-            Ok(target.clone())
-        })
-        .unwrap();
-        assert_eq!(
-            context.relative_source(Path::new("image.png")).unwrap(),
-            Path::new("image.png")
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn relative_source_preserves_non_utf8_components() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let base = temp_dir("non-utf8-source");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let name =
-            std::ffi::OsString::from_vec(vec![b'i', b'm', b'g', 0xff, b'.', b'p', b'n', b'g']);
-        let entry = source.join(&name);
-        let context = Context::establish(&source, &base.join("output")).unwrap();
-        assert_eq!(context.relative_source(&entry).unwrap(), Path::new(&name));
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn ordinary_windows_source_spelling_keeps_its_relative_name() {
-        let base = temp_dir("windows-source-spelling");
-        let source = base.join("source");
-        let entry = source.join("album").join("image.png");
-        fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        let context = Context::establish(&source, &base.join("output")).unwrap();
-        assert_eq!(
-            context.relative_source(&entry).unwrap(),
-            Path::new(r"album\image.png")
-        );
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1762,273 +1039,6 @@ mod tests {
             Context::establish(Path::new("relative"), &base.join("output")),
             Err(Error::SourceNotAbsolute)
         ));
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    fn dir_names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
-    }
-
-    fn boundary(source: &Path, out: &Path) -> Context {
-        Context::establish(source, out).expect("the fixture boundary establishes")
-    }
-
-    #[test]
-    fn create_new_output_writes_bytes_and_reports_the_receipt() {
-        let base = temp_dir("install-first");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out").join("nested");
-        let context = boundary(&source, &out);
-
-        let bytes = b"complete webp bytes";
-        let final_path = out.join("pic.webp");
-        let (receipt, warning) = install(&context, &final_path, bytes).expect("first install");
-        assert!(warning.is_none(), "a clean install warns about nothing");
-        assert_eq!(receipt.path, final_path);
-        assert_eq!(receipt.bytes, bytes.len() as u64);
-        assert_eq!(receipt.sha256.len(), 64, "hex sha256");
-        assert_eq!(fs::read(&final_path).unwrap(), bytes);
-
-        // The empty string's hash is a fixed vector, so this pins the digest
-        // rather than recomputing it with the same code under test.
-        let empty = out.join("empty.webp");
-        let (receipt, _) = install(&context, &empty, b"").expect("empty install");
-        assert_eq!(
-            receipt.sha256,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-
-        #[cfg(unix)]
-        assert_eq!(
-            fs::metadata(&final_path).unwrap().permissions().mode() & 0o777,
-            0o666,
-            "umask owns the final permissions"
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn an_existing_final_is_left_byte_identical_and_reported_foreign() {
-        let base = temp_dir("install-foreign");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-
-        let final_path = out.join("taken.webp");
-        fs::create_dir_all(out).unwrap();
-        fs::write(&final_path, b"somebody else's bytes").unwrap();
-        let error = install(&context, &final_path, b"new bytes").unwrap_err();
-        assert!(
-            matches!(error, InstallError::ForeignOutput { .. }),
-            "an owned name is refused, not a failure: {error}"
-        );
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            fs::read(&final_path).unwrap(),
-            b"somebody else's bytes",
-            "the foreign file is byte-identical"
-        );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn a_final_created_after_staging_maps_only_already_exists_to_foreign() {
-        let base = temp_dir("install-raced");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-        let final_path = out.join("raced.webp");
-
-        let error = install_with_fault(&context, &final_path, b"new bytes", Fault::CommitConflict)
-            .unwrap_err();
-        assert!(
-            matches!(error, InstallError::ForeignOutput { .. }),
-            "a raced commit is refused: {error}"
-        );
-        assert_eq!(
-            fs::read(&final_path).unwrap(),
-            b"somebody else won the race",
-            "the winner's bytes stand"
-        );
-        assert_eq!(dir_names(&out), ["raced.webp"], "the staged temp is gone");
-
-        // Any other commit failure stays a failure and stages nothing visible.
-        let error = install_with_fault(
-            &context,
-            &out.join("broke.webp"),
-            b"new bytes",
-            Fault::Persist,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, InstallError::Commit { .. }),
-            "a non-conflict commit fails: {error}"
-        );
-        assert_eq!(dir_names(&out), ["raced.webp"]);
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn unicode_and_space_parents_are_created_component_by_component() {
-        let base = temp_dir("install-parents");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-
-        let final_path = out
-            .join("Album ünicode")
-            .join("nested deep")
-            .join("pic.webp");
-        let (receipt, _) = install(&context, &final_path, b"bytes").expect("nested install");
-        assert_eq!(receipt.bytes, 5);
-        assert!(final_path.parent().unwrap().is_dir());
-        assert_eq!(fs::read(&final_path).unwrap(), b"bytes");
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_symlinked_parent_is_refused_without_creating_anything() {
-        let base = temp_dir("install-symlink");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let elsewhere = base.join("elsewhere");
-        fs::create_dir(&elsewhere).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-
-        let link = out.join("link");
-        fs::create_dir(&out).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
-        let final_path = link.join("pic.webp");
-        let error = install(&context, &final_path, b"bytes").unwrap_err();
-        assert!(
-            matches!(error, InstallError::ParentSymlink { .. }),
-            "a symlinked parent is refused: {error}"
-        );
-        assert!(!final_path.exists(), "nothing was written through the link");
-        assert_eq!(dir_names(&elsewhere), Vec::<String>::new());
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn unrelated_temp_residue_survives_an_install() {
-        let base = temp_dir("install-residue");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-
-        fs::create_dir(&out).unwrap();
-        fs::write(out.join(".tmpleftover"), b"not mine").unwrap();
-        let final_path = out.join("pic.webp");
-        install(&context, &final_path, b"bytes").expect("install beside residue");
-        assert_eq!(fs::read(out.join(".tmpleftover")).unwrap(), b"not mine");
-        assert_eq!(dir_names(&out), [".tmpleftover", "pic.webp"]);
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn each_injected_stage_failure_writes_no_final_and_leaves_no_temp() {
-        let base = temp_dir("install-faults");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        fs::create_dir(&out).unwrap();
-        fs::write(out.join("residue.tmp"), b"not mine").unwrap();
-        let context = boundary(&source, &out);
-
-        for (fault, expected) in [
-            (Fault::Parent, "ParentCreation"),
-            (Fault::Temp, "TempCreation"),
-            (Fault::Write, "Write"),
-            (Fault::FileSync, "FileSync"),
-            (Fault::Persist, "Commit"),
-        ] {
-            let final_path = out.join(format!("{expected}.webp"));
-            let error = install_with_fault(&context, &final_path, b"bytes", fault).unwrap_err();
-            let actual = match &error {
-                InstallError::ParentCreation { .. } => "ParentCreation",
-                InstallError::TempCreation { .. } => "TempCreation",
-                InstallError::Write { .. } => "Write",
-                InstallError::FileSync { .. } => "FileSync",
-                InstallError::Commit { .. } => "Commit",
-                other => panic!("{fault:?} failed as {other:?} instead of {expected}"),
-            };
-            assert_eq!(actual, expected);
-            assert!(!final_path.exists(), "{expected} stages no final");
-        }
-        assert_eq!(dir_names(&out), ["residue.tmp"], "no staged temp lingers");
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn a_failed_parent_sync_still_reports_the_receipt_with_a_warning() {
-        let base = temp_dir("install-warning");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-        let final_path = out.join("pic.webp");
-
-        let (receipt, warning) =
-            install_with_fault(&context, &final_path, b"bytes", Fault::ParentSync)
-                .expect("a sync failure is not a conversion failure");
-        assert_eq!(receipt.bytes, 5);
-        let warning = warning.expect("the sync failure is reported");
-        assert!(
-            warning.0.contains("sync"),
-            "the warning says what: {warning}"
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), b"bytes");
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn an_escaping_final_is_refused_outside_the_output() {
-        let base = temp_dir("install-outside");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-
-        for final_path in [base.join("evil.webp"), out.clone()] {
-            let error = install(&context, &final_path, b"bytes").unwrap_err();
-            assert!(
-                matches!(error, InstallError::OutsideOutput { .. }),
-                "an escaping final is refused: {error}"
-            );
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        }
-        assert!(!base.join("evil.webp").exists());
-        assert!(!out.exists(), "refusal creates nothing");
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn long_windows_paths_install_within_runner_policy() {
-        let base = temp_dir("install-long");
-        let source = base.join("source");
-        fs::create_dir(&source).unwrap();
-        let out = base.join("out");
-        let context = boundary(&source, &out);
-
-        let long: String = std::iter::repeat_n('n', 180).collect();
-        let final_path = out.join(&long).join("pic.webp");
-        let (receipt, _) = install(&context, &final_path, b"bytes").expect("long install");
-        assert_eq!(receipt.bytes, 5);
-        assert_eq!(fs::read(&final_path).unwrap(), b"bytes");
         fs::remove_dir_all(base).unwrap();
     }
 }

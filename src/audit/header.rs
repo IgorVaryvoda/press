@@ -37,33 +37,21 @@ impl Audit {
         warnings
     }
 
-    /// The findings the list can narrow to right now, with the label and
-    /// tooltip each chip would carry. Listed once so the inline chips and the
-    /// narrow-window menu cannot disagree.
-    pub(super) fn available_findings(&self) -> Vec<(Finding, IconName, String, &'static str)> {
+    /// Findings available in the status-bar filter menu.
+    pub(super) fn available_findings(&self) -> Vec<(Finding, IconName, String)> {
         let mut findings = Vec::new();
-        // The audit reads bytes per pixel for every row and then asks you to
-        // find the heavy ones yourself. These are that answer, as the control
-        // that narrows the list to them.
         if self.heavy > 0 {
             findings.push((
                 Finding::Heavy,
                 IconName::TriangleAlert,
                 format!("{} heavy", self.heavy),
-                "Files carrying more bytes per pixel than a photograph \
-                 needs. Click to show only them.",
             ));
         }
-        // What the last run could not convert. Only here while there is
-        // something to show: a chip that is always present would be a filter
-        // for an empty list on every folder that converted cleanly.
         if !self.failures.is_empty() {
             findings.push((
                 Finding::Failed,
                 IconName::CircleX,
                 format!("{} failed", self.failures.len()),
-                "Files the last run could not convert. Click to show only \
-                 them, then convert them again once the cause is fixed.",
             ));
         }
         if self.mislabelled > 0 {
@@ -71,24 +59,12 @@ impl Audit {
                 Finding::Mislabelled,
                 IconName::TriangleAlert,
                 format!("{} mislabelled", self.mislabelled),
-                "Files whose bytes are not the format their extension \
-                 claims. Click to show only them.",
-            ));
-        }
-        if acquisition::SHOW_ACQUISITION_EXTRAS && self.marketplace > 0 {
-            findings.push((
-                Finding::Marketplace,
-                IconName::TriangleAlert,
-                format!("{} preflight", self.marketplace),
-                "Marketplace file preflight: 1400×1400, at most 250 KB, and a truthful extension. Review the background visually.",
             ));
         }
         findings
     }
 
-    /// Every shortcut the list answers to, in one place. The window already
-    /// moves this way, but nothing said so, and a shortcut nobody names is one
-    /// nobody finds. The dialog is state, not a rail: it changes nothing.
+    /// Keyboard shortcuts for the image list.
     pub(super) fn shortcuts_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         const SHORTCUTS: [(&str, &str); 9] = [
             ("↑ ↓ ← →", "Move between images"),
@@ -384,31 +360,6 @@ impl Audit {
                         ),
                     ),
             )
-            // Findings narrow the list too, but they live in the status bar:
-            // the header is for narrowing the list, and scope and findings
-            // define the list itself.
-            .when(acquisition::SHOW_ACQUISITION_EXTRAS, |header| {
-                header.child(
-                    Button::new("copy-audit-report")
-                        .small()
-                        .ghost()
-                        .icon(if self.report_copied {
-                            IconName::Check
-                        } else {
-                            IconName::Copy
-                        })
-                        .label(if self.report_copied {
-                            "Copied"
-                        } else {
-                            "Copy audit"
-                        })
-                        .tooltip("Copy a shareable Press audit with Sirv and AI next steps")
-                        .disabled(self.converting || self.scan_blocks_delivery())
-                        .on_click(cx.listener(|audit, _, _, cx| audit.copy_audit_report(cx))),
-                )
-            })
-            // Sirv pairing lives in the Open menu; the reconciliation strip below
-            // owns its status and actions once paired.
             // Persistent beside the view toggle so pairing is discoverable:
             // the menu buried it and users never found it. Selected when
             // paired, so the paired state stays visible above the strip.

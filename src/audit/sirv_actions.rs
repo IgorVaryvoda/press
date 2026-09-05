@@ -19,7 +19,7 @@ pub(super) fn transfer_failure(job: &SirvJob) -> Option<(&'static str, String)> 
     let title = match job.kind {
         SirvJobKind::Pull | SirvJobKind::PullChanged => "Sirv download incomplete",
         SirvJobKind::Push | SirvJobKind::PushChanged => "Sirv upload incomplete",
-        SirvJobKind::Publish | SirvJobKind::Spin => "Sirv publish incomplete",
+        SirvJobKind::Publish => "Sirv publish incomplete",
     };
     let rest = job.failed.saturating_sub(job.failures.len());
     let examples = job.failures.join(", ");
@@ -779,16 +779,16 @@ impl Audit {
         } else {
             SirvJobKind::Push
         };
-        self.run_upload_plan(plan, kind, UploadCompletion::None, cx);
+        self.run_upload_plan(plan, kind, None, cx);
     }
 
-    /// The one upload loop used by sync, converted results, and spins. All need
+    /// The one upload loop used by sync and converted results. Both need
     /// the same caps, cancellation and named failures.
     pub(super) fn run_upload_plan(
         &mut self,
         plan: Vec<(String, PathBuf)>,
         kind: SirvJobKind,
-        completion: UploadCompletion,
+        completion: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
         if self.scan_blocks_delivery() {
@@ -1017,15 +1017,10 @@ impl Audit {
                     false
                 };
                 if owns_job {
-                    if failed == 0 {
-                        match completion {
-                            UploadCompletion::None => {}
-                            UploadCompletion::Results(urls) => {
-                                audit.published_results = urls;
-                                audit.report_copied = false;
-                            }
-                            UploadCompletion::Spins(urls) => audit.published_spins = urls,
-                        }
+                    if failed == 0
+                        && let Some(urls) = completion
+                    {
+                        audit.published_results = urls;
                     }
                     if let Some((title, message)) =
                         audit.sirv_job.as_ref().and_then(transfer_failure)

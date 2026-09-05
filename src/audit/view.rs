@@ -86,7 +86,6 @@ impl Audit {
                 SirvJobKind::Push => "Pushing",
                 SirvJobKind::PushChanged => "Overwriting on Sirv",
                 SirvJobKind::Publish => "Publishing",
-                SirvJobKind::Spin => "Publishing spin frames",
             };
             let current = job
                 .current
@@ -1178,7 +1177,6 @@ impl Audit {
                             .min_w_0()
                             .overflow_hidden()
                             .children(self.sirv_reconciliation(cx))
-                            .children(self.spin_notice(cx))
                             .child(self.audit_content(count, window, cx))
                             .children(
                                 (self.sirv_scope != Some(SirvScope::OnlyRemote)

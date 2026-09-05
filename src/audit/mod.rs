@@ -641,14 +641,7 @@ pub(crate) struct Audit {
     heavy: usize,
     /// Files whose extension disagrees with their contents, also fixed for a scan.
     mislabelled: usize,
-    /// Files outside the one marketplace preflight Press can prove from headers.
-    marketplace: usize,
-    /// Numbered sequences found once per scan, ready or with a named issue.
-    spins: Vec<acquisition::SpinSet>,
-    /// Copy/publish acknowledgements stay visible until the dataset or results change.
-    report_copied: bool,
     published_results: Vec<String>,
-    published_spins: Vec<String>,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -767,8 +760,6 @@ enum SirvJobKind {
     PushChanged,
     /// Publish converted results under optimized/.
     Publish,
-    /// Publish complete numbered sequences under press-spins/.
-    Spin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -776,13 +767,6 @@ enum SirvScope {
     OnlyLocal,
     Changed,
     OnlyRemote,
-}
-
-#[derive(Clone)]
-enum UploadCompletion {
-    None,
-    Results(Vec<String>),
-    Spins(Vec<String>),
 }
 
 struct SirvJob {
@@ -1219,12 +1203,6 @@ impl Audit {
             .iter()
             .filter(|entry| Finding::Heavy.holds(entry))
             .count();
-        self.marketplace = scanned
-            .entries
-            .iter()
-            .filter(|entry| acquisition::marketplace_fails(entry))
-            .count();
-        self.spins = acquisition::detect_spins(&self.root, &scanned.entries);
         self.entries = scanned.entries;
         // The scroll handle belongs to the gallery rather than its data. A new folder
         // can have the same column count, so a render-time column transition cannot
@@ -1308,8 +1286,6 @@ impl Audit {
         self.compare_step = 1;
         self.prefetch = None;
         self.prefetch_key = None;
-        self.report_copied = false;
-        self.published_spins.clear();
         self.filter.clear();
         // A finding belongs to the folder it was found in. Carrying it over would show
         // the new folder narrowed to something nobody asked about.
@@ -1941,8 +1917,6 @@ enum Finding {
     /// More bytes per pixel than a photograph needs. These are the files a conversion
     /// is actually for.
     Heavy,
-    /// Objective marketplace file checks. Background colour remains a visual check.
-    Marketplace,
     /// Rows the last run could not convert. The only finding about the run rather
     /// than the file, so a folder of 6,000 images with 40 failures has somewhere to
     /// put them instead of three names on a toast nobody kept.
@@ -1958,7 +1932,6 @@ impl Finding {
         match self {
             Finding::Mislabelled => entry.extension_lies(),
             Finding::Heavy => is_heavy(entry),
-            Finding::Marketplace => acquisition::marketplace_fails(entry),
             Finding::Failed => false,
         }
     }
@@ -2252,11 +2225,6 @@ pub(crate) fn build_audit(
             .iter()
             .filter(|entry| Finding::Heavy.holds(entry))
             .count();
-        let marketplace = entries
-            .iter()
-            .filter(|entry| acquisition::marketplace_fails(entry))
-            .count();
-        let spins = acquisition::detect_spins(&root, &entries);
         // The personal library rarely changes: read it once here, then again
         // after every mutation action. Missing folders read as empty.
         let (recipes, recipes_skipped) = crate::recipe::dir()
@@ -2289,11 +2257,7 @@ pub(crate) fn build_audit(
             visible_bytes: 0,
             heavy,
             mislabelled,
-            marketplace,
-            spins,
-            report_copied: false,
             published_results: Vec::new(),
-            published_spins: Vec::new(),
             studio_job: None,
             studio_tool: studio::Tool::default(),
             studio_key,

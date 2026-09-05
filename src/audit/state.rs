@@ -54,7 +54,7 @@ impl Audit {
                 }
                 self.clear_error("settings", cx);
             }
-            settings::WriteOutcome::Superseded { .. } => {}
+            settings::WriteOutcome::Superseded => {}
             settings::WriteOutcome::Failed { error, .. } => self.notify_error(
                 "settings",
                 "Couldn’t save settings",
@@ -101,10 +101,10 @@ impl Audit {
         // `write_output` atomically replaces an existing target on the supported
         // Unix builds; std's Windows rename does not.
         if !cfg!(windows)
-            && target_count > 0
             && self
-                .targets()
+                .visible
                 .iter()
+                .filter(|index| self.selected.contains(index))
                 .all(|index| self.completed_outputs.contains(&(*index, self.format)))
         {
             let output = if target_count == 1 {
@@ -142,7 +142,6 @@ impl Audit {
         self.stopped_run = None;
         self.converted_totals = (0, 0);
         self.published_results.clear();
-        self.report_copied = false;
         // The failures go with the results. "JPEG cannot keep transparency" is a fact
         // about the run that said it, not about the same folder aimed at WebP, and a
         // badge left over from settings nobody is using any more is a lie.
@@ -700,23 +699,20 @@ impl Audit {
         if self.converting {
             return;
         }
-        let (from, to) = if self.anchor <= self.cursor {
-            (self.anchor, self.cursor)
-        } else {
-            (self.cursor, self.anchor)
-        };
-        let run: Vec<usize> = (from..=to).filter_map(|row| self.entry_at(row)).collect();
+        let from = self.anchor.min(self.cursor);
+        let to = self.anchor.max(self.cursor);
         self.selected.clear();
-        self.selected.extend(run);
+        self.selected.extend(
+            self.visible
+                .iter()
+                .take(to.saturating_add(1))
+                .skip(from)
+                .copied(),
+        );
         self.selection_changed(cx);
     }
 
-    /// What a click on a row means, by the rules every file list uses: plain click
-    /// selects just that row, the platform modifier adds or removes one, shift takes
-    /// the run from the last click, and a second click opens it.
-    ///
-    /// A plain click used to open the comparison, which made picking a few files to
-    /// convert a fight with a full-screen preview.
+    /// Plain click selects, Ctrl/Cmd toggles, Shift adds a range, double-click previews.
     pub(super) fn click_row(
         &mut self,
         row: usize,
@@ -743,15 +739,15 @@ impl Audit {
                 self.selected.insert(entry);
             }
         } else if modifiers.shift {
-            // From wherever the last plain click landed to here, inclusive, so a
-            // run of heavy files is two clicks rather than twenty.
-            let (from, to) = if self.anchor <= row {
-                (self.anchor, row)
-            } else {
-                (row, self.anchor)
-            };
-            let run: Vec<usize> = (from..=to).filter_map(|row| self.entry_at(row)).collect();
-            self.selected.extend(run);
+            let from = self.anchor.min(row);
+            let to = self.anchor.max(row);
+            self.selected.extend(
+                self.visible
+                    .iter()
+                    .take(to.saturating_add(1))
+                    .skip(from)
+                    .copied(),
+            );
         } else {
             self.selected.clear();
             self.selected.insert(entry);
@@ -791,17 +787,14 @@ impl Audit {
 
         let toggle = event.modifiers.control || event.modifiers.platform;
         let additive = toggle || event.modifiers.shift;
-        let base = if additive {
-            self.selected.clone()
-        } else {
-            HashSet::new()
-        };
-        self.selected = base.clone();
+        if !additive {
+            self.selected.clear();
+        }
         let at = (f32::from(event.position.x), f32::from(event.position.y));
         self.marquee = Some(Marquee {
             start: at,
             current: at,
-            base,
+            base: self.selected.clone(),
             toggle,
         });
         self.refresh_target_summary();
@@ -826,15 +819,12 @@ impl Audit {
             f32::from(event.position.y.clamp(surface.top(), surface.bottom())),
         );
         let bounds = marquee.bounds();
-        let base = marquee.base.clone();
+        let mut selected = marquee.base.clone();
         let toggle = marquee.toggle;
-        let hits: Vec<_> = self
-            .selection_bounds
-            .borrow()
+        let item_bounds = self.selection_bounds.borrow();
+        let hits = item_bounds
             .iter()
-            .filter_map(|(index, item)| item.intersects(&bounds).then_some(*index))
-            .collect();
-        let mut selected = base;
+            .filter_map(|(index, item)| item.intersects(&bounds).then_some(*index));
         if toggle {
             for hit in hits {
                 if !selected.insert(hit) {
@@ -844,6 +834,7 @@ impl Audit {
         } else {
             selected.extend(hits);
         }
+        drop(item_bounds);
         if selected != self.selected {
             self.selected = selected;
             self.refresh_target_summary();
