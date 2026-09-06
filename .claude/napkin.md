@@ -92,3 +92,21 @@ sessions learn.
 - 2026-09-06: Released v0.5.0 from main: list and header UI batch (`b7d52a0`)
   on top of product-set jobs and versioned recipes. Same recipe as v0.4.0;
   CI not watched in that session, check the release run before announcing.
+- 2026-09-06: Operations rail = always-present 56px tool strip (`rail-strip`,
+  `strip-<slug>`) plus an open panel (`rail`) sized by `rail_size` and a
+  6px grab edge (`rail-resize`); the workspace root follows the drag in
+  `drag_rail`, and a drag past `RAIL_MIN - RAIL_SNAP` collapses it. Width
+  persists as `rail_width=` in settings. `rail_width()` includes the strip,
+  so table/gallery/bar layout math already accounts for it.
+- 2026-09-06: Preset UI: the chooser menu lists rows only (tests navigate it
+  with `up enter`); verbs live behind the `recipe-actions` dots. Save changes
+  bumps `revision` via `update_recipe`; Save as / Rename use the inline prompt
+  (`recipe_prompt`, `open_recipe_prompt`). `PopupMenuItem::label` is a fine
+  section header; `Switch::small()` exists; clippy wants `update(cx, act)`
+  for a `fn` pointer, not a closure around it.
+- 2026-09-06: `ux/scenarios.json` window-relative clicks accept negative x/y
+  measured from the right/bottom edge; `panel-collapsed` (-28,70) hits the
+  strip's first tool and `preset-actions` (-90,206) hits the dots at 1100×720.
+- 2026-09-06: Released v0.6.0 from main: tool strip + resizable panel +
+  preset rework on top of the v0.5.0 header batch. CI not watched in that
+  session either; check both release runs before announcing.
