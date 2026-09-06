@@ -6,6 +6,7 @@ mod compare_view;
 mod convert_job;
 mod gallery;
 mod header;
+mod job_actions;
 mod local_ai_actions;
 mod media;
 mod panel;
@@ -421,8 +422,22 @@ pub(crate) struct Audit {
     /// The last applied preset row, built-in or personal. Settings edits never
     /// rewrite it: a diverged row reads as modified, never as a silent edit.
     selected_recipe: Option<String>,
+    recipes_open: bool,
     /// The name Save and Rename read. Unfocused text, applied on click.
     recipe_name_input: gpui_kit::Entity<InputState>,
+    /// The open product-set job: anonymous until its first auto-save. Never
+    /// absent, so actions never branch on its existence.
+    work_job: crate::job::Job,
+    /// Resolved role states, refreshed after actions and runs — never during
+    /// render, which must not touch the filesystem.
+    work_states: Vec<crate::job::RoleState>,
+    /// Recorded outputs that no longer match their mapped sources.
+    work_stale: Vec<crate::job::StaleDeliverable>,
+    /// New product name and SKU, and new role label. Unfocused text, applied
+    /// on click beside the product they belong to.
+    product_name_input: gpui_kit::Entity<InputState>,
+    product_sku_input: gpui_kit::Entity<InputState>,
+    role_name_input: gpui_kit::Entity<InputState>,
     /// Bounds of the rendered rows or tiles. Marquee selection only needs the
     /// visible objects, so virtualised items never get measured eagerly.
     selection_bounds: Rc<RefCell<HashMap<usize, gpui_kit::Bounds<gpui_kit::Pixels>>>>,
@@ -846,6 +861,12 @@ impl CachedMedia {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CompareDrag {
+    Pan((f32, f32), (f32, f32)),
+    Split,
+}
+
 struct Comparison {
     index: usize,
     dataset_generation: u64,
@@ -867,8 +888,8 @@ struct Comparison {
     /// Display scale. `None` means fit the window; `Some(1.0)` is one image pixel per
     /// screen pixel. Kept separate so resizing the window keeps "fit" fitting.
     zoom: Option<f32>,
-    /// Pointer position when the current drag began, and the pan it started from.
-    drag: Option<((f32, f32), (f32, f32))>,
+    /// The pointer interaction that owns movement until release.
+    drag: Option<CompareDrag>,
     /// The output being examined, when this is a finished result rather than a
     /// preview. Set means both sides came off disk and the bytes are real.
     written: Option<PathBuf>,
@@ -1187,6 +1208,12 @@ impl Audit {
         }
         self.studio_source = None;
         self.root = root;
+        // Product sets follow the folder, not the run: a new dataset opens
+        // whatever job claims it, with states resolved fresh below.
+        self.work_job = job_actions::load_job_for(&self.root);
+        self.work_states.clear();
+        self.work_stale.clear();
+        self.refresh_job_states(cx);
         self.browser_output_root = output_identity(&self.output, &self.root);
         self.batch_size = batch_size;
         self.batch_folders = None;
@@ -1219,9 +1246,8 @@ impl Audit {
         self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
         self.walk_errors = scanned.walk_errors;
-        // Unreadable files toast once per dataset with their names. There is
-        // no status bar anymore, so a name-dump inline has nowhere to live —
-        // and truncated into one line it was a blob nobody could read.
+        // Unreadable files toast once per dataset with their names, which
+        // would be truncated beyond recognition in the one-line status bar.
         if self.unreadable.is_empty() && self.walk_errors.is_empty() {
             self.clear_error("scan", cx);
         } else {
@@ -1326,17 +1352,6 @@ impl Audit {
         // list again. Ticking before that would tick the rows a stale scope was
         // still hiding, and open the folder with nothing selected.
         self.select_all_visible();
-        // No status bar: the folder totals toast once per dataset, next to the
-        // scan-error toast they replace when the folder reads clean. A clean
-        // folder announces its counts; a dirty one names its damage instead.
-        if self.unreadable.is_empty() && self.walk_errors.is_empty() {
-            let folder = self
-                .root
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Folder".to_string());
-            self.notify_success("scan", folder, self.status_line(self.visible.len()), cx);
-        }
         self.schedule_estimate(cx);
         cx.notify();
 
@@ -2133,6 +2148,11 @@ pub(crate) fn build_audit(
             })
             .detach();
         }
+        let product_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Product name"));
+        let product_sku_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("SKU hint (optional)"));
+        let role_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Role label"));
 
         let recipe_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Recipe name"));
         let quality_slider = cx.new(|_| {
@@ -2230,6 +2250,7 @@ pub(crate) fn build_audit(
         let (recipes, recipes_skipped) = crate::recipe::dir()
             .map(|dir| crate::recipe::list(&dir))
             .unwrap_or_default();
+        let work_job = job_actions::load_job_for(&root);
         let mut audit = Audit {
             window: window.window_handle(),
             table: None,
@@ -2285,6 +2306,7 @@ pub(crate) fn build_audit(
             recipes,
             recipes_skipped,
             selected_recipe: None,
+            recipes_open: false,
             selection_bounds: Rc::new(RefCell::new(HashMap::new())),
             selection_surface: Rc::new(Cell::new(gpui_kit::Bounds::default())),
             marquee: None,
@@ -2297,6 +2319,12 @@ pub(crate) fn build_audit(
             finding: None,
             filter_input,
             recipe_name_input,
+            work_job,
+            work_states: Vec::new(),
+            work_stale: Vec::new(),
+            product_name_input,
+            product_sku_input,
+            role_name_input,
             cursor: 0,
             cursor_redraw_pending: false,
             anchor: 0,

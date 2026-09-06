@@ -337,8 +337,8 @@ regression there would silently flatten every cut-out.
 
 ## Comparing
 
-Double-click any row, press **Enter**, or pass a single file to open the original
-against the selected format at the current quality. The encode happens in memory —
+Double-click any row, press **Enter**, or pass a single file to preview the original.
+Choose **Compare** to inspect it against the selected format at the current quality. The encode happens in memory —
 nothing is written, because the point is to decide whether the trade is acceptable
 *before* committing to it.
 
@@ -347,8 +347,9 @@ nothing is written, because the point is to decide whether the trade is acceptab
 **The view opens fitted.** Press **100%** to inspect native pixels, or scroll to pick
 another zoom level. The original and result stay registered at every scale.
 
-Move the pointer to sweep the divider across. **Hold the left button and drag to
-pan** — both sides move together, so they never fall out of register.
+Drag the divider grip to move the split. With the grip focused, **Left/Right** move
+it and **Home/End** show either side. **Drag the image to pan** — both sides move
+together, so they never fall out of register. Moving the pointer alone changes nothing.
 
 At q40 on a 12 MB photo the sky goes from grainy to smooth and the file goes to
 262 KB. Whether that is a good trade is a judgement, which is why this shows you

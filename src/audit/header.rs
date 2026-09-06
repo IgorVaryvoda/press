@@ -71,7 +71,7 @@ impl Audit {
             ("PgUp PgDn Home End", "Jump through the list"),
             ("Shift + move", "Extend the selection"),
             ("Space", "Tick the row"),
-            ("Enter", "Compare original and output"),
+            ("Enter", "Preview image"),
             ("Ctrl/⌘ + A", "Select everything shown"),
             ("Ctrl/⌘ + K", "Focus the filter box"),
             ("Ctrl/⌘ + ,", "Open settings"),
@@ -133,6 +133,7 @@ impl Audit {
     pub(super) fn shortcuts_overlay(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         div()
             .id("shortcuts-overlay")
+            .occlude()
             .absolute()
             .inset_0()
             .flex()
@@ -146,8 +147,9 @@ impl Audit {
                     .debug_selector(|| "shortcuts-backdrop".into())
                     .on_mouse_down(
                         gpui_kit::MouseButton::Left,
-                        cx.listener(|audit, _, _, cx| {
+                        cx.listener(|audit, _, window, cx| {
                             audit.shortcuts_open = false;
+                            window.focus(&audit.focus, cx);
                             cx.notify();
                             cx.stop_propagation();
                         }),
@@ -424,6 +426,7 @@ impl Audit {
                 // The full shortcut list, one key away. Text, not an icon: no
                 // icon in the set says "keyboard" on its own.
                 Button::new("open-shortcuts")
+                    .debug_selector(|| "open-shortcuts".into())
                     .small()
                     .ghost()
                     .label("?")

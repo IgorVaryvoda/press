@@ -1536,7 +1536,7 @@ fn installing_a_dataset_announces_unreadable_files_once_in_a_toast(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn a_clean_dataset_replaces_the_scan_error_with_its_totals(cx: &mut TestAppContext) {
+fn a_clean_dataset_clears_only_the_scan_error_without_a_success_toast(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(cx, Vec::new());
     audit.update_in(cx, |audit, window, cx| {
         audit.install_dataset(
@@ -1556,8 +1556,11 @@ fn a_clean_dataset_replaces_the_scan_error_with_its_totals(cx: &mut TestAppConte
             cx,
         );
     });
+    audit.update(cx, |audit, cx| {
+        audit.notify_error("settings", "Couldn’t save settings", "read-only folder", cx);
+    });
     cx.run_until_parked();
-    assert_eq!(notification_count(cx), 1);
+    assert_eq!(notification_count(cx), 2);
     audit.update_in(cx, |audit, window, cx| {
         audit.install_dataset(
             scan::Scan {
@@ -1577,13 +1580,15 @@ fn a_clean_dataset_replaces_the_scan_error_with_its_totals(cx: &mut TestAppConte
         );
     });
     cx.run_until_parked();
-    // The error is gone; the clean folder announces its (empty) totals in the
-    // same scope instead.
+    finish_notification_exit(cx);
+    // Success clears only the old scan failure; counts stay in the status bar.
     assert_eq!(notification_count(cx), 1);
     assert!(
-        cx.debug_bounds("error-toast-message:0 images").is_some(),
-        "a clean folder toasts its counts, not the old damage"
+        cx.debug_bounds("error-toast-message:read-only folder")
+            .is_some(),
+        "an unrelated failure remains visible"
     );
+    assert!(cx.debug_bounds("error-toast-message:0 images").is_none());
     assert!(
         cx.debug_bounds("error-toast-message:would not decode: a.jpg")
             .is_none()
@@ -1621,13 +1626,8 @@ fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAp
         .advance_clock(PREVIEW_DELAY + Duration::from_millis(50));
     cx.run_until_parked();
 
-    // The only toast is the new folder's totals: the superseded preview's
-    // failure never reaches the new dataset.
-    assert_eq!(notification_count(cx), 1);
-    assert!(
-        cx.debug_bounds("error-toast-message:0 images").is_some(),
-        "a clean folder toasts its counts"
-    );
+    // Neither routine success nor a superseded preview covers the new dataset.
+    assert_eq!(notification_count(cx), 0);
 }
 
 #[gpui_kit::test]
@@ -5455,6 +5455,277 @@ fn recipe_import_export_round_trip(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Products, roles, mappings and removal through the audit actions against an
+/// isolated library: the files on disk follow the clicks.
+#[gpui_kit::test]
+fn job_products_roles_and_mappings_follow_actions(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-actions-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.product_sku_input.update(cx, |input, cx| {
+            input.set_value("SKU-1", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.products.len(), 1);
+        assert_eq!(audit.work_job.products[0].id, "hero");
+        assert_eq!(audit.work_job.products[0].roles.len(), 2);
+    });
+    audit.update(cx, |audit, cx| audit.map_selected(&dir, "hero", "main", cx));
+    audit.read_with(cx, |audit, _| {
+        let mappings = &audit.work_job.products[0].mappings;
+        assert_eq!(mappings.len(), 2, "both ticked files map to main");
+        assert!(mappings.iter().all(|mapping| mapping.role_id == "main"));
+    });
+    // Mapping twice is a no-op, not duplication.
+    audit.update(cx, |audit, cx| audit.map_selected(&dir, "hero", "main", cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.products[0].mappings.len(), 2);
+    });
+    // The section renders with products and mappings present: a row-indexing
+    // bug panics on draw rather than slipping into the release binary.
+    audit.update(cx, |audit, cx| audit.open_rail(Rail::Convert, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("sets-section").is_some());
+    let first = audit.read_with(cx, |audit, _| {
+        audit.work_job.products[0].mappings[0].id.clone()
+    });
+    audit.update(cx, |audit, cx| audit.unmap(&dir, &first, cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.products[0].mappings.len(), 1);
+    });
+    // A role that still maps files refuses; the empty one goes.
+    audit.update(cx, |audit, cx| audit.delete_role(&dir, "hero", "main", cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.work_job.products[0]
+                .roles
+                .iter()
+                .any(|role| role.id == "main")
+        );
+    });
+    audit.update(cx, |audit, cx| {
+        audit.delete_role(&dir, "hero", "detail", cx)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.work_job.products[0]
+                .roles
+                .iter()
+                .all(|role| role.id != "detail")
+        );
+    });
+    audit.update(cx, |audit, cx| audit.delete_product(&dir, "hero", cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.work_job.products.is_empty());
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// CSV import through the audit: exact rows map, the report names the rest,
+/// and nothing ambiguous is written.
+#[gpui_kit::test]
+fn job_csv_import_maps_and_reports(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-csv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let names = audit.read_with(cx, |audit, _| {
+        audit
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .expect("fixture has a name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+    });
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.product_sku_input.update(cx, |input, cx| {
+            input.set_value("SKU-1", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    let sheet = format!(
+        "sku,role,filename\nSKU-1,main,{}\nSKU-1,detail,missing.png\n",
+        names[0]
+    );
+    audit.update(cx, |audit, cx| {
+        audit.import_csv_bytes(&dir, sheet.as_bytes(), cx)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.products[0].mappings.len(), 1);
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A deleted source reads as missing after refresh; relinking is a store
+/// operation the row keeps pointing through.
+#[gpui_kit::test]
+fn job_missing_sources_refresh_visibly(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-missing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    audit.update(cx, |audit, cx| audit.map_selected(&dir, "hero", "main", cx));
+    audit.update(cx, |audit, cx| audit.refresh_job_states(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.work_states.iter().any(|state| {
+            state
+                .sources
+                .iter()
+                .any(|source| source.status == crate::job::SourceStatus::Fresh)
+        }));
+    });
+    let path = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
+    std::fs::remove_file(&path).unwrap();
+    audit.update(cx, |audit, cx| audit.refresh_job_states(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.work_states.iter().any(|state| {
+            state
+                .sources
+                .iter()
+                .any(|source| source.status == crate::job::SourceStatus::Missing)
+        }));
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Save, export, import and restart: the job survives the process boundary
+/// with its products and mappings intact.
+#[gpui_kit::test]
+fn job_export_import_survives_restart(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    audit.update(cx, |audit, cx| audit.map_selected(&dir, "hero", "main", cx));
+    let target = dir.join("job.press-job.json");
+    audit.update(cx, |audit, cx| audit.export_job_to(&target, cx));
+    let exported = std::fs::read(&target).expect("the export lands");
+    // A later session adopts the exported bytes under the same folder.
+    audit.update(cx, |audit, cx| {
+        audit.import_job_bytes(&dir, &exported, cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.products.len(), 1);
+        assert_eq!(audit.work_job.products[0].mappings.len(), 1);
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Binding the selected recipe records the job's target and persists it;
+/// with nothing selected the job keeps no target instead of inventing one.
+#[gpui_kit::test]
+fn job_target_binds_the_selected_recipe(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-target-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    // Nothing selected: the refusal leaves the job untargeted.
+    audit.update(cx, |audit, cx| {
+        audit.bind_current_recipe_as_target(&dir, cx)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.target_recipe, None);
+    });
+    audit.update(cx, |audit, _| {
+        audit.selected_recipe = Some("night".to_string());
+    });
+    audit.update(cx, |audit, cx| {
+        audit.bind_current_recipe_as_target(&dir, cx)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.target_recipe.as_deref(), Some("night"));
+    });
+    // The binding survives the file round trip; clearing drops it.
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let reloaded = job_actions::load_job_for_in(&dir, &root);
+    assert_eq!(reloaded.target_recipe.as_deref(), Some("night"));
+    audit.update(cx, |audit, cx| audit.clear_job_target(&dir, cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_job.target_recipe, None);
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Edit a converted source and only its deliverable goes stale; selecting
+/// stale ticks exactly the outdated file for regeneration.
+#[gpui_kit::test]
+fn job_stale_sources_select_for_regeneration(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    audit.update(cx, |audit, cx| audit.map_selected(&dir, "hero", "main", cx));
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert_eq!(audit.results.len(), 1));
+    // The run opens its first result; close it to return to the list, the
+    // way back into the stale flow below.
+    audit.update(cx, |audit, _| {
+        audit.compare = None;
+    });
+    let path = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
+    crate::convert::tests::photo(8, 8)
+        .save(&path)
+        .expect("the edit lands");
+    audit.update(cx, |audit, cx| audit.refresh_job_states(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.work_stale.len(),
+            1,
+            "the edited source invalidates its output"
+        );
+    });
+    audit.update(cx, |audit, cx| audit.select_stale_sources(cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, std::collections::HashSet::from([0]));
+    });
+    audit.update(cx, |audit, cx| audit.open_rail(Rail::Convert, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("rail").is_some(),
+        "selecting stale keeps the rail"
+    );
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
     let stopped = panel::conversion_result_state(Some(36), 12);
@@ -6150,7 +6421,7 @@ fn the_status_bar_names_folders_and_images(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn installing_a_clean_dataset_toasts_its_totals(cx: &mut TestAppContext) {
+fn installing_a_clean_dataset_keeps_totals_without_a_toast(cx: &mut TestAppContext) {
     let (audit, cx) = notification_audit(cx, Vec::new());
     audit.update_in(cx, |audit, window, cx| {
         audit.install_dataset(
@@ -6174,12 +6445,11 @@ fn installing_a_clean_dataset_toasts_its_totals(cx: &mut TestAppContext) {
         );
     });
     cx.run_until_parked();
-    assert_eq!(notification_count(cx), 1);
-    assert!(
-        cx.debug_bounds("error-toast-message:2 images · 512 B")
-            .is_some(),
-        "a clean folder announces its counts once"
-    );
+    assert_eq!(notification_count(cx), 0);
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.status_line(audit.visible.len()), "2 images · 512 B");
+    });
+    assert!(cx.debug_bounds("status-bar").is_some());
 }
 
 /// The header keeps one persistent Sirv entry outside the Open menu, so
@@ -6453,4 +6723,370 @@ fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext)
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("conversion-copy-embed").is_some());
     assert!(cx.debug_bounds("conversion-publish").is_none());
+}
+
+#[gpui_kit::test]
+fn keyboard_help_renders_and_owns_list_input(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    for grid in [false, true] {
+        audit.update_in(cx, |audit, window, cx| {
+            audit.grid = grid;
+            audit.selected = [0].into_iter().collect();
+            audit.cursor = 0;
+            window.focus(&audit.focus, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("open-shortcuts").unwrap();
+        cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("shortcuts-card").is_some());
+        cx.simulate_keystrokes("down right space enter ctrl-a ctrl-k ctrl-,");
+        audit.read_with(cx, |audit, _| {
+            assert_eq!(audit.cursor, 0);
+            assert_eq!(audit.selected, [0].into_iter().collect());
+            assert!(audit.compare.is_none());
+            assert!(audit.settings_panel.is_none());
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("shortcuts-card").is_none());
+        cx.simulate_keystrokes("?");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("shortcuts-card").is_some());
+        let backdrop = cx.debug_bounds("shortcuts-backdrop").unwrap();
+        cx.simulate_click(
+            backdrop.origin + gpui_kit::point(px(5.), px(5.)),
+            gpui_kit::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("shortcuts-card").is_none());
+        audit.read_with(cx, |audit, _| {
+            assert_eq!(audit.selected, [0].into_iter().collect())
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn dialog_pointer_input_cannot_change_the_covered_audit(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    for grid in [false, true] {
+        for sirv in [false, true] {
+            audit.update_in(cx, |audit, window, cx| {
+                audit.grid = grid;
+                audit.selected = [0].into_iter().collect();
+                audit.cursor = 0;
+                if sirv {
+                    audit.sirv_browser = Some(SirvBrowser {
+                        client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
+                            sirv::Credentials {
+                                client_id: String::new(),
+                                client_secret: String::new(),
+                            },
+                        ))),
+                        path: "/".into(),
+                        needs_credentials: false,
+                        nodes: Some(Ok(Vec::new())),
+                        generation: 0,
+                        session: 1,
+                        focused: false,
+                        focus: cx.focus_handle(),
+                    });
+                } else {
+                    audit.open_settings(window, cx);
+                }
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let root = audit.read_with(cx, |audit, _| audit.root.clone());
+            let bounds = cx
+                .debug_bounds(if sirv { "sirv-scrim" } else { "settings-scrim" })
+                .unwrap();
+            for at in [
+                bounds.center(),
+                bounds.origin + gpui_kit::point(px(20.), px(100.)),
+            ] {
+                cx.simulate_mouse_down(
+                    at,
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::none(),
+                );
+                cx.simulate_mouse_move(
+                    at + gpui_kit::point(px(70.), px(50.)),
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::none(),
+                );
+                cx.simulate_mouse_up(
+                    at + gpui_kit::point(px(70.), px(50.)),
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::none(),
+                );
+                audit.read_with(cx, |audit, _| {
+                    assert_eq!(audit.selected, [0].into_iter().collect());
+                    assert_eq!(audit.cursor, 0);
+                    assert_eq!(audit.root, root);
+                    assert!(audit.compare.is_none());
+                    assert!(audit.marquee.is_none());
+                });
+            }
+            if sirv {
+                let close = cx.debug_bounds("sirv-close").unwrap();
+                cx.simulate_click(close.center(), gpui_kit::Modifiers::none());
+            } else {
+                cx.simulate_keystrokes("escape");
+            }
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let audit = audit.read(cx);
+                assert!(audit.settings_panel.is_none());
+                assert!(audit.sirv_browser.is_none());
+                assert!(audit.focus.is_focused(window));
+            });
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn conversion_controls_stay_visible_before_recipe_management(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    for count in [0, 30] {
+        audit.update(cx, |audit, cx| {
+            audit.rail = Rail::Convert;
+            audit.sidebar_open = true;
+            audit.quality = Quality::lossy(80.);
+            audit.recipes = (0..count)
+                .map(|index| {
+                    let mut recipe = crate::recipe::Recipe::builtins()[0].clone();
+                    recipe.id = format!("personal-{index}");
+                    recipe.name = format!("Personal {index}");
+                    recipe
+                })
+                .collect();
+            cx.notify();
+        });
+        for (width, height) in [(760., 640.), (1100., 720.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked();
+            audit.update(cx, |audit, cx| {
+                audit.estimate = Some((500_000, 3, 0));
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let body = cx.debug_bounds("rail-settings").unwrap();
+            for selector in ["format-setting", "quality-control", "max-size-setting"] {
+                let control = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    control.top() >= body.top() && control.bottom() <= body.bottom(),
+                    "{selector}: {control:?} outside {body:?}"
+                );
+                assert!(control.size.height > px(0.));
+            }
+            assert!(cx.debug_bounds("recipe-name-input").is_none());
+        }
+    }
+    let chooser = cx.debug_bounds("preset-chooser").unwrap();
+    cx.simulate_click(chooser.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit
+                .selected_recipe
+                .as_deref()
+                .is_some_and(|id| id.starts_with("personal-"))
+        );
+        assert_eq!(
+            audit.format,
+            crate::recipe::Recipe::builtins()[0].effective().0
+        );
+    });
+    let disclosure = cx.debug_bounds("manage-recipes").unwrap();
+    cx.simulate_click(disclosure.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("recipe-name-input").is_some());
+    assert!(cx.debug_bounds("sets-section").is_some());
+}
+
+#[test]
+fn comparison_fit_reserves_controls_and_never_upscales() {
+    for (window_w, window_h) in [(760., 640.), (1100., 720.), (1440., 900.)] {
+        for written in [false, true] {
+            let bounds = compare_view::image_bounds(size(px(window_w), px(window_h)), written);
+            assert!(f32::from(bounds.top()) >= 88.);
+            assert!(f32::from(bounds.bottom()) <= window_h - if written { 194. } else { 74. });
+            for (width, height) in [(800, 1600), (1600, 800), (40, 20)] {
+                let scale = compare_view::fit_scale(bounds, width, height);
+                assert!(scale <= 1.);
+                assert!(width as f32 * scale <= f32::from(bounds.size.width) + 0.001);
+                assert!(height as f32 * scale <= f32::from(bounds.size.height) + 0.001);
+                if width == 40 {
+                    assert_eq!(scale, 1.);
+                }
+            }
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn comparison_grip_and_canvas_own_pointer_and_keyboard_input(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
+        audit.compare = Some(Comparison {
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            mode: MediaMode::Compare,
+            focused: false,
+            key: compare::Key::new(
+                &audit.entries[0].path,
+                &audit.entries[0].path,
+                audit.format,
+                audit.quality,
+                audit.max_edge,
+            ),
+            preview: None,
+            pair: Some(Arc::new(Pair {
+                original: image.clone(),
+                converted: image,
+                converted_bytes: 12,
+                width: 800,
+                height: 1600,
+            })),
+            failed: false,
+            split: 0.5,
+            pan: (0., 0.),
+            zoom: None,
+            drag: None,
+            written: None,
+            produced_by: None,
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let grip = cx
+        .debug_bounds("compare-grip")
+        .expect("comparison grip")
+        .center();
+    let destination = grip + gpui_kit::point(px(100.), px(20.));
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: destination,
+        ..Default::default()
+    });
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().unwrap();
+        assert_eq!(comparison.split, 0.5);
+        assert_eq!(comparison.pan, (0., 0.));
+    });
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        button: gpui_kit::MouseButton::Left,
+        position: grip,
+        ..Default::default()
+    });
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: destination,
+        pressed_button: Some(gpui_kit::MouseButton::Left),
+        ..Default::default()
+    });
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        button: gpui_kit::MouseButton::Left,
+        position: destination,
+        ..Default::default()
+    });
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().unwrap();
+        assert!(comparison.split > 0.5);
+        assert_eq!(comparison.pan, (0., 0.));
+        assert!(comparison.drag.is_none());
+    });
+    cx.simulate_keystrokes("home");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().split, 0.);
+        assert_eq!(audit.compare.as_ref().unwrap().index, 0);
+    });
+    cx.simulate_keystrokes("right");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().split, 0.05)
+    });
+    cx.simulate_keystrokes("ctrl-right");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().split, 0.05);
+        assert_eq!(audit.compare.as_ref().unwrap().index, 0);
+    });
+    cx.simulate_keystrokes("end left");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().split, 0.95)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let canvas = cx.debug_bounds("compare-stage").unwrap().center();
+    let pan_to = canvas + gpui_kit::point(px(50.), px(30.));
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        button: gpui_kit::MouseButton::Left,
+        position: canvas,
+        ..Default::default()
+    });
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: pan_to,
+        pressed_button: Some(gpui_kit::MouseButton::Left),
+        ..Default::default()
+    });
+    // Release in the header, outside the image canvas and original grip.
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        button: gpui_kit::MouseButton::Left,
+        position: gpui_kit::point(px(10.), px(10.)),
+        ..Default::default()
+    });
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().unwrap();
+        assert_eq!(comparison.pan, (50., 30.));
+        assert_eq!(comparison.split, 0.95);
+        assert!(comparison.drag.is_none());
+    });
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: canvas,
+        ..Default::default()
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().pan, (50., 30.))
+    });
+    cx.simulate_keystrokes("ctrl-right");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().index, 0)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let actual = cx.debug_bounds("compare-actual").unwrap().center();
+    cx.simulate_click(actual, gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().unwrap();
+        assert_eq!(comparison.zoom, Some(1.));
+        assert!(comparison.drag.is_none(), "chrome clicks cannot pan");
+    });
+    let fit = cx.debug_bounds("compare-fit").unwrap().center();
+    cx.simulate_click(fit, gpui_kit::Modifiers::none());
+    // A scroll at the image centre must not introduce pan; this also catches
+    // zoom calculations that forget the reserved header's coordinate offset.
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: canvas,
+        delta: gpui_kit::ScrollDelta::Lines(gpui_kit::point(0., 1.)),
+        ..Default::default()
+    });
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().unwrap();
+        assert!(comparison.zoom.is_some());
+        assert!(comparison.pan.0.abs() < 0.5 && comparison.pan.1.abs() < 0.5);
+    });
+    // Canvas focus restores the existing image-navigation keys.
+    cx.simulate_click(canvas, gpui_kit::Modifiers::none());
+    let expected_next = audit.read_with(cx, |audit, _| {
+        let row = audit.visible.iter().position(|&index| index == 0).unwrap();
+        audit.visible[row + 1]
+    });
+    cx.simulate_keystrokes("right");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.compare.as_ref().unwrap().index, expected_next)
+    });
 }

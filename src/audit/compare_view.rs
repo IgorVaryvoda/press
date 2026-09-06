@@ -2,6 +2,39 @@
 
 use super::*;
 
+const COMPARE_TOP: f32 = 88.;
+const COMPARE_FOOT: f32 = 74.;
+const RESULT_STRIP_HEIGHT: f32 = 112.;
+
+pub(super) fn image_bounds(
+    viewport: gpui_kit::Size<gpui_kit::Pixels>,
+    written: bool,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let bottom = COMPARE_FOOT
+        + if written {
+            RESULT_STRIP_HEIGHT + 8.
+        } else {
+            0.
+        };
+    gpui_kit::Bounds::new(
+        gpui_kit::point(px(0.), px(COMPARE_TOP)),
+        gpui_kit::size(
+            viewport.width,
+            px((f32::from(viewport.height) - COMPARE_TOP - bottom).max(1.)),
+        ),
+    )
+}
+
+pub(super) fn fit_scale(
+    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    width: u32,
+    height: u32,
+) -> f32 {
+    (f32::from(bounds.size.width) / width as f32)
+        .min(f32::from(bounds.size.height) / height as f32)
+        .min(1.)
+}
+
 fn compare_chip(
     text: impl Into<gpui_kit::SharedString>,
     colour: gpui_kit::Hsla,
@@ -56,7 +89,11 @@ impl Audit {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let viewport = window.viewport_size();
-        let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
+        let content = image_bounds(viewport, comparison.written.is_some());
+        let (view_w, view_h) = (
+            f32::from(content.size.width),
+            f32::from(content.size.height),
+        );
         // "Keep" names nothing on this side; the file's own name says which encoder
         // the kept format means, without reading it.
         let shown_format = match self.format {
@@ -93,25 +130,30 @@ impl Audit {
 
         let mut stage = div()
             .id("compare-stage")
+            .debug_selector(|| "compare-stage".into())
             .absolute()
-            .inset_0()
+            .left(content.left())
+            .top(content.top())
+            .w(content.size.width)
+            .h(content.size.height)
             .overflow_hidden()
             .bg(rgb(0x0b0d10))
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
-                cx.listener(|audit, event: &gpui_kit::MouseDownEvent, _, cx| {
+                cx.listener(|audit, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    if matches!(
+                        audit
+                            .compare
+                            .as_ref()
+                            .and_then(|comparison| comparison.drag),
+                        Some(CompareDrag::Split)
+                    ) {
+                        return;
+                    }
+                    window.focus(&audit.focus, cx);
                     if let Some(comparison) = audit.compare.as_mut() {
                         let at = (f32::from(event.position.x), f32::from(event.position.y));
-                        comparison.drag = Some((at, comparison.pan));
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up(
-                gpui_kit::MouseButton::Left,
-                cx.listener(|audit, _: &gpui_kit::MouseUpEvent, _, cx| {
-                    if let Some(comparison) = audit.compare.as_mut() {
-                        comparison.drag = None;
+                        comparison.drag = Some(CompareDrag::Pan(at, comparison.pan));
                         cx.notify();
                     }
                 }),
@@ -133,7 +175,7 @@ impl Audit {
                         return;
                     }
 
-                    let fit = (view_w / width as f32).min(view_h / height as f32).min(1.);
+                    let fit = fit_scale(content, width, height);
                     let before = comparison.zoom.unwrap_or(fit);
                     // Fit is the floor: below it the image is a stamp adrift in
                     // a black stage, and there is nothing smaller-than-everything
@@ -154,7 +196,7 @@ impl Audit {
                     // zooming walks the image off screen.
                     let pointer = (
                         f32::from(event.position.x) - view_w / 2.,
-                        f32::from(event.position.y) - view_h / 2.,
+                        f32::from(event.position.y - content.top()) - view_h / 2.,
                     );
                     let ratio = after / before;
                     comparison.pan = (
@@ -164,36 +206,13 @@ impl Audit {
                     comparison.zoom = Some(after);
                     cx.notify();
                 },
-            ))
-            .on_mouse_move(
-                cx.listener(move |audit, event: &gpui_kit::MouseMoveEvent, _, cx| {
-                    let Some(comparison) = audit.compare.as_mut() else {
-                        return;
-                    };
-                    let at = (f32::from(event.position.x), f32::from(event.position.y));
-
-                    match comparison.drag {
-                        // Held: pan both sides together, so they stay in register.
-                        Some((from, start_pan)) => {
-                            comparison.pan =
-                                (start_pan.0 + at.0 - from.0, start_pan.1 + at.1 - from.1);
-                        }
-                        // Free: the divider tracks the pointer only when there
-                        // are two sides to divide.
-                        None if comparison.mode == MediaMode::Compare => {
-                            comparison.split = (at.0 / view_w).clamp(0., 1.)
-                        }
-                        None => return,
-                    }
-                    cx.notify();
-                }),
-            );
+            ));
 
         // Fit never scales up: a 400px thumbnail blown across a 4K window is just a
         // blurry 400px thumbnail. Computed before the branch because the chrome
         // reports the zoom as well as the image using it.
         let scale = comparison.dimensions().map(|(width, height)| {
-            let fit = (view_w / width as f32).min(view_h / height as f32).min(1.);
+            let fit = fit_scale(content, width, height);
             comparison.zoom.unwrap_or(fit)
         });
 
@@ -293,9 +312,41 @@ impl Audit {
                 )
                 .child(
                     div()
+                        .id("compare-grip")
+                        .debug_selector(|| "compare-grip".into())
+                        .focusable()
+                        .tooltip(|window, cx| Tooltip::new("Drag to compare. When focused: Left/Right move the divider; Home/End show either side.").build(window, cx))
+                        .focus(|style| style.border_color(cx.theme().blue).border_2())
+                        .on_key_down(cx.listener(|audit, event: &gpui_kit::KeyDownEvent, _, cx| {
+                            if event.keystroke.modifiers != gpui_kit::Modifiers::none() {
+                                return;
+                            }
+                            let Some(comparison) = audit.compare.as_mut() else {
+                                return;
+                            };
+                            comparison.split = match event.keystroke.key.as_str() {
+                                "left" => (comparison.split - 0.05).max(0.),
+                                "right" => (comparison.split + 0.05).min(1.),
+                                "home" => 0.,
+                                "end" => 1.,
+                                _ => return,
+                            };
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            gpui_kit::MouseButton::Left,
+                            cx.listener(|audit, _, _, _| {
+                                if let Some(comparison) = audit.compare.as_mut() {
+                                    comparison.drag = Some(CompareDrag::Split);
+                                }
+                                // Let GPUI's native focus listener run; the canvas
+                                // recognizes the grip's drag ownership above.
+                            }),
+                        )
                         .absolute()
                         .top(px(view_h / 2. - 18.))
-                        .left(px(divider - 16.))
+                        .left(px((divider - 16.).clamp(0., (view_w - 32.).max(0.))))
                         .w(px(32.))
                         .h(px(36.))
                         .flex()
@@ -315,7 +366,7 @@ impl Audit {
                     // window, so it stays true as the divider moves.
                     div()
                         .absolute()
-                        .top(px(48.))
+                        .top(px(8.))
                         .left(px(divider - 76.))
                         .w(px(64.))
                         .flex()
@@ -325,7 +376,7 @@ impl Audit {
                 .child(
                     div()
                         .absolute()
-                        .top(px(48.))
+                        .top(px(8.))
                         .left(px(divider + 12.))
                         .child(compare_chip(
                             match comparison.written.as_ref() {
@@ -407,7 +458,46 @@ impl Audit {
         // Chrome as two full-width bars. These were black boxes pinned at
         // hand-computed offsets, the right-hand one at `view_w - 240` — a number
         // that stopped being the right edge the moment the text or window changed.
-        stage
+        div()
+            .size_full()
+            .relative()
+            .bg(rgb(0x0b0d10))
+            .on_mouse_move(
+                cx.listener(move |audit, event: &gpui_kit::MouseMoveEvent, _, cx| {
+                    let Some(comparison) = audit.compare.as_mut() else {
+                        return;
+                    };
+                    if !event.dragging() {
+                        comparison.drag = None;
+                        return;
+                    }
+                    match comparison.drag {
+                        Some(CompareDrag::Pan(from, start_pan)) => {
+                            comparison.pan = (
+                                start_pan.0 + f32::from(event.position.x) - from.0,
+                                start_pan.1 + f32::from(event.position.y) - from.1,
+                            );
+                        }
+                        Some(CompareDrag::Split) => {
+                            comparison.split = (f32::from(event.position.x - content.left())
+                                / view_w)
+                                .clamp(0., 1.)
+                        }
+                        None => return,
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|audit, _, _, cx| {
+                    if let Some(comparison) = audit.compare.as_mut() {
+                        comparison.drag = None;
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(stage)
             // The top line: which file, where it sits in the folder, and the
             // way out. The verbs moved to the bar below, where the audit keeps
             // the same four — one bar meaning one thing in both screens.
@@ -493,6 +583,7 @@ impl Audit {
                     .border_color(cx.theme().border)
                     .child(
                         Button::new("compare-fit")
+                            .debug_selector(|| "compare-fit".into())
                             .ghost()
                             .small()
                             .label("Fit")
@@ -507,6 +598,7 @@ impl Audit {
                     )
                     .child(
                         Button::new("compare-actual")
+                            .debug_selector(|| "compare-actual".into())
                             .ghost()
                             .small()
                             .label("100%")
@@ -541,12 +633,13 @@ impl Audit {
             .absolute()
             .left_0()
             .right_0()
-            .bottom(px(74.))
+            .bottom(px(COMPARE_FOOT))
             .flex()
             .justify_center()
             .child(
                 div()
                     .id("result-strip-scroll")
+                    .h(px(RESULT_STRIP_HEIGHT))
                     .flex()
                     .items_center()
                     .gap_1()

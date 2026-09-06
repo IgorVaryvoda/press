@@ -568,6 +568,7 @@ impl Audit {
                     .gap_2()
                     .child(
                         Button::new("sirv-close")
+                            .debug_selector(|| "sirv-close".into())
                             .ghost()
                             .small()
                             .label("Close")
@@ -756,8 +757,7 @@ impl Render for Audit {
                                     .label("Cancel")
                                     .on_click(cx.listener(|audit, _, _, cx| audit.cancel_scan(cx))),
                             )
-                        }))
-                        .children(self.shortcuts_open.then(|| self.shortcuts_overlay(cx))),
+                        })),
                 )
                 .on_drop(
                     cx.listener(|audit, paths: &gpui_kit::ExternalPaths, window, cx| {
@@ -880,6 +880,7 @@ impl Render for Audit {
                 .child(
                     div()
                         .debug_selector(|| "settings-scrim".into())
+                        .occlude()
                         .absolute()
                         .inset_0()
                         .flex()
@@ -954,6 +955,7 @@ impl Render for Audit {
                 .child(
                     div()
                         .debug_selector(|| "sirv-scrim".into())
+                        .occlude()
                         .absolute()
                         .inset_0()
                         .flex()
@@ -994,6 +996,9 @@ impl Render for Audit {
                 .relative()
                 .track_focus(&self.focus)
                 .on_key_down(cx.listener(|audit, event: &gpui_kit::KeyDownEvent, _, cx| {
+                    if event.keystroke.modifiers != gpui_kit::Modifiers::none() {
+                        return;
+                    }
                     match event.keystroke.key.as_str() {
                         "escape" => {
                             audit.compare = None;
@@ -1049,6 +1054,7 @@ impl Audit {
         let overlay_sidebar =
             (!persistent_browser && self.browser_overlay).then(|| self.folder_sidebar(cx));
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1083,6 +1089,15 @@ impl Audit {
             ))
             .on_key_down(
                 cx.listener(|audit, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if audit.shortcuts_open {
+                        if event.keystroke.key == "escape" {
+                            audit.shortcuts_open = false;
+                            window.focus(&audit.focus, cx);
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
                     if audit.text_input_focused(window, cx) {
                         return;
                     }
@@ -1100,12 +1115,7 @@ impl Audit {
                         "home" => audit.step_cursor(isize::MIN / 2, extend, window, cx),
                         "end" => audit.step_cursor(isize::MAX / 2, extend, window, cx),
                         "escape" => {
-                            // An open dialog outranks the selection: escape
-                            // puts the list down only when nothing covers it.
-                            if audit.shortcuts_open {
-                                audit.shortcuts_open = false;
-                                cx.notify();
-                            } else if !audit.selected.is_empty() && !audit.converting {
+                            if !audit.selected.is_empty() && !audit.converting {
                                 audit.selected.clear();
                                 audit.selection_changed(cx);
                             }
@@ -1245,6 +1255,7 @@ impl Audit {
             // Pinned to the window foot, below the list and the rail alike, so
             // the folder and image totals stay on screen while the list scrolls.
             .child(self.status_bar(count, cx))
+            .children(self.shortcuts_open.then(|| self.shortcuts_overlay(cx)))
             .into_any_element()
     }
 

@@ -442,12 +442,6 @@ impl Audit {
     }
 
     fn convert_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Personal rows render eagerly: a lazy iterator would carry the
-        // borrowed context into the element tree.
-        let mut personal_rows = Vec::with_capacity(self.recipes.len());
-        for index in 0..self.recipes.len() {
-            personal_rows.push(self.personal_row(index, cx));
-        }
         div()
             .flex()
             .flex_col()
@@ -456,82 +450,66 @@ impl Audit {
             .child(
                 div()
                     .id("rail-settings")
+                    .debug_selector(|| "rail-settings".into())
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap_3()
+                    .gap_2()
                     .px_3()
-                    .py_3()
+                    .py_2()
                     // Where the output lands, said once and always. Every other
                     // number in this rail is about size; this one is about the
                     // question people actually ask before pressing Convert.
                     .child(self.destination_row(cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(self.preset_row(0, cx))
-                            .child(self.preset_row(1, cx))
-                            .child(self.preset_row(2, cx))
-                            .child(self.preset_row(3, cx))
-                            .children(personal_rows)
-                            .children((!self.recipes_skipped.is_empty()).then(|| {
-                                div()
-                                    .debug_selector(|| "recipes-skipped".into())
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{} recipe files unreadable",
-                                        self.recipes_skipped.len()
-                                    ))
-                            }))
-                            .child(self.recipe_actions(cx)),
-                    )
-                    .child(div().h(px(1.)).bg(cx.theme().border))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("FINE-TUNE"),
-                            )
-                            // No preset is lit because the settings are yours.
-                            // Without this the three unlit rows read as a bug.
-                            .when(
-                                active_preset(self.format, self.quality, self.max_edge).is_none(),
-                                |heading| {
-                                    heading.child(
-                                        div()
-                                            .debug_selector(|| "custom-settings-active".into())
-                                            .text_size(px(10.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(cx.theme().blue)
-                                            .child("CUSTOM"),
-                                    )
-                                },
-                            ),
-                    )
+                    .child(self.preset_chooser(cx))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(self.panel_setting(
-                                "Format",
-                                self.format_group(cx).small().compact(),
-                                cx,
+                            .child(div().debug_selector(|| "format-setting".into()).child(
+                                self.panel_setting(
+                                    "Format",
+                                    self.format_group(cx).small().compact(),
+                                    cx,
+                                ),
                             ))
                             .child(self.panel_quality(cx))
-                            .child(self.panel_setting("Max size", self.resize_control(cx), cx)),
-                    ),
+                            .child(div().debug_selector(|| "max-size-setting".into()).child(
+                                self.panel_setting("Max size", self.resize_control(cx), cx),
+                            )),
+                    )
+                    .child(
+                        Button::new("manage-recipes")
+                            .debug_selector(|| "manage-recipes".into())
+                            .small()
+                            .ghost()
+                            .icon(if self.recipes_open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .label("Manage recipes")
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.recipes_open = !audit.recipes_open;
+                                cx.notify();
+                            })),
+                    )
+                    .children(self.recipes_open.then(|| self.recipe_actions(cx)))
+                    .children((!self.recipes_skipped.is_empty()).then(|| {
+                        div()
+                            .debug_selector(|| "recipes-skipped".into())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} recipe files unreadable",
+                                self.recipes_skipped.len()
+                            ))
+                    }))
+                    .child(div().h(px(1.)).bg(cx.theme().border))
+                    .child(self.sets_section(cx)),
             )
             .child(
                 div()
@@ -862,126 +840,62 @@ impl Audit {
             .child(control)
     }
 
-    /// One preset as a full-width selectable row: the name, and under it the
-    /// exact settings it applies — no memory required. Lit only while the live
-    /// settings are exactly what it names, so a hand-tuned output lights none.
-    fn preset_row(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let row = &builtin_recipes()[index];
-        let (name, summary) = (row.name.clone(), row.summary());
-        let selected = active_preset(self.format, self.quality, self.max_edge) == Some(index);
+    fn preset_chooser(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let rows: Vec<_> = builtin_recipes()
+            .into_iter()
+            .chain(self.recipes.iter().cloned())
+            .collect();
+        let selected = self
+            .selected_recipe
+            .as_deref()
+            .and_then(|id| rows.iter().find(|row| row.id == id))
+            .or_else(|| rows.iter().find(|row| !self.recipe_modified(row)));
+        let modified = selected.is_some_and(|row| self.recipe_modified(row));
+        let label = selected.map_or_else(|| "Custom settings".to_string(), |row| row.name.clone());
+        let audit = cx.entity().downgrade();
         div()
-            .id(("preset", index))
+            .when(
+                active_preset(self.format, self.quality, self.max_edge).is_none(),
+                |chooser| chooser.debug_selector(|| "custom-settings-active".into()),
+            )
             .flex()
             .flex_col()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .when(selected, |row| {
-                row.bg(cx.theme().list_active)
-                    .border_1()
-                    .border_color(cx.theme().list_active_border)
-            })
-            .when(!selected, |row| {
-                row.border_1()
-                    .border_color(gpui_kit::transparent_black())
-                    .hover(|row| row.bg(cx.theme().list_hover))
-            })
+            .gap_1()
             .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().foreground)
-                    .child(name),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(summary),
-            )
-            .on_click(cx.listener(move |audit, _, window, cx| {
-                if audit.converting {
-                    return;
-                }
-                let (format, quality, edge, _) = builtin_recipes()[index].effective();
-                audit.format = format;
-                audit.quality = quality;
-                audit.max_edge = edge;
-                audit.clear_custom_max_edge(window, cx);
-                if let Some(value) = quality.0 {
-                    // Keep the slider where the preset put things, or the knob
-                    // below would contradict the number in the estimate.
-                    audit.slider_quality = value;
-                    audit
-                        .quality_slider
-                        .update(cx, |slider, cx| slider.set_value(value, window, cx));
-                }
-                audit.clear_results();
-                audit.schedule_estimate(cx);
-
-                cx.notify();
-            }))
-    }
-
-    /// One saved recipe as a full-width selectable row, shaped like a preset
-    /// row so the two lists read as one library. A selected row that no
-    /// longer matches the live settings owns the fact with a modified mark
-    /// instead of rewriting itself behind the click.
-    fn personal_row(&self, index: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let Some(recipe) = self.recipes.get(index) else {
-            return div().into_any_element();
-        };
-        let (id, name, summary) = (recipe.id.clone(), recipe.name.clone(), recipe.summary());
-        let selected = self.selected_recipe.as_deref() == Some(id.as_str());
-        let modified = selected && self.recipe_modified(recipe);
-        div()
-            .id(("preset-personal", index))
-            .flex()
-            .flex_col()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .when(selected, |row| {
-                row.bg(cx.theme().list_active)
-                    .border_1()
-                    .border_color(cx.theme().list_active_border)
-            })
-            .when(!selected, |row| {
-                row.border_1()
-                    .border_color(gpui_kit::transparent_black())
-                    .hover(|row| row.bg(cx.theme().list_hover))
-            })
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().foreground)
-                    .child(name),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(summary),
+                Button::new("preset-chooser")
+                    .debug_selector(|| "preset-chooser".into())
+                    .small()
+                    .outline()
+                    .w_full()
+                    .label(label)
+                    .dropdown_caret(true)
+                    .disabled(self.converting)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for row in &rows {
+                            let audit = audit.clone();
+                            let recipe = row.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{} · {}", row.name, row.summary()))
+                                    .on_click(move |_, window, cx| {
+                                        if let Some(audit) = audit.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.clear_custom_max_edge(window, cx);
+                                                audit.apply_recipe(&recipe, &recipe.id, window, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
             )
             .children(modified.then(|| {
                 div()
                     .debug_selector(|| "recipe-modified".into())
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("· modified")
+                    .child("Modified")
             }))
-            .on_click(cx.listener(move |audit, _, window, cx| {
-                if audit.converting {
-                    return;
-                }
-                let Some(recipe) = audit.recipes.iter().find(|recipe| recipe.id == id).cloned()
-                else {
-                    return;
-                };
-                audit.apply_recipe(&recipe, &recipe.id.clone(), window, cx);
-            }))
-            .into_any_element()
     }
 
     /// Save the live settings under a name, and the row operations around the
@@ -1084,6 +998,523 @@ impl Audit {
                                 audit.export_recipe_file(cx);
                             })),
                     ),
+            )
+            .into_any_element()
+    }
+
+    /// The bound target's display name from loaded recipes. A bound id with
+    /// no recipe stays visible as missing: preparation refuses it by name.
+    fn job_target_label(&self) -> String {
+        match crate::job::resolve_target(&self.work_job, &self.recipes) {
+            Ok(None) => "No target".to_string(),
+            Ok(Some(recipe)) => recipe.name.clone(),
+            Err(message) => message,
+        }
+    }
+
+    /// Product sets over the current folder: which files belong to which
+    /// product views, and whether each view is ready, stale, missing, or
+    /// still unmapped. Rendered from cached states only; the filesystem work
+    /// happens in actions and refreshes, never here.
+    fn sets_section(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let busy = self.converting;
+        let mut products = Vec::with_capacity(self.work_job.products.len());
+        for index in 0..self.work_job.products.len() {
+            products.push(self.sets_product(index, cx));
+        }
+        let mut stale_rows = Vec::with_capacity(self.work_stale.len());
+        for index in 0..self.work_stale.len() {
+            stale_rows.push(self.sets_stale_row(index, cx));
+        }
+        div()
+            .debug_selector(|| "sets-section".into())
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("PRODUCT SETS"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "sets-job-name".into())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.work_job.name.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .child(
+                        Button::new("sets-new-job")
+                            .small()
+                            .ghost()
+                            .label("New")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.new_job(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sets-delete-job")
+                            .small()
+                            .ghost()
+                            .label("Delete")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.delete_job(&dir, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sets-import-csv")
+                            .small()
+                            .ghost()
+                            .label("Import CSV")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.import_csv_file(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sets-import-job")
+                            .small()
+                            .ghost()
+                            .label("Import job")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.import_job_file(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sets-export-job")
+                            .small()
+                            .ghost()
+                            .label("Export job")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.export_job_file(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .debug_selector(|| "sets-target".into())
+                            .child(format!("Target: {}", self.job_target_label())),
+                    )
+                    .child(
+                        Button::new("sets-target-current")
+                            .small()
+                            .ghost()
+                            .label("Use current")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.bind_current_recipe_as_target(&dir, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sets-target-clear")
+                            .small()
+                            .ghost()
+                            .label("Clear")
+                            .disabled(busy || self.work_job.target_recipe.is_none())
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.clear_job_target(&dir, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(|| "sets-product-name".into())
+                            .child(Input::new(&self.product_name_input).small().disabled(busy)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(|| "sets-product-sku".into())
+                            .child(Input::new(&self.product_sku_input).small().disabled(busy)),
+                    )
+                    .child(
+                        Button::new("sets-add-product")
+                            .small()
+                            .outline()
+                            .label("Add product")
+                            .disabled(busy)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.add_product(&dir, cx);
+                            })),
+                    ),
+            )
+            .children(products)
+            .children((!self.work_stale.is_empty()).then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().yellow)
+                                    .child("Outdated deliverables"),
+                            )
+                            .child(
+                                Button::new("sets-select-stale")
+                                    .small()
+                                    .ghost()
+                                    .label("Select stale")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|audit, _, _, cx| {
+                                        audit.select_stale_sources(cx);
+                                    })),
+                            ),
+                    )
+                    .children(stale_rows)
+            }))
+            .into_any_element()
+    }
+
+    /// One product with its roles, mapped files and row operations. Missing
+    /// files offer relink where they stand; every file offers removal.
+    fn sets_product(&self, index: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let Some(product) = self.work_job.products.get(index) else {
+            return div().into_any_element();
+        };
+        let product_id = product.id.clone();
+        let mut roles = Vec::with_capacity(product.roles.len());
+        for role in &product.roles {
+            roles.push(self.sets_role(&product_id, &role.id, cx));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .p_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(format!("{} · {}", product.name, product.sku_hint)),
+                    )
+                    .child(
+                        Button::new(("sets-delete-product", index))
+                            .small()
+                            .ghost()
+                            .label("Delete")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.delete_product(&dir, &product_id, cx);
+                            })),
+                    ),
+            )
+            .children(roles)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(|| "sets-role-name".into())
+                            .child(
+                                Input::new(&self.role_name_input)
+                                    .small()
+                                    .disabled(self.converting),
+                            ),
+                    )
+                    .child(
+                        Button::new(("sets-add-role", index))
+                            .small()
+                            .ghost()
+                            .label("Add role")
+                            .disabled(self.converting)
+                            .on_click(cx.listener({
+                                let product_id = product.id.clone();
+                                move |audit, _, window, cx| {
+                                    let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                        return;
+                                    };
+                                    audit.add_role(&dir, &product_id, window, cx);
+                                }
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// One role with its status, its mapped files, and the map control for
+    /// the current file selection.
+    fn sets_role(
+        &self,
+        product_id: &str,
+        role_id: &str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let status = self
+            .work_states
+            .iter()
+            .find(|state| state.product_id == product_id && state.role_id == role_id);
+        let (label, required) = self
+            .work_job
+            .products
+            .iter()
+            .find(|product| product.id == product_id)
+            .and_then(|product| product.roles.iter().find(|role| role.id == role_id))
+            .map(|role| (role.label.clone(), role.required))
+            .unwrap_or_default();
+        let detail = match status.map(|state| state.status) {
+            None | Some(crate::job::RoleStatus::Unmapped) => "unmapped".to_string(),
+            Some(crate::job::RoleStatus::Ready) => {
+                let count = status.map(|state| state.sources.len()).unwrap_or(0);
+                format!("ready · {count}")
+            }
+            Some(crate::job::RoleStatus::Stale) => "stale".to_string(),
+            Some(crate::job::RoleStatus::Missing) => "missing".to_string(),
+        };
+        let mut files = Vec::new();
+        if let Some(state) = status {
+            for source in &state.sources {
+                files.push(self.sets_file(source, cx));
+            }
+        }
+        let product_id = product_id.to_string();
+        let role_id = role_id.to_string();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().foreground)
+                                    .child(format!(
+                                        "{label}{}",
+                                        if required {
+                                            " · required".to_string()
+                                        } else {
+                                            String::new()
+                                        }
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(detail),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                Button::new(format!("sets-map-{product_id}-{role_id}"))
+                                    .small()
+                                    .ghost()
+                                    .label("Map selected")
+                                    .disabled(self.converting)
+                                    .on_click(cx.listener({
+                                        let product_id = product_id.clone();
+                                        let role_id = role_id.clone();
+                                        move |audit, _, _, cx| {
+                                            let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                                return;
+                                            };
+                                            audit.map_selected(&dir, &product_id, &role_id, cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("sets-delete-role-{product_id}-{role_id}"))
+                                    .small()
+                                    .ghost()
+                                    .label("Delete")
+                                    .disabled(self.converting)
+                                    .on_click(cx.listener({
+                                        move |audit, _, _, cx| {
+                                            let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                                return;
+                                            };
+                                            audit.delete_role(&dir, &product_id, &role_id, cx);
+                                        }
+                                    })),
+                            ),
+                    ),
+            )
+            .children(files)
+            .into_any_element()
+    }
+
+    /// One mapped file: its name, its freshness, and the operations its state
+    /// allows. Relink only shows on missing files, where it is the way back.
+    fn sets_file(
+        &self,
+        source: &crate::job::MappedSource,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let name = source
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| source.path.display().to_string());
+        let state = match source.status {
+            crate::job::SourceStatus::Fresh => "fresh",
+            crate::job::SourceStatus::Stale => "stale",
+            crate::job::SourceStatus::Missing => "missing",
+        };
+        let mapping_id = source.mapping_id.clone();
+        let relink_id = mapping_id.clone();
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().foreground)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(state),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .children(
+                        (source.status == crate::job::SourceStatus::Missing).then(|| {
+                            Button::new(format!("sets-relink-{relink_id}"))
+                                .small()
+                                .ghost()
+                                .label("Relink")
+                                .disabled(self.converting)
+                                .on_click(cx.listener(move |audit, _, _, cx| {
+                                    audit.relink_mapping(&relink_id, cx);
+                                }))
+                        }),
+                    )
+                    .child(
+                        Button::new(format!("sets-unmap-{mapping_id}"))
+                            .small()
+                            .ghost()
+                            .label("Remove")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.unmap(&dir, &mapping_id, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// One stale deliverable: which output stopped matching and why.
+    fn sets_stale_row(&self, index: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let Some(stale) = self.work_stale.get(index) else {
+            return div().into_any_element();
+        };
+        let name = stale
+            .output
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| stale.output.display().to_string());
+        let reason = match stale.reason {
+            crate::job::StaleReason::SourceChanged => "source changed",
+            crate::job::StaleReason::OutputGone => "output changed",
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().foreground)
+                    .child(name),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().yellow)
+                    .child(reason),
             )
             .into_any_element()
     }

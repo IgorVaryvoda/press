@@ -11,6 +11,7 @@ mod avif;
 mod compare;
 mod convert;
 mod crash;
+mod job;
 mod jxl;
 mod local_ai;
 mod manifest;
