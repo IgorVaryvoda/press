@@ -166,14 +166,13 @@ pub struct Scan {
     /// denied" somewhere in the tree means every number above is short, and a count
     /// alone would leave the user no place to look.
     pub walk_errors: Vec<PathBuf>,
-    /// Files already sitting in this root's own `OUTPUT_DIR`. The walk steps over them
-    /// anyway, so counting them is free, and a second run is otherwise silent about
-    /// what it is about to write over.
+    /// Files already sitting in this root's own output folder. The walk steps over
+    /// them anyway, so counting them is free, and a second run is otherwise silent
+    /// about what it is about to write over.
     ///
-    /// Only this root's output folder counts. The walk skips every path with an
-    /// `optimized` component in it, wherever it sits, but a run rooted at `~/Pictures`
-    /// would not touch `~/Pictures/Screenshots/optimized`, so warning about it would
-    /// name the wrong 5,415 files.
+    /// Only the configured output root counts. A nested folder that merely shares
+    /// its name is ordinary input: a run rooted here would never touch it, so
+    /// warning about it would name files nobody is about to replace.
     pub existing_output: usize,
 }
 
@@ -1012,12 +1011,7 @@ fn scan_progressive_cancellable_inner(
                     }
                     // Output is excluded below, but still walked so its count remains
                     // truthful. A package there is not skipped input.
-                    if entry
-                        .path()
-                        .components()
-                        .any(|part| part.as_os_str() == OUTPUT_DIR)
-                        || entry.path().starts_with(output_root)
-                    {
+                    if entry.path().starts_with(output_root) {
                         return true;
                     }
                     if entry.file_type().is_dir() && is_opaque_package(entry.path()) {
@@ -1049,15 +1043,10 @@ fn scan_progressive_cancellable_inner(
                 if !file.file_type().is_file() {
                     continue;
                 }
-                let relative = file.path().strip_prefix(root).unwrap_or(file.path());
                 let in_output = file.path().starts_with(output_root);
-                if in_output
-                    || relative
-                        .components()
-                        .any(|part| part.as_os_str() == OUTPUT_DIR)
-                {
+                if in_output {
                     // The run record is not an image the next run would replace.
-                    if in_output && file.file_name() != crate::manifest::NAME {
+                    if file.file_name() != crate::manifest::NAME {
                         summary.existing_output += 1;
                     }
                     continue;
@@ -2037,23 +2026,21 @@ mod tests {
         assert_eq!(scanned.entries.len(), 1);
     }
 
-    /// Every `optimized` folder is skipped as input, but only this root's own is what a
-    /// run would write over. Counting a nested one told a real folder that converting
-    /// would replace 5,415 files it was never going to touch.
+    /// A nested folder that shares the output name is ordinary input: only the
+    /// configured output root is excluded and counted.
     #[test]
-    fn only_this_roots_output_folder_counts_as_what_a_run_would_replace() {
+    fn an_unrelated_optimized_folder_is_audited() {
         let dir = temp_dir("nested-output");
         write_sample(&dir, "source.png", 16, 16);
         let nested = dir.join("screenshots").join(OUTPUT_DIR);
         std::fs::create_dir_all(&nested).unwrap();
         write_sample(&nested, "old.png", 8, 8);
-        write_sample(&nested, "older.png", 8, 8);
 
         let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(
             scanned.entries.len(),
-            1,
-            "the nested output is still skipped"
+            2,
+            "screenshots/optimized is audited input"
         );
         assert_eq!(
             scanned.existing_output, 0,
