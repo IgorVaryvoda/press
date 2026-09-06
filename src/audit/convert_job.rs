@@ -101,13 +101,14 @@ impl Audit {
 
         let plan_root = root.clone();
         let proof_root = root.clone();
+        let proof_output = output.clone();
         cx.spawn(async move |this, cx| {
             // Filesystem proof off the click handler: a slow or revoked
             // destination must not hang the window. Prior results stay on
             // screen until a destination proves itself.
             let proof = cx
                 .background_executor()
-                .spawn(async move { output.context(&proof_root) })
+                .spawn(async move { proof_output.context(&proof_root) })
                 .await;
             let context = match proof {
                 Ok(context) => context,
@@ -325,6 +326,13 @@ impl Audit {
                     &cancel,
                 ) {
                     audit.restorable = restorable;
+                    // The run cleared results when its destination proved out, so
+                    // anything recorded now was written at this destination. An
+                    // all-failed run recorded nothing and erases neither field.
+                    if !audit.results.is_empty() {
+                        audit.conversion_destination = Some((output.clone(), out_dir.clone()));
+                        audit.latest_output_root = Some(out_dir.clone());
+                    }
                     audit.converting = false;
                     audit.active_target_count = None;
                     audit.convert_cancel = None;

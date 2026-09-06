@@ -102,6 +102,10 @@ impl Audit {
         // Unix builds; std's Windows rename does not.
         if !cfg!(windows)
             && self
+                .conversion_destination
+                .as_ref()
+                .is_some_and(|(output, _)| *output == self.output)
+            && self
                 .visible
                 .iter()
                 .filter(|index| self.selected.contains(index))

@@ -476,6 +476,14 @@ pub(crate) struct Audit {
     /// Outputs successfully written in this session, retained when settings change
     /// so the next action can say that it will replace them.
     completed_outputs: HashSet<(usize, Format)>,
+    /// The selection and proven destination of the last successful normal
+    /// conversion. Reveals and replacement wording read this, not the current
+    /// selection, so aiming elsewhere afterwards never rewrites history.
+    conversion_destination: Option<(Output, PathBuf)>,
+    /// Destination of the latest successful producer of any kind, for the
+    /// generic Show output. Conversion sets its context root; legacy producers
+    /// set the root captured before their background write.
+    latest_output_root: Option<PathBuf>,
     /// Originals this folder's run record could put back. Read from disk when the
     /// dataset changes and after a run, never during a render, and it survives a
     /// restart because the record does.
@@ -1331,6 +1339,10 @@ impl Audit {
         self.selection_bounds.borrow_mut().clear();
         self.clear_results();
         self.completed_outputs.clear();
+        // Provenance belongs to the folder that produced it. `clear_results`
+        // keeps both for the visible run; a new dataset describes neither.
+        self.conversion_destination = None;
+        self.latest_output_root = None;
         self.compare = None;
         self.cached = None;
         self.ahead = None;
@@ -1745,8 +1757,17 @@ impl Audit {
     /// Hand the output folder to the desktop's file manager.
     // ponytail: three names for one idea, and no crate needed for it.
     fn reveal_output(&self, cx: &mut Context<Self>) {
+        self.reveal_resolved(&self.generic_reveal_root(), cx);
+    }
+
+    /// Hand the folder that wrote the visible conversion results to the file
+    /// manager. A destination chosen afterwards never moves what is shown.
+    fn reveal_conversion_output(&self, cx: &mut Context<Self>) {
+        self.reveal_resolved(&self.conversion_reveal_root(), cx);
+    }
+
+    fn reveal_resolved(&self, path: &Path, cx: &mut Context<Self>) {
         self.clear_error("reveal-output", cx);
-        let path = self.output.root(&self.root);
         if !path.exists() {
             self.notify_error(
                 "reveal-output",
@@ -1756,7 +1777,24 @@ impl Audit {
             );
             return;
         }
-        self.reveal_path(&path, "Couldn’t show output folder", cx);
+        self.reveal_path(path, "Couldn’t show output folder", cx);
+    }
+
+    /// Folder the generic Show output opens: the latest successful producer's
+    /// destination, else the current selection.
+    fn generic_reveal_root(&self) -> PathBuf {
+        self.latest_output_root
+            .clone()
+            .unwrap_or_else(|| self.output.root(&self.root))
+    }
+
+    /// Folder a conversion result opens: the destination that wrote it, else
+    /// the generic reveal.
+    fn conversion_reveal_root(&self) -> PathBuf {
+        self.conversion_destination
+            .as_ref()
+            .map(|(_, root)| root.clone())
+            .unwrap_or_else(|| self.generic_reveal_root())
     }
 
     fn reveal_path(&self, path: &Path, title: &'static str, cx: &mut Context<Self>) {
@@ -2388,6 +2426,8 @@ pub(crate) fn build_audit(
             results: HashMap::new(),
             result_paths: HashMap::new(),
             completed_outputs: HashSet::new(),
+            conversion_destination: None,
+            latest_output_root: None,
             restorable,
             converted_totals: (0, 0),
             converting: false,

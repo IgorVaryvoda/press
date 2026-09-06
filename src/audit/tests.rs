@@ -2204,6 +2204,7 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
             "Convert 2 selected to WEBP"
         );
         audit.record_result(2, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
+        audit.conversion_destination = Some((audit.output.clone(), PathBuf::from("/tmp")));
         assert_eq!(audit.converted_totals(), (101_000, 50_500));
         assert_eq!(audit.conversion_action_label(), replace_label());
         audit.record_result(0, Format::WebP, 40_000, PathBuf::from("/tmp/out.webp"));
@@ -5253,6 +5254,16 @@ fn a_revoked_destination_keeps_prior_results_and_hands_back_controls(cx: &mut Te
     let (audit, cx) = convertible_audit(2, cx);
     audit.update(cx, |audit, cx| audit.start_conversion(cx));
     cx.run_until_parked();
+    let kept = audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.conversion_destination.is_some(),
+            "the good run retains its destination"
+        );
+        (
+            audit.conversion_destination.clone(),
+            audit.latest_output_root.clone(),
+        )
+    });
     audit.read_with(cx, |audit, _| assert_eq!(audit.results.len(), 2));
 
     let out_dir = audit.read_with(cx, |audit, _| audit.root.join("optimized"));
@@ -5271,9 +5282,113 @@ fn a_revoked_destination_keeps_prior_results_and_hands_back_controls(cx: &mut Te
         assert!(audit.convert_cancel.is_none());
         assert!(audit.active_target_count.is_none());
         assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(
+            audit.conversion_destination, kept.0,
+            "the refusal erases neither retained root"
+        );
+        assert_eq!(audit.latest_output_root, kept.1);
     });
     let root = audit.read_with(cx, |audit, _| audit.root.clone());
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A run writes its destination down: aiming elsewhere afterwards moves
+/// neither the result reveal nor the generic Show output, and the Replace
+/// offer stops claiming files another destination wrote.
+#[gpui_kit::test]
+fn a_finished_run_keeps_its_original_output_destination(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    let first = scan_fixture("gui-provenance-first");
+    let second = scan_fixture("gui-provenance-second");
+
+    audit.update(cx, |audit, cx| {
+        audit.set_output(Output::Folder(first.clone()), cx);
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        assert_eq!(audit.results.len(), 2);
+        assert_eq!(
+            audit.conversion_destination,
+            Some((Output::Folder(first.clone()), first.clone()))
+        );
+        assert_eq!(audit.latest_output_root, Some(first.clone()));
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.set_output(Output::Folder(second.clone()), cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.conversion_reveal_root(),
+            first,
+            "the result reveal stays where the run wrote"
+        );
+        assert_eq!(
+            audit.generic_reveal_root(),
+            first,
+            "no later producer ran, so the generic reveal stays too"
+        );
+        assert_eq!(
+            audit.conversion_action_label(),
+            "Convert 2 selected to WEBP",
+            "the Replace offer must not claim another destination's files"
+        );
+    });
+
+    // A legacy producer finishing at the new folder moves only the generic
+    // reveal. The landing writes this field beside its own completion; the
+    // assignment here is that write, without running a model.
+    audit.update(cx, |audit, _| {
+        audit.latest_output_root = Some(second.clone());
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.conversion_reveal_root(), first);
+        assert_eq!(audit.generic_reveal_root(), second);
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.set_output(Output::Folder(first.clone()), cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.conversion_action_label(), replace_label());
+    });
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    std::fs::remove_dir_all(root).ok();
+    std::fs::remove_dir_all(first).ok();
+    std::fs::remove_dir_all(second).ok();
+}
+
+/// A source deleted after the audit keeps its row in the report while its
+/// siblings convert around it.
+#[gpui_kit::test]
+fn a_removed_source_is_named_while_other_targets_convert(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    let missing = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
+    std::fs::remove_file(&missing).expect("the source is deleted after the audit");
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.results.len(), 1);
+        assert!(audit.results.contains_key(&1));
+        assert_eq!(audit.failures.len(), 1);
+        assert!(
+            audit
+                .failures
+                .get(&0)
+                .is_some_and(|reason| !reason.is_empty()),
+            "{:?}",
+            audit.failures
+        );
+        assert!(
+            audit.conversion_destination.is_some(),
+            "the converted sibling still retains its destination"
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// Cancel lands before the background proof even polls: planning stays empty,

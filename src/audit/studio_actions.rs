@@ -355,6 +355,7 @@ impl Audit {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
+            let landing_out_dir = out_dir.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -383,6 +384,7 @@ impl Audit {
                     Ok(path) => {
                         audit.clear_error("studio-job", cx);
                         audit.existing_output = audit.existing_output.saturating_add(1);
+                        audit.latest_output_root = Some(landing_out_dir.clone());
                         let Some(job) = audit.studio_job.as_mut() else {
                             return;
                         };

@@ -896,7 +896,11 @@ impl Audit {
                                 .icon(IconName::FolderOpen)
                                 .when(labelled, |button| button.label("Show in folder"))
                                 .tooltip("Open the output folder in the file manager")
-                                .on_click(cx.listener(|audit, _, _, cx| audit.reveal_output(cx)))
+                                .on_click(
+                                    cx.listener(|audit, _, _, cx| {
+                                        audit.reveal_conversion_output(cx)
+                                    }),
+                                )
                         }),
                     )
                     .children(comparison.produced_by.is_none().then(|| {
