@@ -165,10 +165,11 @@ pub const API_KEYS_URL: &str = "https://sirv.com/help/articles/sirv-api/?utm_sou
 pub enum SyncState {
     /// No file with this relative path on Sirv.
     OnlyLocal,
-    /// Same relative path and byte size.
-    Same,
-    /// Same path, different size.
-    Changed,
+    /// Same relative path and equal byte size. Size only: equal bytes are not
+    /// proof the contents match.
+    SameSize,
+    /// Same path, unequal byte size.
+    DifferentSize,
 }
 
 /// Classify one local file against the remote listing. Size is the only
@@ -177,8 +178,18 @@ pub enum SyncState {
 pub fn classify(local_size: u64, remote: Option<&Node>) -> SyncState {
     match remote {
         None => SyncState::OnlyLocal,
-        Some(node) if node.size == local_size => SyncState::Same,
-        Some(_) => SyncState::Changed,
+        Some(node) if node.size == local_size => SyncState::SameSize,
+        Some(_) => SyncState::DifferentSize,
+    }
+}
+
+/// The word the window says a comparison state in. Size only, on purpose:
+/// equal bytes are `same size`, never `synced` or `matching`.
+pub(crate) fn sync_state_word(state: SyncState) -> &'static str {
+    match state {
+        SyncState::SameSize => "same size",
+        SyncState::DifferentSize => "different size",
+        SyncState::OnlyLocal => "new",
     }
 }
 
@@ -274,7 +285,7 @@ pub fn pull_plan(
         .filter(|(key, _)| safe_key(key))
         .filter(|(key, node)| match local_sizes.get(key) {
             Some(local_size) => {
-                differing && classify(*local_size, Some(node)) == SyncState::Changed
+                differing && classify(*local_size, Some(node)) == SyncState::DifferentSize
             }
             None => !differing,
         })
@@ -1161,9 +1172,26 @@ mod tests {
             kind: None,
             size: 100,
         };
-        assert_eq!(classify(100, Some(&node)), SyncState::Same);
-        assert_eq!(classify(101, Some(&node)), SyncState::Changed);
+        assert_eq!(classify(100, Some(&node)), SyncState::SameSize);
+        assert_eq!(classify(101, Some(&node)), SyncState::DifferentSize);
         assert_eq!(classify(100, None), SyncState::OnlyLocal);
+    }
+
+    /// Size-only words: equal bytes are `same size`, never `synced`, `same`,
+    /// `changed`, or `matching`. No hash or download stands behind them.
+    #[test]
+    fn sirv_size_evidence_words_name_only_sizes() {
+        assert_eq!(sync_state_word(SyncState::SameSize), "same size");
+        assert_eq!(sync_state_word(SyncState::DifferentSize), "different size");
+        assert_eq!(sync_state_word(SyncState::OnlyLocal), "new");
+        for word in [
+            sync_state_word(SyncState::SameSize),
+            sync_state_word(SyncState::DifferentSize),
+        ] {
+            for banned in ["synced", "same", "changed", "matching"] {
+                assert_ne!(word, banned, "size evidence must not claim {banned}");
+            }
+        }
     }
 
     #[test]

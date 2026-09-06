@@ -757,7 +757,7 @@ impl Audit {
 
     /// Deliberately replace every differing remote copy with the local one.
     pub(super) fn start_push_changed(&mut self, cx: &mut Context<Self>) {
-        self.run_push(sirv::SyncState::Changed, cx);
+        self.run_push(sirv::SyncState::DifferentSize, cx);
     }
 
     pub(super) fn run_push(&mut self, accept: sirv::SyncState, cx: &mut Context<Self>) {
@@ -774,7 +774,7 @@ impl Audit {
             return;
         };
         let plan = sirv_push_plan(&self.root, &self.entries, files, accept);
-        let kind = if accept == sirv::SyncState::Changed {
+        let kind = if accept == sirv::SyncState::DifferentSize {
             SirvJobKind::PushChanged
         } else {
             SirvJobKind::Push
@@ -1054,8 +1054,8 @@ impl Audit {
                     };
                     match sirv::classify(entry.bytes, files.get(&key)) {
                         sirv::SyncState::OnlyLocal => to_push += 1,
-                        sirv::SyncState::Changed => changed += 1,
-                        sirv::SyncState::Same => {}
+                        sirv::SyncState::DifferentSize => changed += 1,
+                        sirv::SyncState::SameSize => {}
                     }
                 }
                 let to_pull = files

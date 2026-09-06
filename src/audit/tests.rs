@@ -890,25 +890,25 @@ fn push_plan_lists_only_files_sirv_lacks() {
 }
 
 #[test]
-fn the_forced_push_plan_takes_changed_files_and_leaves_synced_ones() {
+fn the_forced_push_plan_takes_different_size_files_and_leaves_same_size_ones() {
     let entries = vec![
-        entry("photos/same.jpg", 1, 1, 20, ImageFormat::Jpeg),
-        entry("photos/changed.jpg", 1, 1, 30, ImageFormat::Jpeg),
+        entry("photos/same-size.jpg", 1, 1, 20, ImageFormat::Jpeg),
+        entry("photos/different-size.jpg", 1, 1, 30, ImageFormat::Jpeg),
     ];
     let files = HashMap::from([
         (
-            "same.jpg".into(),
+            "same-size.jpg".into(),
             sirv::Node {
-                filename: "/d/same.jpg".into(),
+                filename: "/d/same-size.jpg".into(),
                 is_directory: false,
                 kind: None,
                 size: 20,
             },
         ),
         (
-            "changed.jpg".into(),
+            "different-size.jpg".into(),
             sirv::Node {
-                filename: "/d/changed.jpg".into(),
+                filename: "/d/different-size.jpg".into(),
                 is_directory: false,
                 kind: None,
                 size: 31,
@@ -921,9 +921,12 @@ fn the_forced_push_plan_takes_changed_files_and_leaves_synced_ones() {
             Path::new("photos"),
             &entries,
             &files,
-            sirv::SyncState::Changed,
+            sirv::SyncState::DifferentSize,
         ),
-        [("changed.jpg".into(), PathBuf::from("photos/changed.jpg"))]
+        [(
+            "different-size.jpg".into(),
+            PathBuf::from("photos/different-size.jpg")
+        )]
     );
 }
 

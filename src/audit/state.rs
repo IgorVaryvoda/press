@@ -387,7 +387,7 @@ impl Audit {
                     matches!(
                         (sirv_scope, state),
                         (Some(SirvScope::OnlyLocal), sirv::SyncState::OnlyLocal)
-                            | (Some(SirvScope::Changed), sirv::SyncState::Changed)
+                            | (Some(SirvScope::Changed), sirv::SyncState::DifferentSize)
                     )
                 }
             })

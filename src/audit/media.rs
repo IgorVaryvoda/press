@@ -1022,11 +1022,13 @@ impl Audit {
             return None;
         };
         let key = sirv::relative_key(&self.root, &entry.path)?;
-        Some(match sirv::classify(entry.bytes, files.get(&key)) {
-            sirv::SyncState::Same => ("synced", cx.theme().muted_foreground),
-            sirv::SyncState::Changed => ("changed", cx.theme().yellow),
-            sirv::SyncState::OnlyLocal => ("new", cx.theme().blue),
-        })
+        let state = sirv::classify(entry.bytes, files.get(&key));
+        let colour = match state {
+            sirv::SyncState::SameSize => cx.theme().muted_foreground,
+            sirv::SyncState::DifferentSize => cx.theme().yellow,
+            sirv::SyncState::OnlyLocal => cx.theme().blue,
+        };
+        Some((sirv::sync_state_word(state), colour))
     }
 
     /// Drop the oldest thumbnails once the cache is over its bound. `requested` has to
