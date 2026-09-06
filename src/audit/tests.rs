@@ -1047,6 +1047,7 @@ fn a_studio_result_belongs_to_its_exact_file_and_dataset() {
         source_name: "photo.jpg".into(),
         output_source: PathBuf::from("photo.jpg"),
         prompt: "white background".into(),
+        output_root: None,
         state: StudioJobState::Running,
         cancelled: cancelled.clone(),
     };
@@ -2265,6 +2266,7 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             source_name: "photo.jpg".to_string(),
             output_source: PathBuf::from("photo.jpg"),
             prompt: String::new(),
+            output_root: None,
             state: StudioJobState::Running,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
@@ -2980,6 +2982,7 @@ fn scan_blocked_studio_confirmation_is_disabled(cx: &mut TestAppContext) {
             source_name: "photo.jpg".into(),
             output_source: PathBuf::from("photo.jpg"),
             prompt: String::new(),
+            output_root: None,
             state: StudioJobState::AwaitingConfirmation(studio::PreparedUpload::for_test()),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
@@ -3012,6 +3015,7 @@ fn studio_confirm_card_shows_upload_and_source_sizes(cx: &mut TestAppContext) {
             output_source: PathBuf::from("photo.jpg"),
             prompt: String::new(),
             state: StudioJobState::AwaitingConfirmation(studio::PreparedUpload::for_test()),
+            output_root: None,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         audit.rail = Rail::Studio;
@@ -3052,6 +3056,7 @@ fn studio_confirm_card_is_absent_while_running(cx: &mut TestAppContext) {
             source_name: "photo.jpg".into(),
             output_source: PathBuf::from("photo.jpg"),
             prompt: String::new(),
+            output_root: None,
             state: StudioJobState::Running,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
@@ -5424,6 +5429,91 @@ fn invalid_local_ai_destination_starts_no_preparation(cx: &mut TestAppContext) {
     });
     let root = audit.read_with(cx, |audit, _| audit.root.clone());
     std::fs::remove_dir_all(root).ok();
+}
+
+/// A revoked destination fails the Studio job before any preparation: the
+/// failure is synchronous, so no upload was prepared and none requested.
+#[gpui_kit::test]
+fn invalid_studio_destination_fails_before_preparation(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    audit.update(cx, |audit, _| {
+        audit.selected.insert(0);
+        audit.studio_key = Some("sk_live_test".into());
+        audit.studio_tool = studio::Tool::RemoveBackground;
+    });
+    let out_dir = audit.read_with(cx, |audit, _| audit.root.join("optimized"));
+    std::fs::remove_dir_all(&out_dir).ok();
+    std::fs::write(&out_dir, b"not a directory").expect("the destination is revoked");
+    audit.update(cx, |audit, cx| audit.start_studio(0, None, cx));
+    audit.read_with(cx, |audit, _| {
+        let Some(job) = audit.studio_job.as_ref() else {
+            panic!("a refused destination installs a failed job");
+        };
+        assert!(!job.busy(), "nothing was started");
+        assert!(
+            matches!(&job.state, StudioJobState::Failed(message) if message.contains("optimized")),
+            "the refusal names the destination"
+        );
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            matches!(
+                audit.studio_job.as_ref().map(|job| &job.state),
+                Some(StudioJobState::Failed(_))
+            ),
+            "no preparation task ran afterwards"
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Confirmation runs the starting destination, not the current selection. A
+/// bogus key fails locally before any network, so the proof is hermetic:
+/// reaching the key refusal proves the retained root was used, while the
+/// revoked selection would have failed as unusable first.
+#[gpui_kit::test]
+fn studio_confirmation_keeps_its_starting_output_context(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let first = scan_fixture("gui-studio-first");
+    std::fs::create_dir_all(&first).unwrap();
+    let revoked = audit.read_with(cx, |audit, _| audit.root.join("optimized"));
+    std::fs::remove_dir_all(&revoked).ok();
+    std::fs::write(&revoked, b"not a directory").unwrap();
+    audit.update(cx, |audit, cx| {
+        audit.selected.insert(0);
+        audit.studio_key = Some("bogus".into());
+        audit.studio_tool = studio::Tool::RemoveBackground;
+        audit.studio_job = Some(StudioJob {
+            tool: studio::Tool::RemoveBackground,
+            index: 0,
+            dataset_generation: audit.dataset_generation,
+            source_name: "photo.jpg".into(),
+            output_root: Some(first.clone()),
+            output_source: PathBuf::from("photo.jpg"),
+            prompt: String::new(),
+            state: StudioJobState::AwaitingConfirmation(studio::PreparedUpload::for_test()),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        // Aiming elsewhere after the job started. Assigned directly because
+        // the validated setter would never admit a revoked folder.
+        audit.output = Output::Folder(revoked.clone());
+        audit.confirm_studio_for_test(cx);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        let Some(job) = audit.studio_job.as_ref() else {
+            panic!("the confirmation ran against the retained root");
+        };
+        assert!(
+            matches!(&job.state, StudioJobState::Failed(message) if message.contains("sk_live_")),
+            "the request path refused the key instead of the revoked selection"
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    std::fs::remove_dir_all(root).ok();
+    std::fs::remove_dir_all(first).ok();
 }
 
 /// Cancel lands before the background proof even polls: planning stays empty,

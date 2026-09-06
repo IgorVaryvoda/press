@@ -991,6 +991,10 @@ struct StudioJob {
     index: usize,
     dataset_generation: u64,
     source_name: String,
+    /// The destination proven when the job started, or nothing when start
+    /// refused one. Confirmation and processing read this, never the current
+    /// selection: aiming elsewhere mid-job must not move a paid request.
+    output_root: Option<PathBuf>,
     output_source: PathBuf,
     prompt: String,
     state: StudioJobState,

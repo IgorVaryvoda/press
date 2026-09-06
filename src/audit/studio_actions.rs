@@ -228,11 +228,34 @@ impl Audit {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| entry.name())
         };
+        // Prove the destination before any preparation or request: a result that
+        // cannot be written is worse than one that was never asked for.
+        let output_root = match self.output.context(&self.root) {
+            Ok(context) => context.output_root().to_path_buf(),
+            Err(message) => {
+                let message = format!("{}: {message}", self.output.label());
+                self.studio_job = Some(StudioJob {
+                    tool,
+                    index,
+                    dataset_generation: self.dataset_generation,
+                    output_root: None,
+                    source_name,
+                    output_source,
+                    prompt,
+                    state: StudioJobState::Failed(message.clone()),
+                    cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                });
+                self.notify_error("studio-job", "AI operation failed", message, cx);
+                cx.notify();
+                return;
+            }
+        };
         let dataset_generation = self.dataset_generation;
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.studio_job = Some(StudioJob {
             tool,
             index,
+            output_root: Some(output_root),
             dataset_generation,
             source_name,
             output_source,
@@ -324,22 +347,21 @@ impl Audit {
         let Some(key) = self.studio_key.clone() else {
             return;
         };
-        // Prove the destination before the request is paid for: a result that cannot
-        // be written is worse than one that was never asked for.
-        let out_dir = match self.output.context(&self.root) {
-            Ok(context) => context.output_root().to_path_buf(),
-            Err(message) => {
-                let message = format!(
-                    "the output folder {} is unusable: {message}",
-                    self.output.label()
-                );
-                if let Some(job) = self.studio_job.as_mut() {
-                    job.state = StudioJobState::Failed(message.clone());
-                }
-                self.notify_error("studio-job", "AI operation failed", message, cx);
-                cx.notify();
-                return;
+        // The destination was proven when the job started and travels with it.
+        // Reproving the current selection here moved a paid request's output
+        // when the folder changed mid-confirmation. A job that never proved one
+        // retires: the writer below still refuses a dead root.
+        let out_dir = self
+            .studio_job
+            .as_ref()
+            .and_then(|job| job.output_root.clone());
+        let Some(out_dir) = out_dir else {
+            if let Some(job) = self.studio_job.take() {
+                job.cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
+            cx.notify();
+            return;
         };
         let Some(job) = self.studio_job.as_mut() else {
             return;

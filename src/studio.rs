@@ -868,41 +868,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The three exchanges behind one direct run: upload, process, download.
+    /// Shared so the default and external destinations prove the same requests.
+    fn serve_one_direct_run(listener: TcpListener, server_api: String, server_output: Vec<u8>) {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_request(&mut stream);
+        let text = String::from_utf8_lossy(&request);
+        assert!(text.starts_with("POST /api/zapier/upload "));
+        assert!(text.contains("Authorization: Bearer sk_live_test"));
+        assert!(text.contains("name=\"file\"; filename=\"upload.png\""));
+        respond(
+            stream,
+            "application/json",
+            br#"{"url":"https://upload.test/input.png"}"#,
+        );
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_request(&mut stream);
+        let text = String::from_utf8_lossy(&request);
+        assert!(text.starts_with("POST /api/zapier/replace-bg "));
+        assert!(text.contains("Authorization: Bearer sk_live_test"));
+        assert!(text.contains("\"prompt\":\"clean white studio\""));
+        let body = format!("{{\"image_url\":\"{server_api}/result.png\"}}");
+        respond(stream, "application/json", body.as_bytes());
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_request(&mut stream);
+        let text = String::from_utf8_lossy(&request);
+        assert!(text.starts_with("GET /result.png "));
+        assert!(!text.contains("Authorization:"));
+        respond(stream, "image/png", &server_output);
+    }
+
     #[test]
     fn one_direct_run_uploads_processes_and_writes_a_real_result() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let output = png();
-        let server_api = api.clone();
-        let server_output = output.clone();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            let text = String::from_utf8_lossy(&request);
-            assert!(text.starts_with("POST /api/zapier/upload "));
-            assert!(text.contains("Authorization: Bearer sk_live_test"));
-            assert!(text.contains("name=\"file\"; filename=\"upload.png\""));
-            respond(
-                stream,
-                "application/json",
-                br#"{"url":"https://upload.test/input.png"}"#,
-            );
-
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            let text = String::from_utf8_lossy(&request);
-            assert!(text.starts_with("POST /api/zapier/replace-bg "));
-            assert!(text.contains("Authorization: Bearer sk_live_test"));
-            assert!(text.contains("\"prompt\":\"clean white studio\""));
-            let body = format!("{{\"image_url\":\"{server_api}/result.png\"}}");
-            respond(stream, "application/json", body.as_bytes());
-
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            let text = String::from_utf8_lossy(&request);
-            assert!(text.starts_with("GET /result.png "));
-            assert!(!text.contains("Authorization:"));
-            respond(stream, "image/png", &server_output);
+        let server = std::thread::spawn({
+            let server_api = api.clone();
+            let server_output = output.clone();
+            move || serve_one_direct_run(listener, server_api, server_output)
         });
 
         let root = std::env::temp_dir().join(format!(
@@ -932,6 +938,58 @@ mod tests {
             root.join("optimized/photo-studio-background-replaced.png")
         );
         assert_eq!(std::fs::read(&written).unwrap(), output);
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The same three requests land a result in a disjoint destination: the
+    /// direct processor takes the proven root, not the audited tree.
+    #[test]
+    fn one_direct_run_writes_into_an_external_output_root() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let output = png();
+        let server = std::thread::spawn({
+            let server_api = api.clone();
+            let server_output = output.clone();
+            move || serve_one_direct_run(listener, server_api, server_output)
+        });
+
+        let root = std::env::temp_dir().join(format!(
+            "press-studio-external-{}-{}",
+            std::process::id(),
+            BOUNDARY_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let outside = root.join("exports");
+        let output_source = root.join("photo.png");
+        let source = root.join("photo.webp");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, png()).unwrap();
+        let context = crate::settings::Output::Folder(outside.clone())
+            .context(&root)
+            .expect("a folder outside the root establishes");
+        let written = process_with_api(
+            &api,
+            "sk_live_test",
+            &root,
+            context.output_root(),
+            &source,
+            &output_source,
+            Tool::ReplaceBackground,
+            "clean white studio",
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert_eq!(
+            written,
+            outside.join("photo-studio-background-replaced.png")
+        );
+        assert_eq!(std::fs::read(&written).unwrap(), output);
+        assert!(
+            !root.join(scan::OUTPUT_DIR).exists(),
+            "nothing lands in the default tree"
+        );
         server.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
