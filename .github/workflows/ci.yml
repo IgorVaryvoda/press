@@ -10,6 +10,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug test binaries nest gpui futures deep enough to overflow Windows'
+  # 1 MiB test threads; libtest honours this floor on every platform.
+  RUST_MIN_STACK: 8388608
 
 jobs:
   workflow-validation:

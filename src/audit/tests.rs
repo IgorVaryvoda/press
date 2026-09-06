@@ -5884,7 +5884,9 @@ fn job_stale_sources_select_for_regeneration(cx: &mut TestAppContext) {
         audit.compare = None;
     });
     let path = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
-    crate::convert::tests::photo(8, 8)
+    // A larger photo, not the same bytes again: the edit has to change the
+    // file size, or a same-second rewrite is indistinguishable from no edit.
+    crate::convert::tests::photo(16, 16)
         .save(&path)
         .expect("the edit lands");
     audit.update(cx, |audit, cx| audit.refresh_job_states(cx));

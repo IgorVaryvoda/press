@@ -12,6 +12,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   NO_STRIP: 1
+  # Same deep debug-test stacks as CI: the updater-feature test run happens
+  # on Windows before packaging.
+  RUST_MIN_STACK: 8388608
 
 # Third-party actions are pinned to a commit, never a tag: a tag moves, and the
 # package job below hands the updater's signing key and the Apple identity to
