@@ -5391,6 +5391,41 @@ fn a_removed_source_is_named_while_other_targets_convert(cx: &mut TestAppContext
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A revoked destination installs a failed job synchronously: the failure
+/// lands before any task spawns, so preparation provably never starts.
+#[gpui_kit::test]
+fn invalid_local_ai_destination_starts_no_preparation(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let out_dir = audit.read_with(cx, |audit, _| audit.root.join("optimized"));
+    std::fs::remove_dir_all(&out_dir).ok();
+    std::fs::write(&out_dir, b"not a directory").expect("the destination is revoked");
+    audit.update(cx, |audit, cx| {
+        audit.start_local_ai(local_ai::Tool::RemoveBackground, 0, cx)
+    });
+    audit.read_with(cx, |audit, _| {
+        let Some(job) = audit.local_ai_job.as_ref() else {
+            panic!("a refused destination installs a failed job");
+        };
+        assert!(!job.busy(), "nothing was started");
+        assert!(
+            matches!(&job.state, LocalAiJobState::Failed(message) if message.contains("optimized")),
+            "the refusal names the destination"
+        );
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            matches!(
+                audit.local_ai_job.as_ref().map(|job| &job.state),
+                Some(LocalAiJobState::Failed(_))
+            ),
+            "no preparation task ran afterwards"
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Cancel lands before the background proof even polls: planning stays empty,
 /// nothing is written, and the tail still reports the stop honestly.
 #[gpui_kit::test]

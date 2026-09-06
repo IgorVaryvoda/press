@@ -110,12 +110,21 @@ impl Audit {
         let out_dir = match self.output.context(&self.root) {
             Ok(context) => context.output_root().to_path_buf(),
             Err(message) => {
-                self.notify_error(
-                    "local-ai",
-                    "Couldn’t use the output folder",
-                    format!("{}: {message}", self.output.label()),
-                    cx,
-                );
+                // Like any other refusal to start, this installs a named failed
+                // job instead of only a notice: the card says what was not
+                // attempted, and nothing was spawned to prepare or download.
+                let message = format!("{}: {message}", self.output.label());
+                self.local_ai_job = Some(LocalAiJob {
+                    tool,
+                    index,
+                    dataset_generation: self.dataset_generation,
+                    source_name,
+                    first_setup: false,
+                    state: LocalAiJobState::Failed(message.clone()),
+                    cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                });
+                self.notify_error("local-ai", "Couldn’t use the output folder", message, cx);
+                cx.notify();
                 return;
             }
         };

@@ -596,6 +596,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A chosen destination anywhere else holds the same mirrored tree, written
+    /// through the conversion boundary — no model needed to prove the path.
+    #[test]
+    fn ai_outputs_use_an_external_output_root() {
+        let base = temp_dir("external").canonicalize().unwrap();
+        let root = base.join("photos");
+        let source = root.join("products/chair.jpg");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"source").unwrap();
+        let outside = base.join("exports");
+        let context = crate::settings::Output::Folder(outside.clone())
+            .context(&root)
+            .expect("a folder outside the root establishes");
+        assert_eq!(context.output_root(), outside);
+        let written = output_path(
+            &root,
+            context.output_root(),
+            &source,
+            Tool::RemoveBackground,
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            outside.join("products/chair-background-removed.png")
+        );
+        crate::convert::write_output(context.output_root(), &written, b"result").unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), b"result");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn cached_assets_must_match_both_size_and_digest() {
         let root = temp_dir("digest");
