@@ -746,7 +746,11 @@ struct ConversionReport {
     schema_version: u32,
     command: &'static str,
     target: String,
-    output: String,
+    /// The proven destination. `None` when it never established: the run-level
+    /// `error` below says why, and every file reports the same refusal.
+    output: Option<String>,
+    /// Why no destination established. `None` on a run that had one.
+    error: Option<String>,
     /// Whether this run planned only. A dry run writes nothing and reports what it
     /// would have written.
     dry_run: bool,
@@ -1283,6 +1287,118 @@ fn convert_headless(
     totals
 }
 
+/// One failed row per scanned target, sharing the single reason the destination
+/// never established. A refusal is a run-level failure, so the report still
+/// names every target instead of failing the folder silently.
+fn refused_files(scanned: &scan::Scan, reason: &str) -> Vec<ConversionFile> {
+    let mut files: Vec<ConversionFile> = scanned
+        .entries
+        .iter()
+        .map(|entry| ConversionFile {
+            source: path_text(&entry.path),
+            status: "failed",
+            output: None,
+            planned_output: None,
+            source_bytes: entry.bytes,
+            output_bytes: None,
+            width: None,
+            height: None,
+            error: Some(reason.to_string()),
+            skipped: false,
+            reason: None,
+        })
+        .collect();
+    files.sort_by(|left, right| left.source.cmp(&right.source));
+    files
+}
+
+/// The report for a destination that never established: a null output plus the
+/// run-level error, with counts that agree with the refused files. Schema 2 is
+/// when `output` went nullable and `error` arrived; readers must not read a
+/// concrete output path off an older refused document.
+#[allow(clippy::too_many_arguments)]
+fn refused_report(
+    target: &Path,
+    scanned: &scan::Scan,
+    scope: Option<bool>,
+    dry_run: bool,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    reason: &str,
+) -> ConversionReport {
+    let files = refused_files(scanned, reason);
+    ConversionReport {
+        schema_version: 2,
+        command: "convert",
+        target: path_text(target),
+        output: None,
+        error: Some(reason.to_string()),
+        dry_run,
+        subfolders: scope,
+        options: ConversionOptions {
+            format: format.label(),
+            quality: quality.0,
+            max_edge: max_edge.0,
+        },
+        scan: ScanSummary::from_scan(scanned),
+        summary: ConversionSummary {
+            attempted: scanned.entries.len(),
+            converted: 0,
+            failed: files.len(),
+            skipped: 0,
+            source_bytes: 0,
+            output_bytes: 0,
+            grew: false,
+            changed_bytes: 0,
+            projected_bytes: None,
+            projected_samples: None,
+        },
+        manifest: None,
+        backup: None,
+        files,
+        unreadable: sorted_paths(&scanned.unreadable),
+        walk_errors: sorted_paths(&scanned.walk_errors),
+    }
+}
+
+/// A destination that never established ends the process with a truthful report
+/// instead of a bare stderr line. Text names each refused target and the
+/// destination; JSON carries the refusal document. Always exits nonzero, even
+/// when the scan found nothing to refuse.
+#[allow(clippy::too_many_arguments)]
+fn refused_headless(
+    target: &Path,
+    scanned: &scan::Scan,
+    scope: Option<bool>,
+    dry_run: bool,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    destination: &settings::Output,
+    reason: &str,
+    json: bool,
+) -> ! {
+    if !json {
+        for entry in &scanned.entries {
+            outln!("{:<52} failed: {reason}", entry.name());
+        }
+        eprintln!(
+            "press: could not use output {}: {reason}",
+            destination.label()
+        );
+    } else {
+        let report = refused_report(
+            target, scanned, scope, dry_run, format, quality, max_edge, reason,
+        );
+        if let Err(error) = write_json(&report) {
+            eprintln!("press: could not write JSON: {error}");
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(2);
+}
+
 fn main() {
     let pending_crash = crash::pending_snapshot();
     crash::install();
@@ -1510,10 +1626,18 @@ fn main() {
     };
     let context = match destination.context(&root) {
         Ok(context) => context,
-        Err(message) => {
-            eprintln!("press: {message}");
-            std::process::exit(2);
-        }
+        Err(message) => refused_headless(
+            &target,
+            &scanned,
+            scope,
+            args.dry_run,
+            args.format,
+            args.quality,
+            args.max_edge,
+            &destination,
+            &message,
+            args.json,
+        ),
     };
     let out_dir = context.output_root().to_path_buf();
     let backups = args.replace.then(|| manifest::backup_root(&out_dir));
@@ -1585,15 +1709,15 @@ fn main() {
     } else {
         (run.after, run.before.abs_diff(run.after))
     };
-    run.files.extend(queued.skipped);
     run.files
         .sort_by(|left, right| left.source.cmp(&right.source));
     if args.json {
         let report = ConversionReport {
-            schema_version: 1,
+            schema_version: 2,
             command: "convert",
             target: path_text(&target),
-            output: path_text(&out_dir),
+            output: Some(path_text(&out_dir)),
+            error: None,
             dry_run: args.dry_run,
             subfolders: scope,
             options: ConversionOptions {
@@ -2861,10 +2985,11 @@ mod tests {
         assert!(!out_dir.exists(), "a dry run writes nothing");
 
         let report = ConversionReport {
-            schema_version: 1,
+            schema_version: 2,
             command: "convert",
             target: path_text(&root),
-            output: path_text(&out_dir),
+            output: Some(path_text(&out_dir)),
+            error: None,
             dry_run: true,
             subfolders: Some(true),
             options: ConversionOptions {
@@ -2900,12 +3025,136 @@ mod tests {
             walk_errors: vec![],
         };
         let json = serde_json::to_value(report).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
+        assert!(
+            json["error"].is_null(),
+            "a run with a destination has no run error"
+        );
         assert_eq!(json["dry_run"], true);
         assert_eq!(json["summary"]["converted"], 0);
         assert_eq!(json["summary"]["projected_bytes"], projected);
         assert_eq!(json["files"][0]["status"], "planned");
         assert!(json["files"][0]["planned_output"].is_string());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+    /// A destination that never established is a run-level failure: every scanned
+    /// target reports the one refusal, the document carries a null output plus the
+    /// error, and the counts agree. An empty scan keeps the error with zero files.
+    #[test]
+    fn headless_invalid_output_context_reports_every_target_failed() {
+        let base = temp_root("refused");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        write_photo(&root.join("one.png"), 16, 16);
+        write_photo(&root.join("two.png"), 16, 16);
+        let entries = probe_all(&[root.join("one.png"), root.join("two.png")]);
+        let scanned = scan::Scan {
+            entries,
+            skipped_raw: 0,
+            skipped_heic: 0,
+            skipped_packages: 0,
+            unreadable: vec![],
+            walk_errors: vec![],
+            existing_output: 0,
+        };
+        let reason = "output component is not a directory: /photos/optimized";
+        let files = refused_files(&scanned, reason);
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|file| file.status == "failed"));
+        assert!(
+            files
+                .iter()
+                .all(|file| file.error.as_deref() == Some(reason)),
+            "every target names the one refusal"
+        );
+        assert!(files.iter().all(|file| file.output.is_none()));
+
+        let report = refused_report(
+            &root,
+            &scanned,
+            Some(true),
+            false,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            reason,
+        );
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["schema_version"], 2);
+        assert!(json["output"].is_null());
+        assert_eq!(json["error"].as_str(), Some(reason));
+        assert_eq!(json["summary"]["attempted"], 2);
+        assert_eq!(json["summary"]["converted"], 0);
+        assert_eq!(json["summary"]["failed"], 2);
+        assert_eq!(json["files"].as_array().unwrap().len(), 2);
+
+        let empty = scan::Scan {
+            entries: vec![],
+            skipped_raw: 0,
+            skipped_heic: 0,
+            skipped_packages: 0,
+            unreadable: vec![],
+            walk_errors: vec![],
+            existing_output: 0,
+        };
+        let json = serde_json::to_value(refused_report(
+            &root,
+            &empty,
+            Some(true),
+            false,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            reason,
+        ))
+        .unwrap();
+        assert_eq!(json["error"].as_str(), Some(reason));
+        assert_eq!(json["summary"]["attempted"], 0);
+        assert!(json["files"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A symlinked audited root establishes beneath its canonical target, so the
+    /// report names the real destination rather than what was typed.
+    #[cfg(unix)]
+    #[test]
+    fn headless_symlinked_root_reports_the_canonical_output() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_root("refused-alias").canonicalize().unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let alias = base.join("alias");
+        symlink(&target, &alias).unwrap();
+        let context = settings::Output::Optimized
+            .context(&alias)
+            .expect("an aliased root establishes");
+        assert_eq!(context.output_root(), target.join(scan::OUTPUT_DIR));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn headless_symlinked_root_reports_the_canonical_output() {
+        let base = temp_root("refused-alias").canonicalize().unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let alias = base.join("alias");
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                alias.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let context = settings::Output::Optimized
+            .context(&alias)
+            .expect("an aliased root establishes");
+        assert_eq!(context.output_root(), target.join(scan::OUTPUT_DIR));
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -2923,7 +3172,7 @@ mod tests {
         for index in 0..64 {
             let path = base.join(format!("photo-{index:02}.png"));
             if index < 16 && index % 2 == 0 {
-                write_photo(&path, 160, 160);
+                write_photo(&path, 64, 64);
             } else {
                 write_photo(&path, 16, 16);
             }

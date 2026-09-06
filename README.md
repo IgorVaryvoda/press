@@ -91,8 +91,10 @@ has not moved keeps whatever the last run wrote. Clear the output folder when th
 settings change.
 `--dry-run` writes nothing: it reports the name each file would be written to and
 projects the total from the same sample the window's estimate uses. With `--json`, stdout contains one document with
-`schema_version: 1`, exact byte counts, per-file findings or conversion outcomes,
-and named failures. Diagnostics stay on stderr. Exit `0` means complete success,
+exact byte counts, per-file findings or conversion outcomes, and named failures.
+The audit document carries `schema_version: 1`; convert carries `schema_version: 2`,
+whose `output` is null and whose `error` names the reason when the destination
+never established. Diagnostics stay on stderr. Exit `0` means complete success,
 `1` means a partial audit or conversion, and `2` means an invalid invocation.
 
 The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discovered
