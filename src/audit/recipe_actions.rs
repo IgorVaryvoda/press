@@ -1,7 +1,8 @@
-//! Personal recipe actions: apply, save, duplicate, rename, delete, import
-//! and export. Thin over `crate::recipe` storage: the file dialogs stay async
+//! Personal recipe actions: apply, save, save as, rename, delete, import and
+//! export. Thin over `crate::recipe` storage: the file dialogs stay async
 //! like the folder picker, while the byte-level rules live beside the model
-//! where the unit tests reach them without a window.
+//! where the unit tests reach them without a window. The window says
+//! "preset"; the files, the flags and this code say recipe.
 
 use super::*;
 use crate::recipe::{self, Recipe};
@@ -13,7 +14,7 @@ impl Audit {
             None => {
                 self.notify_error(
                     "recipes",
-                    "Couldn’t use the recipe library",
+                    "Couldn’t use the preset library",
                     "no config folder resolves on this machine",
                     cx,
                 );
@@ -91,46 +92,112 @@ impl Audit {
         self.recipe_name_input.read(cx).value().trim().to_string()
     }
 
-    /// Save the live settings under the name in the box.
+    /// The live dials as recipe fields, for a new file and for an update alike.
+    fn current_recipe_fields(
+        &self,
+    ) -> (
+        recipe::RecipeFormat,
+        recipe::RecipeQuality,
+        Option<u32>,
+        Option<u8>,
+    ) {
+        let format = match self.format {
+            convert::Format::WebP => recipe::RecipeFormat::WebP,
+            convert::Format::Avif => recipe::RecipeFormat::Avif,
+            convert::Format::Jpeg => recipe::RecipeFormat::Jpeg,
+            convert::Format::Png => recipe::RecipeFormat::Png,
+            convert::Format::JpegXl => recipe::RecipeFormat::JpegXl,
+            convert::Format::Same => recipe::RecipeFormat::Keep,
+        };
+        let quality = match self.quality.0 {
+            None => recipe::RecipeQuality::Lossless,
+            Some(value) => recipe::RecipeQuality::Lossy(value),
+        };
+        (
+            format,
+            quality,
+            self.max_edge.0,
+            crate::avif::configured_speed(),
+        )
+    }
+
+    /// Open the name prompt under the preset row. Rename starts from the
+    /// current name; Save as starts blank. The box takes focus, so the next
+    /// keystrokes are the name.
+    pub(super) fn open_recipe_prompt(
+        &mut self,
+        prompt: RecipePrompt,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let seed = match prompt {
+            RecipePrompt::Rename => self
+                .selected_personal()
+                .map(|row| row.name)
+                .unwrap_or_default(),
+            RecipePrompt::SaveAs => String::new(),
+        };
+        self.recipe_name_input.update(cx, |input, cx| {
+            input.set_value(seed, window, cx);
+        });
+        self.recipe_prompt = Some(prompt);
+        window.focus(&self.recipe_name_input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The prompt's button: a new file under the typed name, or the selected
+    /// file renamed to it. The prompt stays open when the store refuses, so
+    /// the name is still there to fix.
+    pub(super) fn confirm_recipe_prompt(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.recipe_dir_or_notify(cx) else {
+            return;
+        };
+        let done = match self.recipe_prompt {
+            Some(RecipePrompt::SaveAs) => self.save_current_recipe(&dir, window, cx),
+            Some(RecipePrompt::Rename) => self.rename_recipe(&dir, window, cx),
+            None => return,
+        };
+        if done {
+            self.recipe_prompt = None;
+            cx.notify();
+        }
+    }
+
+    /// Save the live settings under the name in the box, as a new file.
     pub(super) fn save_current_recipe(
         &mut self,
         dir: &Path,
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.converting {
-            return;
+            return false;
         }
         let name = self.recipe_name(cx);
         if name.is_empty() {
             self.notify_error(
                 "recipes",
-                "Couldn’t save the recipe",
+                "Couldn’t save the preset",
                 "name the current settings first",
                 cx,
             );
-            return;
+            return false;
         }
+        let (format, quality, max_edge, avif_speed) = self.current_recipe_fields();
         let recipe = Recipe {
             schema: recipe::SCHEMA_VERSION,
             id: recipe::suggest_id(dir, &name),
             name,
             revision: 1,
             provenance: recipe::Provenance::Personal,
-            format: match self.format {
-                convert::Format::WebP => recipe::RecipeFormat::WebP,
-                convert::Format::Avif => recipe::RecipeFormat::Avif,
-                convert::Format::Jpeg => recipe::RecipeFormat::Jpeg,
-                convert::Format::Png => recipe::RecipeFormat::Png,
-                convert::Format::JpegXl => recipe::RecipeFormat::JpegXl,
-                convert::Format::Same => recipe::RecipeFormat::Keep,
-            },
-            quality: match self.quality.0 {
-                None => recipe::RecipeQuality::Lossless,
-                Some(value) => recipe::RecipeQuality::Lossy(value),
-            },
-            max_edge: self.max_edge.0,
-            avif_speed: crate::avif::configured_speed(),
+            format,
+            quality,
+            max_edge,
+            avif_speed,
         };
         let id = recipe.id.clone();
         match recipe::save(dir, &recipe) {
@@ -141,50 +208,42 @@ impl Audit {
                     input.set_value("", window, cx);
                 });
                 cx.notify();
+                true
             }
-            Err(message) => self.notify_error("recipes", "Couldn’t save the recipe", message, cx),
+            Err(message) => {
+                self.notify_error("recipes", "Couldn’t save the preset", message, cx);
+                false
+            }
         }
     }
 
-    /// Fork the selected row under a fresh id. Built-ins fork too: the copy
-    /// is personal, the template row stays untouched.
-    pub(super) fn duplicate_recipe(&mut self, dir: &Path, cx: &mut Context<Self>) {
+    /// Write the live settings into the selected personal preset and bump its
+    /// revision. Built-ins never change: Save as new forks them instead.
+    pub(super) fn update_recipe(&mut self, dir: &Path, cx: &mut Context<Self>) {
         if self.converting {
             return;
         }
-        let Some(source) = self.selected_recipe.clone().and_then(|id| {
-            Recipe::builtins()
-                .iter()
-                .find(|row| row.id == id)
-                .cloned()
-                .or_else(|| self.recipes.iter().find(|recipe| recipe.id == id).cloned())
-        }) else {
+        let Some(mut recipe) = self.selected_personal() else {
             self.notify_error(
                 "recipes",
-                "Couldn’t duplicate the recipe",
-                "select a preset row first",
+                "Couldn’t save the preset",
+                "select one of your own presets first; a built-in preset forks with Save as new",
                 cx,
             );
             return;
         };
-        let mut name = format!("{} copy", source.name);
-        while name.chars().count() > recipe::MAX_NAME_LEN {
-            name.pop();
-        }
-        let mut fork = source;
-        fork.name = name;
-        fork.id = recipe::suggest_id(dir, &fork.name);
-        fork.revision = 1;
-        let id = fork.id.clone();
-        match recipe::save(dir, &fork) {
+        let (format, quality, max_edge, avif_speed) = self.current_recipe_fields();
+        recipe.format = format;
+        recipe.quality = quality;
+        recipe.max_edge = max_edge;
+        recipe.avif_speed = avif_speed;
+        recipe.revision += 1;
+        match recipe::overwrite(dir, &recipe) {
             Ok(()) => {
                 self.reload_recipes(dir);
-                self.selected_recipe = Some(id);
                 cx.notify();
             }
-            Err(message) => {
-                self.notify_error("recipes", "Couldn’t duplicate the recipe", message, cx)
-            }
+            Err(message) => self.notify_error("recipes", "Couldn’t save the preset", message, cx),
         }
     }
 
@@ -195,28 +254,28 @@ impl Audit {
         dir: &Path,
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.converting {
-            return;
+            return false;
         }
         let name = self.recipe_name(cx);
         if name.is_empty() {
             self.notify_error(
                 "recipes",
-                "Couldn’t rename the recipe",
+                "Couldn’t rename the preset",
                 "type the new name first",
                 cx,
             );
-            return;
+            return false;
         }
         let Some(mut recipe) = self.selected_personal() else {
             self.notify_error(
                 "recipes",
-                "Couldn’t rename the recipe",
-                "select a personal row first; built-in rows keep their names",
+                "Couldn’t rename the preset",
+                "select one of your own presets first; built-in presets keep their names",
                 cx,
             );
-            return;
+            return false;
         };
         recipe.name = name;
         match recipe::overwrite(dir, &recipe) {
@@ -226,8 +285,12 @@ impl Audit {
                     input.set_value("", window, cx);
                 });
                 cx.notify();
+                true
             }
-            Err(message) => self.notify_error("recipes", "Couldn’t rename the recipe", message, cx),
+            Err(message) => {
+                self.notify_error("recipes", "Couldn’t rename the preset", message, cx);
+                false
+            }
         }
     }
 
@@ -240,8 +303,8 @@ impl Audit {
         let Some(recipe) = self.selected_personal() else {
             self.notify_error(
                 "recipes",
-                "Couldn’t delete the recipe",
-                "select a personal row first; built-in rows stay",
+                "Couldn’t delete the preset",
+                "select one of your own presets first; built-in presets stay",
                 cx,
             );
             return;
@@ -252,7 +315,7 @@ impl Audit {
                 self.reload_recipes(dir);
                 cx.notify();
             }
-            Err(message) => self.notify_error("recipes", "Couldn’t delete the recipe", message, cx),
+            Err(message) => self.notify_error("recipes", "Couldn’t delete the preset", message, cx),
         }
     }
 
@@ -262,8 +325,8 @@ impl Audit {
         if bytes.len() as u64 > recipe::MAX_FILE_BYTES {
             self.notify_error(
                 "recipes",
-                "Couldn’t import the recipe",
-                "that file is larger than any recipe",
+                "Couldn’t import the preset",
+                "that file is larger than any preset",
                 cx,
             );
             return;
@@ -275,7 +338,7 @@ impl Audit {
                 self.selected_recipe = Some(id);
                 cx.notify();
             }
-            Err(message) => self.notify_error("recipes", "Couldn’t import the recipe", message, cx),
+            Err(message) => self.notify_error("recipes", "Couldn’t import the preset", message, cx),
         }
     }
 
@@ -290,7 +353,7 @@ impl Audit {
                 .background_executor()
                 .spawn(async move {
                     rfd::FileDialog::new()
-                        .add_filter("Recipe", &["json"])
+                        .add_filter("Preset", &["json"])
                         .pick_file()
                 })
                 .await;
@@ -309,8 +372,8 @@ impl Audit {
                     Some(bytes) => audit.import_recipe_bytes(&dir, &bytes, cx),
                     None => audit.notify_error(
                         "recipes",
-                        "Couldn’t import the recipe",
-                        "that file cannot be read as a recipe",
+                        "Couldn’t import the preset",
+                        "that file cannot be read as a preset",
                         cx,
                     ),
                 }
@@ -327,7 +390,7 @@ impl Audit {
         let Some(recipe) = self.selected_personal() else {
             self.notify_error(
                 "recipes",
-                "Couldn’t export the recipe",
+                "Couldn’t export the preset",
                 "select a personal row first",
                 cx,
             );
@@ -339,7 +402,7 @@ impl Audit {
                 .background_executor()
                 .spawn(async move {
                     rfd::FileDialog::new()
-                        .add_filter("Recipe", &["json"])
+                        .add_filter("Preset", &["json"])
                         .set_file_name(format!("{id}.json"))
                         .save_file()
                 })
@@ -359,7 +422,7 @@ impl Audit {
         let Some(recipe) = self.selected_personal() else {
             self.notify_error(
                 "recipes",
-                "Couldn’t export the recipe",
+                "Couldn’t export the preset",
                 "select a personal row first",
                 cx,
             );
@@ -370,7 +433,7 @@ impl Audit {
                 .map_err(|error| format!("{} cannot be written: {error}", path.display()))
         }) {
             Ok(()) => cx.notify(),
-            Err(message) => self.notify_error("recipes", "Couldn’t export the recipe", message, cx),
+            Err(message) => self.notify_error("recipes", "Couldn’t export the preset", message, cx),
         }
     }
 }

@@ -430,21 +430,6 @@ impl Audit {
                     })),
             )
             .child(
-                // The operations sidebar, always a click away. Collapsed, the
-                // list takes the room; the verbs in the action bar reopen it
-                // on the tab they need.
-                Button::new("toggle-sidebar")
-                    .small()
-                    .ghost()
-                    .icon(IconName::PanelRight)
-                    .tooltip("Toggle operations sidebar")
-                    .selected(self.sidebar_open)
-                    .on_click(cx.listener(|audit, _, _, cx| {
-                        audit.sidebar_open = !audit.sidebar_open;
-                        cx.notify();
-                    })),
-            )
-            .child(
                 // Icon-only: the one global surface, always in the same corner.
                 Button::new("open-settings")
                     .small()

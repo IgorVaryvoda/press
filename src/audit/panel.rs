@@ -9,10 +9,17 @@
 
 use super::*;
 
-/// Width of an open rail. The table and the gallery lay themselves out against
-/// the viewport minus this, so a rail never silently squeezes their column
-/// math. A closed rail takes nothing.
+/// The open panel's built-in width, and the range its grab edge allows. The
+/// table and the gallery lay themselves out against the viewport minus the
+/// rail, so a panel never silently squeezes their column math.
 pub(super) const RAIL_WIDTH: f32 = 300.;
+pub(super) const RAIL_MIN: f32 = 260.;
+pub(super) const RAIL_MAX: f32 = 520.;
+/// How far past the minimum a drag goes before the panel collapses.
+pub(super) const RAIL_SNAP: f32 = 60.;
+/// The tool strip at the window's right edge, there whether the panel is
+/// open or not: the visible way into every operation, and out again.
+pub(super) const STRIP_WIDTH: f32 = 56.;
 
 /// Room the list leaves under itself for the floating bar: the bar's 18px
 /// offset and 46px height, plus a gap. Without the room the bar covers the
@@ -21,8 +28,8 @@ pub(super) const RAIL_WIDTH: f32 = 300.;
 pub(super) const BAR_CLEARANCE: f32 = 72.;
 
 /// Below this much room, the three secondary verbs drop to icons. The bar has
-/// to fit the list it floats over, and at the minimum window with a rail open
-/// there are 460px to fit into.
+/// to fit the list it floats over, and at the minimum window with the panel
+/// open there are about 400px to fit into.
 const BAR_LABELS_WIDTH: f32 = 720.;
 /// Below this, the readout goes too: the verbs are what the bar is for.
 const BAR_READOUT_WIDTH: f32 = 560.;
@@ -321,67 +328,108 @@ impl Audit {
         }
     }
 
-    /// One tab per operation, always present above the settings. The sidebar
-    /// stays open, so switching ops is one click, not a verb plus a rail.
-    fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.active_tab();
-        // Two fixed rows of two: four tabs never fit 300px in one row, and a
-        // wrapping row leaves Studio alone on a second line by accident.
-        let tab = |tab: Rail, label: &'static str, tooltip: &'static str| {
-            Button::new(("rail-tab", tab as usize))
-                .small()
-                .flex_1()
-                .label(label)
-                .tooltip(tooltip)
-                .selected(active == tab)
-                .when(active != tab, |button| button.ghost())
-                .disabled(self.converting)
-                .on_click(cx.listener(move |audit, _, _, cx| audit.open_rail(tab, cx)))
-        };
+    /// The operations rail: a slim strip of tools that is always there, and
+    /// the panel beside it with the lit tool's settings and commit. The strip
+    /// is the only way in and out, so it is always on screen.
+    pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(tab(
-                        Rail::Convert,
-                        "Convert",
-                        "Convert images to WebP, AVIF, or their own format",
-                    ))
-                    .child(tab(
-                        Rail::RemoveBackground,
-                        "Remove bg",
-                        "Remove the background on this computer",
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(tab(Rail::Upscale, "Upscale", "Upscale 4× on this computer"))
-                    .child(tab(
-                        Rail::Studio,
-                        "Studio",
-                        "AI operations with Sirv Studio",
-                    )),
-            )
+            .flex_shrink_0()
+            .h_full()
+            .children(self.sidebar_open.then(|| self.rail_panel(cx)))
+            .child(self.rail_strip(cx))
     }
 
-    /// The sidebar: tabs, the active operation's settings, and its commit at
-    /// the foot — the same shape whichever operation it belongs to.
-    pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        if !self.sidebar_open {
-            return None;
-        }
+    /// One tool on the strip: a glyph over a word, lit while its panel is open.
+    fn strip_tool(
+        &self,
+        tab: Rail,
+        label: &'static str,
+        icon: Icon,
+        tooltip: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let lit = self.sidebar_open && self.active_tab() == tab;
+        let hover = cx.theme().secondary_hover;
+        div()
+            .id(("strip", tab as usize))
+            .debug_selector(move || format!("strip-{}", tab.slug()))
+            .w(px(STRIP_WIDTH - 8.))
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_0p5()
+            .cursor_pointer()
+            .text_color(if lit {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(lit, |tool| {
+                tool.bg(cx.theme().list_active)
+                    .border_1()
+                    .border_color(cx.theme().list_active_border)
+            })
+            .hover(move |tool| tool.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+            .on_click(cx.listener(move |audit, _, _, cx| audit.toggle_rail_tab(tab, cx)))
+            .child(icon)
+            .child(div().text_size(px(10.)).whitespace_nowrap().child(label))
+    }
+
+    fn rail_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio_glyph = |slug: &str| match crate::assets::studio_icon(slug) {
+            Some(path) => Icon::default().path(path).size_4(),
+            None => Icon::new(IconName::Bot).size_4(),
+        };
+        div()
+            .debug_selector(|| "rail-strip".into())
+            .w(px(STRIP_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .py_2()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(self.strip_tool(
+                Rail::Convert,
+                "Convert",
+                Icon::new(IconName::Replace).size_4(),
+                "Convert images to WebP, AVIF, or their own format",
+                cx,
+            ))
+            .child(self.strip_tool(
+                Rail::RemoveBackground,
+                "Remove bg",
+                studio_glyph("background-removal"),
+                "Remove the background on this computer",
+                cx,
+            ))
+            .child(self.strip_tool(
+                Rail::Upscale,
+                "Upscale",
+                studio_glyph("upscale"),
+                "Upscale 4× on this computer",
+                cx,
+            ))
+            .child(self.strip_tool(
+                Rail::Studio,
+                "Studio",
+                Icon::new(IconName::Bot).size_4(),
+                "AI operations with Sirv Studio",
+                cx,
+            ))
+    }
+
+    /// The open panel: the lit operation's title, its settings, and its commit
+    /// at the foot — the same shape whichever operation it belongs to. Its
+    /// left edge is the grab edge that sizes it.
+    fn rail_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let title = tab.title();
         let body = match tab {
@@ -390,57 +438,77 @@ impl Audit {
             Rail::Studio => self.studio_rail(cx),
             Rail::None => self.convert_rail(cx).into_any_element(),
         };
-        Some(
-            div()
-                .debug_selector(|| "rail".into())
-                .w(px(RAIL_WIDTH))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .border_l_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().secondary)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .flex_shrink_0()
-                        .h(px(42.))
-                        .pl_3()
-                        .pr_1()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            div()
-                                .font_family("SF Pro Display")
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().foreground)
-                                .child(title),
-                        )
-                        .child(
-                            // Collapse, not close: the sidebar is the operations
-                            // home, and closing it mid-run would take Stop away
-                            // with it. The header toggle brings it back.
-                            div().debug_selector(|| "close-rail".into()).child(
-                                Button::new("close-rail")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Close)
-                                    .tooltip("Collapse sidebar")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        audit.sidebar_open = false;
-                                        cx.notify();
-                                    })),
-                            ),
+        let accent = cx.theme().primary;
+        div()
+            .debug_selector(|| "rail".into())
+            .relative()
+            .w(px(self.rail_size))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .flex_shrink_0()
+                    .h(px(42.))
+                    .pl_3()
+                    .pr_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .font_family("SF Pro Display")
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(title),
+                    )
+                    .child(
+                        // Collapse, not close: the panel is the operations
+                        // home, and closing it mid-run would take Stop away
+                        // with it. The strip brings it back.
+                        div().debug_selector(|| "close-rail".into()).child(
+                            Button::new("close-rail")
+                                .small()
+                                .ghost()
+                                .icon(IconName::PanelRightClose)
+                                .tooltip("Collapse the panel")
+                                .disabled(self.converting)
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    audit.sidebar_open = false;
+                                    cx.notify();
+                                })),
                         ),
-                )
-                .child(self.tab_bar(cx))
-                .child(body)
-                .into_any_element(),
-        )
+                    ),
+            )
+            .child(body)
+            .child(
+                // The grab edge. Drag it to size the panel; drag it past the
+                // minimum and the panel collapses to the strip.
+                div()
+                    .id("rail-resize")
+                    .debug_selector(|| "rail-resize".into())
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(6.))
+                    .cursor_ew_resize()
+                    .hover(move |edge| edge.bg(accent.opacity(0.5)))
+                    .when(self.rail_drag, |edge| edge.bg(accent))
+                    .on_mouse_down(
+                        gpui_kit::MouseButton::Left,
+                        cx.listener(|audit, _, _, cx| {
+                            audit.rail_drag = true;
+                            cx.notify();
+                        }),
+                    ),
+            )
     }
 
     fn convert_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -465,12 +533,20 @@ impl Audit {
                     // number in this rail is about size; this one is about the
                     // question people actually ask before pressing Convert.
                     .child(self.destination_row(cx))
-                    .child(self.preset_chooser(cx))
+                    // The transform, boxed as one thing: the preset names it,
+                    // and the three dials below are what it holds.
                     .child(
                         div()
+                            .debug_selector(|| "transform-card".into())
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().background)
+                            .child(self.preset_row(cx))
                             .child(div().debug_selector(|| "format-setting".into()).child(
                                 self.panel_setting(
                                     "Format",
@@ -483,34 +559,16 @@ impl Audit {
                                 self.panel_setting("Max size", self.resize_control(cx), cx),
                             )),
                     )
-                    .child(
-                        Button::new("manage-recipes")
-                            .debug_selector(|| "manage-recipes".into())
-                            .small()
-                            .ghost()
-                            .icon(if self.recipes_open {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .label("Manage recipes")
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.recipes_open = !audit.recipes_open;
-                                cx.notify();
-                            })),
-                    )
-                    .children(self.recipes_open.then(|| self.recipe_actions(cx)))
                     .children((!self.recipes_skipped.is_empty()).then(|| {
                         div()
                             .debug_selector(|| "recipes-skipped".into())
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "{} recipe files unreadable",
+                                "{} preset files unreadable",
                                 self.recipes_skipped.len()
                             ))
                     }))
-                    .child(div().h(px(1.)).bg(cx.theme().border))
                     .child(self.sets_section(cx)),
             )
             .child(
@@ -739,13 +797,13 @@ impl Audit {
     /// answer for anyone whose output belongs in a staging folder or a build
     /// tree. The originals never move either way.
     fn destination_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let custom = self.output != Output::Optimized;
+        let custom = matches!(self.output, Output::Folder(_));
         let replacing = self.output == Output::Replace;
         div()
             .debug_selector(|| "output-destination".into())
             .flex()
             .flex_col()
-            .gap_0p5()
+            .gap_1()
             .child(
                 div()
                     .flex()
@@ -784,23 +842,32 @@ impl Audit {
                             .on_click(cx.listener(|audit, _, _, cx| audit.reset_output(cx)))
                     }))
                     .children((!replacing).then(|| {
-                        Button::new("output-replace")
-                            .xsmall()
-                            .ghost()
-                            .label("Replace")
-                            .tooltip("Convert in place, keeping every original in press-originals/")
-                            .disabled(self.converting)
-                            .on_click(cx.listener(|audit, _, _, cx| audit.use_replace_output(cx)))
-                    }))
-                    .child(
                         Button::new("output-choose")
                             .xsmall()
                             .ghost()
                             .label("Change")
                             .tooltip("Choose the folder converted files are written to")
                             .disabled(self.converting)
-                            .on_click(cx.listener(|audit, _, _, cx| audit.pick_output(cx))),
-                    ),
+                            .on_click(cx.listener(|audit, _, _, cx| audit.pick_output(cx)))
+                    })),
+            )
+            // A mode, so a switch: "Replace" beside "Change" read as two
+            // folder links, and one of them rewrote the folder you audited.
+            .child(
+                div().debug_selector(|| "output-replace".into()).child(
+                    Switch::new("output-replace")
+                        .small()
+                        .checked(replacing)
+                        .label("Replace originals in place")
+                        .disabled(self.converting)
+                        .on_click(cx.listener(|audit, _, _, cx| {
+                            if audit.output == Output::Replace {
+                                audit.reset_output(cx);
+                            } else {
+                                audit.use_replace_output(cx);
+                            }
+                        })),
+                ),
             )
             // The promise the whole app rests on, kept in view rather than
             // discovered afterwards — and said differently when the destination
@@ -842,71 +909,63 @@ impl Audit {
             .child(control)
     }
 
-    fn preset_chooser(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+    /// The row the dials currently name: the applied one, or failing that the
+    /// first row the dials still match.
+    fn selected_preset_row(&self) -> Option<crate::recipe::Recipe> {
         let rows: Vec<_> = builtin_recipes()
             .into_iter()
             .chain(self.recipes.iter().cloned())
             .collect();
-        let selected = self
-            .selected_recipe
+        self.selected_recipe
             .as_deref()
             .and_then(|id| rows.iter().find(|row| row.id == id))
-            .or_else(|| rows.iter().find(|row| !self.recipe_modified(row)));
-        let modified = selected.is_some_and(|row| self.recipe_modified(row));
-        let label = selected.map_or_else(|| "Custom settings".to_string(), |row| row.name.clone());
-        let audit = cx.entity().downgrade();
+            .or_else(|| rows.iter().find(|row| !self.recipe_modified(row)))
+            .cloned()
+    }
+
+    /// What the estimate says will run: the preset's name, marked when the
+    /// dials left it, or "custom settings" when no row matches.
+    pub(super) fn preset_label(&self) -> String {
+        match self.selected_preset_row() {
+            Some(row) if self.recipe_modified(&row) => format!("{} (edited)", row.name),
+            Some(row) => row.name,
+            None => "custom settings".to_string(),
+        }
+    }
+
+    /// The preset row: its label and edited mark, the chooser, the actions
+    /// menu, and the name prompt while Save as or Rename asks for one. The
+    /// chooser lists rows only; the verbs live behind the dots, so the list
+    /// stays a list.
+    fn preset_row(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let rows: Vec<_> = builtin_recipes()
+            .into_iter()
+            .chain(self.recipes.iter().cloned())
+            .collect();
+        let selected = self.selected_preset_row();
+        let selected_id = selected.as_ref().map(|row| row.id.clone());
+        let modified = selected
+            .as_ref()
+            .is_some_and(|row| self.recipe_modified(row));
+        let label = selected
+            .as_ref()
+            .map_or_else(|| "Custom settings".to_string(), |row| row.name.clone());
+        let personal = self.selected_personal();
+        let has_personal = personal.is_some();
+        let can_update = modified && has_personal;
+        let update_label = personal.as_ref().map_or_else(
+            || "Save changes".to_string(),
+            |row| format!("Save changes to {}", row.name),
+        );
+        let builtin_count = builtin_recipes().len();
+        let chooser = cx.entity().downgrade();
+        let actions = cx.entity().downgrade();
+        let busy = self.converting;
         div()
             .when(
                 active_preset(self.format, self.quality, self.max_edge).is_none(),
-                |chooser| chooser.debug_selector(|| "custom-settings-active".into()),
+                |row| row.debug_selector(|| "custom-settings-active".into()),
             )
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                Button::new("preset-chooser")
-                    .debug_selector(|| "preset-chooser".into())
-                    .small()
-                    .outline()
-                    .w_full()
-                    .label(label)
-                    .dropdown_caret(true)
-                    .disabled(self.converting)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for row in &rows {
-                            let audit = audit.clone();
-                            let recipe = row.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(format!("{} · {}", row.name, row.summary()))
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(audit) = audit.upgrade() {
-                                            audit.update(cx, |audit, cx| {
-                                                audit.clear_custom_max_edge(window, cx);
-                                                audit.apply_recipe(&recipe, &recipe.id, window, cx);
-                                            });
-                                        }
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            )
-            .children(modified.then(|| {
-                div()
-                    .debug_selector(|| "recipe-modified".into())
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Modified")
-            }))
-    }
-
-    /// Save the live settings under a name, and the row operations around the
-    /// selected personal recipe. Import and export move bytes through pickers;
-    /// everything else resolves against the on-disk library.
-    fn recipe_actions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let busy = self.converting;
-        let personal = self.selected_personal().is_some();
-        div()
             .flex()
             .flex_col()
             .gap_1()
@@ -914,94 +973,210 @@ impl Audit {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .justify_between()
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .debug_selector(|| "recipe-name-input".into())
-                            .child(Input::new(&self.recipe_name_input).small().disabled(busy)),
+                            .id("preset-label")
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .tooltip(|window, cx| {
+                                Tooltip::new(
+                                    "A preset saves format, quality, max size and AVIF speed. \
+                                     The output folder and replace mode stay per run.",
+                                )
+                                .build(window, cx)
+                            })
+                            .child("Preset"),
                     )
-                    .child(
-                        Button::new("recipe-save")
-                            .small()
-                            .outline()
-                            .label("Save")
-                            .disabled(busy)
-                            .on_click(cx.listener(|audit, _, window, cx| {
-                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.save_current_recipe(&dir, window, cx);
-                            })),
-                    ),
+                    .children(modified.then(|| {
+                        div()
+                            .debug_selector(|| "recipe-modified".into())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().yellow)
+                            .child("edited")
+                    })),
             )
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
+                    .items_center()
                     .gap_1()
                     .child(
-                        Button::new("recipe-duplicate")
-                            .small()
-                            .ghost()
-                            .label("Duplicate")
-                            .disabled(busy || self.selected_recipe.is_none())
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.duplicate_recipe(&dir, cx);
-                            })),
+                        div().flex_1().min_w_0().child(
+                            Button::new("preset-chooser")
+                                .debug_selector(|| "preset-chooser".into())
+                                .small()
+                                .outline()
+                                .w_full()
+                                .label(label)
+                                .dropdown_caret(true)
+                                .disabled(busy)
+                                .dropdown_menu(move |mut menu, _, _| {
+                                    for (index, row) in rows.iter().enumerate() {
+                                        if index == builtin_count {
+                                            menu = menu
+                                                .separator()
+                                                .item(PopupMenuItem::label("My presets"));
+                                        }
+                                        let audit = chooser.clone();
+                                        let recipe = row.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(format!(
+                                                "{} · {}",
+                                                row.name,
+                                                row.summary()
+                                            ))
+                                            .checked(selected_id.as_deref() == Some(&row.id))
+                                            .on_click(move |_, window, cx| {
+                                                if let Some(audit) = audit.upgrade() {
+                                                    audit.update(cx, |audit, cx| {
+                                                        audit.clear_custom_max_edge(window, cx);
+                                                        audit.apply_recipe(
+                                                            &recipe, &recipe.id, window, cx,
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        ),
                     )
                     .child(
-                        Button::new("recipe-rename")
+                        Button::new("recipe-actions")
+                            .debug_selector(|| "recipe-actions".into())
                             .small()
-                            .ghost()
-                            .label("Rename")
-                            .disabled(busy || !personal)
-                            .on_click(cx.listener(|audit, _, window, cx| {
-                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.rename_recipe(&dir, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("recipe-delete")
-                            .small()
-                            .ghost()
-                            .label("Delete")
-                            .disabled(busy || !personal)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                let Some(dir) = audit.recipe_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.delete_recipe(&dir, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("recipe-import")
-                            .small()
-                            .ghost()
-                            .label("Import")
+                            .outline()
+                            .icon(IconName::Ellipsis)
+                            .tooltip("Save, rename, delete, import or export presets")
                             .disabled(busy)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.import_recipe_file(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("recipe-export")
-                            .small()
-                            .ghost()
-                            .label("Export")
-                            .disabled(busy || !personal)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.export_recipe_file(cx);
-                            })),
+                            .dropdown_menu(move |menu, _, _| {
+                                let update = actions.clone();
+                                let save_as = actions.clone();
+                                let rename = actions.clone();
+                                let delete = actions.clone();
+                                let import = actions.clone();
+                                let export = actions.clone();
+                                let with_dir = |audit: &gpui_kit::WeakEntity<Audit>,
+                                                cx: &mut App,
+                                                act: fn(&mut Audit, &Path, &mut Context<Audit>)| {
+                                    if let Some(audit) = audit.upgrade() {
+                                        audit.update(cx, |audit, cx| {
+                                            if let Some(dir) = audit.recipe_dir_or_notify(cx) {
+                                                act(audit, &dir, cx);
+                                            }
+                                        });
+                                    }
+                                };
+                                menu.item(
+                                    PopupMenuItem::new(update_label.clone())
+                                        .disabled(!can_update)
+                                        .on_click(move |_, _, cx| {
+                                            with_dir(&update, cx, Audit::update_recipe)
+                                        }),
+                                )
+                                .item(PopupMenuItem::new("Save as new preset…").on_click(
+                                    move |_, window, cx| {
+                                        if let Some(audit) = save_as.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.open_recipe_prompt(
+                                                    RecipePrompt::SaveAs,
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        }
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new("Rename…")
+                                        .disabled(!has_personal)
+                                        .on_click(move |_, window, cx| {
+                                            if let Some(audit) = rename.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.open_recipe_prompt(
+                                                        RecipePrompt::Rename,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Delete")
+                                        .disabled(!has_personal)
+                                        .on_click(move |_, _, cx| {
+                                            with_dir(&delete, cx, Audit::delete_recipe)
+                                        }),
+                                )
+                                .separator()
+                                .item(PopupMenuItem::new("Import…").on_click(move |_, _, cx| {
+                                    if let Some(audit) = import.upgrade() {
+                                        audit.update(cx, |audit, cx| audit.import_recipe_file(cx));
+                                    }
+                                }))
+                                .item(
+                                    PopupMenuItem::new("Export…")
+                                        .disabled(!has_personal)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = export.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.export_recipe_file(cx)
+                                                });
+                                            }
+                                        }),
+                                )
+                            }),
                     ),
             )
-            .into_any_element()
+            .children(
+                self.recipe_prompt
+                    .map(|prompt| self.recipe_prompt_row(prompt, cx)),
+            )
+    }
+
+    /// The name box, inline under the row, with the one verb it serves and a
+    /// way out. Save as starts blank; Rename starts from the current name.
+    fn recipe_prompt_row(&self, prompt: RecipePrompt, cx: &Context<Self>) -> impl IntoElement {
+        let busy = self.converting;
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .debug_selector(|| "recipe-name-input".into())
+                    .child(Input::new(&self.recipe_name_input).small().disabled(busy)),
+            )
+            .child(
+                Button::new("recipe-save")
+                    .debug_selector(|| "recipe-save".into())
+                    .small()
+                    .outline()
+                    .label(match prompt {
+                        RecipePrompt::SaveAs => "Save",
+                        RecipePrompt::Rename => "Rename",
+                    })
+                    .disabled(busy)
+                    .on_click(cx.listener(|audit, _, window, cx| {
+                        audit.confirm_recipe_prompt(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("recipe-cancel")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Close)
+                    .tooltip("Cancel")
+                    .on_click(cx.listener(|audit, _, _, cx| {
+                        audit.recipe_prompt = None;
+                        cx.notify();
+                    })),
+            )
     }
 
     /// The bound target's display name from loaded recipes. A bound id with
@@ -1028,98 +1203,103 @@ impl Audit {
         for index in 0..self.work_stale.len() {
             stale_rows.push(self.sets_stale_row(index, cx));
         }
+        let open = self.sets_open;
+        let job = cx.entity().downgrade();
+        // Folded by default: sets are a second job over the folder, and five
+        // verbs plus three boxes sat under every conversion whether or not
+        // anyone had a product to name.
+        let header =
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    Button::new("sets-toggle")
+                        .debug_selector(|| "sets-toggle".into())
+                        .small()
+                        .ghost()
+                        .icon(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .label("Product sets")
+                        .on_click(cx.listener(|audit, _, _, cx| {
+                            audit.sets_open = !audit.sets_open;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    // The job's name is the job menu: the five verbs used to be
+                    // two rows of ghost text under the heading.
+                    div().debug_selector(|| "sets-job-name".into()).child(
+                        Button::new("sets-job")
+                            .small()
+                            .ghost()
+                            .label(self.work_job.name.clone())
+                            .dropdown_caret(true)
+                            .disabled(busy)
+                            .dropdown_menu(move |menu, _, _| {
+                                let new_job = job.clone();
+                                let delete = job.clone();
+                                let csv = job.clone();
+                                let import = job.clone();
+                                let export = job.clone();
+                                let act = |audit: &gpui_kit::WeakEntity<Audit>,
+                                       cx: &mut App,
+                                       act: fn(&mut Audit, &mut Context<Audit>)| {
+                                if let Some(audit) = audit.upgrade() {
+                                    audit.update(cx, act);
+                                }
+                            };
+                                menu.item(
+                                    PopupMenuItem::new("New job").on_click(move |_, _, cx| {
+                                        act(&new_job, cx, Audit::new_job)
+                                    }),
+                                )
+                                .item(PopupMenuItem::new("Delete job").on_click(move |_, _, cx| {
+                                    if let Some(audit) = delete.upgrade() {
+                                        audit.update(cx, |audit, cx| {
+                                            if let Some(dir) = audit.job_dir_or_notify(cx) {
+                                                audit.delete_job(&dir, cx);
+                                            }
+                                        });
+                                    }
+                                }))
+                                .separator()
+                                .item(PopupMenuItem::new("Import CSV…").on_click(
+                                    move |_, _, cx| act(&csv, cx, Audit::import_csv_file),
+                                ))
+                                .item(PopupMenuItem::new("Import job…").on_click(
+                                    move |_, _, cx| act(&import, cx, Audit::import_job_file),
+                                ))
+                                .item(
+                                    PopupMenuItem::new("Export job…").on_click(move |_, _, cx| {
+                                        act(&export, cx, Audit::export_job_file)
+                                    }),
+                                )
+                            }),
+                    ),
+                );
         div()
             .debug_selector(|| "sets-section".into())
             .flex()
             .flex_col()
             .flex_shrink_0()
             .gap_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().muted_foreground)
-                            .child("PRODUCT SETS"),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "sets-job-name".into())
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.work_job.name.clone()),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(
-                        Button::new("sets-new-job")
-                            .small()
-                            .ghost()
-                            .label("New")
-                            .disabled(busy)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.new_job(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sets-delete-job")
-                            .small()
-                            .ghost()
-                            .label("Delete")
-                            .disabled(busy)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                let Some(dir) = audit.job_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.delete_job(&dir, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sets-import-csv")
-                            .small()
-                            .ghost()
-                            .label("Import CSV")
-                            .disabled(busy)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.import_csv_file(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sets-import-job")
-                            .small()
-                            .ghost()
-                            .label("Import job")
-                            .disabled(busy)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.import_job_file(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sets-export-job")
-                            .small()
-                            .ghost()
-                            .label("Export job")
-                            .disabled(busy)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                audit.export_job_file(cx);
-                            })),
-                    ),
-            )
-            .child(
+            .child(header)
+            .children(open.then(|| {
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .debug_selector(|| "sets-target".into())
@@ -1150,24 +1330,22 @@ impl Audit {
                                 };
                                 audit.clear_job_target(&dir, cx);
                             })),
-                    ),
-            )
-            .child(
+                    )
+            }))
+            .children(open.then(|| {
+                // Stacked: side by side, the two boxes cut their own
+                // placeholders to "Product n" and "SKU hint (".
                 div()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_1()
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
                             .debug_selector(|| "sets-product-name".into())
                             .child(Input::new(&self.product_name_input).small().disabled(busy)),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
                             .debug_selector(|| "sets-product-sku".into())
                             .child(Input::new(&self.product_sku_input).small().disabled(busy)),
                     )
@@ -1175,6 +1353,7 @@ impl Audit {
                         Button::new("sets-add-product")
                             .small()
                             .outline()
+                            .w_full()
                             .label("Add product")
                             .disabled(busy)
                             .on_click(cx.listener(|audit, _, _, cx| {
@@ -1183,10 +1362,10 @@ impl Audit {
                                 };
                                 audit.add_product(&dir, cx);
                             })),
-                    ),
-            )
-            .children(products)
-            .children((!self.work_stale.is_empty()).then(|| {
+                    )
+            }))
+            .children(open.then_some(products).into_iter().flatten())
+            .children((open && !self.work_stale.is_empty()).then(|| {
                 div()
                     .flex()
                     .flex_col()
@@ -1577,6 +1756,7 @@ impl Audit {
             // than no switch.
             .children(self.format.supports_lossless().then(|| {
                 Switch::new("lossless")
+                    .small()
                     .checked(lossless)
                     .label("Lossless")
                     .disabled(self.converting)
@@ -1689,8 +1869,10 @@ impl Audit {
                 } else {
                     cx.theme().green
                 },
+                // The preset by name at the commit moment, so what will run
+                // is said where the number is, not only up in the card.
                 format!(
-                    "from {}{}{}",
+                    "from {}{}{} · {}",
                     format_bytes(source),
                     sampling_note(sampled, target_count),
                     if refused > 0 {
@@ -1698,6 +1880,7 @@ impl Audit {
                     } else {
                         String::new()
                     },
+                    self.preset_label(),
                 ),
                 if sampled == 0 {
                     None

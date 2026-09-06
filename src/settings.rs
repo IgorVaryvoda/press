@@ -26,6 +26,9 @@ pub struct Settings {
     /// carries every operation, and a collapsed default would hide the app's
     /// job behind one more click. Stored collapsed so absence stays open.
     pub sidebar_collapsed: bool,
+    /// The open sidebar's width, as its grab edge left it. `None` is the
+    /// built-in width; the range is clamped where the window reads it.
+    pub rail_width: Option<f32>,
     /// libaom's speed dial for AVIF output. `None` is the built-in default; the
     /// window has no control for it, so this and `--avif-speed` are the two ways
     /// to say anything else. Range-checked once, in `avif::set_speed`.
@@ -537,6 +540,7 @@ fn parse(text: &str) -> Settings {
             "columns" => settings.columns = ColumnPrefs::parse(value),
             "subfolders" => settings.include_subfolders = value.trim() == "1",
             "sidebar_collapsed" => settings.sidebar_collapsed = value.trim() == "1",
+            "rail_width" => settings.rail_width = value.trim().parse().ok(),
             // Range-checked in `avif::set_speed`, which is where every source of this
             // value goes through. Parsing only has to reject what is not a number.
             "avif_speed" => settings.avif_speed = value.trim().parse().ok(),
@@ -587,6 +591,9 @@ fn render(settings: &Settings) -> String {
     // Same shape: open writes nothing, so older files open with the sidebar.
     if settings.sidebar_collapsed {
         out.push_str("sidebar_collapsed=1\n");
+    }
+    if let Some(width) = settings.rail_width {
+        out.push_str(&format!("rail_width={width}\n"));
     }
     if let Some(speed) = settings.avif_speed {
         out.push_str(&format!("avif_speed={speed}\n"));
@@ -681,6 +688,7 @@ mod tests {
             output: Output::Folder(PathBuf::from("/exports/web")),
             include_subfolders: true,
             sidebar_collapsed: true,
+            rail_width: None,
             avif_speed: Some(8),
         };
         assert_eq!(parse(&render(&settings)), settings);
@@ -788,6 +796,7 @@ mod tests {
     fn the_collapsed_sidebar_round_trips() {
         let collapsed = Settings {
             sidebar_collapsed: true,
+            rail_width: None,
             ..Settings::default()
         };
         assert!(render(&collapsed).contains("sidebar_collapsed=1\n"));

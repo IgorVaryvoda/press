@@ -429,6 +429,7 @@ fn screenshot() {
                     output: crate::settings::Output::default(),
                     include_subfolders: false,
                     sidebar_open: true,
+                    rail_width: None,
                 },
                 window,
                 cx,
@@ -672,6 +673,7 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         output: crate::settings::Output::default(),
         include_subfolders: false,
         sidebar_open: true,
+        rail_width: None,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -783,6 +785,7 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         output: crate::settings::Output::default(),
         include_subfolders: false,
         sidebar_open: true,
+        rail_width: None,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
@@ -1079,7 +1082,7 @@ fn a_studio_result_belongs_to_its_exact_file_and_dataset() {
 fn table_layout_keeps_decision_columns_at_compact_width() {
     let prefs = ColumnPrefs::default();
     // The narrowest the list ever gets: the minimum window with a rail open.
-    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::RAIL_WIDTH - 44.;
+    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::RAIL_WIDTH - panel::STRIP_WIDTH - 44.;
     let (_, narrow_name, narrow_columns) =
         AuditTable::layout(minimum_left_pane, prefs, true, false);
     assert!(narrow_name >= W_NAME_MIN);
@@ -1411,6 +1414,7 @@ fn notification_audit(
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
                 sidebar_open: true,
+                rail_width: None,
             },
             window,
             cx,
@@ -1885,6 +1889,7 @@ fn finding_launch() -> Launch {
         output: crate::settings::Output::default(),
         include_subfolders: false,
         sidebar_open: true,
+        rail_width: None,
     }
 }
 
@@ -2689,6 +2694,7 @@ fn pointer_checkbox_audit(
         output: crate::settings::Output::default(),
         include_subfolders: false,
         sidebar_open: true,
+        rail_width: None,
     };
     let (harness, cx) = cx.add_window_view(move |window, cx| {
         let built = build_audit(launch, window, cx);
@@ -3311,6 +3317,101 @@ fn heavy_needs_a_file_worth_converting() {
 /// The picker's toggle has to reach the table, not only the state: the delegate
 /// caches its column list against a signature, and a preference left out of that
 /// signature changes nothing on screen.
+/// The strip is the visible way in and out of the panel: a tool opens it on
+/// that tool, the lit tool collapses it, and the strip itself never leaves.
+#[gpui_kit::test]
+fn the_tool_strip_opens_switches_and_collapses_the_panel(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("rail-strip").is_some());
+
+    let upscale = cx
+        .debug_bounds("strip-upscale")
+        .expect("the strip offers every tool");
+    cx.simulate_click(upscale.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sidebar_open);
+        assert_eq!(audit.active_tab(), Rail::Upscale);
+    });
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let upscale = cx.debug_bounds("strip-upscale").unwrap();
+    cx.simulate_click(upscale.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.sidebar_open, "the lit tool collapses the panel");
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("rail").is_none());
+    assert!(cx.debug_bounds("rail-strip").is_some(), "the strip stays");
+
+    let convert = cx.debug_bounds("strip-convert").unwrap();
+    cx.simulate_click(convert.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sidebar_open);
+        assert_eq!(audit.active_tab(), Rail::Convert);
+    });
+}
+
+/// The grab edge sizes the panel from the pointer within its range, and a
+/// drag past the minimum collapses it rather than jamming there.
+#[gpui_kit::test]
+fn the_grab_edge_sizes_and_collapses_the_panel(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let viewport = 1100.;
+    let at = |x: f32| gpui_kit::MouseMoveEvent {
+        position: gpui_kit::point(px(x), px(300.)),
+        pressed_button: Some(gpui_kit::MouseButton::Left),
+        ..Default::default()
+    };
+    audit.update(cx, |audit, cx| {
+        audit.rail_drag = true;
+        audit.drag_rail(&at(viewport - panel::STRIP_WIDTH - 400.), viewport, cx);
+        assert_eq!(audit.rail_size, 400.);
+        audit.drag_rail(&at(0.), viewport, cx);
+        assert_eq!(
+            audit.rail_size,
+            panel::RAIL_MAX,
+            "the edge stops at the widest panel"
+        );
+        assert!(audit.sidebar_open);
+        let past = panel::RAIL_MIN - panel::RAIL_SNAP - 1.;
+        audit.drag_rail(&at(viewport - panel::STRIP_WIDTH - past), viewport, cx);
+        assert!(!audit.sidebar_open, "past the minimum the panel collapses");
+        assert!(!audit.rail_drag);
+        assert_eq!(
+            audit.rail_size,
+            panel::RAIL_MAX,
+            "the last good width is kept"
+        );
+    });
+}
+
+/// Save changes writes the dials into the selected personal preset and bumps
+/// its revision, so the row reads as current again.
+#[gpui_kit::test]
+fn save_changes_updates_the_selected_personal_preset(cx: &mut TestAppContext) {
+    let (audit, cx) = pointer_checkbox_audit(false, cx);
+    let dir = crate::recipe::temp_store("gui-update");
+    audit.update_in(cx, |audit, window, cx| {
+        audit.recipe_name_input.update(cx, |input, cx| {
+            input.set_value("Night", window, cx);
+        });
+        assert!(audit.save_current_recipe(&dir, window, cx));
+        audit.quality = Quality::lossy(42.);
+        audit.update_recipe(&dir, cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        let night = audit
+            .recipes
+            .iter()
+            .find(|row| row.id == "night")
+            .expect("the file keeps its id");
+        assert_eq!(night.revision, 2);
+        assert_eq!(night.quality, crate::recipe::RecipeQuality::Lossy(42.));
+        assert!(!audit.recipe_modified(night), "the row is current again");
+    });
+}
+
 /// The whole header label sorts. The library only sorts from the small arrow
 /// it draws at the far edge of the cell, which on Name sat beside "Format".
 #[gpui_kit::test]
@@ -4653,6 +4754,7 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
                 sidebar_open: true,
+                rail_width: None,
             },
             window,
             cx,
@@ -4766,6 +4868,7 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
                 sidebar_open: true,
+                rail_width: None,
             },
             window,
             cx,
@@ -4847,6 +4950,7 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui_kit::TestAppCo
                 output: crate::settings::Output::default(),
                 include_subfolders: false,
                 sidebar_open: true,
+                rail_width: None,
             },
             window,
             cx,
@@ -4932,6 +5036,7 @@ fn convertible_audit(
         output: crate::settings::Output::default(),
         include_subfolders: false,
         sidebar_open: true,
+        rail_width: None,
     };
     let mut built = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
@@ -5428,10 +5533,10 @@ fn a_diverged_row_reads_modified_not_silent(cx: &mut TestAppContext) {
     assert_eq!(stored.quality, crate::recipe::RecipeQuality::Lossy(80.));
 }
 
-/// Save, duplicate, rename and delete against an isolated library: the files
+/// Save, save as, rename and delete against an isolated library: the files
 /// on disk follow the clicks, and the selection follows the files.
 #[gpui_kit::test]
-fn recipe_files_follow_save_duplicate_rename_delete(cx: &mut TestAppContext) {
+fn recipe_files_follow_save_rename_delete(cx: &mut TestAppContext) {
     let (audit, cx) = pointer_checkbox_audit(false, cx);
     let dir = crate::recipe::temp_store("gui-actions");
     audit.update_in(cx, |audit, window, cx| {
@@ -5450,7 +5555,12 @@ fn recipe_files_follow_save_duplicate_rename_delete(cx: &mut TestAppContext) {
             .expect("save selects its row")
     });
     assert_eq!(first.name, "First");
-    audit.update(cx, |audit, cx| audit.duplicate_recipe(&dir, cx));
+    audit.update_in(cx, |audit, window, cx| {
+        audit.recipe_name_input.update(cx, |input, cx| {
+            input.set_value("First copy", window, cx);
+        });
+        audit.save_current_recipe(&dir, window, cx);
+    });
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.selected_recipe.as_deref(), Some("first-copy"));
         assert_eq!(audit.recipes.len(), 2);
@@ -5560,7 +5670,10 @@ fn job_products_roles_and_mappings_follow_actions(cx: &mut TestAppContext) {
     });
     // The section renders with products and mappings present: a row-indexing
     // bug panics on draw rather than slipping into the release binary.
-    audit.update(cx, |audit, cx| audit.open_rail(Rail::Convert, cx));
+    audit.update(cx, |audit, cx| {
+        audit.sets_open = true;
+        audit.open_rail(Rail::Convert, cx);
+    });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("sets-section").is_some());
     let first = audit.read_with(cx, |audit, _| {
@@ -6972,9 +7085,10 @@ fn conversion_controls_stay_visible_before_recipe_management(cx: &mut TestAppCon
             crate::recipe::Recipe::builtins()[0].effective().0
         );
     });
-    let disclosure = cx.debug_bounds("manage-recipes").unwrap();
-    cx.simulate_click(disclosure.center(), gpui_kit::Modifiers::none());
-    cx.run_until_parked();
+    audit.update_in(cx, |audit, window, cx| {
+        audit.open_recipe_prompt(RecipePrompt::SaveAs, window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("recipe-name-input").is_some());
     assert!(cx.debug_bounds("sets-section").is_some());
 }

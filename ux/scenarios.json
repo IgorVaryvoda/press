@@ -589,7 +589,7 @@
   },
   "conversion-result": {
     "name": "Look at what a run produced",
-    "goal": "See the files a finished run wrote — against the originals they came from, at the bytes they actually weigh — and get to them in the folder.",
+    "goal": "See the files a finished run wrote \u2014 against the originals they came from, at the bytes they actually weigh \u2014 and get to them in the folder.",
     "success": [
       "A finished run leads straight to its output rather than reporting a number and stopping.",
       "Both sides are the files on disk, and nothing suggests the converted side is a preview.",
@@ -943,7 +943,7 @@
   },
   "comparison-actions": {
     "name": "Act on the image you are comparing",
-    "goal": "Judge one image against its conversion and act on it — convert, run a local model, or hand it to Studio — without leaving the screen or hunting through a menu.",
+    "goal": "Judge one image against its conversion and act on it \u2014 convert, run a local model, or hand it to Studio \u2014 without leaving the screen or hunting through a menu.",
     "success": [
       "Every action available for this image is visible in the bar, with no disclosure to open first.",
       "The readout says what this image costs now and converted, and updates when settings change.",
@@ -984,6 +984,86 @@
         "label": "wide",
         "width": 1440,
         "height": 900
+      }
+    ]
+  },
+  "panel-collapsed": {
+    "name": "Collapse the operations panel from its strip",
+    "goal": "Fold the panel away from the tool strip and see the strip stay as the way back in.",
+    "success": [
+      "The lit tool on the strip collapses the panel.",
+      "The strip remains visible with every tool.",
+      "The list takes the freed width."
+    ],
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
+    "actions": [
+      {
+        "type": "click",
+        "x": -28,
+        "y": 70
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      }
+    ],
+    "interaction_trace": [
+      "Open a folder.",
+      "Click the lit Convert tool on the strip.",
+      "Read the strip and the widened list."
+    ],
+    "review_focus": [
+      "Strip legibility",
+      "Collapsed state affordance",
+      "List width"
+    ],
+    "sizes": [
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
+      }
+    ]
+  },
+  "preset-actions": {
+    "name": "Open the preset actions",
+    "goal": "Find where a preset is saved, renamed, deleted, imported or exported.",
+    "success": [
+      "The actions menu opens from the dots beside the preset chooser.",
+      "Save changes is disabled until a personal preset is edited."
+    ],
+    "launch": {
+      "kind": "folder",
+      "path": "docs"
+    },
+    "actions": [
+      {
+        "type": "click",
+        "x": -90,
+        "y": 206
+      },
+      {
+        "type": "wait",
+        "seconds": 1
+      }
+    ],
+    "interaction_trace": [
+      "Open a folder.",
+      "Click the dots beside the preset.",
+      "Read the verbs."
+    ],
+    "review_focus": [
+      "Preset row hierarchy",
+      "Menu verb clarity"
+    ],
+    "sizes": [
+      {
+        "label": "default",
+        "width": 1100,
+        "height": 720
       }
     ]
   }

@@ -1373,6 +1373,7 @@ fn main() {
                 output: remembered.output.clone(),
                 include_subfolders: remembered.include_subfolders,
                 sidebar_open: !remembered.sidebar_collapsed,
+                rail_width: remembered.rail_width,
             },
             None,
             pending_crash,
@@ -1415,6 +1416,7 @@ fn main() {
                 output: remembered.output.clone(),
                 include_subfolders: remembered.include_subfolders,
                 sidebar_open: !remembered.sidebar_collapsed,
+                rail_width: remembered.rail_width,
             },
             Some(target),
             pending_crash,
@@ -1802,6 +1804,7 @@ struct Launch {
     output: settings::Output,
     include_subfolders: bool,
     sidebar_open: bool,
+    rail_width: Option<f32>,
 }
 
 /// `Root` owns these overlays but leaves their placement to the app's content view.

@@ -658,6 +658,7 @@ impl Render for Audit {
             },
             include_subfolders: self.include_subfolders,
             sidebar_collapsed: !self.sidebar_open,
+            rail_width: Some(self.rail_size),
             // Read back from the process rather than kept a second time here: the
             // speed is set once at startup and nothing in the window changes it, so
             // a copy on `Audit` would only be a copy to forget to update.
@@ -1165,6 +1166,20 @@ impl Audit {
                     audit.request_paths(paths.paths().to_vec(), window, cx);
                 }),
             )
+            // The panel's grab edge is six pixels wide and the pointer leaves
+            // it at once, so the workspace follows the drag on its behalf.
+            .on_mouse_move(
+                cx.listener(|audit, event: &gpui_kit::MouseMoveEvent, window, cx| {
+                    if audit.rail_drag {
+                        let viewport = f32::from(window.viewport_size().width);
+                        audit.drag_rail(event, viewport, cx);
+                    }
+                }),
+            )
+            .on_mouse_up(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|audit, _, _, cx| audit.end_rail_drag(cx)),
+            )
             .child(self.header(window, cx))
             // Audit on the left, the output panel on the right: the working
             // area and the settings column split below one shared header.
@@ -1194,7 +1209,7 @@ impl Audit {
                                 .then(|| self.action_bar(list_width, cx)),
                             ),
                     )
-                    .children(self.rail_view(cx))
+                    .child(self.rail_view(cx))
                     .children(overlay_sidebar.map(|sidebar| {
                         div()
                             .id("folder-overlay")

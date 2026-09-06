@@ -243,6 +243,24 @@ impl Rail {
             Rail::Studio => "AI operations",
         }
     }
+
+    /// The word the strip's selectors carry, so a test names a tool, not a number.
+    fn slug(self) -> &'static str {
+        match self {
+            Rail::None => "none",
+            Rail::Convert => "convert",
+            Rail::RemoveBackground => "remove-bg",
+            Rail::Upscale => "upscale",
+            Rail::Studio => "studio",
+        }
+    }
+}
+
+/// Which name the prompt under the preset row is asking for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum RecipePrompt {
+    SaveAs,
+    Rename,
 }
 
 #[derive(Clone)]
@@ -422,9 +440,16 @@ pub(crate) struct Audit {
     /// The last applied preset row, built-in or personal. Settings edits never
     /// rewrite it: a diverged row reads as modified, never as a silent edit.
     selected_recipe: Option<String>,
-    recipes_open: bool,
-    /// The name Save and Rename read. Unfocused text, applied on click.
+    /// The name prompt under the preset row, while Save as or Rename asks.
+    recipe_prompt: Option<RecipePrompt>,
+    /// The name Save as and Rename read. Unfocused text, applied on click.
     recipe_name_input: gpui_kit::Entity<InputState>,
+    /// The product-set block folds closed: it is a second job, not a setting.
+    sets_open: bool,
+    /// The open panel's width, as its grab edge left it. Remembered.
+    rail_size: f32,
+    /// The grab edge is held: the workspace sizes the panel from the pointer.
+    rail_drag: bool,
     /// The open product-set job: anonymous until its first auto-save. Never
     /// absent, so actions never branch on its existence.
     work_job: crate::job::Job,
@@ -2106,6 +2131,7 @@ pub(crate) fn build_audit(
         output,
         include_subfolders,
         sidebar_open,
+        rail_width,
     } = launch;
     let root = navigation_path(root);
     let recent_folders = recent_folders
@@ -2154,7 +2180,7 @@ pub(crate) fn build_audit(
             cx.new(|cx| InputState::new(window, cx).placeholder("SKU hint (optional)"));
         let role_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Role label"));
 
-        let recipe_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Recipe name"));
+        let recipe_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Preset name"));
         let quality_slider = cx.new(|_| {
             SliderState::new()
                 .min(1.)
@@ -2306,7 +2332,12 @@ pub(crate) fn build_audit(
             recipes,
             recipes_skipped,
             selected_recipe: None,
-            recipes_open: false,
+            recipe_prompt: None,
+            sets_open: false,
+            rail_size: rail_width.map_or(panel::RAIL_WIDTH, |width| {
+                width.clamp(panel::RAIL_MIN, panel::RAIL_MAX)
+            }),
+            rail_drag: false,
             selection_bounds: Rc::new(RefCell::new(HashMap::new())),
             selection_surface: Rc::new(Cell::new(gpui_kit::Bounds::default())),
             marquee: None,

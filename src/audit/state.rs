@@ -232,7 +232,7 @@ impl Audit {
     }
 
     /// Select a sidebar tab. The sidebar opens with it; collapsing is the
-    /// header toggle's job, so a verb never hides the surface it just chose.
+    /// strip's job, so a verb never hides the surface it just chose.
     /// Clicking the active verb keeps the tab rather than closing the rail:
     /// with the sidebar always present there is nothing to toggle back to.
     pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
@@ -263,12 +263,61 @@ impl Audit {
         self.selection_changed(cx);
     }
 
-    /// What the sidebar takes from the list. Zero while collapsed.
+    /// The strip's tool: opens the panel on that tool, or collapses the panel
+    /// when its lit tool is clicked again. Never mid-run: the panel holds Stop.
+    pub(super) fn toggle_rail_tab(&mut self, rail: Rail, cx: &mut Context<Self>) {
+        if self.sidebar_open && self.active_tab() == rail {
+            if !self.converting {
+                self.sidebar_open = false;
+                cx.notify();
+            }
+            return;
+        }
+        self.open_rail(rail, cx);
+    }
+
+    /// What the sidebar takes from the list: the strip always, the panel when open.
     pub(super) fn rail_width(&self) -> f32 {
-        if self.sidebar_open {
-            panel::RAIL_WIDTH
+        panel::STRIP_WIDTH
+            + if self.sidebar_open {
+                self.rail_size
+            } else {
+                0.
+            }
+    }
+
+    /// Size the panel from the pointer while the grab edge is held. Past the
+    /// minimum by a margin the panel collapses instead of jamming at it; the
+    /// list always keeps a few hundred pixels whatever the window's width.
+    pub(super) fn drag_rail(
+        &mut self,
+        event: &gpui_kit::MouseMoveEvent,
+        viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.rail_drag {
+            return;
+        }
+        if !event.dragging() {
+            self.rail_drag = false;
+            cx.notify();
+            return;
+        }
+        let wanted = viewport_width - panel::STRIP_WIDTH - f32::from(event.position.x);
+        if wanted < panel::RAIL_MIN - panel::RAIL_SNAP && !self.converting {
+            self.sidebar_open = false;
+            self.rail_drag = false;
         } else {
-            0.
+            let ceiling = (viewport_width - panel::STRIP_WIDTH - 320.).max(panel::RAIL_MIN);
+            self.rail_size = wanted.clamp(panel::RAIL_MIN, panel::RAIL_MAX.min(ceiling));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn end_rail_drag(&mut self, cx: &mut Context<Self>) {
+        if self.rail_drag {
+            self.rail_drag = false;
+            cx.notify();
         }
     }
 
