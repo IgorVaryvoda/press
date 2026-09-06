@@ -85,7 +85,7 @@ impl Recipe {
             Recipe {
                 schema: SCHEMA_VERSION,
                 id: "recommended".into(),
-                name: "Recommended".into(),
+                name: "Keep dimensions".into(),
                 revision: 1,
                 provenance: Provenance::Builtin,
                 format: RecipeFormat::WebP,
@@ -96,7 +96,7 @@ impl Recipe {
             Recipe {
                 schema: SCHEMA_VERSION,
                 id: "small-files".into(),
-                name: "Small files".into(),
+                name: "Small delivery".into(),
                 revision: 1,
                 provenance: Provenance::Builtin,
                 format: RecipeFormat::Avif,
@@ -107,7 +107,7 @@ impl Recipe {
             Recipe {
                 schema: SCHEMA_VERSION,
                 id: "pixel-perfect".into(),
-                name: "Pixel-perfect".into(),
+                name: "Lossless WebP (8-bit)".into(),
                 revision: 1,
                 provenance: Provenance::Builtin,
                 format: RecipeFormat::WebP,
@@ -598,6 +598,22 @@ mod tests {
                 (Format::WebP, Quality::LOSSLESS, MaxEdge::FULL, None),
                 (Format::Same, Quality::lossy(80.), MaxEdge(Some(2400)), None),
             ]
+        );
+    }
+
+    /// Renamed rows, identical transforms: display names say what the row does,
+    /// and the row summaries still state format, quality, and dimensions.
+    #[test]
+    fn renamed_builtin_rows_keep_their_summaries() {
+        let rows = Recipe::builtins();
+        assert_eq!(rows[0].name, "Keep dimensions");
+        assert_eq!(rows[0].summary(), "WebP · quality 80 · original size");
+        assert_eq!(rows[1].name, "Small delivery");
+        assert_eq!(rows[1].summary(), "AVIF · quality 60 · max 2400px");
+        assert_eq!(rows[2].name, "Lossless WebP (8-bit)");
+        assert_eq!(
+            rows[2].summary(),
+            "WebP · lossless · original size · 8-bit sources"
         );
     }
 

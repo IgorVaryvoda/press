@@ -71,7 +71,7 @@ impl Audit {
         self.max_edge = edge;
         self.selected_recipe = Some(id.to_string());
         // Only a pinned speed moves the global dial: unpinned recipes leave
-        // ambient speed alone, so clicking Recommended never resets a speed
+        // ambient speed alone, so clicking Keep dimensions never resets a speed
         // the settings file chose.
         if let Some(speed) = speed {
             crate::avif::set_speed(speed);

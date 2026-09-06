@@ -599,7 +599,7 @@ fn fine_tuning_has_one_named_owner() {
     assert_eq!(
         panel::active_preset(Format::WebP, Quality::lossy(57.), MaxEdge::FULL),
         None,
-        "a manual change is a custom configuration, not Recommended"
+        "a manual change is a custom configuration, not Keep dimensions"
     );
 }
 
