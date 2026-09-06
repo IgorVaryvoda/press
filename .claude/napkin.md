@@ -66,3 +66,29 @@ sessions learn.
   `improve/016-checkbox-pointer`, `improve/preflight-batch-10-integration`
   (API removed by 89505b8), `advisor/batch2` (Sirv work superseded),
   `codex/ui-{fixes,comparison}-20260905` (content in b1d1a9a).
+- 2026-09-06: gpui-component 0.6 table headers sort only from the trailing
+  sort icon; clicking the label selects the column. Press now owns header
+  clicks in `AuditTable::render_th` (`sort-head-N` selectors) and draws the
+  Name arrow beside its label, so Name's `TableCol` must stay non-`sortable()`
+  or the library adds a second arrow at the far edge.
+- 2026-09-06: `./scripts/ux-eval capture audit-core --fixture <dir>
+  --allow-external-fixture --skip-build` proves the list against a generated
+  fixture in ~10 s per scenario. `docs` has three light rows, so it cannot
+  show finding chips, long names, `optimized/` counts or the bar clearance;
+  Pillow noise PNGs (`Image.frombytes` on `os.urandom`) make `heavy` rows.
+- 2026-09-06: The VibeQ MCP server is project-scoped to ai-image-tools in
+  `~/.claude.json` (`https://work.sirv.studio/mcp`), so its tools are absent
+  here. Direct HTTP from Python needs `User-Agent: node`; the default UA gets
+  Cloudflare error 1010. Press tasks there carry tag `press` and no domain.
+- 2026-09-06: The bundled gpui-kit icon set has no list or grid glyph
+  (`layout-dashboard`, `menu`, `gallery-vertical-end` only), so the header
+  view switch is a text `ButtonGroup` (List | Grid) via `toolbar::segment`.
+  Press's own SVGs live in `assets/icons/studio/` if a glyph is ever needed.
+- 2026-09-06: `ux/scenarios.json` clicks are absolute window coordinates. The
+  two Sirv credential scenarios clicked (250,23), where nothing lived at any
+  size. With Open and Sirv anchored at the header's left, (155,20) hits Sirv
+  at 760, 1100 and 1440; keep primary header controls left-anchored so fixed
+  scenario clicks stay valid across sizes.
+- 2026-09-06: Released v0.5.0 from main: list and header UI batch (`b7d52a0`)
+  on top of product-set jobs and versioned recipes. Same recipe as v0.4.0;
+  CI not watched in that session, check the release run before announcing.
