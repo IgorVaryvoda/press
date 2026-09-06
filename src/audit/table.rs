@@ -24,7 +24,8 @@ const W_RESULT_NARROW: f32 = 152.;
 const W_SYNC: f32 = 86.;
 /// The gutter at the right edge whose header opens the column picker.
 const W_OPTIONS: f32 = 30.;
-const W_FORMAT_COMPACT: f32 = 70.;
+/// Wide enough for "Format" and its sort arrow; at 70 the arrow was clipped.
+const W_FORMAT_COMPACT: f32 = 78.;
 const W_PIXELS_COMPACT: f32 = 88.;
 const W_DENSITY_COMPACT: f32 = 60.;
 const W_WEIGHT_COMPACT: f32 = 86.;
@@ -105,10 +106,12 @@ impl TableColumn {
             TableColumn::Thumb => TableCol::new("thumb", "").width(px(THUMB_SLOT + 12.)).p_0(),
             // Name takes whatever the other columns leave, so the window has no dead
             // strip down its right-hand side.
+            // Not `sortable()`: the library would draw the arrow at the far
+            // edge of the widest cell, next to "Format". `render_th` draws
+            // Name's arrow beside its label and sorts on click itself.
             TableColumn::Name => TableCol::new("name", "Name")
                 .width(px(name_width))
                 .min_width(px(W_NAME_MIN))
-                .sortable()
                 .resizable(true),
             TableColumn::Format => TableCol::new("format", "Format")
                 .width(px(if compact { W_FORMAT_COMPACT } else { W_FORMAT }))
@@ -288,7 +291,9 @@ impl TableDelegate for AuditTable {
         let narrow = !self.columns.contains(&TableColumn::Format);
         let mut spec = column.spec(self.name_width, self.compact, narrow);
         // Show the arrow on whichever column the audit is actually ordered by.
+        // Name draws its own, see `render_th`.
         if let Some(sort) = column.sorts_by()
+            && *column != TableColumn::Name
             && let Some(audit) = self.audit.upgrade()
         {
             let audit = audit.read(cx);
@@ -361,10 +366,63 @@ impl TableDelegate for AuditTable {
                     )
                     .into_any_element()
             }
-            _ => div()
-                .size_full()
-                .child(self.column(col_ix, cx).name)
-                .into_any_element(),
+            _ => {
+                let sorts = column.and_then(|column| column.sorts_by());
+                let numeric = matches!(
+                    column,
+                    Some(TableColumn::Pixels | TableColumn::Density | TableColumn::Weight)
+                );
+                let name = self.column(col_ix, cx).name;
+                let arrow = (sorts == Some(Column::Name)).then(|| {
+                    let sort = audit.read(cx).sort;
+                    let (icon, on) = if sort.column == Column::Name {
+                        let icon = if sort.descending {
+                            IconName::SortDescending
+                        } else {
+                            IconName::SortAscending
+                        };
+                        (icon, true)
+                    } else {
+                        (IconName::ChevronsUpDown, false)
+                    };
+                    div().when(!on, |arrow| arrow.opacity(0.5)).child(
+                        Icon::new(icon)
+                            .size_3()
+                            .text_color(cx.theme().secondary_foreground),
+                    )
+                });
+                div()
+                    .id(("sort-head", col_ix))
+                    .debug_selector(move || format!("sort-head-{col_ix}"))
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    // Numbers are right-aligned; their labels sit over them.
+                    .when(numeric, |head| head.justify_end())
+                    // The whole label sorts. The library only sorts from the
+                    // small arrow it draws at the cell's far edge.
+                    .when(sorts.is_some(), |head| {
+                        head.cursor_pointer().on_click(cx.listener(
+                            move |table, _: &gpui_kit::ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                let delegate = table.delegate();
+                                let Some(column) =
+                                    delegate.columns.get(col_ix).and_then(TableColumn::sorts_by)
+                                else {
+                                    return;
+                                };
+                                let Some(audit) = delegate.audit.upgrade() else {
+                                    return;
+                                };
+                                audit.update(cx, |audit, cx| audit.set_sort(column, cx));
+                            },
+                        ))
+                    })
+                    .child(name)
+                    .children(arrow)
+                    .into_any_element()
+            }
         }
     }
 
@@ -389,8 +447,10 @@ impl TableDelegate for AuditTable {
             .border_1()
             .border_color(gpui_kit::transparent_black())
             .when(ticked, |row| row.bg(cx.theme().list_active))
+            // The same accent the sidebar puts on the current folder: a grey
+            // outline was one more grey among the zebra and the hover.
             .when(row_ix == cursor, |row| {
-                row.border_color(cx.theme().muted_foreground)
+                row.border_color(cx.theme().list_active_border)
             })
             .on_prepaint(move |bounds, _, _| {
                 if let Some(entry) = entry {
@@ -551,6 +611,9 @@ impl TableDelegate for AuditTable {
                 // heavy and mislabelled, and both are worth saying.
                 let heavy = Finding::Heavy.holds(entry);
                 let lies = entry.extension_lies();
+                // The full path on hover: the ellipsis eats the tail, and the
+                // tail is where the files of one export batch differ.
+                let hover = entry.path.display().to_string();
                 div()
                     .w_full()
                     .flex()
@@ -559,15 +622,30 @@ impl TableDelegate for AuditTable {
                     .min_w_0()
                     .child(
                         div()
+                            .id(("name", index))
                             .flex_shrink(1.)
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_color(cx.theme().foreground)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(hover.clone()).build(window, cx)
+                            })
                             .child(entry_label(&audit.root, audit.show_parent(), entry)),
                     )
-                    .children(heavy.then(|| finding_chip("heavy", cx)))
-                    .children(lies.then(|| finding_chip("mislabelled", cx)))
+                    // One lane at the cell's right edge, so a column of
+                    // findings scans; after the name, each landed wherever
+                    // its name happened to end.
+                    .child(
+                        div()
+                            .ml_auto()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(heavy.then(|| finding_chip("heavy", cx)))
+                            .children(lies.then(|| finding_chip("mislabelled", cx))),
+                    )
                     .into_any_element()
             }
             TableColumn::Format => {
@@ -589,13 +667,16 @@ impl TableDelegate for AuditTable {
                     .when(lies, |cell| cell.child(div().text_size(px(11.)).child("≠")))
                     .into_any_element()
             }
+            // Styled like File size: the two together are what "heavy" means,
+            // and muted text read as the lesser of the pair.
             TableColumn::Pixels => div()
                 .w_full()
                 .flex()
                 .justify_end()
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(cx.theme().foreground)
                 .whitespace_nowrap()
                 .child(format!("{}×{}", entry.width, entry.height))
                 .into_any_element(),

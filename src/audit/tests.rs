@@ -3311,6 +3311,77 @@ fn heavy_needs_a_file_worth_converting() {
 /// The picker's toggle has to reach the table, not only the state: the delegate
 /// caches its column list against a signature, and a preference left out of that
 /// signature changes nothing on screen.
+/// The whole header label sorts. The library only sorts from the small arrow
+/// it draws at the far edge of the cell, which on Name sat beside "Format".
+#[gpui_kit::test]
+fn clicking_a_column_label_sorts_by_that_column(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let name_ix = audit.read_with(cx, |audit, cx| {
+        audit
+            .table
+            .as_ref()
+            .and_then(|table| {
+                table
+                    .read(cx)
+                    .delegate()
+                    .columns_for_test()
+                    .iter()
+                    .position(|column| *column == TableColumn::Name)
+            })
+            .expect("the list shows a Name column")
+    });
+    let selector: &'static str = Box::leak(format!("sort-head-{name_ix}").into_boxed_str());
+    let before = audit.read_with(cx, |audit, _| audit.sort.column);
+    assert_ne!(before, Column::Name, "the fixture opens sorted by weight");
+
+    let head = cx
+        .debug_bounds(selector)
+        .expect("the Name header carries its own sort target");
+    cx.simulate_click(head.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.sort.column, Column::Name);
+        assert!(!audit.sort.descending, "names open A to Z");
+    });
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let head = cx
+        .debug_bounds(selector)
+        .expect("the header survives the re-sort");
+    cx.simulate_click(head.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sort.descending, "a second click reverses the order");
+    });
+}
+
+/// The header's List | Grid segments switch the view and show which one is on.
+#[gpui_kit::test]
+fn the_view_segments_switch_between_list_and_gallery(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.grid, "the audit opens as a list")
+    });
+
+    let grid = cx
+        .debug_bounds("view-grid")
+        .expect("the header offers the gallery segment");
+    cx.simulate_click(grid.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.grid, "the Grid segment opens the gallery")
+    });
+
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let list = cx
+        .debug_bounds("view-list")
+        .expect("the header offers the list segment");
+    cx.simulate_click(list.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.grid, "the List segment returns to the list")
+    });
+}
+
 #[gpui_kit::test]
 fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);

@@ -29,9 +29,10 @@ impl Audit {
         // optimized/ is normal life, and a yellow banner made it look like
         // something had gone wrong.
         if self.existing_output > 0 {
+            // "2 files in optimized/" read as two files converted this time.
             warnings.push_str(&match self.existing_output {
-                1 => format!(" · 1 file in {}/", scan::OUTPUT_DIR),
-                many => format!(" · {many} files in {}/", scan::OUTPUT_DIR),
+                1 => format!(" · {}/ already holds 1 file", scan::OUTPUT_DIR),
+                many => format!(" · {}/ already holds {many} files", scan::OUTPUT_DIR),
             });
         }
         warnings
@@ -227,6 +228,43 @@ impl Audit {
         // way the command line decides it with a flag.
         let scope_checked = self.include_subfolders;
         let scope_disabled = self.converting || self.single_file;
+        // The label carries the state: paired, it names the remote folder.
+        // A tint on the same word did not say "paired" to anyone.
+        let sirv_label = match &self.sirv_pairing {
+            Some(pairing) => {
+                let name = pairing
+                    .dir
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("");
+                let name = if name.is_empty() { "/" } else { name };
+                if name.chars().count() > 18 {
+                    format!("Sirv · {}…", name.chars().take(17).collect::<String>())
+                } else {
+                    format!("Sirv · {name}")
+                }
+            }
+            None => "Sirv".to_string(),
+        };
+        // Beside Open, at a fixed spot: this is where the folder comes from
+        // and goes to, not a view control. The menu buried it and users never
+        // found it; the right-hand cluster made it drift with the path.
+        let sirv = div().debug_selector(|| "sirv-pair-header".into()).child(
+            Button::new("sirv-pair-header")
+                .small()
+                .ghost()
+                .icon(IconName::Globe)
+                .label(sirv_label)
+                .tooltip(if self.sirv_pairing.is_some() {
+                    "Paired with Sirv — see status below the header"
+                } else {
+                    "Pair a Sirv folder with this local folder"
+                })
+                .selected(self.sirv_pairing.is_some())
+                .disabled(sirv_disabled)
+                .on_click(cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx))),
+        );
         div()
             .debug_selector(|| "audit-header".into())
             .flex()
@@ -261,7 +299,8 @@ impl Audit {
                                 })),
                         )
                     }))
-                    .child(div().min_w_0().overflow_hidden().child(breadcrumbs))
+                    // Open before the path, so it keeps one spot however long
+                    // the path gets; after it, it drifted with every folder.
                     .child(
                         Button::new("source-picker")
                             .small()
@@ -342,14 +381,17 @@ impl Audit {
                                         }),
                                 )
                             }),
-                    ),
+                    )
+                    .child(sirv)
+                    .child(div().min_w_0().overflow_hidden().child(breadcrumbs)),
             )
             // The box narrows the list; erasing its text widens it back out.
             // There is no Clear button: it sat dimmed for most of the audit's
-            // life and duplicated what backspace already does.
+            // life and duplicated what backspace already does. Narrower below
+            // 900px, where the path needs the room more than the filter does.
             .child(
                 div()
-                    .w(px(242.))
+                    .w(px(if width < 900. { 205. } else { 242. }))
                     .flex()
                     .items_center()
                     .flex_shrink_0()
@@ -362,49 +404,29 @@ impl Audit {
                         ),
                     ),
             )
-            // Persistent beside the view toggle so pairing is discoverable:
-            // the menu buried it and users never found it. Selected when
-            // paired, so the paired state stays visible above the strip.
+            // One segmented control, List | Grid, like the format group in
+            // the panel. The single button wore a burger icon in list view,
+            // which read as a menu; the icon set has no list or grid glyph.
             .child(
-                div().debug_selector(|| "sirv-pair-header".into()).child(
-                    Button::new("sirv-pair-header")
-                        .small()
-                        .ghost()
-                        .icon(IconName::Globe)
-                        .label("Sirv")
-                        .tooltip(if self.sirv_pairing.is_some() {
-                            "Paired with Sirv — see status below the header"
-                        } else {
-                            "Pair a Sirv folder with this local folder"
-                        })
-                        .selected(self.sirv_pairing.is_some())
-                        .disabled(sirv_disabled)
-                        .on_click(cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx))),
-                ),
-            )
-            // One button, not a pair: the views exclude each other. The icon
-            // mirrors the layout on screen, so the grid never wears a burger
-            // menu, and the tooltip names the destination a click reaches.
-            .child(
-                Button::new("view-grid")
+                ButtonGroup::new("view")
                     .small()
                     .outline()
-                    .icon(if self.grid {
-                        IconName::LayoutDashboard
-                    } else {
-                        IconName::Menu
-                    })
-                    .tooltip(if self.grid {
-                        "Show the audit as a list"
-                    } else {
-                        "Show the images as a gallery"
-                    })
-                    .disabled(self.converting)
-                    .on_click(cx.listener(|audit, _, _, cx| {
+                    .compact()
+                    .children([
+                        toolbar::segment("view-list", "List", !self.grid)
+                            .debug_selector(|| "view-list".into())
+                            .tooltip("Show the audit as a list")
+                            .disabled(self.converting),
+                        toolbar::segment("view-grid", "Grid", self.grid)
+                            .debug_selector(|| "view-grid".into())
+                            .tooltip("Show the images as a gallery")
+                            .disabled(self.converting),
+                    ])
+                    .on_click(cx.listener(|audit, clicked: &Vec<usize>, _, cx| {
                         if audit.converting {
                             return;
                         }
-                        audit.set_grid(!audit.grid, cx);
+                        audit.set_grid(clicked.first() == Some(&1), cx);
                     })),
             )
             .child(
@@ -419,20 +441,6 @@ impl Audit {
                     .selected(self.sidebar_open)
                     .on_click(cx.listener(|audit, _, _, cx| {
                         audit.sidebar_open = !audit.sidebar_open;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                // The full shortcut list, one key away. Text, not an icon: no
-                // icon in the set says "keyboard" on its own.
-                Button::new("open-shortcuts")
-                    .debug_selector(|| "open-shortcuts".into())
-                    .small()
-                    .ghost()
-                    .label("?")
-                    .tooltip("Keyboard shortcuts (?)")
-                    .on_click(cx.listener(|audit, _, _, cx| {
-                        audit.shortcuts_open = true;
                         cx.notify();
                     })),
             )

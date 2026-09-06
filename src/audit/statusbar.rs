@@ -159,6 +159,22 @@ impl Audit {
                             .text_color(cx.theme().muted_foreground)
                             .whitespace_nowrap()
                             .child(right),
+                    )
+                    .child(
+                        // The shortcut list describes list keys, not the header's
+                        // per-view controls, so its trigger lives here in the
+                        // footer's right corner. Text, not an icon: no icon in
+                        // the set says "keyboard" on its own.
+                        Button::new("open-shortcuts")
+                            .debug_selector(|| "open-shortcuts".into())
+                            .small()
+                            .ghost()
+                            .label("?")
+                            .tooltip("Keyboard shortcuts (?)")
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                audit.shortcuts_open = true;
+                                cx.notify();
+                            })),
                     ),
             )
     }

@@ -1281,6 +1281,13 @@ pub fn format_name(format: FileFormat) -> &'static str {
         FileFormat::Image(ImageFormat::Gif) => "GIF",
         FileFormat::Image(ImageFormat::Tiff) => "TIFF",
         FileFormat::Image(ImageFormat::Bmp) => "BMP",
+        FileFormat::Image(ImageFormat::Hdr) => "HDR",
+        FileFormat::Image(ImageFormat::OpenExr) => "EXR",
+        FileFormat::Image(ImageFormat::Qoi) => "QOI",
+        FileFormat::Image(ImageFormat::Tga) => "TGA",
+        FileFormat::Image(ImageFormat::Ico) => "ICO",
+        FileFormat::Image(ImageFormat::Pnm) => "PNM",
+        FileFormat::Image(ImageFormat::Dds) => "DDS",
         FileFormat::Image(other) => other.extensions_str().first().copied().unwrap_or("?"),
     }
 }

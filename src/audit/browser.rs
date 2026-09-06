@@ -403,15 +403,19 @@ impl Audit {
 
     pub(super) fn folder_sidebar(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let output_root = self.browser_output_root();
-        let places = self
-            .places()
-            .into_iter()
-            .filter(|(_, path, _)| !path.starts_with(&output_root))
-            .collect::<Vec<_>>();
-        let place_paths = places
+        let all_places = self.places();
+        // Recents still skip every place, shown or not: a hidden Home would
+        // otherwise come back as a recent.
+        let place_paths = all_places
             .iter()
             .map(|(_, path, _)| path.clone())
             .collect::<HashSet<_>>();
+        let places = all_places
+            .into_iter()
+            // The tree already opens at Home whenever the folder is under it;
+            // a Home row above that tree said the same thing twice.
+            .filter(|(_, path, _)| !path.starts_with(&output_root) && *path != self.tree_anchor)
+            .collect::<Vec<_>>();
         let recents = self
             .recent_folders
             .iter()

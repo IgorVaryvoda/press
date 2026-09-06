@@ -14,9 +14,11 @@ use super::*;
 /// math. A closed rail takes nothing.
 pub(super) const RAIL_WIDTH: f32 = 300.;
 
-/// Room the list leaves under itself for the floating bar. Without it the bar
-/// covers the last row and no amount of scrolling reveals it.
-pub(super) const BAR_CLEARANCE: f32 = 64.;
+/// Room the list leaves under itself for the floating bar: the bar's 18px
+/// offset and 46px height, plus a gap. Without the room the bar covers the
+/// last row; without the gap the list's cut-off bottom row meets the bar's
+/// top edge and reads as hidden under it rather than as the viewport's end.
+pub(super) const BAR_CLEARANCE: f32 = 72.;
 
 /// Below this much room, the three secondary verbs drop to icons. The bar has
 /// to fit the list it floats over, and at the minimum window with a rail open
