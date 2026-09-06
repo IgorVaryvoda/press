@@ -1155,25 +1155,36 @@ fn write_inner(
     encoded: &[u8],
     recorded: Option<(&Path, &Recording)>,
 ) -> Result<(), Failure> {
+    write_inner_with_hook(output_root, written, encoded, recorded, || {})
+}
+
+fn write_inner_with_hook(
+    output_root: &Path,
+    written: &Path,
+    encoded: &[u8],
+    recorded: Option<(&Path, &Recording)>,
+    before_final_validation: impl FnOnce(),
+) -> Result<(), Failure> {
     let relative = written
         .strip_prefix(output_root)
         .map_err(|_| Failure::OutsideOutput)?;
-    let mut ancestor = output_root.to_path_buf();
-    // The destination itself is now the first thing that has to be a plain folder;
-    // nothing above it is walked any more, so nothing else would catch a symlink
-    // standing in for it.
-    ensure_directory(&ancestor, || std::fs::create_dir_all(&ancestor))?;
-    for component in relative
-        .parent()
-        .ok_or(Failure::OutsideOutput)?
-        .components()
-    {
-        let std::path::Component::Normal(component) = component else {
+    let relative_parent = relative.parent().ok_or(Failure::OutsideOutput)?;
+    for component in relative_parent.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
             return Err(Failure::OutsideOutput);
-        };
-        ancestor.push(component);
-        ensure_directory(&ancestor, || std::fs::create_dir(&ancestor))?;
+        }
     }
+    let final_parent = written.parent().ok_or(Failure::OutsideOutput)?;
+    // Walk every ancestor from the filesystem root, not just from the output
+    // root down. A symlink swapped into an existing parent above the
+    // destination would otherwise redirect the whole write elsewhere, and the
+    // old walk from the output root never looked that high.
+    ensure_absolute_parents(final_parent)?;
+    before_final_validation();
+    // Revalidate immediately before staging so the swap above is the one that
+    // fails, not a later rename. The hook is a deterministic test seam, not a
+    // public extension point.
+    ensure_absolute_parents(final_parent)?;
     // Write beside the target and rename onto it. A crash or a full disk part-way
     // through the write would otherwise leave a short image that looks finished.
     //
@@ -1332,6 +1343,66 @@ fn ensure_directory(
         },
         Err(_) => Err(Failure::Failed),
     }
+}
+
+/// Every directory from the filesystem root to `final_parent`, creating missing
+/// normal components one at a time and refusing symlinks without following them.
+///
+/// Creating one level at a time matters: `create_dir_all` would build a missing
+/// chain through whatever the parents currently point at, while this walk checks
+/// each level before creating the next. On Windows a junction looks like a plain
+/// directory to `symlink_metadata`, so every level also rejects reparse points.
+fn ensure_absolute_parents(final_parent: &Path) -> Result<(), Failure> {
+    use std::path::Component;
+    let mut components = final_parent.components().peekable();
+    let mut ancestor = PathBuf::new();
+    if let Some(Component::Prefix(prefix)) = components.peek().cloned() {
+        ancestor.push(prefix.as_os_str());
+        components.next();
+    }
+    match components.next() {
+        Some(Component::RootDir) => ancestor.push(std::path::MAIN_SEPARATOR_STR),
+        _ => return Err(Failure::OutsideOutput),
+    }
+    check_plain_directory(&ancestor)?;
+    for component in components {
+        let Component::Normal(part) = component else {
+            return Err(Failure::OutsideOutput);
+        };
+        ancestor.push(part);
+        ensure_directory(&ancestor, || std::fs::create_dir(&ancestor))?;
+        #[cfg(windows)]
+        reject_windows_reparse(&ancestor)?;
+    }
+    Ok(())
+}
+
+fn check_plain_directory(path: &Path) -> Result<(), Failure> {
+    let metadata = path.symlink_metadata().map_err(|_| Failure::Failed)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Failure::UnsafeOutputPath);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(Failure::UnsafeOutputPath);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_windows_reparse(path: &Path) -> Result<(), Failure> {
+    use std::os::windows::fs::MetadataExt;
+    let attributes = path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_attributes())
+        .map_err(|_| Failure::Failed)?;
+    if attributes & 0x400 != 0 {
+        return Err(Failure::UnsafeOutputPath);
+    }
+    Ok(())
 }
 
 /// The most decoded bytes one image may hold: 1 GiB, or 128 megapixels of
@@ -2540,6 +2611,88 @@ pub(crate) mod tests {
             .is_err()
         );
         assert!(!outside.join("in.webp").exists());
+    }
+
+    /// A symlink swapped into an ancestor above the output root between planning
+    /// and staging must fail the write, not redirect it. Installing the alias
+    /// before the first walk does not prove this: only a swap between the two
+    /// walks does.
+    #[cfg(unix)]
+    #[test]
+    fn a_late_unix_ancestor_above_output_root_blocks_the_write() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_dir("late-unix-ancestor");
+        let ancestor = base.join("ancestor");
+        let output_root = ancestor.join("out");
+        let external = base.join("external");
+        std::fs::create_dir(&ancestor).unwrap();
+        std::fs::create_dir(&output_root).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let written = output_root.join("sub").join("a.webp");
+        let mut partial_os = written.clone().into_os_string();
+        partial_os.push(format!(".{}.part", std::process::id()));
+        let partial = PathBuf::from(partial_os);
+
+        let result = super::write_inner_with_hook(&output_root, &written, b"bytes", None, || {
+            std::fs::remove_dir_all(&ancestor).unwrap();
+            symlink(&external, &ancestor).unwrap();
+        });
+        assert_eq!(result, Err(Failure::UnsafeOutputPath));
+        assert!(!written.exists(), "final must be absent");
+        assert!(!partial.exists(), ".part must be absent");
+        assert!(
+            !external.join("out").join("sub").join("a.webp").exists(),
+            "external target must be absent"
+        );
+        assert!(
+            !external
+                .join("out")
+                .join("sub")
+                .join(format!("a.webp.{}.part", std::process::id()))
+                .exists(),
+            "external partial must be absent"
+        );
+        let _ = std::fs::remove_file(&ancestor);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_late_windows_ancestor_above_output_root_blocks_the_write() {
+        let base = temp_dir("late-windows-ancestor");
+        let ancestor = base.join("ancestor");
+        let output_root = ancestor.join("out");
+        let external = base.join("external");
+        std::fs::create_dir(&ancestor).unwrap();
+        std::fs::create_dir(&output_root).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let written = output_root.join("sub").join("a.webp");
+        let mut partial_os = written.clone().into_os_string();
+        partial_os.push(format!(".{}.part", std::process::id()));
+        let partial = PathBuf::from(partial_os);
+
+        let result = super::write_inner_with_hook(&output_root, &written, b"bytes", None, || {
+            std::fs::remove_dir_all(&ancestor).unwrap();
+            let status = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    ancestor.to_str().unwrap(),
+                    external.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        });
+        assert_eq!(result, Err(Failure::UnsafeOutputPath));
+        assert!(!written.exists(), "final must be absent");
+        assert!(!partial.exists(), ".part must be absent");
+        assert!(
+            !external.join("out").join("sub").join("a.webp").exists(),
+            "external target must be absent"
+        );
+        let _ = std::fs::remove_dir(&ancestor);
     }
 
     #[cfg(unix)]
