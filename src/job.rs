@@ -302,7 +302,11 @@ impl Job {
             return Err(format!("job root {} is not absolute", root.display()));
         }
         let join = |relative: &std::path::Path| {
-            if relative.is_absolute() {
+            // `has_root` catches what `is_absolute` misses: on Windows a path
+            // like `/abs.png` has a root but no prefix, and joining it would
+            // rebase the mapping onto the drive root instead of the root its
+            // new owner chose. Portable paths are never that; refuse them.
+            if relative.is_absolute() || relative.has_root() {
                 return Err(format!(
                     "portable path {} is not relative",
                     relative.display()
@@ -1060,14 +1064,16 @@ mod tests {
         assert!(remove(&dir, "job").is_ok());
         assert!(remove(&dir, "job").is_err(), "deleting twice fails");
         assert!(list(&dir).0.is_empty());
+        // `dir` is absolute on every platform; a literal `/p` is not one on
+        // Windows, where a root without a prefix is not an absolute path.
         assert!(
             save(
                 &dir,
-                &Job::new("x".into(), "X".into(), vec![PathBuf::from("/p")]).unwrap()
+                &Job::new("x".into(), "X".into(), vec![dir.join("p")]).unwrap()
             )
             .is_ok()
         );
-        assert!(Job::new("Bad Id!".into(), "X".into(), vec![PathBuf::from("/p")]).is_err());
+        assert!(Job::new("Bad Id!".into(), "X".into(), vec![dir.join("p")]).is_err());
         assert!(
             Job::new("x".into(), "X".into(), vec![]).is_err(),
             "roots are required"
