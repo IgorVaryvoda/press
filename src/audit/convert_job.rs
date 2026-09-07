@@ -65,6 +65,8 @@ impl Audit {
         if targets.is_empty() {
             return;
         }
+        // Image-menu conversion also needs the live controls and Stop in view.
+        self.open_rail(Rail::Convert, cx);
         self.clear_error("conversion", cx);
         let target_count = targets.len();
         let dataset_generation = self.dataset_generation;

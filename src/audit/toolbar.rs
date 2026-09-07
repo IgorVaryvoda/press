@@ -32,6 +32,7 @@ impl Audit {
                     display,
                     self.max_edge == *edge,
                 )
+                .flex_1()
                 .disabled(self.converting)
             }))
             .on_click(cx.listener(move |audit, clicked: &Vec<usize>, window, cx| {
@@ -56,11 +57,11 @@ impl Audit {
             .flex()
             .flex_col()
             .gap_1()
-            .child(self.resize_group(cx).small().compact())
+            .child(self.resize_group(cx).small().outline().compact().w_full())
             .child(
                 div()
                     .debug_selector(|| "max-edge-input".into())
-                    .w(px(120.))
+                    .w_full()
                     .child(
                         Input::new(&self.max_edge_input)
                             .small()
@@ -117,6 +118,7 @@ impl Audit {
         ButtonGroup::new("format")
             .children(options.iter().map(|format| {
                 segment(format.label(), format.display(), self.format == *format)
+                    .flex_1()
                     .disabled(self.converting)
             }))
             .on_click(cx.listener(move |audit, clicked: &Vec<usize>, _, cx| {

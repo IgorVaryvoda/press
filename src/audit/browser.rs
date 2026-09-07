@@ -81,6 +81,7 @@ impl Audit {
 
     pub(super) fn browser_persistent(&self, window: &Window) -> bool {
         self.batch_size.is_none()
+            && !self.browser_collapsed
             && f32::from(window.viewport_size().width) >= SIDEBAR_MIN_WINDOW_WIDTH
     }
 
@@ -93,8 +94,17 @@ impl Audit {
     }
 
     pub(super) fn toggle_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.batch_size.is_none() && !self.browser_persistent(window) {
-            if self.browser_overlay {
+        if self.batch_size.is_none() && !self.converting {
+            if f32::from(window.viewport_size().width) >= SIDEBAR_MIN_WINDOW_WIDTH {
+                self.browser_collapsed = !self.browser_collapsed;
+                self.browser_overlay = false;
+                if self.browser_collapsed {
+                    window.focus(&self.focus, cx);
+                } else {
+                    window.focus(&self.folder_filter_input.read(cx).focus_handle(cx), cx);
+                }
+                cx.notify();
+            } else if self.browser_overlay {
                 self.close_browser_overlay(window, cx);
             } else {
                 self.browser_overlay = true;
@@ -350,8 +360,11 @@ impl Audit {
         let hover = path.display().to_string();
         ListItem::new(id)
             .w_full()
-            .h(px(30.))
+            .h_8()
+            .py_0()
             .px_2()
+            .text_sm()
+            .rounded_md()
             .selected(selected)
             .child(
                 div()
@@ -478,8 +491,11 @@ impl Audit {
             }
             ListItem::new(format!("local-tree-{index}"))
                 .w_full()
-                .h(px(28.))
-                .pl(px(8. + entry.depth() as f32 * 12.))
+                .h_8()
+                .py_0()
+                .text_sm()
+                .rounded_md()
+                .pl(px(4. + entry.depth() as f32 * 12.))
                 .pr_2()
                 .selected(selected)
                 .child(
@@ -492,8 +508,9 @@ impl Audit {
                             div()
                                 .id(format!("folder-disclosure-hit-{index}"))
                                 .debug_selector(move || format!("folder-disclosure-{index}"))
-                                .w(px(24.))
-                                .h(px(24.))
+                                .w_5()
+                                .h_6()
+                                .flex_shrink_0()
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -510,6 +527,7 @@ impl Audit {
             .flex()
             .flex_col()
             .w(px(SIDEBAR_WIDTH))
+            .px_2()
             .h_full()
             .flex_none()
             .overflow_hidden()
@@ -519,8 +537,7 @@ impl Audit {
             .child(
                 div()
                     .debug_selector(|| "folder-search".into())
-                    .px_2()
-                    .pt_2()
+                    .pt_3()
                     .pb_1()
                     .on_key_down(cx.listener(
                         |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
@@ -551,13 +568,13 @@ impl Audit {
             .when(places.len() > 1, |sidebar| {
                 sidebar.child(
                     div()
-                        .px_3()
+                        .px_2()
                         .pt_2()
                         .pb_1()
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(cx.theme().muted_foreground)
-                        .child("PLACES"),
+                        .child("Places"),
                 )
             })
             .children(
@@ -572,13 +589,13 @@ impl Audit {
                 sidebar
                     .child(
                         div()
-                            .px_3()
+                            .px_2()
                             .pt_3()
                             .pb_1()
-                            .text_size(px(10.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(cx.theme().muted_foreground)
-                            .child("RECENT"),
+                            .child("Recent"),
                     )
                     .children(recents.into_iter().enumerate().map(|(index, path)| {
                         self.navigation_row(
@@ -592,13 +609,13 @@ impl Audit {
             })
             .child(
                 div()
-                    .px_3()
+                    .px_2()
                     .pt_3()
                     .pb_1()
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
-                    .child("FOLDERS"),
+                    .child("Folders"),
             )
             .child(
                 div()

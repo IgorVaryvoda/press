@@ -2,7 +2,7 @@
 //!
 //! Press uploads only the image a person explicitly runs, calls Studio's REST
 //! API, then writes the returned image through the same safe output path as its
-//! local models. Browser links are kept only for obtaining and managing a key.
+//! local models. Browser links handle key setup and batch processing.
 
 use serde::Deserialize;
 use std::io::Write;
@@ -17,6 +17,11 @@ use crate::{convert, scan, settings, sirv};
 // tests reach their own loopback server through `process_with_api` instead.
 const API: &str = "https://www.sirv.studio";
 pub const API_KEYS_URL: &str = "https://www.sirv.studio/settings/api?utm_source=press&utm_medium=desktop&utm_campaign=studio-api-key";
+pub const BATCH_BACKGROUND_REMOVAL_URL: &str =
+    "https://www.sirv.studio/tools/batch-background-removal?utm_source=press&utm_medium=desktop";
+pub const BATCH_UPSCALE_URL: &str =
+    "https://www.sirv.studio/tools/batch-upscale?utm_source=press&utm_medium=desktop";
+
 const MAX_UPLOAD: u64 = 20 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(360);

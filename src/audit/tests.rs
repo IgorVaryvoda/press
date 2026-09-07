@@ -1086,7 +1086,7 @@ fn a_studio_result_belongs_to_its_exact_file_and_dataset() {
 fn table_layout_keeps_decision_columns_at_compact_width() {
     let prefs = ColumnPrefs::default();
     // The narrowest the list ever gets: the minimum window with a rail open.
-    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::RAIL_WIDTH - panel::STRIP_WIDTH - 44.;
+    let minimum_left_pane = WINDOW_MIN_WIDTH - panel::RAIL_WIDTH - 44.;
     let (_, narrow_name, narrow_columns) =
         AuditTable::layout(minimum_left_pane, prefs, true, false);
     assert!(narrow_name >= W_NAME_MIN);
@@ -3323,42 +3323,55 @@ fn heavy_needs_a_file_worth_converting() {
     assert!(!Finding::Heavy.holds(&photo));
 }
 
-/// The picker's toggle has to reach the table, not only the state: the delegate
-/// caches its column list against a signature, and a preference left out of that
-/// signature changes nothing on screen.
-/// The strip is the visible way in and out of the panel: a tool opens it on
-/// that tool, the lit tool collapses it, and the strip itself never leaves.
 #[gpui_kit::test]
-fn the_tool_strip_opens_switches_and_collapses_the_panel(cx: &mut TestAppContext) {
+fn the_tool_chooser_opens_operations_and_returns_without_collapsing(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("rail-strip").is_some());
+    cx.run_until_parked();
+    let back = cx.debug_bounds("tools-back").unwrap();
+    cx.simulate_click(back.center(), gpui_kit::Modifiers::none());
+    for (width, height) in [(760., 640.), (1100., 720.), (1440., 900.)] {
+        cx.simulate_resize(size(px(width), px(height)));
+        cx.run_until_parked();
+        let rail = cx.debug_bounds("rail").unwrap();
+        let convert = cx.debug_bounds("tool-convert").unwrap();
+        let last = cx.debug_bounds("tool-studio").unwrap();
+        assert_eq!(convert.top() - rail.top(), rail.bottom() - last.bottom());
+        assert_eq!(
+            convert.left() - rail.left(),
+            rail.right() - convert.right() + px(1.)
+        );
+        assert!(last.bottom() <= rail.bottom());
+    }
 
-    let upscale = cx
-        .debug_bounds("strip-upscale")
-        .expect("the strip offers every tool");
+    let upscale = cx.debug_bounds("tool-upscale").unwrap();
     cx.simulate_click(upscale.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
         assert!(audit.sidebar_open);
-        assert_eq!(audit.active_tab(), Rail::Upscale);
+        assert_eq!(audit.rail, Rail::Upscale);
     });
-
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    let upscale = cx.debug_bounds("strip-upscale").unwrap();
-    cx.simulate_click(upscale.center(), gpui_kit::Modifiers::none());
+    assert!(cx.debug_bounds("tool-chooser").is_none());
+    let back = cx.debug_bounds("tools-back").unwrap();
+    cx.simulate_click(back.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
-        assert!(!audit.sidebar_open, "the lit tool collapses the panel");
+        assert!(audit.sidebar_open);
+        assert_eq!(audit.rail, Rail::None);
     });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(cx.debug_bounds("rail").is_none());
-    assert!(cx.debug_bounds("rail-strip").is_some(), "the strip stays");
 
-    let convert = cx.debug_bounds("strip-convert").unwrap();
+    let convert = cx.debug_bounds("tool-convert").unwrap();
     cx.simulate_click(convert.center(), gpui_kit::Modifiers::none());
-    audit.read_with(cx, |audit, _| {
-        assert!(audit.sidebar_open);
-        assert_eq!(audit.active_tab(), Rail::Convert);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("format-setting").is_some());
+    audit.update(cx, |audit, cx| {
+        audit.converting = true;
+        cx.notify();
     });
+    cx.run_until_parked();
+    let back = cx.debug_bounds("tools-back").unwrap();
+    cx.simulate_click(back.center(), gpui_kit::Modifiers::none());
+    audit.read_with(cx, |audit, _| assert_eq!(audit.rail, Rail::Convert));
+    audit.update(cx, |audit, _| audit.converting = false);
 }
 
 /// The grab edge sizes the panel from the pointer within its range, and a
@@ -3374,7 +3387,7 @@ fn the_grab_edge_sizes_and_collapses_the_panel(cx: &mut TestAppContext) {
     };
     audit.update(cx, |audit, cx| {
         audit.rail_drag = true;
-        audit.drag_rail(&at(viewport - panel::STRIP_WIDTH - 400.), viewport, cx);
+        audit.drag_rail(&at(viewport - 400.), viewport, cx);
         assert_eq!(audit.rail_size, 400.);
         audit.drag_rail(&at(0.), viewport, cx);
         assert_eq!(
@@ -3384,7 +3397,7 @@ fn the_grab_edge_sizes_and_collapses_the_panel(cx: &mut TestAppContext) {
         );
         assert!(audit.sidebar_open);
         let past = panel::RAIL_MIN - panel::RAIL_SNAP - 1.;
-        audit.drag_rail(&at(viewport - panel::STRIP_WIDTH - past), viewport, cx);
+        audit.drag_rail(&at(viewport - past), viewport, cx);
         assert!(!audit.sidebar_open, "past the minimum the panel collapses");
         assert!(!audit.rail_drag);
         assert_eq!(
@@ -3549,8 +3562,58 @@ fn dragging_a_column_changes_and_keeps_its_display_order(cx: &mut TestAppContext
     });
 }
 
-/// The two local models and the Studio API act on one file, so they only
-/// light up when the ticked set names exactly one.
+#[gpui_kit::test]
+fn multiple_images_offer_the_matching_studio_batch_tool(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    cx.simulate_resize(size(px(1440.), px(900.)));
+    for (rail, selector, url) in [
+        (Rail::Upscale, "rail-upscale", studio::BATCH_UPSCALE_URL),
+        (
+            Rail::RemoveBackground,
+            "rail-remove-background",
+            studio::BATCH_BACKGROUND_REMOVAL_URL,
+        ),
+    ] {
+        audit.update(cx, |audit, cx| {
+            audit.select_all_visible();
+            audit.open_rail(Rail::Convert, cx);
+        });
+        cx.run_until_parked();
+        if local_ai::available() {
+            let action = cx
+                .debug_bounds(selector)
+                .expect("batch action remains available");
+            cx.simulate_click(action.center(), gpui_kit::Modifiers::none());
+        } else {
+            audit.update(cx, |audit, cx| audit.open_rail(rail, cx));
+        }
+        cx.run_until_parked();
+        audit.read_with(cx, |audit, _| assert_eq!(audit.rail, rail));
+        assert!(cx.debug_bounds("local-ai-batch-handoff").is_some());
+        assert!(cx.debug_bounds("local-ai-single").is_none());
+        let link = cx.debug_bounds("open-studio-batch").unwrap();
+        cx.simulate_click(link.center(), gpui_kit::Modifiers::none());
+        assert_eq!(cx.opened_url().as_deref(), Some(url));
+        audit.read_with(cx, |audit, _| assert!(audit.local_ai_job.is_none()));
+
+        audit.update(cx, |audit, cx| {
+            audit.selected = [audit.visible[0]].into_iter().collect();
+            audit.selection_changed(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("local-ai-batch-handoff").is_none());
+        assert!(cx.debug_bounds("local-ai-single").is_some());
+
+        audit.update(cx, |audit, cx| {
+            audit.selected.clear();
+            audit.selection_changed(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("local-ai-batch-handoff").is_none());
+    }
+}
+
+/// The local models and Studio API must not choose a file from a batch.
 #[gpui_kit::test]
 fn one_ticked_file_is_what_single_image_tools_act_on(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
@@ -3799,7 +3862,7 @@ fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAp
     cx.simulate_resize(size(px(1100.), px(720.)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("folder-sidebar").is_some());
-    assert!(cx.debug_bounds("folder-tree-toggle").is_none());
+    assert!(cx.debug_bounds("folder-tree-toggle").is_some());
 
     cx.simulate_resize(size(px(900.), px(720.)));
     cx.run_until_parked();
@@ -3821,7 +3884,66 @@ fn folder_browser_is_persistent_only_when_the_workspace_has_room(cx: &mut TestAp
     // The operations sidebar no longer evicts the folder sidebar: both share
     // the window and the list takes what is left.
     assert!(cx.debug_bounds("folder-sidebar").is_some());
-    assert!(cx.debug_bounds("folder-tree-toggle").is_none());
+    assert!(cx.debug_bounds("folder-tree-toggle").is_some());
+}
+
+#[gpui_kit::test]
+fn topbar_sidebar_controls_stay_at_the_edges_and_toggle_independently(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    for width in [760., 1100., 1440.] {
+        cx.simulate_resize(size(px(width), px(720.)));
+        cx.run_until_parked();
+        let header = cx.debug_bounds("audit-header").unwrap();
+        let menu = cx.debug_bounds("app-menu").unwrap();
+        let left = cx.debug_bounds("folder-tree-toggle").unwrap();
+        let right = cx.debug_bounds("operations-sidebar-toggle").unwrap();
+        assert!(menu.right() < left.left());
+        assert!(left.right() < right.left());
+        assert_eq!(menu.left() - header.left(), header.right() - right.right());
+        assert!(right.right() <= header.right());
+
+        let folders_visible = cx.debug_bounds("folder-sidebar").is_some();
+        let operations_visible = audit.read_with(cx, |audit, _| audit.sidebar_open);
+        cx.simulate_click(left.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("folder-sidebar").is_some(),
+            !folders_visible
+        );
+        audit.read_with(cx, |audit, _| {
+            assert_eq!(audit.sidebar_open, operations_visible)
+        });
+        cx.simulate_click(left.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("folder-sidebar").is_some(), folders_visible);
+
+        cx.simulate_click(right.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        audit.read_with(cx, |audit, _| {
+            assert_eq!(audit.sidebar_open, !operations_visible)
+        });
+        assert_eq!(cx.debug_bounds("folder-sidebar").is_some(), folders_visible);
+        cx.simulate_click(right.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        audit.read_with(cx, |audit, _| {
+            assert_eq!(audit.sidebar_open, operations_visible)
+        });
+    }
+
+    let menu = cx.debug_bounds("app-menu").unwrap();
+    cx.simulate_click(menu.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("shortcuts-card").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("shortcuts-card").is_none());
+    cx.simulate_click(menu.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("up up enter");
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert!(audit.settings_panel.is_some()));
 }
 
 #[gpui_kit::test]
@@ -5088,7 +5210,13 @@ fn replacing_converts_in_place_and_the_rail_offers_the_originals_back(cx: &mut T
         "the rail says what the destination does before the run"
     );
 
-    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    audit.update(cx, |audit, cx| {
+        audit.rail = Rail::None;
+        audit.sidebar_open = false;
+        audit.start_conversion(cx);
+        assert!(audit.sidebar_open, "starting a run exposes Stop");
+        assert_eq!(audit.rail, Rail::Convert);
+    });
     cx.run_until_parked();
 
     let (root, backups) = audit.read_with(cx, |audit, _| {
@@ -6400,8 +6528,8 @@ fn a_running_conversion_cannot_have_its_stop_closed_away(cx: &mut TestAppContext
 
     assert!(cx.debug_bounds("convert-stop").is_some());
     let close = cx
-        .debug_bounds("close-rail")
-        .expect("the open rail has its close control");
+        .debug_bounds("operations-sidebar-toggle")
+        .expect("the top bar has the sidebar control");
     cx.simulate_click(close.center(), gpui_kit::Modifiers::none());
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
@@ -6723,14 +6851,14 @@ fn the_sidebar_tabs_switch_operations_and_collapse(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.read_with(cx, |audit, _| {
         assert!(audit.sidebar_open, "the operations sidebar starts open");
-        assert_eq!(audit.active_tab(), Rail::Convert);
+        assert_eq!(audit.rail, Rail::Convert);
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("rail").is_some());
 
     audit.update(cx, |audit, cx| audit.open_rail(Rail::RemoveBackground, cx));
     audit.read_with(cx, |audit, _| {
-        assert_eq!(audit.active_tab(), Rail::RemoveBackground)
+        assert_eq!(audit.rail, Rail::RemoveBackground)
     });
 
     audit.update(cx, |audit, cx| {
@@ -6746,7 +6874,7 @@ fn the_sidebar_tabs_switch_operations_and_collapse(cx: &mut TestAppContext) {
     audit.update(cx, |audit, cx| audit.open_rail(Rail::Studio, cx));
     audit.read_with(cx, |audit, _| {
         assert!(audit.sidebar_open);
-        assert_eq!(audit.active_tab(), Rail::Studio);
+        assert_eq!(audit.rail, Rail::Studio);
     });
 
     audit.update(cx, |audit, cx| {
@@ -7140,6 +7268,7 @@ fn the_status_bar_carries_findings_under_one_icon(cx: &mut TestAppContext) {
 fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
+        audit.open_rail(Rail::Convert, cx);
         audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/out.webp"));
         cx.notify();
     });

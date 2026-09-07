@@ -235,10 +235,7 @@ impl Audit {
         ticked.next().is_none().then_some(first)
     }
 
-    /// Select a sidebar tab. The sidebar opens with it; collapsing is the
-    /// strip's job, so a verb never hides the surface it just chose.
-    /// Clicking the active verb keeps the tab rather than closing the rail:
-    /// with the sidebar always present there is nothing to toggle back to.
+    /// Choosing an operation opens its settings in the sidebar.
     pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
         self.rail = rail;
         self.sidebar_open = true;
@@ -267,10 +264,9 @@ impl Audit {
         self.selection_changed(cx);
     }
 
-    /// The strip's tool: opens the panel on that tool, or collapses the panel
-    /// when its lit tool is clicked again. Never mid-run: the panel holds Stop.
+    /// Toggle the sidebar without losing the chosen tool. Never hide Stop mid-run.
     pub(super) fn toggle_rail_tab(&mut self, rail: Rail, cx: &mut Context<Self>) {
-        if self.sidebar_open && self.active_tab() == rail {
+        if self.sidebar_open && self.rail == rail {
             if !self.converting {
                 self.sidebar_open = false;
                 cx.notify();
@@ -280,14 +276,12 @@ impl Audit {
         self.open_rail(rail, cx);
     }
 
-    /// What the sidebar takes from the list: the strip always, the panel when open.
     pub(super) fn rail_width(&self) -> f32 {
-        panel::STRIP_WIDTH
-            + if self.sidebar_open {
-                self.rail_size
-            } else {
-                0.
-            }
+        if self.sidebar_open {
+            self.rail_size
+        } else {
+            0.
+        }
     }
 
     /// Size the panel from the pointer while the grab edge is held. Past the
@@ -307,12 +301,12 @@ impl Audit {
             cx.notify();
             return;
         }
-        let wanted = viewport_width - panel::STRIP_WIDTH - f32::from(event.position.x);
+        let wanted = viewport_width - f32::from(event.position.x);
         if wanted < panel::RAIL_MIN - panel::RAIL_SNAP && !self.converting {
             self.sidebar_open = false;
             self.rail_drag = false;
         } else {
-            let ceiling = (viewport_width - panel::STRIP_WIDTH - 320.).max(panel::RAIL_MIN);
+            let ceiling = (viewport_width - 320.).max(panel::RAIL_MIN);
             self.rail_size = wanted.clamp(panel::RAIL_MIN, panel::RAIL_MAX.min(ceiling));
         }
         cx.notify();

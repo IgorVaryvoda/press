@@ -222,7 +222,7 @@ fn thumb_cache_limit(edge: u32) -> usize {
 
 /// The sidebar tab: one operation each. Every operation with settings owns
 /// one, so the action bar can hold verbs alone and no operation borrows
-/// another's controls. `None` is no choice yet, and reads as Convert.
+/// another's controls. `None` shows the tool chooser.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) enum Rail {
     #[default]
@@ -244,7 +244,7 @@ impl Rail {
         }
     }
 
-    /// The word the strip's selectors carry, so a test names a tool, not a number.
+    /// The word the tool selectors carry, so a test names a tool, not a number.
     fn slug(self) -> &'static str {
         match self {
             Rail::None => "none",
@@ -389,6 +389,8 @@ pub(crate) struct Audit {
     recent_folders: Vec<PathBuf>,
     /// The narrow/work-panel form of the folder browser is an overlay.
     browser_overlay: bool,
+    /// Explicitly hidden at widths that otherwise show the folder sidebar.
+    browser_collapsed: bool,
     /// Backs the loaded-folder search in the browser sidebar.
     folder_filter_input: gpui_kit::Entity<InputState>,
     tree_state: gpui_kit::Entity<TreeState>,
@@ -705,12 +707,9 @@ pub(crate) struct Audit {
     column_prefs: ColumnPrefs,
     /// Where conversions and local-model results are written.
     output: Output,
-    /// The open rail, if any. A folder opens on Convert: it is the app's job,
-    /// and an empty right-hand edge on launch would hide it.
+    /// The chosen operation, or the tool chooser when none is selected.
     rail: Rail,
-    /// The right sidebar with one tab per operation. Open on launch and
-    /// collapsible, never gone: the operations are the app, and a rail that
-    /// only appears after the right click already happened helps nobody.
+    /// The right sidebar starts on Convert and can be hidden from the top bar.
     sidebar_open: bool,
     /// The keyboard shortcut list, open over the workspace like settings.
     shortcuts_open: bool,
@@ -2330,6 +2329,7 @@ pub(crate) fn build_audit(
             folders: Vec::new(),
             recent_folders,
             browser_overlay: false,
+            browser_collapsed: false,
             folder_filter_input,
             tree_state,
             tree_anchor: PathBuf::new(),
@@ -2463,7 +2463,7 @@ pub(crate) fn build_audit(
             local_ai_job: None,
             column_prefs,
             output,
-            rail: Rail::None,
+            rail: Rail::Convert,
             sidebar_open,
             shortcuts_open: false,
         };

@@ -12,15 +12,11 @@ use super::*;
 /// The open panel's built-in width, and the range its grab edge allows. The
 /// table and the gallery lay themselves out against the viewport minus the
 /// rail, so a panel never silently squeezes their column math.
-pub(super) const RAIL_WIDTH: f32 = 300.;
-pub(super) const RAIL_MIN: f32 = 260.;
+pub(super) const RAIL_WIDTH: f32 = 320.;
+pub(super) const RAIL_MIN: f32 = 280.;
 pub(super) const RAIL_MAX: f32 = 520.;
 /// How far past the minimum a drag goes before the panel collapses.
 pub(super) const RAIL_SNAP: f32 = 60.;
-/// The tool strip at the window's right edge, there whether the panel is
-/// open or not: the visible way into every operation, and out again.
-pub(super) const STRIP_WIDTH: f32 = 56.;
-
 /// Room the list leaves under itself for the floating bar: the bar's 18px
 /// offset and 46px height, plus a gap. Without the room the bar covers the
 /// last row; without the gap the list's cut-off bottom row meets the bar's
@@ -264,8 +260,7 @@ impl Audit {
         )
     }
 
-    /// One local model as a verb. Both need exactly one image, and both say why
-    /// when they cannot run rather than sitting there grey and mute.
+    /// Single images use the local model; batches open the Studio handoff.
     #[allow(clippy::too_many_arguments)]
     fn local_ai_action(
         &self,
@@ -279,7 +274,9 @@ impl Audit {
         labelled: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let batch = self.target_count() > 1;
         let blocked = match single {
+            None if batch => None,
             None => Some("Select one image to run this on".to_string()),
             Some(index) => {
                 let entry = self.entries.get(index);
@@ -305,6 +302,7 @@ impl Audit {
                 .map(|job| job.message(&self.root))
                 .or_else(|| self.studio_job.as_ref().map(|job| job.message(&self.root)))
                 .unwrap_or_else(|| "Local AI is running…".into()),
+            (None, false) if batch => format!("{label} for multiple images in Sirv AI Studio"),
             (None, false) => format!("{label} on this computer; the first run downloads the model"),
         };
         Button::new(id)
@@ -317,126 +315,81 @@ impl Audit {
             .loading(running)
             .disabled(blocked.is_some() || busy)
             .on_click(cx.listener(move |audit, _, _, cx| audit.open_rail(rail, cx)))
+            .map(|button| div().debug_selector(move || id.into()).child(button))
     }
 
-    /// The tab the sidebar shows. Nothing chosen yet means Convert: it is the
-    /// app's job, and the sidebar opens on it.
-    pub(super) fn active_tab(&self) -> Rail {
-        match self.rail {
-            Rail::None => Rail::Convert,
-            tab => tab,
-        }
-    }
-
-    /// The operations rail: a slim strip of tools that is always there, and
-    /// the panel beside it with the lit tool's settings and commit. The strip
-    /// is the only way in and out, so it is always on screen.
     pub(super) fn rail_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_shrink_0()
             .h_full()
             .children(self.sidebar_open.then(|| self.rail_panel(cx)))
-            .child(self.rail_strip(cx))
     }
 
-    /// One tool on the strip: a glyph over a word, lit while its panel is open.
-    fn strip_tool(
-        &self,
-        tab: Rail,
-        label: &'static str,
-        icon: Icon,
-        tooltip: &'static str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let lit = self.sidebar_open && self.active_tab() == tab;
-        let hover = cx.theme().secondary_hover;
+    fn tool_chooser(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id(("strip", tab as usize))
-            .debug_selector(move || format!("strip-{}", tab.slug()))
-            .w(px(STRIP_WIDTH - 8.))
-            .py_1p5()
-            .rounded_md()
+            .debug_selector(|| "tool-chooser".into())
             .flex()
             .flex_col()
-            .items_center()
-            .gap_0p5()
-            .cursor_pointer()
-            .text_color(if lit {
-                cx.theme().foreground
-            } else {
-                cx.theme().muted_foreground
-            })
-            .when(lit, |tool| {
-                tool.bg(cx.theme().list_active)
-                    .border_1()
-                    .border_color(cx.theme().list_active_border)
-            })
-            .hover(move |tool| tool.bg(hover))
-            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-            .on_click(cx.listener(move |audit, _, _, cx| audit.toggle_rail_tab(tab, cx)))
-            .child(icon)
-            .child(div().text_size(px(10.)).whitespace_nowrap().child(label))
-    }
-
-    fn rail_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let studio_glyph = |slug: &str| match crate::assets::studio_icon(slug) {
-            Some(path) => Icon::default().path(path).size_4(),
-            None => Icon::new(IconName::Bot).size_4(),
-        };
-        div()
-            .debug_selector(|| "rail-strip".into())
-            .w(px(STRIP_WIDTH))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .py_2()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .child(self.strip_tool(
-                Rail::Convert,
-                "Convert",
-                Icon::new(IconName::Replace).size_4(),
-                "Convert images to WebP, AVIF, or their own format",
-                cx,
-            ))
-            .child(self.strip_tool(
-                Rail::RemoveBackground,
-                "Remove bg",
-                studio_glyph("background-removal"),
-                "Remove the background on this computer",
-                cx,
-            ))
-            .child(self.strip_tool(
-                Rail::Upscale,
-                "Upscale",
-                studio_glyph("upscale"),
-                "Upscale 4× on this computer",
-                cx,
-            ))
-            .child(self.strip_tool(
-                Rail::Studio,
-                "Studio",
-                Icon::new(IconName::Bot).size_4(),
-                "AI operations with Sirv Studio",
-                cx,
-            ))
+            .flex_1()
+            .justify_center()
+            .gap_2()
+            .p_4()
+            .children(
+                [
+                    (Rail::Convert, "Convert", Icon::new(IconName::Replace)),
+                    (
+                        Rail::RemoveBackground,
+                        "Remove background",
+                        Icon::default().path("icons/studio/background-removal.svg"),
+                    ),
+                    (
+                        Rail::Upscale,
+                        "Upscale",
+                        Icon::default().path("icons/studio/upscale.svg"),
+                    ),
+                    (Rail::Studio, "AI operations", Icon::new(IconName::Bot)),
+                ]
+                .into_iter()
+                .map(|(rail, label, icon)| {
+                    div()
+                        .debug_selector(move || format!("tool-{}", rail.slug()))
+                        .child(
+                            Button::new(("tool", rail as usize))
+                                .outline()
+                                .w_full()
+                                .h_9()
+                                .rounded_lg()
+                                .accessibility_label(label)
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(px(13.))
+                                        .child(icon.size_4())
+                                        .child(label),
+                                )
+                                .on_click(
+                                    cx.listener(move |audit, _, _, cx| audit.open_rail(rail, cx)),
+                                ),
+                        )
+                }),
+            )
     }
 
     /// The open panel: the lit operation's title, its settings, and its commit
     /// at the foot — the same shape whichever operation it belongs to. Its
     /// left edge is the grab edge that sizes it.
     fn rail_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab = self.active_tab();
+        let tab = self.rail;
         let title = tab.title();
         let body = match tab {
             Rail::Convert => self.convert_rail(cx).into_any_element(),
             Rail::RemoveBackground | Rail::Upscale => self.local_ai_rail(tab, cx),
             Rail::Studio => self.studio_rail(cx),
-            Rail::None => self.convert_rail(cx).into_any_element(),
+            Rail::None => self.tool_chooser(cx).into_any_element(),
         };
         let accent = cx.theme().primary;
         div()
@@ -448,18 +401,32 @@ impl Audit {
             .flex_col()
             .border_l_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .child(
+            .bg(cx.theme().background)
+            .children((tab != Rail::None).then(|| {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap_2()
                     .flex_shrink_0()
-                    .h(px(42.))
-                    .pl_3()
-                    .pr_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
+                    .h(px(48.))
+                    .px_3()
+                    .child(
+                        div().debug_selector(|| "tools-back".into()).child(
+                            Button::new("tools-back")
+                                .small()
+                                .ghost()
+                                .icon(IconName::ArrowLeft)
+                                .tooltip("Back to tools")
+                                .disabled(self.converting)
+                                .on_click(cx.listener(|audit, _, window, cx| {
+                                    if !audit.converting {
+                                        audit.rail = Rail::None;
+                                        window.focus(&audit.focus, cx);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                    )
                     .child(
                         div()
                             .font_family("SF Pro Display")
@@ -468,28 +435,11 @@ impl Audit {
                             .text_color(cx.theme().foreground)
                             .child(title),
                     )
-                    .child(
-                        // Collapse, not close: the panel is the operations
-                        // home, and closing it mid-run would take Stop away
-                        // with it. The strip brings it back.
-                        div().debug_selector(|| "close-rail".into()).child(
-                            Button::new("close-rail")
-                                .small()
-                                .ghost()
-                                .icon(IconName::PanelRightClose)
-                                .tooltip("Collapse the panel")
-                                .disabled(self.converting)
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.sidebar_open = false;
-                                    cx.notify();
-                                })),
-                        ),
-                    ),
-            )
+            }))
             .child(body)
             .child(
                 // The grab edge. Drag it to size the panel; drag it past the
-                // minimum and the panel collapses to the strip.
+                // minimum and the panel collapses.
                 div()
                     .id("rail-resize")
                     .debug_selector(|| "rail-resize".into())
@@ -526,31 +476,25 @@ impl Audit {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap_2()
-                    .px_3()
+                    .gap_3()
+                    .px_4()
                     .py_2()
                     // Where the output lands, said once and always. Every other
                     // number in this rail is about size; this one is about the
                     // question people actually ask before pressing Convert.
                     .child(self.destination_row(cx))
-                    // The transform, boxed as one thing: the preset names it,
-                    // and the three dials below are what it holds.
+                    // Preset and controls share the sidebar's inset.
                     .child(
                         div()
                             .debug_selector(|| "transform-card".into())
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .p_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().background)
                             .child(self.preset_row(cx))
                             .child(div().debug_selector(|| "format-setting".into()).child(
                                 self.panel_setting(
                                     "Format",
-                                    self.format_group(cx).small().compact(),
+                                    self.format_group(cx).small().outline().compact().w_full(),
                                     cx,
                                 ),
                             ))
@@ -577,7 +521,7 @@ impl Audit {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .px_3()
+                    .px_4()
                     .py_3()
                     .border_t_1()
                     .border_color(cx.theme().border)
@@ -592,6 +536,57 @@ impl Audit {
             Rail::Upscale => local_ai::Tool::Upscale,
             _ => local_ai::Tool::RemoveBackground,
         };
+        if self.target_count() > 1 {
+            let (operation, url) = match tool {
+                local_ai::Tool::Upscale => ("upscaling", studio::BATCH_UPSCALE_URL),
+                local_ai::Tool::RemoveBackground => {
+                    ("background removal", studio::BATCH_BACKGROUND_REMOVAL_URL)
+                }
+            };
+            return div()
+                .debug_selector(|| "local-ai-batch-handoff".into())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .justify_center()
+                .gap_3()
+                .p_4()
+                .text_sm()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("{} images selected", self.target_count())),
+                )
+                .child(format!(
+                    "Press runs {operation} on one image at a time. \
+                     Use Sirv AI Studio to process multiple images together."
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Opens in your browser. Sign in and add your images there; Press does not upload this selection."),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "open-studio-batch".into())
+                        .child(
+                            Button::new("open-studio-batch")
+                                .primary()
+                                .w_full()
+                                .icon(IconName::ExternalLink)
+                                .label("Open in Sirv AI Studio")
+                                .on_click(move |_, _, cx| cx.open_url(url)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Or select one image to process it locally."),
+                )
+                .into_any_element();
+        }
         let index = self.single_target();
         let entry = index.and_then(|index| self.entries.get(index));
         // The thumbnail the list already decoded. A rail that names a file and
@@ -629,6 +624,7 @@ impl Audit {
         };
 
         div()
+            .debug_selector(|| "local-ai-single".into())
             .flex()
             .flex_col()
             .flex_1()
@@ -854,20 +850,28 @@ impl Audit {
             // A mode, so a switch: "Replace" beside "Change" read as two
             // folder links, and one of them rewrote the folder you audited.
             .child(
-                div().debug_selector(|| "output-replace".into()).child(
-                    Switch::new("output-replace")
-                        .small()
-                        .checked(replacing)
-                        .label("Replace originals in place")
-                        .disabled(self.converting)
-                        .on_click(cx.listener(|audit, _, _, cx| {
-                            if audit.output == Output::Replace {
-                                audit.reset_output(cx);
-                            } else {
-                                audit.use_replace_output(cx);
-                            }
-                        })),
-                ),
+                div()
+                    .debug_selector(|| "output-replace".into())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h_6()
+                    .text_size(px(13.))
+                    .child("Replace originals in place")
+                    .child(
+                        Switch::new("output-replace")
+                            .small()
+                            .checked(replacing)
+                            .accessibility_label("Replace originals in place")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                if audit.output == Output::Replace {
+                                    audit.reset_output(cx);
+                                } else {
+                                    audit.use_replace_output(cx);
+                                }
+                            })),
+                    ),
             )
             // The promise the whole app rests on, kept in view rather than
             // discovered afterwards — and said differently when the destination
@@ -1755,26 +1759,35 @@ impl Audit {
             // AVIF is lossy-only here, and a switch that lies about that is worse
             // than no switch.
             .children(self.format.supports_lossless().then(|| {
-                Switch::new("lossless")
-                    .small()
-                    .checked(lossless)
-                    .label("Lossless")
-                    .disabled(self.converting)
-                    .on_click(cx.listener(|audit, _, _, cx| {
-                        if audit.converting {
-                            return;
-                        }
-                        // A second click on a lit toggle has to turn it off, or
-                        // lossless is a one-way door.
-                        audit.quality = if audit.quality == Quality::LOSSLESS {
-                            Quality::lossy(audit.slider_quality)
-                        } else {
-                            Quality::LOSSLESS
-                        };
-                        audit.clear_results();
-                        audit.schedule_estimate(cx);
-                        cx.notify();
-                    }))
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h_6()
+                    .text_size(px(13.))
+                    .child("Lossless")
+                    .child(
+                        Switch::new("lossless")
+                            .small()
+                            .checked(lossless)
+                            .accessibility_label("Lossless")
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, _, cx| {
+                                if audit.converting {
+                                    return;
+                                }
+                                // A second click on a lit toggle has to turn it off, or
+                                // lossless is a one-way door.
+                                audit.quality = if audit.quality == Quality::LOSSLESS {
+                                    Quality::lossy(audit.slider_quality)
+                                } else {
+                                    Quality::LOSSLESS
+                                };
+                                audit.clear_results();
+                                audit.schedule_estimate(cx);
+                                cx.notify();
+                            })),
+                    )
             }))
             // WebP saves transparency lossless no matter what the slider says.
             // The caption owns that fact next to the knob, so the number above

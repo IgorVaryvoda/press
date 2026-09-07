@@ -180,14 +180,7 @@ impl Audit {
     /// that narrow the list. One row: the second strip was carrying a filter box
     /// and two chips across the whole window, and cost the list forty pixels.
     pub(super) fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let source_icon = if self.batch_folders.is_some() {
-            IconName::Folder
-        } else if self.batch_size.is_some() {
-            IconName::File
-        } else {
-            IconName::Folder
-        };
-        let tree_collapsed = self.batch_size.is_none() && !self.browser_persistent(window);
+        let browser_open = self.browser_persistent(window) || self.browser_overlay;
         let breadcrumb_source = cx.entity().downgrade();
         let mut breadcrumb_parts = self.breadcrumb_parts();
         let width = f32::from(window.viewport_size().width);
@@ -226,6 +219,7 @@ impl Audit {
             self.converting || self.batch_folders.is_some() || self.scan_blocks_delivery();
         // Scope rides with opening: it decides what a folder open covers, the
         // way the command line decides it with a flag.
+        let open_disabled = self.converting;
         let scope_checked = self.include_subfolders;
         let scope_disabled = self.converting || self.single_file;
         // The label carries the state: paired, it names the remote folder.
@@ -247,9 +241,7 @@ impl Audit {
             }
             None => "Sirv".to_string(),
         };
-        // Beside Open, at a fixed spot: this is where the folder comes from
-        // and goes to, not a view control. The menu buried it and users never
-        // found it; the right-hand cluster made it drift with the path.
+        // Keep pairing visible beside the source path.
         let sirv = div().debug_selector(|| "sirv-pair-header".into()).child(
             Button::new("sirv-pair-header")
                 .small()
@@ -276,50 +268,29 @@ impl Audit {
             .bg(cx.theme().table_head)
             .border_b_1()
             .border_color(cx.theme().border)
-            // One named source control replaces three adjacent icon-only openers.
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .min_w_0()
-                    .min_w(px(260.))
-                    .children(tree_collapsed.then(|| {
-                        div().debug_selector(|| "folder-tree-toggle".into()).child(
-                            Button::new("folder-tree-toggle")
-                                .small()
-                                .ghost()
-                                .icon(IconName::PanelLeft)
-                                .selected(self.browser_overlay)
-                                .tooltip("Browse folders")
-                                .disabled(self.converting)
-                                .on_click(cx.listener(|audit, _, window, cx| {
-                                    audit.toggle_browser(window, cx)
-                                })),
-                        )
-                    }))
-                    // Open before the path, so it keeps one spot however long
-                    // the path gets; after it, it drifted with every folder.
+                    .flex_shrink_0()
+                    .debug_selector(|| "app-menu".into())
                     .child(
-                        Button::new("source-picker")
+                        Button::new("app-menu")
                             .small()
                             .ghost()
-                            .icon(source_icon)
-                            .label("Open")
-                            .tooltip("Open a folder or choose images")
-                            .dropdown_caret(true)
-                            .disabled(self.converting)
+                            .icon(IconName::Menu)
+                            .tooltip("Menu")
                             .dropdown_menu(move |menu, _, _| {
                                 let open_folder = source_menu.clone();
                                 let open_images = source_menu.clone();
                                 let toggle_scope = source_menu.clone();
                                 let pair_sirv = source_menu.clone();
+                                let settings = source_menu.clone();
+                                let shortcuts = source_menu.clone();
                                 let reveal_root = reveal_root.clone();
                                 let reveal_source = reveal_source.clone();
                                 menu.item(
                                     PopupMenuItem::new("Open folder…")
                                         .icon(IconName::Folder)
+                                        .disabled(open_disabled)
                                         .on_click(move |_, _, cx| {
                                             if let Some(audit) = open_folder.upgrade() {
                                                 audit.update(cx, |audit, cx| audit.pick(true, cx));
@@ -329,6 +300,7 @@ impl Audit {
                                 .item(
                                     PopupMenuItem::new("Open images…")
                                         .icon(IconName::File)
+                                        .disabled(open_disabled)
                                         .on_click(move |_, _, cx| {
                                             if let Some(audit) = open_images.upgrade() {
                                                 audit.update(cx, |audit, cx| audit.pick(false, cx));
@@ -380,8 +352,68 @@ impl Audit {
                                             }
                                         }),
                                 )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Settings…")
+                                        .icon(IconName::Settings)
+                                        .on_click(move |_, window, cx| {
+                                            if let Some(audit) = settings.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.open_settings(window, cx)
+                                                });
+                                            }
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Keyboard shortcuts").on_click(
+                                        move |_, window, cx| {
+                                            if let Some(audit) = shortcuts.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.shortcuts_open = true;
+                                                    window.focus(&audit.focus, cx);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        },
+                                    ),
+                                )
                             }),
-                    )
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .debug_selector(|| "folder-tree-toggle".into())
+                    .child(
+                        Button::new("folder-tree-toggle")
+                            .small()
+                            .ghost()
+                            .icon(if browser_open {
+                                Icon::default().path("icons/panel-left-filled.svg")
+                            } else {
+                                Icon::new(IconName::PanelLeft)
+                            })
+                            .selected(browser_open)
+                            .tooltip(if browser_open {
+                                "Hide folder sidebar"
+                            } else {
+                                "Show folder sidebar"
+                            })
+                            .disabled(self.converting || self.batch_size.is_some())
+                            .on_click(
+                                cx.listener(|audit, _, window, cx| {
+                                    audit.toggle_browser(window, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
                     .child(sirv)
                     .child(div().min_w_0().overflow_hidden().child(breadcrumbs)),
             )
@@ -430,13 +462,30 @@ impl Audit {
                     })),
             )
             .child(
-                // Icon-only: the one global surface, always in the same corner.
-                Button::new("open-settings")
-                    .small()
-                    .ghost()
-                    .icon(IconName::Settings)
-                    .tooltip("Settings")
-                    .on_click(cx.listener(|audit, _, window, cx| audit.open_settings(window, cx))),
+                div()
+                    .flex_shrink_0()
+                    .debug_selector(|| "operations-sidebar-toggle".into())
+                    .child(
+                        Button::new("operations-sidebar-toggle")
+                            .small()
+                            .ghost()
+                            .icon(if self.sidebar_open {
+                                Icon::default().path("icons/panel-right-filled.svg")
+                            } else {
+                                Icon::new(IconName::PanelRight)
+                            })
+                            .selected(self.sidebar_open)
+                            .tooltip(if self.sidebar_open {
+                                "Hide operations sidebar"
+                            } else {
+                                "Show operations sidebar"
+                            })
+                            .disabled(self.converting)
+                            .on_click(cx.listener(|audit, _, window, cx| {
+                                audit.toggle_rail_tab(audit.rail, cx);
+                                window.focus(&audit.focus, cx);
+                            })),
+                    ),
             )
     }
 }
