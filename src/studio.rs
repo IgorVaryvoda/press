@@ -917,6 +917,11 @@ mod tests {
             BOUNDARY_ID.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(root.join("optimized")).unwrap();
+        // macOS hands out `/var/...` through a symlink to `/private/var`, and
+        // Windows spells temp with a short `RUNNER~1` name versus the verbatim
+        // `\\?\` canonical form. The writer walks real ancestors, so the
+        // fixture uses the canonical spelling like every other helper does.
+        let root = root.canonicalize().unwrap();
         let output_source = root.join("photo.png");
         let source = root.join("optimized/photo.webp");
         std::fs::write(&source, png()).unwrap();
@@ -960,10 +965,13 @@ mod tests {
             std::process::id(),
             BOUNDARY_ID.fetch_add(1, Ordering::Relaxed)
         ));
+        std::fs::create_dir_all(&root).unwrap();
+        // Same canonical-temp rule as the direct run above: `Context` returns
+        // the real path, so the expected sibling must start from it too.
+        let root = root.canonicalize().unwrap();
         let outside = root.join("exports");
         let output_source = root.join("photo.png");
         let source = root.join("photo.webp");
-        std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&source, png()).unwrap();
         let context = crate::settings::Output::Folder(outside.clone())
             .context(&root)
