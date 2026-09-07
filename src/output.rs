@@ -173,7 +173,21 @@ fn canonical_source(source: &Path) -> Result<PathBuf, Error> {
     if !source.is_absolute() {
         return Err(Error::SourceNotAbsolute);
     }
-    validate_existing_windows_components(source, false)?;
+    #[cfg(windows)]
+    {
+        // An aliased root resolves to its target like a unix symlink does;
+        // only the ancestors above it must already be plain directories.
+        // Validating the alias itself would refuse every junctioned source
+        // before canonicalize gets to resolve it.
+        match source.parent() {
+            Some(parent) => validate_existing_windows_components(parent, false)?,
+            None => validate_existing_windows_components(source, false)?,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        validate_existing_windows_components(source, false)?;
+    }
     let source_root = fs::canonicalize(source).map_err(|error| Error::SourceLookup {
         path: source.to_path_buf(),
         error,
