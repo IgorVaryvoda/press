@@ -1,109 +1,122 @@
-# Press: a product-image workbench, connected to Studio
+# Press: prepare, verify and deliver product images
 
-Direction updated 2026-09-05. These are design and implementation plans, not
-announcements of shipped features or approved pricing. Code baseline:
-`ec9794bad7a6115a2fe1cd8313ca623ae6420699` (0.4.4).
+Updated 2026-09-08 against `77ab9191a8986604fa54f2f41a41863c33584302`
+(v0.6.6). This is product direction, not an announcement that the planned
+integrations exist. The [execution ledger](docs/workbench-execution-plan.md)
+separates source-present work, unverified behavior and proposed work.
 
-**Supplier Portal is the first strong use case, not the ceiling.** Press should
-feel complete for one person preparing product images. Studio becomes valuable
-when that person needs hosted processing, shared assets, collaboration, or a
-managed supplier-to-retailer workflow. Using Studio entirely inside Press still
-counts as using Studio; a browser visit is not the conversion objective.
-
-## Product promise
+## The product and its place
 
 ```text
-Images -> product sets -> requirements -> prepare -> inspect -> local deliverables
-                                                           -> supplier submission
-                                                           -> optional Studio service
+ImageGuide / extension: diagnose a delivery problem
+Press: prepare local files, inspect outputs, explain checks and produce deliverables
+Studio: coordinate shared products, access, requirements, review and delivery
 ```
 
-Keep quick folder conversion intact. Product grouping is an optional layer over
-that job, not onboarding that every screenshot must pass through. Give users a
-useful local tool without account requirements, artificial batch caps, watermarks,
-weakened models, or an export paywall. Monetize additional service value, not
-avoidable frustration.
+**Product-image preflight** is the strategic direction: understand what a batch is
+for, prepare the required outputs without losing the masters, and explain what
+was actually checked. It is not a promise of marketplace acceptance. Keep the
+simple folder optimizer as a useful entry point, not a compulsory product/SKU
+wizard. Public messaging must distinguish today's local capabilities from future
+submission and verification capabilities.
 
-## Three connected opportunities
+Press can also be valuable on its own. It need not convert every local user into
+a Studio customer or become a separately monetized desktop business. Studio earns
+adoption through hosted processing, shared work and managed delivery, including
+when those services are used entirely inside Press.
 
-| Opportunity | Press experience | Studio value |
+See [strategy and distribution](docs/preflight-strategy.md) for positioning,
+audience hypotheses, experiments and the commercial boundary.
+
+## Four entrances, one local engine
+
+| Entrance | First useful outcome | Next experiment |
 | --- | --- | --- |
-| Supplier preparation | Assigned products and slots, local checks, corrections, submission and status | Authoritative requirements, access, review, approval and delivery |
-| Independent product-image work | Product sets, consistent presentation, custom presets and marketplace export packages | Optional hosted repair/generation, then the user's own shared workspace |
-| Repeated team workflows | Reusable deliverables, selected editor handoff, later monitored export folders | Shared masters, review, provenance and managed automation |
+| ImageGuide site and extension | Turn an observed image problem into a local preparation task | File-based audit handoff, confirmed source mapping, explicit deployment and re-audit |
+| Desktop discovery and referrals | Prepare a real folder without an account | Repeat the job with saved presets and two independent outputs |
+| Agents and command-line workflows | Inspect, plan and perform authorized local work with machine-readable outcomes | Contract tests, then a saved plan/execution/receipt contract |
+| Studio retailer invitations | Fulfill an assigned supplier task with less correction work | One scoped submission, interruption recovery and rejection/resubmission loop |
 
-A supplier does not have to buy a separate Studio subscription merely to fulfill
-an authorized retailer request. Optional processing in the supplier's own workspace
-is a separate purchase context. Retailer-sponsored processing is a later, explicitly
-budgeted service, not permission to use a merchant-wide API key.
+These are distribution hypotheses, not four simultaneous launch commitments.
+Choose a small real job for each experiment; increase investment only where it
+produces repeat use or measurable retailer value.
+
+## What exists and what comes next
+
+Personal recipes and local product-set job code already exist. Do not rebuild
+W1/W2 from the September 5 design documents. Destination proof has also moved off
+the conversion click handler. Source presence is not proof that every acceptance
+journey works on every operating system. The execution ledger records the remaining
+verification and implementation gaps with specific source references.
+
+The default next work is:
+
+1. Reconcile recipe/source/result identity, portable-job safety and CLI contract
+   documentation. Preserve the existing output and restore boundary.
+2. Test a minimal ImageGuide-to-Press handoff and a two-target local delivery job.
+   Reuse the current preset and product-job models; neither needs a template catalog.
+3. Complete the supplier vertical slice against confirmed Studio contracts, with
+   authoritative requirements and durable receipts.
+4. Add maintained requirement packs and contextual Studio services where observed
+   work justifies them. Investigate phone-image ingestion in parallel when actual
+   user folders contain unsupported HEIC/HEIF files.
+
+This is not a new serial dependency chain. A committed supplier pilot takes
+priority over speculative browser acquisition work. Its auth/intake discovery can
+run alongside local work; it must not wait for multi-target export, an agent
+protocol, a marketplace catalog or AI checkout. Each expansion consumes only the
+foundation checks relevant to its own writes or public promises.
 
 ## Ownership and commercial boundary
 
-Press owns local sources, work-in-progress product sets, recipes, deterministic
-checks it can actually perform, output inspection and transfer recovery. Studio
-owns canonical connected products, assignments, policies, authorization, billing,
-shared assets, review and delivery. Local grouping may show products without
-becoming a second PIM; cached server state is never new authority.
+Press owns local sources, work-in-progress grouping, supported preparation,
+inspection, local checks and recovery. Studio owns canonical connected products,
+assignments, authorization, policy resolution, billing, shared assets, review and
+downstream delivery. A local product set is not a second PIM, and a cached policy
+is not authority. A preset, report, deep link or plan cannot grant permission.
 
-Keep capabilities, access, payer and destination distinct. A hosted repair can run
-inside Press without silently saving the user's whole folder to a cloud library.
-A submitted file is not an approved file, and approval is not delivery.
+Keep capability, access, payer and destination separate. Ordinary authorized
+supplier submission must not inherit an unrelated personal API subscription gate.
+Optional processing in a supplier's own workspace has a separate purchase context;
+retailer sponsorship remains a later server-enforced allowance, never a merchant
+API key. Existing plans and entitlements must be confirmed with Studio rather
+than bypassed in the client.
 
-## Implementation order
+Useful local operations, presets, checks and exports should remain account-free.
+Do not manufacture cloud demand with batch caps, watermarks, weakened local models
+or an export paywall. No silent uploads, unapproved spending or repeated offers
+after a user declines. Remote outages must not disable ordinary local work.
 
-| Stage | Smallest useful result | Release condition |
-| --- | --- | --- |
-| Foundation | Preserve landed trust fixes; complete validated recipe/result identity and asynchronous planning | Local behavior remains safe and consistent across preview, estimate and export |
-| Personal recipes and product sets | Save/reuse settings; map images to local product roles and show missing items | A job survives restart without requiring a cloud account |
-| Supplier-first pilot | One retailer, scoped sign-in, exact requirements, preparation, submit and correction loop | Correct tenant/product/slot, recoverable partial batches, browser fallback |
-| Contextual Studio services | A relevant repair or generation action with explicit upload and payer/cost confirmation | Recoverable job and charge, no duplicate spend or hidden account fallback |
-| Broader deliverables | A small maintained marketplace set and independent outputs from one master | Real repeat demand; per-target verification without overwriting other outputs |
-| Team and repeat-work expansion | Own workspace, shared review; later editor/watch-folder conveniences and sponsorship | Measured value and supportable operating costs, not feature-count growth |
-
-Supplier access-contract work can run alongside local recipe work. Do not delay a
-committed supplier pilot to build an extensive marketplace catalog, sponsorship,
-or a general creative suite. Hosted-work planning may proceed in parallel, but
-supplier submission must not depend on purchasing hosted AI. The executable slices,
-dependencies and proof obligations are in the [execution plan](docs/workbench-execution-plan.md).
-
-## Design map
+## Design and execution map
 
 | Document | Owns |
 | --- | --- |
-| [Product workbench](docs/product-workbench.md) | Users, product-set model, information architecture and end-to-end examples |
-| [Delivery recipes](docs/delivery-recipes.md) | Custom presets, maintained marketplace requirements and output verification |
-| [Supplier integration](docs/supplier-portal-integration.md) | Canonical intake, assignment scope, submission receipts and resubmission |
-| [Connected Studio services](docs/studio-connected-services.md) | Contextual actions, native authorization, payer separation and paid-job recovery |
-| [Adoption and packaging](docs/adoption-and-packaging.md) | Retailer-led and supplier-led adoption, proposed commercial boundaries and pilot measures |
-| [Execution plan](docs/workbench-execution-plan.md) | Ordered implementation slices, accountable role, dependency and acceptance evidence |
-| [Engineering follow-up](docs/engineering-follow-up.md) | Current processing baseline and remaining trust work |
+| [Execution ledger and briefs](docs/workbench-execution-plan.md) | Current status, dependencies, bounded implementation PRs and proof |
+| [Strategy and distribution](docs/preflight-strategy.md) | Positioning, audience experiments, channel order and success criteria |
+| [Browser handoff](docs/browser-handoff-plan.md) | Audit import, safe matching, deployment boundary and re-audit |
+| [Agent execution](docs/agent-execution-plan.md) | CLI compatibility, deterministic plans, local execution and receipts |
+| [Delivery recipes](docs/delivery-recipes.md) | Presets, early multi-target exports, executable requirements and evidence |
+| [Phone-image ingestion](docs/phone-image-ingestion-plan.md) | Bounded HEIC/HEIF investigation and platform acceptance |
+| [Product workbench](docs/product-workbench.md) | Intended product-set experience and end-to-end journeys |
+| [Supplier integration](docs/supplier-portal-integration.md) | Canonical intake, scoped access, receipts and resubmission |
+| [Connected Studio services](docs/studio-connected-services.md) | Native authorization, explicit cost/payer and paid-job recovery |
+| [Adoption and packaging](docs/adoption-and-packaging.md) | Proposed service boundary, retailer pilot, economics and rollback |
+| [Engineering follow-up](docs/engineering-follow-up.md) | Source-backed foundation gaps and validation obligations |
 
-This update broadens the earlier delivery-only framing. The existing recipe and
-supplier contracts remain in force. This roadmap owns cross-document order;
-commercial proposals live in packaging; detailed service authority lives in the
-connected-services plan. No document promises a price, an available API, or an
-implementation deadline that has not been verified.
-
-## Already landed versus still proposed
-
-[PR #3](https://github.com/IgorVaryvoda/press/pull/3) is merged. Subsequent source
-changes share lossless-depth checks and retain ICC profiles in prepared Studio
-uploads. The engineering follow-up records those changes so they are not rebuilt.
-This documentation update does not constitute native runtime validation.
-
-Product-set jobs, a custom-preset editor, maintained marketplace templates, supplier
-sign-in, quoted/recoverable paid jobs and sponsorship are planned here; their
-existence must not be inferred from existing generic Sirv or Studio AI actions.
+The ledger supersedes old scheduling and blanket "not implemented" statements;
+those design documents still own their detailed behavioral contracts. A shipped
+subset does not make its whole design complete. Update the ledger with evidence
+in the same PR that lands a slice.
 
 ## Deliberate limits
 
-Do not build a second DAM/PIM, approval engine, billing ledger, generic workflow
-canvas, full RAW developer, or camera-tethering stack in Press. Exposing authorized
-Studio state in a desktop view is allowed; inventing a rival source of truth is not.
-Local and hosted model choices should reflect capability and evidence, not a
-manufactured quality gap. Advanced cloud administration can remain on the web.
+Do not build another DAM/PIM, approval engine, billing ledger, generic workflow
+canvas, RAW developer or tethering stack. Do not start a codec-count race, an AI
+catalog expansion, an MCP server or a template marketplace without an observed
+job that needs it. A CLI-only package is an option if installation evidence calls
+for it, not a reason to rewrite the application now.
 
-No silent uploads, auto-spending watched folders, account-required local presets,
-or nagging after a user declines Studio. Validate product accuracy after generation;
-missing technical dimensions do not justify inventing product details or approving
-an image. Expand when users need the next outcome, not when another tool is available.
+Keep these outcomes distinct: locally prepared, technically checked, visually
+reviewed, submitted, approved and delivered. Generation creates a candidate to
+inspect, not permission to invent product details or approve an asset. Expand
+because users need the next outcome, not because another tool can be added.
