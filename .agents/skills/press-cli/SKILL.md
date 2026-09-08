@@ -21,6 +21,21 @@ Read `summary`, then inspect `files` for exact dimensions, bytes, bytes per pixe
 
 Exit status `0` means the audit was complete. Status `1` means the JSON is still usable, but one or more paths could not be read; report the named `unreadable` or `walk_errors` entries.
 
+## Check a local requirements snapshot
+
+Use a bounded, local, user-authored requirements file to inspect actual output
+bytes:
+
+```bash
+press check <file-or-folder> --requirements-file <local-spec> --json
+```
+
+The report uses relative names and evidence from the same bounded input bytes:
+content-derived format, dimensions, byte counts and hashes. Required checks that
+the supported engine cannot perform remain `not_checked` and prevent an
+all-required-pass result. This command does not contact a retailer, issue
+approval, read signed URLs or use a remote policy feed.
+
 ## Convert only when authorized
 
 Conversion writes into `optimized/` under the input folder and can replace outputs from an earlier run. Do not run it from a request to inspect, audit, compare, estimate, or recommend. Get explicit authorization to write files, then use one command:
@@ -51,6 +66,10 @@ A file whose destination or format is refused comes back from a dry run as `stat
 Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF, JPEG, or `same`. `--max-edge` only downscales.
 
 `--format jpeg` refuses a source with real transparency by name; JPEG has no alpha channel. `--format same` re-encodes each JPEG, PNG, WebP, AVIF, or JPEG XL source in its own format and keeps its file name and extension, so existing references keep working; use it with `--max-edge` for a resize-only run. Other formats, such as BMP or GIF, are refused by name under `same`.
+
+AVIF inspection and conversion use native libavif with its dav1d decoder backend.
+Nonidentity AVIF orientation or crop transforms are refused by name. This is a
+bounded supported subset, not an all-platform decoder claim.
 
 Treat exit status `1` as a partial result, not as proof that nothing was written. Read each file's `status`, report named failures, and use each successful `output` path as the source of truth. Never claim savings from the requested settings alone; use `summary.source_bytes` and `summary.output_bytes` from the completed run.
 

@@ -183,3 +183,57 @@ Any source loss, cross-tenant delivery, unauthorized upload/charge or unrecovera
 accepted operation blocks expansion of that path. Preserve the local product and
 existing browser workflow as fallbacks. If a channel does not produce useful repeat
 work, improve the observed bottleneck or defer it instead of adding more features.
+
+## September 8 closeout checkpoint
+
+This closeout records the reviewed integration tree after `origin/main` was
+merged at `b5b57b3cda84437c1dcc436de58de325514f991d`. The approved local
+foundations and D2 requirements work are present through `b6570f6`; the isolated
+D3 preparation experiment was stopped and is not part of this tree.
+
+| Slice | Landed evidence | Boundary at closeout |
+| --- | --- | --- |
+| F1 | Exact source/output identity, bounded consumed bytes, recipe processing revision and content-verified reuse in `b6570f6` | GUI preparation parity remains open under D3 |
+| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated | Keyboard action focus still needs follow-up; no complete UI or all-platform claim |
+| D2 | Strict local requirements snapshots and actual-output reports in `b6570f6`; use `press check <file-or-folder> --requirements-file <spec> [--json]` | Requirements are local and user-authored; required unsupported checks stay `not_checked`, so a report is not approval |
+| Muse Spark fakehost | The fixture-only supplier and Studio rehearsal was completed through `e447f41` with explicit fake scripts and durable local attempts | No native auth, retailer service, hosted inference, billing or live pilot was performed |
+| A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
+| D1 | Not landed; isolated checkpoint `codex/workbench-job-safety` at `fc9ad974` | The existing CLI target subset is not independent GUI target delivery |
+| H1 | Not landed; extension checkpoint `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
+| D3 | Not landed; preparation/parity work was stopped before integration | No maintained Google/eBay packs, policy catalog or pack approval is included |
+| HEIF | Not landed; investigation only | No decoder, packaging or platform proof is included |
+
+The D2 CLI check is bounded to local bytes and reports relative names, actual
+content hashes, dimensions, format, bytes and observed evidence. The supported
+AVIF path selects the native libavif dav1d backend and refuses nonidentity
+`irot`/`imir`/`clap` transforms by name. It does not claim arbitrary backend,
+orientation or all-platform support.
+
+Root's final integration gates recorded `cargo test --locked` with 658 passed
+and 2 ignored, and the updater variant with 674 passed and 3 ignored. The
+all-targets/all-features clippy gate, `cargo fmt --check` and `git diff --check`
+passed. An offline disconnected-container check converted a deterministic 8x8
+PNG and passed the local requirements check; the wrong-format and wrong-dimension
+fixture correctly failed for four WebP outputs. The frozen D2 binary hash was
+`4020250913923ee82729f30f941445041950f1d5f55d256d678f536e6ca06c1d5f`. Logs and
+JSON evidence remain under `ux/`; they are review artifacts, not release proof.
+
+The F3 real-window proof includes
+[`ux/workbench-ui/f3-corrected-reveal-004.png`](../ux/workbench-ui/f3-corrected-reveal-004.png)
+and the native export fixture
+[`ux/workbench-ui/exported-alpha.press-job.json`](../ux/workbench-ui/exported-alpha.press-job.json).
+Those artifacts prove the reviewed Linux visibility/export path. Keyboard action
+focus remains unresolved, and no macOS/Windows or complete UI claim follows.
+
+### Isolated checkpoints for tomorrow
+
+| Worktree branch | Checkpoint | Closeout handling |
+| --- | --- | --- |
+| `codex/workbench-completion` | `b5b57b3` | Integration tree with this closeout pending review |
+| `codex/workbench-requirements` | `326afb0` | D2 is at `b6570f6`; the later D3 error-shape WIP is not to be merged |
+| `codex/workbench-identity` | `d62dfd0` | A2/A3 WIP; not landed |
+| `codex/workbench-job-safety` | `fc9ad974` | D1 WIP; not landed |
+| `codex/press-handoff` | `7216e32` | H1 WIP; not landed |
+
+The closeout docs do not land those isolated checkpoints. No additional release,
+marketplace, browser or cross-platform result is inferred.

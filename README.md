@@ -81,6 +81,7 @@ press convert ~/path/to/folder --format jxl --lossless
 press convert ~/path/to/folder --output ~/build/images   # write somewhere else
 press convert ~/path/to/folder --skip-existing           # only sources that changed
 press convert ~/path/to/folder --dry-run                 # plan and project, write nothing
+press check ~/path/to/folder --requirements-file ./requirements.json --json
 press update                                    # install the latest signed release
 ```
 
@@ -110,6 +111,13 @@ reports relative names, content-derived format, dimensions, byte counts and hash
 it does not contact a retailer or treat a local report as approval. The bundled
 technical subset records required unsupported checks as `not_checked`, so an
 incomplete inspection cannot claim all required checks passed.
+
+The current local workbench checkpoint includes the reviewed F1/F2/F3 subset and
+D2 requirements checks. F3 visibility and native export were demonstrated on
+Linux; keyboard action focus still needs follow-up. A2/A3 saved-plan execution,
+the D1 GUI target journey, D3 preparation and maintained packs, H1 browser
+delivery, and HEIF support are not landed. These local results do not claim a
+complete UI, all-platform support, marketplace approval, or a live service.
 
 `press handoff` validates an imported ImageGuide report and can inspect mappings
 under an explicitly chosen local root. `press supplier` and `press studio` provide
