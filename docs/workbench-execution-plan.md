@@ -1,202 +1,141 @@
-# Workbench implementation slices
+# Execution ledger and implementation briefs
 
-Status: proposed, 2026-09-05. This is the cross-document execution order, not a
-claim that work is scheduled or complete. Start from [roadmap](../ROADMAP.md).
-Each implementation PR must name one accountable person for the role below and
-record its actual code baseline and proof. Role labels are not assigned staffing.
+Updated 2026-09-08. Baseline: `77ab9191a8986604fa54f2f41a41863c33584302`
+(v0.6.6). Read the [roadmap](../ROADMAP.md) first. This is a live decision/status
+ledger, not an assigned schedule. Accountable roles below must become named people
+in implementation PRs; no staffing, price or deadline is invented here.
 
-## Scope and dependencies
+## Evidence vocabulary
 
-| Slice | Outcome | Accountable role | Dependency |
-| --- | --- | --- | --- |
-| W0 | Preserve landed fixes; make recipe execution trustworthy | Processing engineer | Current baseline audit |
-| W1 | Persistent personal recipes | Desktop engineer | W0's supported transform contract |
-| W2 | Optional product-set jobs and target mapping | Desktop engineer | W1 identity/persistence conventions |
-| W3 | One end-to-end supplier pilot | Integration owner with Studio counterpart | W0-W2 plus confirmed native auth/intake contract |
-| W4 | One contextual quoted Studio service | Integration owner with billing counterpart | W0; W3's reusable identity boundary; durable service/ledger contract |
-| W5 | Maintained templates and multi-target local deliverables | Processing/product owner | W1-W2; pilot-specific target requirements |
-| W6 | Explicit own-workspace connection and shared review | Studio integration owner | W3 identity; validated user demand and existing canonical services |
-| W7 | Repeat-work conveniences and sponsored corrections | Relevant desktop or service owner | Measured repeat demand; W4 for sponsorship; separate bounded pilots |
+**Source-present** means inspected code contains the capability, not that its full
+journey passed. **Proposed** means not delivered by this plan. **Contract-dependent**
+means a counterpart must confirm the relevant API/authorization. **Deferred** means
+not required for the next useful job. Record runtime verification separately with
+commit, platform, test command, fixtures and observed outcome.
 
-Auth/API discovery for W3 can run beside W1-W2. W5 can supply one pilot-needed
-recipe earlier, but a marketplace catalog is not a prerequisite for W3. W4 is
-optional to normal supplier submission; do not wait for AI checkout to deliver W3.
-W6 and W7 are gated extensions, not a commitment to start parallel projects now.
+This ledger supersedes blanket September 4/5 statements that all presets/product
+jobs are unimplemented. The old workbench, packaging and connected-service docs
+remain behavioral designs, not status checklists. Never rebuild a landed subset
+because its owning design still uses future tense.
 
-Keep detailed contracts in their owning documents: [workbench](product-workbench.md),
-[recipes](delivery-recipes.md), [supplier intake](supplier-portal-integration.md),
-[connected services](studio-connected-services.md), and
-[packaging/pilot](adoption-and-packaging.md). Do not copy a second contradictory
-state machine or policy table into implementation briefs.
+## Current baseline and W0-W7 reconciliation
 
-## W0: trustworthy processing before new promises
-
-Re-read the current engine and [engineering follow-up](engineering-follow-up.md).
-Shared lossless-depth checks and Studio ICC preservation have landed; preserve them.
-Do not reimplement those fixes from the original review. Introduce only the remaining
-common requested/effective recipe and per-file result contract needed by W1.
-
-Move remaining blocking destination proof off the UI thread with explicit planning
-ownership, retain previous results on refusal, and protect source/output identity
-across changes. Preserve collision/recovery behavior and named unsupported results.
-Use realistic tagged/deep/animated images and slow/interrupted destination fixtures.
-
-Exit evidence: local tests/lint/format, real-window planning/cancel checks, unchanged
-originals, accurate failures and cross-path results. A supported simple recipe may
-ship without every future transform; unsupported operations must remain unavailable.
-No UI framework rewrite or second worker/manifest system.
-
-## W1: save and reuse a personal recipe
-
-Implement the versioned typed recipe in the existing conversion boundary, normalize
-built-ins through it, and add atomic storage plus Save current, Duplicate, Rename,
-Delete, Import and Export. A changed control produces a modified copy, not silent
-mutation of a saved preset. GUI and CLI resolve explicit recipes the same way;
-headless operation does not inherit the last visible GUI selection.
-
-Exit demonstration: save, restart, load, adjust, export/import and execute a recipe
-offline without an account. Bad/future schema, unsafe paths and unsupported required
-steps fail before writes. Deleting a recipe never deletes deliverables. Do not build
-a remote preset marketplace, executable DSL or general workflow canvas.
-
-## W2: optional product sets, not a desktop PIM
-
-Add a stable local job and product-set mapping on top of Files. Support manual and
-CSV/filename-assisted mapping, roles, missing/unmapped/ambiguous states, and one
-selected target. Connected bindings reserve explicit scoped canonical IDs; local
-names and SKUs never grant access or create server products. Keep quick conversion
-available without a product-set form.
-
-Exit demonstration: recover a job after restart, handle equal SKUs for different
-recipients, relink a missing source and invalidate affected outputs after an edit.
-Keyboard/selection/filter actions keep operating on the shown scope. Portable job
-export strips credentials, private connection data and absolute paths. No global
-catalog, shared editing or two-way sync reconciliation engine in this slice.
-
-## W3: supplier-first vertical slice
-
-First produce a reviewed integration contract with the Studio counterpart: secure
-native sign-in, supplier/recipient scope, assignment/requirements reads, canonical
-mapping, ordinary submission entitlements, upload finalization, receipts, correction
-and resubmission. Resolve whether existing routes/services supply each behavior;
-record confirmed gaps before building UI against guessed endpoints. Do not weaken
-server guards or require a merchant key to meet the deadline.
-
-Then implement one retailer flow: authenticate, load assignments and policy revision,
-map local files, prepare, inspect exact outputs, submit, reconcile and display feedback.
-Use bounded polling initially. Browser fallback stays visible. A revoked assignment
-or changed policy stops/revalidates the affected submission, not the entire local job.
-No personal paid Studio subscription is required solely for authorized submission;
-this needs a server entitlement decision, not a client-side bypass.
-
-Exit evidence: the existing supplier acceptance matrix, particularly wrong-recipient
-refusal, partial batch/restart, response lost after acceptance and rejection/resubmit.
-A non-primary operator can guide setup from the documented flow. Do not include
-sponsorship, extensive channel connectors or a new desktop approval queue.
-
-## W4: contextual hosted value with recoverable spend
-
-Choose one concrete operation from pilot demand, such as a hosted background-removal
-alternative or a lifestyle candidate. Reuse the existing Studio integration where
-appropriate but confirm a server quote/accept/job/receipt contract before presenting
-new guarantees. Bind source identity, parameters, actor, payer, model and maximum
-spend to an immutable attempt; use the canonical server ledger.
-
-Add contextual discovery, explicit local/cloud and cost disclosure, one payer per
-job, cancellation semantics, status recovery and exact result retrieval. The first
-version can use the user's own authorized workspace; sponsored allowances are later.
-No automatic fallback charge to another workspace. Keep/Discard does not imply a
-new charge, refund, approval or submission.
-
-Exit evidence: fake-service tests for duplicate clicks, expired quotes, logout,
-unknown provider outcome, lost response/download, cancel and partial failure;
-then a separately authorized cost-capped live pilot. Do not replace existing direct
-AI behavior without an explicit migration, or advertise new billing guarantees before
-the server can meet them.
-
-## W5: maintained templates and multiple deliverables
-
-Select two or three targets from actual pilot work. Source and version requirements
-by channel/region/category/role as applicable; assign a maintenance owner and show
-coverage/effective dates. Use the same recipe engine for exact canvas, naming and
-bounded byte budgets as those transforms are implemented. Unknown visual checks
-stay Not checked/Needs review, never Marketplace approved.
-
-Support separate outputs per source/master and target, with independent paths,
-reports and retry state. A master-required retailer submission cannot receive the
-last selected low-resolution marketplace derivative by accident.
-
-Exit evidence: source/recipe/policy revision changes, impossible constraints, case
-and naming collisions, transparent/tagged images and one-target failure while others
-succeed. No direct marketplace-account publishing, remote recipe feed or speculative
-catalog of hundreds of templates. A single-target subset may ship first.
-
-## W6: the supplier becomes a workspace customer by choice
-
-Connect/create the user's own Studio workspace and explicitly save selected assets
-or share deliverables for review using existing server-owned workflows. Preserve
-local work and identify recipient audience, asset ownership and workspace. Do not
-silently promote retailer material into the user's personal business account.
-
-Exit demonstration: invited supplier and independently owned workspace coexist without
-cross-access, billing confusion or accidental public links. Existing comments/status
-come from Studio, not a second review database. A browser roundtrip restores task
-context; an entirely desktop service session is equally successful. Full cloud
-administration and a desktop PIM editor remain out of scope.
-
-## W7: add only the repeat work the pilot exposes
-
-Treat these as separately approved increments, not one large automation project.
-For editor handoff, choose an installed application, prefer a working copy and
-reinspect stable saved revisions. For watched export folders, bound scope, ignore
-partial files, debounce changes and offer local preparation with Pause. No script
-execution from imported recipes or silent remote spending/submission.
-
-For sponsorship, first implement server grants scoped by supplier/task/operation,
-expiry and caps, using existing reservations/receipts. Test concurrent last-credit
-requests, revoked grants and response-loss recovery. Separate sponsor and personal
-payer contexts in UI and metrics. Sponsorship is not needed to keep suppliers using
-ordinary portal submission. Expansion requires the packaging pilot's usefulness,
-correctness and cost evidence.
-
-## Implementation touchpoints to inspect
-
-These are existing file areas at the baseline, not instructions to expand the
-central Audit object indefinitely. New modules are justified by ownership, not by
-an abstract layering target.
-
-| Area | Existing entry points | Keep / extend |
+| Earlier slice | Current evidence | Remaining work |
 | --- | --- | --- |
-| Processing and identity | `src/convert.rs`, `src/scan.rs`, `src/compare.rs`, `src/manifest.rs`, `src/output.rs` | One safe preparation/output boundary; source/master and recipe revision |
-| Local job UI | `src/audit/mod.rs`, `state.rs`, `panel.rs`, `media.rs`, `convert_job.rs`, `tests.rs` | Preserve index/generation ownership; separate product-job state when needed |
-| Persistence and CLI | `src/settings.rs`, `src/main.rs` | Explicit recipe persistence and headless determinism |
-| Hosted actions | `src/studio.rs`, `src/audit/studio_actions.rs` | Reuse transport where compatible; add confirmed scoped service lifecycle |
-| Existing non-portal actions | `src/sirv.rs`, `src/local_ai.rs` | Keep distinct from supplier approval and remote billing authority |
+| W0: trustworthy processing | Async destination proof, run ownership, recipe fingerprint fields and earlier depth/ICC guards are source-present | F1-F4: complete execution identity, import/persistence boundaries and relevant runtime proof |
+| W1: personal recipes | `src/recipe.rs`, recipe UI actions and CLI `--preset-file` are source-present | Verify migration/round-trip, precision/default semantics and GUI/CLI execution parity; no new preset library |
+| W2: product-set jobs | `src/job.rs` and `src/audit/job_actions.rs` contain persistence, mappings, target reference, import/export and relink actions | Verify full journeys; fix portable metadata/path handling, job identity and stale-result ownership |
+| W3: supplier pilot | Integration design exists; local binding fields are not native supplier authorization | Confirm Studio contracts, then S1-S3 |
+| W4: contextual hosted service | Existing direct Studio actions are not proof of quote/idempotency/charge recovery | Preserve current behavior; C1 only after confirmed service/ledger contract |
+| W5: templates/multiple outputs | Recipe model exists; current job has a single `target_recipe` | Pull D1 forward; D2 supplies a real target's checks; D3 catalog remains demand-led |
+| W6: own workspace/review | Proposed connected-work design | C2 when shared work is needed and canonical services support it |
+| W7: conveniences/sponsorship | Proposed expansion | Deferred; each gets an independent demand/security/economics decision |
 
-Server work is a coordinated dependency, not a change authorized or implemented by
-this docs PR. Keep private operational details out of this public repository. Record
-wire schemas, entitlement decisions and server tests in the appropriate owning repo;
-link only artifacts that their owner permits publishing.
+Read [engineering follow-up](engineering-follow-up.md) for exact observations.
+No runtime test was executed for this documentation refresh.
 
-## Review and release evidence
+## Work selection and dependencies
 
-Every implementation slice needs a small source diff, tests for its actual invariants,
-a real task demonstration where UI changes, clear unsupported cases, and a rollback
-that preserves local work and accepted remote receipts. Use the pinned toolchain:
+Start with a concrete job, not all rows at once. The recommended local path is
+relevant F1/F2/F3 checks, then H1-H3 or D1 according to available participants.
+A1 contract hygiene can proceed independently. I1 can establish whether phone
+inputs are a real blocker before selecting a decoder.
 
-```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --check
-```
+A committed supplier pilot outranks speculative acquisition work. S1 discovery
+can proceed immediately; S2/S3 consume only the local foundations and requirements
+they need. **Do not put H, A2/A3, D1/D3, HEIC or AI checkout on S's critical path**
+unless that pilot's actual inputs/workflow require them. D2 may be implemented for
+S before D1. Shared recipe/source identity is a narrow foundation, not a mandate
+to complete every future transform first.
 
-UI proof must include actual target operating systems, keyboard focus, narrow windows,
-scale factors, pending/failed state and restart. Source comments and test definitions
-are not proof of native behavior. Connected slices additionally require scoped-server
-contract tests and failure injection before a limited live pilot. No production
-credentials or billable calls belong in ordinary tests.
+| Track | Accountable role | Earliest dependency | Owning brief |
+| --- | --- | --- | --- |
+| F1-F4: foundations | Processing/desktop engineer | Current source audit | [Engineering](engineering-follow-up.md) |
+| H1-H3: browser remediation | Desktop engineer + ImageGuide counterpart | Shared import contract, source identity/confinement before effects | [Browser handoff](browser-handoff-plan.md) |
+| A1-A3: agent execution | Processing/CLI engineer | A1 now; complete relevant identity/persistence before A2/A3 | [Agent execution](agent-execution-plan.md) |
+| D1-D3: deliverables/checks | Processing/product owner | Existing recipes/jobs plus relevant foundations | [Delivery recipes](delivery-recipes.md) |
+| S1-S3: supplier vertical slice | Integration owner + Studio counterpart | Confirmed scoped auth/intake; relevant local checks | [Supplier contract](supplier-portal-integration.md) |
+| I1-I3: phone inputs | Processing engineer + packaging support | I1 evidence and decoder decision before implementation | [Phone ingestion](phone-image-ingestion-plan.md) |
+| C1-C2: hosted/shared value | Studio integration owner + service owner | Confirmed native/service authority and observed demand | [Connected services](studio-connected-services.md) |
 
-A documentation-only PR validates links, scope, source references and internal
-consistency; it does not rerun or certify Rust/native/server gates. Do not reopen
-already-landed code fixes because an old plan says Pending. Recheck the baseline
-before each implementation, and record what actually ran in that PR.
+## S1-S3: keep the supplier loop executable
+
+**S1: contract proof.** With the Studio counterpart, map existing services to native
+sign-in, supplier/recipient scope, assignments, resolved requirements, canonical
+product/slot mapping, normal submission entitlement, upload/finalization and receipt
+lookup. Record missing server work in its owning repository; do not guess endpoints
+or expose private customer details here. A supplier must not need a merchant key
+or an unrelated personal paid workspace merely to fulfill an authorized request.
+
+**S2: one real submission.** Load one retailer's assignments and policy revision,
+confirm mappings, prepare supported outputs and inspect the exact files, then
+submit through canonical intake. Pin workspace, supplier, product/slot, source/
+output hashes, recipe/policy revisions and attempt identity. Browser fallback stays
+visible. Generic Sirv folder pairing is not the supplier submission route.
+
+**S3: correction and interruption recovery.** Persist attempt IDs before sending;
+reconcile a lost response after acceptance, retain successful siblings, restore
+pending work after restart and link a correction to the intended earlier submission.
+Show transferred, accepted, awaiting review, approved/rejected and delivered only
+when the corresponding server state exists. Revocation and policy changes trigger
+current server checks, not a cached permission or a silent destination switch.
+
+Acceptance is the existing supplier matrix: wrong recipient, revoked assignment,
+changed policy, edited bytes, duplicate retry, cancellation races, partial batch,
+restart and rejection/resubmission. Use fake services first and an authorized live
+retailer pilot second. Include setup by someone other than the principal developer.
+Success is reviewable work with less correction/support effort, not a browser visit
+or compulsory installation. Roll back only the integration; keep local files and
+accepted receipts.
+
+## C1-C2 and deliberate deferrals
+
+C1 is one contextual hosted operation under the existing connected-services design:
+explicit local/cloud boundary, authorized payer, quoted maximum cost, idempotent
+acceptance, recoverable job/charge and result retrieval. Confirm the actual Studio
+ledger/provider contract first. A discarded candidate is not automatically free;
+a timeout is not permission to rerun paid inference. Do not add automatic bulk
+retry or sponsorship to a legacy direct-call path while these guarantees are absent.
+
+C2 is an explicit own-workspace save/share journey using canonical Studio assets,
+access and review. An invited supplier's retailer scope and personal workspace
+remain distinct. Full desktop PIM/DAM administration is not required to use shared
+services from Press. A browser roundtrip preserves task context.
+
+Editor handoff, watched folders, native browser launch, MCP, CLI-only packaging,
+large template catalogs, remote policy feeds and sponsorship remain separate
+options. No watched-folder upload/spend without independently designed consent and
+server controls. No weakened local models or artificial export caps to force C1/C2.
+
+## Definition of ready and done
+
+Before coding a slice, identify its real user/job, accountable person, read-first
+files, counterpart contract, bounded result, exclusions, failure cases and evidence.
+Do not open a general "build the workbench" implementation task. Each H/A/D/I brief
+already supplies small PR boundaries; F and S should be similarly split when needed.
+
+An implementation PR is done only when its actual changed behavior has evidence:
+pinned Rust test/lint/format gates, black-box CLI checks where relevant, fixture
+compatibility/migration and supported-OS filesystem tests. UI changes also require
+real-window demonstration, keyboard/focus, narrow layout, cancelled/failed state
+and restart. Connected changes require server failure injection and scoped pilot
+proof; no live credentials or billable calls in ordinary regression tests.
+
+Update this ledger in the same PR: status, baseline/result SHA, actual commands,
+platforms, demonstrated journey, remaining limitation and next decision. A link
+to code or the existence of a test is not a passing runtime result. Do not erase
+prior acceptance criteria when marking a smaller subset source-present.
+
+## Product evidence and expansion gates
+
+Use the cohort-specific measures in [strategy](preflight-strategy.md) and the
+retailer/service economics in [packaging](adoption-and-packaging.md). Agree the
+threshold before observing outcomes. Track real job completion, repeat work among
+users with another eligible job, active preparation time and support effort.
+For browser work, distinguish mapped, exported, deployed and re-audited stages.
+For hosted work, distinguish gross use from retained useful outcomes and net cost.
+
+Any source loss, cross-tenant delivery, unauthorized upload/charge or unrecoverable
+accepted operation blocks expansion of that path. Preserve the local product and
+existing browser workflow as fallbacks. If a channel does not produce useful repeat
+work, improve the observed bottleneck or defer it instead of adding more features.

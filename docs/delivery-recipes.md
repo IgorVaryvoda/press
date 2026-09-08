@@ -1,142 +1,141 @@
-# Custom presets and marketplace export templates
+# Recipes, multiple deliverables and executable requirements
 
-Status: proposed. Entry point: [roadmap](../ROADMAP.md).
+Updated 2026-09-08 against `77ab9191a8986604fa54f2f41a41863c33584302`.
+The [execution ledger](workbench-execution-plan.md) owns status and order.
+This updates the September 4 proposal without replacing its safety/authority
+boundary. New transforms, multi-target execution and policy packs remain proposed.
 
-## First useful increment: save what already works
+## Preserve the landed recipe work
 
-Introduce one versioned, strictly parsed recipe representation for the existing
-format, lossy/lossless quality, maximum edge, and applicable encoder options.
-Normalize the four built-in presets through it instead of maintaining another
-settings-to-engine mapping beside `src/audit/panel.rs`.
+`src/recipe.rs` already defines schema-versioned personal recipes, strict parsing,
+identity/revision, built-ins, persistence and a settings fingerprint. The UI in
+`src/audit/recipe_actions.rs` supports saving/updating, renaming, importing and
+exporting. `src/main.rs` exposes `--preset-file`. Do not implement another preset
+library. Verify round-trip and GUI/CLI behavior against this source.
 
-The first UI is a preset selector with **Save current settings**, **Duplicate**,
-**Rename**, **Delete**, **Import**, and **Export**. Changing a setting marks the
-selection as modified; it must not silently edit the stored preset. Deleting a
-preset does not delete generated files. Duplicate display names must not become
-ambiguous identifiers. Store presets atomically outside the source folder.
+Recipe fingerprints exist but do not yet constitute a complete source/engine/
+policy/output identity. Extend the existing model with explicit compatibility and
+migration tests. Display labels are not canonical numeric settings. Record resolved
+defaults, output-affecting codec options and processing revision, while preserving
+old records for recovery. Imported settings cannot acquire authority.
 
-Proposed CLI shape (not implemented): `press convert PATH --preset-file FILE`.
-Explicit command-line settings override a personal recipe and are shown in the
-resolved plan. Contradictory or unsupported options fail before writing. Do not
-make headless commands depend on whichever preset the GUI last selected.
+## Keep four concepts separate
 
-## Separate three concepts
-
-| Concept | Owns | Does not own |
+| Concept | Owns | Must not imply |
 | --- | --- | --- |
-| Requirements | Allowed media, dimensions, aspect ratio, byte limits, slot role, required checks, policy source/revision | Codec preferences, local paths, credentials, approval |
-| Recipe | Supported transforms and their parameters; requested and effective settings | Authority to waive a required check |
-| Destination binding | Local output root or an explicitly authorized supplier target | Portable credentials or arbitrary code |
+| Requirements | Allowed media, dimensions, roles, byte limits, policy provenance/revision, mandatory/advisory checks | A preference or a local permission to waive the recipient's rules |
+| Recipe | Supported transforms and requested/effective settings | Approval, access or arbitrary executable steps |
+| Destination binding | A locally selected output root or independently authorized remote recipient | Portable credentials or permission inherited from an import |
+| Receipt | Actual source/output identity, settings, checks and outcomes | A tamper-proof certificate, marketplace acceptance or server approval |
 
-Use plain typed data, not a graph editor or an executable transformation language.
-The binding to a local folder or authenticated account is stored separately from
-portable templates. Requirements, recipes, and template provenance can be parts
-of one document without being conflated as one list of overridable settings.
+Use typed data and known handlers, not an executable DSL or workflow graph.
+Unknown required operations/schema semantics fail closed with a reason; unsupported
+checks remain Not checked, not Passed. Allow advisory metadata only under an
+explicit schema compatibility rule.
 
-Stable recipe IDs, schema version, recipe revision, name, and provenance are needed
-from the first increment. Record a normalized recipe fingerprint with each output.
-Include output-affecting options such as AVIF speed and the relevant processing
-implementation revision; a display label such as `q80` is not a full recipe identity.
-Avoid introducing arbitrary script steps, shell commands, or model downloads in
-imported recipes.
+## D1: one master, two useful local targets
 
-## A template is more than a format button
+Bring this ahead of an extensive marketplace catalog. First example: a byte-for-byte
+master copy in one target folder and a 1600px website derivative in another. A
+verified passthrough copy is a proposed operation, not something to fake using
+`Keep`/`same`, which re-encodes. Alternatively test two already supported encoding
+targets first. Do not label either example marketplace-compliant without a policy.
 
-A marketplace template should identify channel, region, category scope where
-relevant, and image role (for example main image versus gallery). Distinguish
-mandatory requirements from the application's recommended export settings.
+Extend `Job.target_recipe` through a versioned migration to independent targets;
+existing single-target jobs must retain their meaning. Keep product grouping
+optional. Pin each target's recipe snapshot, requirements when present and output
+namespace. Make source -> target -> actual output visible in one execution summary.
+The first UI may support two targets while the model allows bounded repetition.
 
-Each published revision needs an official source URL, last-verification date,
-effective-from date when applicable, supported check coverage, and template/engine
-compatibility. Unknown required operations or unsupported schema versions must
-fail with a reason, not be silently ignored. Unknown advisory metadata may be
-preserved without being treated as a passed check.
+Generate each target from the selected master revision, not another target's
+compressed output. Plan names across the complete selection and target roots.
+Refuse overlapping/unsafe destinations and protect originals, including unselected
+files. Use separate folders by default and the existing output-safety boundary.
+Do not use replace mode for this initial multi-target flow.
 
-Choose the first two or three templates from pilot demand. Candidate primary
-sources checked on 2026-09-04:
+Keep success/failure per item and target. An impossible target must not erase a
+successful sibling. Retry failed and regenerate outdated are separate actions.
+Changing a recipe or source invalidates only affected deliverables; changing a
+display name does not pretend the bytes changed. Never relabel previous results
+using whatever controls happen to be selected now.
 
-- [Amazon product image guide](https://sellercentral.amazon.com/help/hub/reference/external/G1881)
-  and its [public product-photo guidance](https://sell.amazon.com/blog/product-photos).
-- [eBay picture policy](https://www.ebay.com/help/policies/listing-policies/picture-policy?id=4370).
-- [Google Merchant Center image link specification](https://support.google.com/merchants/answer/6324350?hl=en-GB).
+Exit: reopen the job, inspect both real files, change one input, regenerate only
+affected outputs, fail/cancel one target and recover without touching the other.
+Measure repeated-job preparation effort before adding a larger target catalog.
 
-These are source leads, not a claim that a full executable specification has been
-verified. Resolve conflicting official guidance, category exceptions, image roles,
-and account-specific rules before publishing a template. Do not silently pick
-whichever page offers the easiest threshold.
+## D2: requirements and receipts for one real destination
 
-Effective dates are a real requirement: Google's current image-link guidance
-announces a new minimum-size policy starting **2027-01-31**. A template must not
-apply a future rule early as a current rejection, nor remain permanently pinned
-to an old rule. Preview a template revision's changes before updating a saved job;
-never alter an active run because a template update arrived.
+Start with one retailer's resolved technical requirements or a user-authored local
+specification. Keep their provenance distinct. Studio resolves its policy layers;
+Press interprets a supported snapshot rather than reimplementing that resolver.
+Mandatory server requirements remain authoritative at submission.
 
-Built-in updates are bundled with a release initially. A later remote update feed
-requires integrity verification and the same strict data parser, not downloaded
-executable logic. Users may fork built-in recipes without losing their provenance;
-a fork is no longer advertised as the unchanged maintained template.
+A pack should identify stable policy/revision, target and role, category/region
+scope where relevant, source URL or authorized issuer, last verification,
+effective interval, supported engine/check versions and mandatory versus advisory
+rules. Define reference fixtures for the supported subset. Requirements are
+portable data, but private retailer metadata is exported only with authorization.
 
-## Add capabilities only with truthful output verification
+Check the actual encoded output: content-derived format, dimensions, alpha, bytes,
+name and supported profile/depth constraints. Record the source/output hashes,
+recipe and processing revision, policy revision, each check's evidence, observed
+value and result. Keep pass, fail, not checked, not applicable and needs review
+separate. A required unknown prevents a claim that all technical requirements pass.
 
-After basic preset persistence, add exact-canvas fit/pad, explicit background
-compositing, naming patterns, and byte-budget encoding as separate tested increments.
-Do not show a control as supported until the engine and preview implement it.
+Images plus a JSON receipt and a human-readable report are the useful deliverable.
+A raw local filesystem path or signed asset URL should not leak into a shareable
+report. Local evidence can be edited; the receiving service must revalidate bytes.
+A product may have all required roles present yet still fail technical checks or
+human review. Do not compress those states into an invented readiness percentage.
 
-For a byte budget, use a bounded quality search with a quality floor. Resizing below
-an agreed limit requires an explicit policy, not a hidden fallback. Failure to fit
-is a named unsatisfied constraint. Never upscale merely to make a minimum-dimension
-check green; distinguish source resolution from delivered dimensions and require an
-explicit user decision for AI upscaling or other content-changing repairs.
+## D3: maintained packs and supported preparation
 
-Profile handling must distinguish preserving an ICC profile from converting pixels
-to sRGB. Attaching an sRGB label to unchanged wide-gamut pixels is not conversion.
-Likewise, white padding does not prove an existing background is white or that the
-subject occupies the requested fraction of the frame.
+Choose two or three maintained marketplace/channel targets from actual demand.
+Assign a maintainer and define what happens when verification is stale. Each
+published revision must link to official policy, date its verification and state
+coverage, exceptions and effective dates. A forked personal recipe is not the
+unchanged maintained policy. Do not silently update an active run or saved job;
+show changed requirements and revalidate before a new submission.
 
-Technical checks inspect the actual encoded output: content-derived format,
-dimensions, alpha, byte count, naming, and supported profile/depth constraints.
-Claims about accurate depiction, rights, logos, text, background, or framing require
-the appropriate visual check or explicit human review. An AI opinion is not a
-marketplace acceptance guarantee. Unsupported mandatory checks remain **Not checked**.
+For example, Google's official [image-link guidance](https://support.google.com/merchants/answer/6324350?hl=en-GB)
+announces a minimum of 500 x 500 pixels from **2027-01-31**, verified 2026-09-08.
+That is a concrete need for effective-dated checks, not permission to reject every
+smaller image before then or declare every larger image acceptable. Role, surface
+and category exceptions require a complete source review before publishing a pack.
 
-Use **Technical checks passed**, **Needs review**, or **Cannot meet requirements**,
-not a universal **Marketplace approved** badge. Export the files plus a per-file
-report identifying recipe/policy revision, checks performed, failures, and output
-identity. Do not reduce the source master to a marketplace derivative merely to
-feed a retailer who actually requested the master.
+Candidate policy sources also include [Amazon's product-image guidance](https://sell.amazon.com/blog/product-photos)
+and [eBay's picture policy](https://www.ebay.com/help/policies/listing-policies/picture-policy?id=4370).
+These are implementation research leads, not newly verified executable specifications.
+Bundle initial pack updates with releases; a remote feed later requires integrity
+verification, strict parsing and an explicit update decision, not downloaded code.
 
-## Interaction and safety contract
+Add exact-canvas fit/pad, explicit compositing, naming and bounded byte-budget
+encoding as separate tested increments. No control is supported until preparation,
+preview and actual output verification agree. Use a quality floor and bounded
+search for a byte budget; impossible constraints remain named failures. Never
+silently resize below an agreed minimum or upscale to manufacture a technical pass.
 
-Show one execution summary before committing: selected file count, effective
-format/quality/depth, dimensions, destination, source handling, and local versus
-remote execution. Explain a forced-lossless transparent WebP rather than making
-the quality slider appear to do something it cannot.
+Preserving ICC metadata is different from converting pixels to sRGB. White padding
+is not background removal or proof of a white background. Subject occupancy,
+accurate depiction, logos, text and usage rights need appropriate evidence/human
+review. Retain or explicitly account for relevant provenance metadata; do not
+present generated content as an untouched original. A hosted repair produces an
+inspectable candidate, not guaranteed compliance.
 
-A saved profile is data, not permission. Import must have bounded file size, field
-lengths, names, and counts. Reject traversal in output naming; use the existing
-safe output boundary and collision planner. Do not import credentials, executable
-commands, automatic upload permission, or an absolute destination path from someone
-else's template. A different selected output folder is a local decision.
-
-Keep the same recipe snapshot throughout preview, conversion, export report, and
-optional submission. Stale source content or a changed policy invalidates affected
-work visibly. Settings changes after conversion do not retroactively relabel an
-existing output as produced by the new recipe.
-
-## Acceptance tests
+## Acceptance and rollout
 
 | Case | Required outcome |
 | --- | --- |
-| Save, restart, edit, duplicate, delete | Persisted settings round-trip; modified copies remain distinct; deleting never removes outputs. |
-| GUI versus CLI | Resolve the same explicit recipe; GUI preference state does not change a headless invocation. |
-| Corrupt, oversized, future-schema import | Named refusal before any image or settings file is changed. |
-| Unsupported mandatory rule | Remains unsatisfied/not checked; never appears as a pass. |
-| Identical stem, Unicode names, case-insensitive destination | Stable collision-safe names and accurate result-to-source mapping. |
-| Quality, size, codec-option, or source change | A recorded output is not falsely reused as the new job's verified result. |
-| Third-party or edited output | Remains protected; no automatic overwrite justified by an unverified timestamp. |
-| Too-small source or impossible byte budget | Explicit unmet requirement, not silent enlargement or over-compression. |
-| New template revision or effective date | Existing run remains pinned; new run shows the applicable changed requirements. |
-| Multi-target export, when added | Independent outputs and reports; one target's failure does not invalidate successful siblings. |
+| Existing recipe/job/manifest | Migration preserves its meaning and restore data; deleting a preset never deletes output |
+| Malformed/future/oversized import | Bounded refusal before writes; no executable steps, credentials or imported absolute output root |
+| Duplicate stems, Unicode/case differences, overlapping targets | Collision-safe mappings or named refusal; no lost original |
+| Source, numeric option, engine or policy revision changes | No false reuse of an old verified result |
+| Byte budget impossible or mandatory check unsupported | Explicit failure/Not checked, not an approval badge |
+| Current versus future policy | Apply the appropriate revision and expose stale/changed policy |
+| Wide-gamut/deep/transparent input | Consistent preparation, preview and output evidence; explicit unsupported cases |
+| Partial target failure, restart or edited output | Successful siblings retained; ownership rechecked before reuse/retry |
 
-Start with persistent recipes, not a catalog service, a marketplace uploader, or a
-new preset marketplace. One maintained data model should do the work.
+D1 needs source/recipe/output identity and safe persistence, not D2/D3 or Studio.
+D2 can also supply a pilot-required policy before D1. The supplier pilot must not
+wait for a catalog. Direct marketplace publishing, a preset marketplace and remote
+policy execution remain out of scope. Record native and CLI proof in each code PR.
