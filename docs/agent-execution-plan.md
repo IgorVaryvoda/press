@@ -1,8 +1,9 @@
 # Agent-friendly local execution
 
-Proposed extension of the existing CLI, 2026-09-08. Owner role: processing/CLI
+Local extension of the existing CLI, 2026-09-08. Owner role: processing/CLI
 engineer. The [execution ledger](workbench-execution-plan.md) owns priority.
-No saved-plan command, MCP service or new report schema is implemented by this PR.
+The saved-plan commands are a local CLI protocol; no MCP service is required.
+They use schema version 1 for portable plans and restartable receipts.
 
 ## Start from the real interface
 
@@ -45,9 +46,27 @@ framework-specific wrappers deferred until a real client cannot use the CLI.
 
 ## A2: a saved plan is a snapshot, not authorization
 
-Proposed lifecycle: **inspect -> resolve -> preview a plan -> authorize execution
--> execute/reconcile -> inspect receipt**. Name the commands only in the
-implementation PR after the data contract is reviewed.
+The implemented local lifecycle is:
+
+```sh
+press plan --root ./source --output ./output --plan ./plan.json --format webp --quality 80 --json
+press execute ./plan.json --root ./source --output ./output --continue-unstarted --json
+press reconcile ./plan.json --root ./source --output ./output --json
+```
+
+Creation records relative paths, bounded source identities, collision mappings,
+effective settings and the engine revision. Execution binds both roots explicitly
+again. It does not replace originals, execute plan text, upload or inherit
+permission. `--retry-failed` is a separate explicit mode from
+`--continue-unstarted`; `--cancel` records pending items as cancelled without
+encoding. Reconcile verifies installed manifest/output hashes and repairs a
+missing receipt without encoding again. JSON schema 1 uses exit `0` for complete,
+`1` for a partial run with item states and `2` for an invalid invocation, binding
+or plan with a named top-level error.
+
+The lifecycle is **inspect -> resolve -> preview a plan -> authorize execution
+-> execute/reconcile -> inspect receipt**. The local commands above implement
+that lifecycle; policy and external authority remain outside the plan.
 
 | Plan field | Required meaning |
 | --- | --- |

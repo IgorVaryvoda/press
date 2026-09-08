@@ -88,6 +88,13 @@ fn run(args: &[&str]) -> Output {
         .expect("the binary runs")
 }
 
+fn run_owned(args: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_press"))
+        .args(args)
+        .output()
+        .expect("the binary runs")
+}
+
 fn stdout_json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
@@ -703,6 +710,344 @@ fn convert_targets_refuse_before_writing_anything() {
         assert_eq!(run(&args).status.code(), Some(2));
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn saved_plan_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf, String, String, String) {
+    let dir = workdir(tag);
+    let source = dir.join("source");
+    let output = dir.join("output");
+    std::fs::create_dir_all(&source).expect("the source root is created");
+    std::fs::create_dir_all(&output).expect("the output root is created");
+    photo(&source, "shot.png");
+    let plan = dir.join("saved-plan.json");
+    let source_text = source.to_string_lossy().into_owned();
+    let output_text = output.to_string_lossy().into_owned();
+    let plan_text = plan.to_string_lossy().into_owned();
+    (dir, source, output, source_text, output_text, plan_text)
+}
+
+fn create_saved_plan(source: &str, output: &str, plan: &str) -> Output {
+    run_owned(&[
+        "plan".into(),
+        "--root".into(),
+        source.into(),
+        "--output".into(),
+        output.into(),
+        "--plan".into(),
+        plan.into(),
+        "--json".into(),
+    ])
+}
+
+fn execute_saved_plan(plan: &str, source: &str, output: &str, mode: &str) -> Output {
+    run_owned(&[
+        "execute".into(),
+        plan.into(),
+        "--root".into(),
+        source.into(),
+        "--output".into(),
+        output.into(),
+        mode.into(),
+        "--json".into(),
+    ])
+}
+
+fn reconcile_saved_plan(plan: &str, source: &str, output: &str) -> Output {
+    run_owned(&[
+        "reconcile".into(),
+        plan.into(),
+        "--root".into(),
+        source.into(),
+        "--output".into(),
+        output.into(),
+        "--json".into(),
+    ])
+}
+
+#[test]
+fn saved_plan_round_trip_and_reconcile_reuses_the_receipt() {
+    let (dir, _source, output, source, output_root, plan) = saved_plan_fixture("saved-round-trip");
+    let planned = create_saved_plan(&source, &output_root, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let document = stdout_json(&planned);
+    assert_eq!(document["command"], "plan");
+    assert_eq!(document["status"], "planned");
+    assert_eq!(document["plan"]["write_scope"], "outputs_only");
+    assert_eq!(document["plan"]["sources"][0]["source"], "shot.png");
+    assert_eq!(
+        document["plan"]["targets"][0]["mappings"][0]["output"],
+        "shot.webp"
+    );
+    assert!(
+        !output.join("shot.webp").exists(),
+        "planning writes no image"
+    );
+
+    let executed = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    let receipt = stdout_json(&executed);
+    assert_eq!(receipt["status"], "complete");
+    assert_eq!(receipt["counts"]["written"], 1);
+    assert!(receipt["items"][0]["output_hash"].is_string());
+    let bytes = std::fs::read(output.join("shot.webp")).expect("the planned output is written");
+
+    let reconciled = reconcile_saved_plan(&plan, &source, &output_root);
+    assert_eq!(reconciled.status.code(), Some(0), "{}", stderr(&reconciled));
+    let repaired = stdout_json(&reconciled);
+    assert_eq!(repaired["command"], "reconcile");
+    assert_eq!(repaired["status"], "complete");
+    assert_eq!(repaired["counts"]["written"], 1);
+    assert_eq!(std::fs::read(output.join("shot.webp")).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_plan_cancel_keeps_unstarted_items_distinct_from_failures() {
+    let (dir, _source, output, source, output_root, plan) = saved_plan_fixture("saved-cancel");
+    assert_eq!(
+        create_saved_plan(&source, &output_root, &plan)
+            .status
+            .code(),
+        Some(0)
+    );
+    let cancelled = execute_saved_plan(&plan, &source, &output_root, "--cancel");
+    assert_eq!(cancelled.status.code(), Some(1), "{}", stderr(&cancelled));
+    let report = stdout_json(&cancelled);
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["counts"]["cancelled"], 1);
+    assert_eq!(report["counts"]["failed"], 0);
+    assert_eq!(report["items"][0]["status"], "cancelled");
+    assert!(
+        !output.join("shot.webp").exists(),
+        "cancellation writes no image"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_plan_refuses_a_same_size_source_edit_even_with_the_old_mtime() {
+    let (dir, source_root, _output, source, output, plan) =
+        saved_plan_fixture("saved-source-stale");
+    let source_path = source_root.join("shot.png");
+    let old_modified = std::fs::metadata(&source_path)
+        .expect("the source stats exist")
+        .modified()
+        .expect("the source mtime exists");
+    let mut changed = photo_png();
+    let last = changed.len() - 1;
+    changed[last] ^= 1;
+    std::fs::write(&source_path, changed).expect("the replacement source is written");
+    std::fs::File::options()
+        .write(true)
+        .open(&source_path)
+        .expect("the replacement source opens")
+        .set_modified(old_modified)
+        .expect("the old mtime is restored");
+
+    let planned = create_saved_plan(&source, &output, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    // Change after planning, while restoring the old stats. The checked decoder
+    // refuses the snapshot before it has to understand the replacement bytes.
+    let mut changed_again = photo_png();
+    let last = changed_again.len() - 1;
+    changed_again[last] ^= 2;
+    std::fs::write(&source_path, changed_again).expect("the stale replacement is written");
+    std::fs::File::options()
+        .write(true)
+        .open(&source_path)
+        .expect("the stale replacement opens")
+        .set_modified(old_modified)
+        .expect("the old mtime is restored again");
+
+    let executed = execute_saved_plan(&plan, &source, &output, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(1));
+    let report = stdout_json(&executed);
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["counts"]["failed"], 1);
+    assert_eq!(report["items"][0]["status"], "failed");
+    assert!(
+        report["items"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("changed"))
+    );
+    assert!(!dir.join("output/shot.webp").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_plan_preserves_an_edited_unrecorded_output_at_the_writer_boundary() {
+    let (dir, _source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-output-edited");
+    let planned = create_saved_plan(&source, &output_root, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let edited = b"an external file that the plan does not own".to_vec();
+    let expected_path = output.join("shot.webp");
+    std::fs::write(&expected_path, &edited).expect("the external output is written");
+
+    let executed = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(1));
+    let report = stdout_json(&executed);
+    assert_eq!(report["items"][0]["status"], "failed");
+    assert!(
+        report["items"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("output"))
+    );
+    assert_eq!(std::fs::read(&expected_path).unwrap(), edited);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_plan_refuses_a_collision_mapping_changed_after_creation() {
+    let (dir, _source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-collision");
+    let planned = create_saved_plan(&source, &output_root, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let occupied = output.join("shot.webp");
+    std::fs::write(&occupied, b"owned by another source").expect("the occupied output is written");
+    let modified = std::fs::metadata(&occupied)
+        .expect("the occupied output stats exist")
+        .modified()
+        .expect("the occupied output mtime exists")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the occupied output time is unix")
+        .as_secs();
+    let record = serde_json::json!({
+        "source": "other.png",
+        "source_bytes": 1,
+        "source_modified": null,
+        "source_hash": null,
+        "output": "shot.webp",
+        "output_bytes": b"owned by another source".len(),
+        "output_modified": modified,
+        "output_hash": null,
+        "format": "webp",
+        "quality": "80",
+        "max_edge": null,
+        "avif_speed": null,
+        "recipe": null,
+        "written": 1,
+        "backup": null
+    });
+    std::fs::write(
+        output.join(".press-manifest.jsonl"),
+        format!("{}\n", serde_json::to_string(&record).unwrap()),
+    )
+    .expect("the foreign receipt is written");
+
+    let executed = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(2));
+    let report = stdout_json(&executed);
+    assert_eq!(report["status"], "failed");
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("collision mapping changed"))
+    );
+    assert_eq!(
+        std::fs::read(&occupied).unwrap(),
+        b"owned by another source"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_plan_reconcile_repairs_a_receipt_left_running_by_an_interruption() {
+    let (dir, _source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-receipt-recovery");
+    assert_eq!(
+        create_saved_plan(&source, &output_root, &plan)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted")
+            .status
+            .code(),
+        Some(0)
+    );
+    let state_path = std::fs::read_dir(&dir)
+        .expect("the plan folder is readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.to_string_lossy().contains(".run-"))
+        .expect("execution leaves a binding-specific state file");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("the run state is readable"))
+            .expect("the run state is JSON");
+    state["items"][0]["status"] = serde_json::json!("running");
+    state["items"][0]["output_hash"] = serde_json::Value::Null;
+    state["items"][0]["output_bytes"] = serde_json::Value::Null;
+    state["items"][0]["width"] = serde_json::Value::Null;
+    state["items"][0]["height"] = serde_json::Value::Null;
+    state["items"][0]["checks"] = serde_json::json!([]);
+    state["items"][0]["error"] = serde_json::Value::Null;
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap())
+        .expect("the interrupted state is written");
+
+    let reconciled = reconcile_saved_plan(&plan, &source, &output_root);
+    assert_eq!(reconciled.status.code(), Some(0), "{}", stderr(&reconciled));
+    let report = stdout_json(&reconciled);
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["items"][0]["status"], "written");
+    assert!(report["items"][0]["output_hash"].is_string());
+    assert!(output.join("shot.webp").is_file());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn saved_plan_malformed_and_oversize_files_have_named_json_errors() {
+    let (dir, _source_root, _output, source, output, plan) = saved_plan_fixture("saved-bounds");
+    std::fs::write(&plan, br#"{"schema_version":1}"#).expect("the malformed plan is written");
+    let malformed = execute_saved_plan(&plan, &source, &output, "--continue-unstarted");
+    assert_eq!(malformed.status.code(), Some(2));
+    let malformed_report = stdout_json(&malformed);
+    assert_eq!(malformed_report["command"], "execute");
+    assert_eq!(malformed_report["status"], "failed");
+    assert!(malformed_report["error"].is_string());
+
+    let oversized = vec![b'{'; (saved_plan_limit() + 1) as usize];
+    std::fs::write(&plan, oversized).expect("the oversized plan is written");
+    let oversized_run = execute_saved_plan(&plan, &source, &output, "--continue-unstarted");
+    assert_eq!(oversized_run.status.code(), Some(2));
+    let oversized_report = stdout_json(&oversized_run);
+    assert!(
+        oversized_report["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("limit"))
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn saved_plan_limit() -> u64 {
+    8 * 1024 * 1024
+}
+
+#[test]
+fn saved_plan_treats_shell_like_names_as_path_data() {
+    let dir = workdir("saved-shell-data");
+    let source_root = dir.join("source");
+    let output_root = dir.join("output");
+    std::fs::create_dir_all(&source_root).expect("the source root is created");
+    std::fs::create_dir_all(&output_root).expect("the output root is created");
+    let shell_name = "$(touch-press-plan-marker).png";
+    photo(&source_root, shell_name);
+    let plan = dir.join("plan.json");
+    let source = source_root.to_string_lossy().into_owned();
+    let output = output_root.to_string_lossy().into_owned();
+    let plan_text = plan.to_string_lossy().into_owned();
+    let planned = create_saved_plan(&source, &output, &plan_text);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let executed = execute_saved_plan(&plan_text, &source, &output, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    assert!(
+        output_root
+            .join("$(touch-press-plan-marker).webp")
+            .is_file()
+    );
+    assert!(!dir.join("press-plan-marker").exists());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn supplier_home(tag: &str) -> PathBuf {

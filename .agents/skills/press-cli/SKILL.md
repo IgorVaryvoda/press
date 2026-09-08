@@ -62,6 +62,20 @@ The report's `output` field is the canonical path of the folder that was written
 
 Every run appends one line to `.press-manifest.jsonl` in the output folder as each file lands, recording which source that output came from. The report's `manifest` field is its path. An output an earlier run wrote from a different source is never overwritten: that file gets a name of its own, such as `shot-jpg.webp`, so read each file's `output` rather than assuming the name.
 
+## Save, execute and reconcile a local plan
+
+Use a saved plan when the selected files, output mapping and effective settings must be reviewed before conversion. Creation binds an explicit source and output root, snapshots bounded source bytes and writes only the plan file:
+
+```bash
+press plan --root <source-dir> --output <output-dir> --plan <plan.json> --format webp --quality 80 --json
+press execute <plan.json> --root <source-dir> --output <output-dir> --continue-unstarted --json
+press reconcile <plan.json> --root <source-dir> --output <output-dir> --json
+```
+
+The plan is portable data. It contains relative source/output names, source SHA-256 identities, collision mappings, resolved settings and the engine revision; it does not contain roots, credentials, shell commands or permission. Execution requires both roots again and refuses a changed source, changed mapping, unsafe boundary, incompatible recipe or edited destination. It never uses `--replace`.
+
+`--continue-unstarted` runs only items that have not started. `--retry-failed` is a separate explicit action for failed items, and `--cancel` records pending items as cancelled without encoding. `reconcile` inspects the manifest and installed output hashes, repairs receipts after an interruption and never re-encodes. Successful siblings stay written when another item fails. Plan, execute and reconcile JSON uses schema version `1`: exit `0` is complete, exit `1` is a partial run with named item states, and exit `2` is an invalid plan, binding or invocation with a named top-level `error`.
+
 ## Replace the originals only when told to
 
 `press convert <folder> --replace` writes each converted file beside its source and moves the original into `press-originals/` under the same folder. Nothing is deleted, but the folder the user gave you is rewritten, so treat it as a separate authorization from conversion itself. The report's `backup` field is the folder the originals moved into.
