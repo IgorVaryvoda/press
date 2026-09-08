@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "id": "local-web-hero",
+  "name": "Local web hero",
+  "revision": 1,
+  "provenance": { "local_author": { "author": "user" } },
+  "target": "website",
+  "role": "hero",
+  "category": null,
+  "region": null,
+  "last_verified": "2026-09-08",
+  "effective_from": null,
+  "effective_until": null,
+  "engine": "press",
+  "engine_version": 1,
+  "checker_version": 1,
+  "rules": [
+    {
+      "id": "format",
+      "label": "WebP or AVIF",
+      "required": true,
+      "constraint": { "kind": "format", "allowed": ["webp", "avif"] }
+    },
+    {
+      "id": "dimensions",
+      "label": "Hero dimensions",
+      "required": true,
+      "constraint": {
+        "kind": "dimensions",
+        "min_width": 1200,
+        "max_width": 2400,
+        "min_height": 600,
+        "max_height": 1600
+      }
+    },
+    {
+      "id": "bytes",
+      "label": "Output size",
+      "required": true,
+      "constraint": { "kind": "bytes", "min": null, "max": 5000000 }
+    },
+    {
+      "id": "name",
+      "label": "Web delivery name",
+      "required": true,
+      "constraint": { "kind": "name", "allowed_extensions": ["avif", "webp"] }
+    },
+    {
+      "id": "profile",
+      "label": "ICC profile",
+      "required": false,
+      "constraint": { "kind": "profile", "present": false }
+    }
+  ]
+}

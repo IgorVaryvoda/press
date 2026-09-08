@@ -19,6 +19,7 @@ mod manifest;
 mod menus;
 mod output;
 mod recipe;
+pub mod requirements;
 mod scan;
 mod settings;
 mod sirv;
@@ -94,6 +95,7 @@ const HELP: &str = concat!(
     "  press convert <PATH> [OPTIONS]\n",
     "  press restore <PATH>\n",
     "  press handoff <FILE>\n",
+    "  press check <FILE_OR_FOLDER> --requirements-file <FILE> [--json]\n",
     "  press supplier <PATH> <verb> [OPTIONS]\n",
     "  press studio <verb> [OPTIONS]\n",
     "  press skill\n",
@@ -103,6 +105,7 @@ const HELP: &str = concat!(
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
     "  restore    Put back the originals a --replace run moved aside\n",
     "  handoff    Validate an ImageGuide report into a pending local task\n",
+    "  check      Inspect actual output bytes against a local requirements snapshot\n",
     "  supplier   Prepare, submit and reconcile product images as a supplier\n",
     "  studio     Rehearse one bounded hosted operation against a local script\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
@@ -177,6 +180,7 @@ enum Command {
     Audit,
     Convert,
     Handoff,
+    Check,
     Supplier,
     Studio,
     Restore,
@@ -217,6 +221,8 @@ struct Args {
     /// The deployed tree `handoff --root` verifies against. Needs `--root`;
     /// anything else refuses the flag.
     map_deployed: Option<PathBuf>,
+    /// A bounded, user-authored requirements snapshot for `check`.
+    requirements_file: Option<PathBuf>,
     /// One run per target for `convert`: a saved recipe id and the output
     /// namespace under the run's output root. Empty is a plain convert.
     targets: Vec<TargetSpec>,
@@ -288,6 +294,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut output = None;
     let mut map_root = None;
     let mut map_deployed = None;
+    let mut requirements_file = None;
     let mut targets = Vec::new();
     let mut supplier_verb = None;
     let mut supplier_attempt = None;
@@ -317,6 +324,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
             "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
             "handoff" if root.is_none() && command == Command::Window => command = Command::Handoff,
+            "check" if root.is_none() && command == Command::Window => command = Command::Check,
             "supplier" if root.is_none() && command == Command::Window => {
                 command = Command::Supplier
             }
@@ -379,6 +387,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--root" => {
                 let value = next_value(&mut rest, "--root", "a folder")?;
                 map_root = Some(PathBuf::from(value));
+            }
+            "--requirements-file" => {
+                let value = next_value(&mut rest, "--requirements-file", "a requirements file")?;
+                requirements_file = Some(PathBuf::from(value));
             }
             "--assignment" => {
                 let value = next_value(&mut rest, "--assignment", "an assignment file")?;
@@ -546,6 +558,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             output,
             map_root: None,
             map_deployed: None,
+            requirements_file: None,
             targets: Vec::new(),
             supplier_verb: None,
             supplier_attempt: None,
@@ -604,6 +617,40 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if map_deployed.is_some() && (command != Command::Handoff || map_root.is_none()) {
         return Err("--deployed needs handoff --root".into());
+    }
+    if requirements_file.is_some() && command != Command::Check {
+        return Err("--requirements-file needs check".into());
+    }
+    if command == Command::Check
+        && (conversion_option
+            || grid
+            || !subfolders
+            || output.is_some()
+            || preset.is_some()
+            || map_root.is_some()
+            || map_deployed.is_some()
+            || !targets.is_empty()
+            || replace
+            || skip_existing
+            || dry_run
+            || supplier_assignment.is_some()
+            || supplier_fake.is_some()
+            || supplier_verb.is_some()
+            || supplier_attempt.is_some()
+            || studio_verb.is_some()
+            || studio_tool.is_some()
+            || studio_image.is_some()
+            || studio_job.is_some()
+            || studio_out.is_some()
+            || studio_payer.is_some()
+            || studio_prompt.is_some()
+            || studio_fake.is_some()
+            || !unknown.is_empty())
+    {
+        return Err("check takes a file or folder, --requirements-file and --json only".into());
+    }
+    if command == Command::Check && requirements_file.is_none() {
+        return Err("check needs --requirements-file <file>".into());
     }
     if !targets.is_empty() && command != Command::Convert {
         return Err("--target needs convert".into());
@@ -723,11 +770,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             Command::Audit
                 | Command::Convert
                 | Command::Handoff
+                | Command::Check
                 | Command::Supplier
                 | Command::Studio
         )
     {
-        return Err("--json needs audit, convert, handoff or supplier".into());
+        return Err("--json needs audit, convert, handoff, check or supplier".into());
     }
     if command == Command::Handoff && !subfolders {
         return Err("--no-subfolders needs audit or convert".into());
@@ -796,6 +844,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         output,
         map_root,
         map_deployed,
+        requirements_file,
         targets,
         supplier_verb,
         supplier_attempt,
@@ -2187,6 +2236,7 @@ fn main() {
         | Command::Convert
         | Command::Restore
         | Command::Handoff
+        | Command::Check
         | Command::Supplier
         | Command::Studio => {}
     }
@@ -2245,6 +2295,7 @@ fn main() {
                     Command::Audit => "audit",
                     Command::Restore => "restore",
                     Command::Handoff => "handoff",
+                    Command::Check => "check",
                     Command::Supplier => "supplier",
                     _ => "convert",
                 }
@@ -2285,6 +2336,16 @@ fn main() {
             std::process::exit(2);
         }
         std::process::exit(restore_headless(&target));
+    }
+
+    if args.command == Command::Check {
+        std::process::exit(check_headless(
+            &target,
+            args.requirements_file
+                .as_deref()
+                .expect("check requires a requirements file"),
+            args.json,
+        ));
     }
 
     // Supplier verbs run a saved job's attempt queue: prepare off the folder's
@@ -2673,6 +2734,81 @@ fn restore_headless(root: &Path) -> i32 {
         restore.failures.len()
     );
     i32::from(!restore.failures.is_empty())
+}
+
+/// Inspect one output file or every regular file below a chosen output folder.
+/// The requirement pack is local data; this command never uploads or rewrites.
+fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
+    let snapshot = match requirements::parse_file(requirements_path) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("press: {error}");
+            return 2;
+        }
+    };
+    let (root, refs) = if target.is_file() {
+        let root = target.parent().unwrap_or_else(|| Path::new("."));
+        (
+            root.to_path_buf(),
+            vec![requirements::OutputRef {
+                source: None,
+                output: target
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| target.to_path_buf()),
+                processing: None,
+            }],
+        )
+    } else if target.is_dir() {
+        let mut refs = Vec::new();
+        for item in walkdir::WalkDir::new(target).follow_links(false) {
+            let item = match item {
+                Ok(item) => item,
+                Err(error) => {
+                    eprintln!("press: could not inspect {}: {error}", target.display());
+                    return 1;
+                }
+            };
+            let path = item.path();
+            if !item.file_type().is_file()
+                || path.file_name() == Some(std::ffi::OsStr::new(manifest::NAME))
+                || path == requirements_path
+            {
+                continue;
+            }
+            let Some(relative) = path.strip_prefix(target).ok() else {
+                continue;
+            };
+            refs.push(requirements::OutputRef {
+                source: None,
+                output: relative.to_path_buf(),
+                processing: None,
+            });
+        }
+        refs.sort_by(|left, right| left.output.cmp(&right.output));
+        (target.to_path_buf(), refs)
+    } else {
+        eprintln!("press: {} is not a file or folder", target.display());
+        return 2;
+    };
+    let receipt = match requirements::inspect_outputs(&root, &refs, &snapshot) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            eprintln!("press: {error}");
+            return 1;
+        }
+    };
+    let result = if json {
+        requirements::render_json(&receipt).map(|json| print_text(&format!("{json}\n")))
+    } else {
+        print_text(&requirements::render_report(&receipt));
+        Ok(())
+    };
+    if let Err(error) = result {
+        eprintln!("press: {error}");
+        return 1;
+    }
+    i32::from(!receipt.all_required_pass)
 }
 
 fn studio_error(error: studio_ledger::LedgerError) -> String {

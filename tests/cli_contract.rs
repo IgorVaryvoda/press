@@ -125,6 +125,36 @@ fn convert_json_writes_outputs_and_reports_schema_two() {
 }
 
 #[test]
+fn check_json_reports_actual_output_against_a_local_snapshot() {
+    let dir = workdir("requirements");
+    photo(&dir, "shot.png");
+    let requirements =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/requirements/local-web.json");
+    let output = run(&[
+        "check",
+        &dir.to_string_lossy(),
+        "--requirements-file",
+        &requirements.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = stdout_json(&output);
+    assert_eq!(report["requirements"]["id"], "local-web-hero");
+    assert_eq!(report["outputs"][0]["output"], "shot.png");
+    assert_eq!(report["outputs"][0]["actual"]["format"], "png");
+    assert!(report["outputs"][0]["output_hash"].is_string());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(dir.to_string_lossy().as_ref()),
+        "the receipt does not expose the local root"
+    );
+    assert!(
+        stderr(&output).is_empty(),
+        "a checked report stays on stdout"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_invalid_invocation_exits_two_with_stderr_only() {
     let dir = workdir("invalid");
     photo(&dir, "shot.png");
