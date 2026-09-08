@@ -24,8 +24,8 @@ because its owning design still uses future tense.
 | --- | --- | --- |
 | W0: trustworthy processing | Async destination proof, run ownership, recipe fingerprint fields and earlier depth/ICC guards are source-present | F1-F4: complete execution identity, import/persistence boundaries and relevant runtime proof |
 | W1: personal recipes | `src/recipe.rs`, recipe UI actions and CLI `--preset-file` are source-present | Verify migration/round-trip, precision/default semantics and GUI/CLI execution parity; no new preset library |
-| W2: product-set jobs | `src/job.rs` and `src/audit/job_actions.rs` contain persistence, mappings, target reference, import/export and relink actions | Verify full journeys; fix portable metadata/path handling, job identity and stale-result ownership |
-| W3: supplier pilot | Integration design exists; local binding fields are not native supplier authorization | Confirm Studio contracts, then S1-S3 |
+| W2: product-set jobs | `src/job.rs` and `src/audit/job_actions.rs` contain persistence, mappings, target reference, import/export and relink actions | Verify full journeys; fix portable path handling, name/SKU metadata-privacy preview, job identity and stale-result ownership |
+| W3: supplier pilot | Integration design exists; the `ServerBinding`/role-mapping fields in `src/job.rs` are reserved structures, not native supplier authorization | Confirm Studio contracts, then S1-S3 |
 | W4: contextual hosted service | Existing direct Studio actions are not proof of quote/idempotency/charge recovery | Preserve current behavior; C1 only after confirmed service/ledger contract |
 | W5: templates/multiple outputs | Recipe model exists; current job has a single `target_recipe` | Pull D1 forward; D2 supplies a real target's checks; D3 catalog remains demand-led |
 | W6: own workspace/review | Proposed connected-work design | C2 when shared work is needed and canonical services support it |
@@ -38,8 +38,10 @@ No runtime test was executed for this documentation refresh.
 
 Start with a concrete job, not all rows at once. The recommended local path is
 relevant F1/F2/F3 checks, then H1-H3 or D1 according to available participants.
-A1 contract hygiene can proceed independently. I1 can establish whether phone
-inputs are a real blocker before selecting a decoder.
+A1 contract hygiene can proceed independently, and its fixture PR closes the
+contract half of F4; F4's execution-budget half travels with the multi-target work
+that needs it. I1 can establish whether phone inputs are a real blocker before
+selecting a decoder.
 
 A committed supplier pilot outranks speculative acquisition work. S1 discovery
 can proceed immediately; S2/S3 consume only the local foundations and requirements
@@ -60,25 +62,20 @@ to complete every future transform first.
 
 ## S1-S3: keep the supplier loop executable
 
-**S1: contract proof.** With the Studio counterpart, map existing services to native
-sign-in, supplier/recipient scope, assignments, resolved requirements, canonical
-product/slot mapping, normal submission entitlement, upload/finalization and receipt
-lookup. Record missing server work in its owning repository; do not guess endpoints
-or expose private customer details here. A supplier must not need a merchant key
-or an unrelated personal paid workspace merely to fulfill an authorized request.
+**S1: contract proof.** Status: proposed, needs a Studio counterpart. Next decision:
+which existing services map to native sign-in, scoped assignment/requirement reads
+and canonical intake. Record missing server work in its owning repository; do not
+guess endpoints. No merchant key or unrelated paid workspace for authorized requests.
 
-**S2: one real submission.** Load one retailer's assignments and policy revision,
-confirm mappings, prepare supported outputs and inspect the exact files, then
-submit through canonical intake. Pin workspace, supplier, product/slot, source/
-output hashes, recipe/policy revisions and attempt identity. Browser fallback stays
-visible. Generic Sirv folder pairing is not the supplier submission route.
+**S2: one real submission.** Status: blocked on S1 contracts. Pin workspace,
+supplier, product/slot, source/output hashes, recipe/policy revisions and attempt
+identity on the one pilot job. Browser fallback stays visible; generic Sirv folder
+pairing is not the submission route.
 
-**S3: correction and interruption recovery.** Persist attempt IDs before sending;
-reconcile a lost response after acceptance, retain successful siblings, restore
-pending work after restart and link a correction to the intended earlier submission.
-Show transferred, accepted, awaiting review, approved/rejected and delivered only
-when the corresponding server state exists. Revocation and policy changes trigger
-current server checks, not a cached permission or a silent destination switch.
+**S3: correction and interruption recovery.** Status: blocked on S1 contracts.
+Persist attempt IDs before sending; reconcile after acceptance, retain siblings,
+restore pending work after restart. Show server states only when the server reports
+them; revocation and policy changes trigger fresh server checks, never cached permission.
 
 Acceptance is the existing supplier matrix: wrong recipient, revoked assignment,
 changed policy, edited bytes, duplicate retry, cancellation races, partial batch,
@@ -90,17 +87,14 @@ accepted receipts.
 
 ## C1-C2 and deliberate deferrals
 
-C1 is one contextual hosted operation under the existing connected-services design:
-explicit local/cloud boundary, authorized payer, quoted maximum cost, idempotent
-acceptance, recoverable job/charge and result retrieval. Confirm the actual Studio
-ledger/provider contract first. A discarded candidate is not automatically free;
-a timeout is not permission to rerun paid inference. Do not add automatic bulk
-retry or sponsorship to a legacy direct-call path while these guarantees are absent.
+C1 is one contextual hosted operation under the connected-services design. Status:
+blocked on the confirmed Studio ledger/provider contract. No bulk auto-retry or
+sponsorship on legacy direct-call paths meanwhile; a discard is not automatically
+free and a timeout never authorizes a paid rerun.
 
-C2 is an explicit own-workspace save/share journey using canonical Studio assets,
-access and review. An invited supplier's retailer scope and personal workspace
-remain distinct. Full desktop PIM/DAM administration is not required to use shared
-services from Press. A browser roundtrip preserves task context.
+C2 is an explicit own-workspace save/share journey on canonical Studio assets.
+Status: deferred until shared work is needed and canonical services support it.
+Retailer scope and personal workspace stay distinct; no desktop PIM required.
 
 Editor handoff, watched folders, native browser launch, MCP, CLI-only packaging,
 large template catalogs, remote policy feeds and sponsorship remain separate
