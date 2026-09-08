@@ -180,6 +180,9 @@ struct Args {
     /// Where `convert` writes. `None` is the default `optimized/` beside the sources.
     /// The window has its own remembered Output setting.
     output: Option<PathBuf>,
+    /// Where `handoff` looks for the reported files. `None` validates the
+    /// report without mapping it. Every other command refuses the flag.
+    map_root: Option<PathBuf>,
     /// Leave a source alone when its planned output is already current.
     skip_existing: bool,
     /// Plan and project the conversion without writing anything.
@@ -229,6 +232,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut subfolders = true;
     let mut replace = false;
     let mut output = None;
+    let mut map_root = None;
     let mut skip_existing = false;
     let mut dry_run = false;
     let mut unknown = Vec::new();
@@ -299,6 +303,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 let value = next_value(&mut rest, "--output", "a folder")?;
                 output = Some(PathBuf::from(value));
+            }
+            "--root" => {
+                let value = next_value(&mut rest, "--root", "a folder")?;
+                map_root = Some(PathBuf::from(value));
             }
             "--avif-speed" => {
                 conversion_option = true;
@@ -392,6 +400,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             subfolders,
             replace,
             output,
+            map_root: None,
             skip_existing,
             dry_run,
             preset: None,
@@ -431,6 +440,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if command == Command::Handoff && (conversion_option || grid) {
         return Err("handoff takes only a report file".into());
+    }
+    if map_root.is_some() && command != Command::Handoff {
+        return Err("--root needs handoff".into());
     }
     if command == Command::Handoff && !subfolders {
         return Err("--no-subfolders needs audit or convert".into());
@@ -505,6 +517,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         subfolders,
         replace,
         output,
+        map_root,
         skip_existing,
         dry_run,
         preset,
@@ -1312,6 +1325,15 @@ fn convert_headless(
 }
 
 #[derive(Serialize)]
+struct HandoffMappingSummary {
+    confirmed: usize,
+    candidate: usize,
+    ambiguous: usize,
+    unmatched: usize,
+    out_of_scope: usize,
+}
+
+#[derive(Serialize)]
 struct HandoffReport {
     schema_version: u32,
     command: &'static str,
@@ -1320,9 +1342,41 @@ struct HandoffReport {
     resources: usize,
     warnings: Vec<String>,
     pending: handoff::PendingHandoff,
+    /// The mapped root, absent when the report was only validated.
+    root: Option<String>,
+    /// One entry per resource, in report order. Candidates need explicit
+    /// confirmation before anything converts them.
+    mappings: Option<Vec<handoff::Mapping>>,
+    summary: Option<HandoffMappingSummary>,
 }
 
-fn handoff_report(target: &Path, pending: &handoff::PendingHandoff) -> HandoffReport {
+fn handoff_report(
+    target: &Path,
+    pending: &handoff::PendingHandoff,
+    mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
+) -> HandoffReport {
+    let (root, mappings, summary) = match mapped {
+        None => (None, None, None),
+        Some((root, mappings)) => {
+            let mut summary = HandoffMappingSummary {
+                confirmed: 0,
+                candidate: 0,
+                ambiguous: 0,
+                unmatched: 0,
+                out_of_scope: 0,
+            };
+            for mapping in mappings {
+                match mapping.verdict {
+                    handoff::Verdict::Confirmed => summary.confirmed += 1,
+                    handoff::Verdict::Candidate => summary.candidate += 1,
+                    handoff::Verdict::Ambiguous => summary.ambiguous += 1,
+                    handoff::Verdict::Unmatched => summary.unmatched += 1,
+                    handoff::Verdict::OutOfScope => summary.out_of_scope += 1,
+                }
+            }
+            (Some(path_text(root)), Some(mappings.clone()), Some(summary))
+        }
+    };
     HandoffReport {
         schema_version: 1,
         command: "handoff",
@@ -1331,12 +1385,21 @@ fn handoff_report(target: &Path, pending: &handoff::PendingHandoff) -> HandoffRe
         resources: pending.handoff.resources.len(),
         warnings: pending.warnings.clone(),
         pending: pending.clone(),
+        root,
+        mappings,
+        summary,
     }
 }
 
 /// The validated task, briefly: warnings are diagnostics, so they go to
-/// stderr beside the summary rather than into the task listing.
-fn print_handoff(target: &Path, pending: &handoff::PendingHandoff) {
+/// stderr beside the summary rather than into the task listing. With a
+/// mapped root every resource gets one verdict line; candidates name the
+/// file they resemble without claiming it.
+fn print_handoff(
+    target: &Path,
+    pending: &handoff::PendingHandoff,
+    mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
+) {
     outln!(
         "{}: task {} from {}: {} resources",
         target.display(),
@@ -1344,8 +1407,33 @@ fn print_handoff(target: &Path, pending: &handoff::PendingHandoff) {
         pending.handoff.producer,
         pending.handoff.resources.len()
     );
+    if let Some((root, mappings)) = mapped {
+        outln!("mapped against {}", root.display());
+        for mapping in mappings {
+            let detail = mapping.paths.first().map(String::as_str).unwrap_or("-");
+            outln!(
+                "{} {}: {}",
+                verdict_word(mapping.verdict),
+                mapping.id,
+                detail
+            );
+            for note in &mapping.notes {
+                outln!("  note: {note}");
+            }
+        }
+    }
     for warning in &pending.warnings {
         eprintln!("press: handoff warning: {warning}");
+    }
+}
+
+fn verdict_word(verdict: handoff::Verdict) -> &'static str {
+    match verdict {
+        handoff::Verdict::Confirmed => "confirmed",
+        handoff::Verdict::Candidate => "candidate",
+        handoff::Verdict::Ambiguous => "ambiguous",
+        handoff::Verdict::Unmatched => "unmatched",
+        handoff::Verdict::OutOfScope => "out of scope",
     }
 }
 
@@ -1598,13 +1686,32 @@ fn main() {
         };
         match handoff::parse_bytes(&bytes) {
             Ok(pending) => {
+                // Mapping reads the chosen root through the same header-only
+                // walk as an audit. It never converts: candidates wait for
+                // explicit confirmation.
+                let mapped = match args.map_root.as_deref() {
+                    None => None,
+                    Some(map_root) => {
+                        if !map_root.is_dir() {
+                            eprintln!("press: {} is not a folder", map_root.display());
+                            std::process::exit(2);
+                        }
+                        let scanned = scan::scan(map_root, &map_root.join(scan::OUTPUT_DIR));
+                        print_scan_errors(&scanned);
+                        Some((
+                            map_root.to_path_buf(),
+                            handoff::map_to_root(&pending.handoff, map_root, &scanned.entries),
+                        ))
+                    }
+                };
+                let mapped = mapped.as_ref().map(|mapped| (&mapped.0, &mapped.1));
                 if args.json {
-                    if write_json(&handoff_report(&target, &pending)).is_err() {
+                    if write_json(&handoff_report(&target, &pending, mapped)).is_err() {
                         eprintln!("press: could not write JSON");
                         std::process::exit(1);
                     }
                 } else {
-                    print_handoff(&target, &pending);
+                    print_handoff(&target, &pending, mapped);
                 }
                 std::process::exit(0);
             }
@@ -2658,6 +2765,7 @@ mod tests {
             "press convert <file-or-folder> --format webp --quality 80 --json",
             "schema-two error document",
             "recipe fingerprint and the source content hash",
+            "Map an ImageGuide report before converting it",
         ] {
             assert!(
                 AGENT_SKILL.contains(marker),
@@ -3528,6 +3636,14 @@ mod tests {
         assert!(parse(&["handoff", "report.json", "--output", "out"]).is_err());
         assert!(parse(&["handoff", "report.json", "--dry-run"]).is_err());
         assert!(parse(&["handoff", "report.json", "--skip-existing"]).is_err());
+        assert!(
+            parse(&["handoff", "report.json", "--root", "photos"])
+                .unwrap()
+                .map_root
+                .is_some()
+        );
+        assert!(parse(&["audit", "x", "--root", "photos"]).is_err());
+        assert!(parse(&["convert", "x", "--root", "photos"]).is_err());
     }
 
     #[test]

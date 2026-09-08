@@ -71,6 +71,12 @@ press restore <folder>
 
 `press restore` reads the manifest, moves every original back, and removes the file that replaced it. It works on a later run and on another machine, because the record is in the folder. It prints one `restored` line per file, names on stderr anything it could not put back, and exits `1` when any original stayed put.
 
+## Map an ImageGuide report before converting it
+
+`press handoff <report.json> [--root <dir>] [--json]` validates a findings report into a pending task and, with `--root`, resolves each resource against that folder. Import reads the report and the root's headers only: no network, no writes, no conversion.
+
+Each resource gets one verdict: `confirmed` names its file, `candidate` names one plausible file, `ambiguous` lists several, `unmatched` names nothing, and `out_of_scope` points at another machine's layout. Convert only `confirmed` mappings, and only after the user picks them: a `candidate` is a resemblance, not an identification. Reported dimensions and measured bytes that disagree with the local file arrive as `notes`, not verdict changes.
+
 ## Update Press
 
 Run `press update` to install the latest signed release. Self-updating works for the Press AppImage, macOS app, and Windows installer; use the package manager for other installs.

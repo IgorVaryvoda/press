@@ -320,3 +320,452 @@ mod tests {
         assert_eq!(pending.warnings.len(), 2);
     }
 }
+
+/// How one reported resource resolved against a user-chosen root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// A path hint named exactly one existing file under the root.
+    Confirmed,
+    /// One filename match: plausible, but only a human confirms it.
+    Candidate,
+    /// Several files match: a choice, never a guess.
+    Ambiguous,
+    /// Nothing under the root answers to this resource.
+    Unmatched,
+    /// The hints point at a different machine layout, not at this root.
+    OutOfScope,
+}
+
+/// One resource's resolution: its verdict, the local paths behind it, and
+/// observations that do not change the verdict but travel with it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Mapping {
+    pub id: String,
+    pub verdict: Verdict,
+    pub paths: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// Join a hint onto the root without leaving it lexically: absolute, rooted
+/// and parent-escaping hints refuse before touching the filesystem.
+fn confined_join(root: &std::path::Path, hint: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let hint = std::path::Path::new(hint);
+    if hint.is_absolute() || hint.has_root() {
+        return None;
+    }
+    let mut depth = 0u32;
+    let mut joined = root.to_path_buf();
+    for component in hint.components() {
+        match component {
+            Component::Normal(part) => {
+                depth += 1;
+                joined.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth = depth.checked_sub(1)?;
+                joined.pop();
+            }
+            _ => return None,
+        }
+    }
+    Some(joined)
+}
+
+/// Whether `path` resolves to a real file still under `root`. Symlinks
+/// resolve before the comparison, so a link pointing out reads as absent.
+/// Anything unresolvable reads as absent too: mapping advises on files it
+/// can actually open, and the row stays available to manual work regardless.
+fn resolves_within(root: &std::path::Path, path: &std::path::Path) -> bool {
+    if !path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return false;
+    }
+    match (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+        (Ok(resolved), Ok(confined)) => resolved.starts_with(&confined),
+        _ => false,
+    }
+}
+
+/// The joined hint as a real file still under the root.
+fn existing_file(root: &std::path::Path, hint: &str) -> Option<std::path::PathBuf> {
+    let candidate = confined_join(root, hint)?;
+    resolves_within(root, &candidate).then_some(candidate)
+}
+
+fn basename(hint: &str) -> &str {
+    hint.rsplit(['/', '\\']).next().unwrap_or(hint)
+}
+
+/// Resolve every resource against scanned entries under `root`. Reads
+/// metadata, never image bytes and never the network. Mapping never converts:
+/// candidates wait for explicit confirmation, which is later work consuming
+/// this report.
+pub fn map_to_root(
+    handoff: &Handoff,
+    root: &std::path::Path,
+    entries: &[crate::scan::Entry],
+) -> Vec<Mapping> {
+    handoff
+        .resources
+        .iter()
+        .map(|resource| map_one(resource, root, entries))
+        .collect()
+}
+
+fn map_one(
+    resource: &HandoffResource,
+    root: &std::path::Path,
+    entries: &[crate::scan::Entry],
+) -> Mapping {
+    let mut notes = Vec::new();
+    let mut hits: Vec<std::path::PathBuf> = Vec::new();
+    let mut elsewhere = false;
+    for hint in resource.path_hints.iter().chain(resource.urls.iter()) {
+        let path = std::path::Path::new(hint);
+        if path.is_absolute() || path.has_root() {
+            // An absolute hint under this root is still usable; anywhere else
+            // it describes a different machine layout, not this folder.
+            if let Ok(relative) = path.strip_prefix(root)
+                && let Some(relative) = relative.to_str()
+                && let Some(hit) = existing_file(root, relative)
+            {
+                push_hit(&mut hits, hit);
+                continue;
+            }
+            elsewhere = true;
+            continue;
+        }
+        if let Some(hit) = existing_file(root, hint) {
+            push_hit(&mut hits, hit);
+        }
+    }
+    if hits.len() == 1 {
+        let single = hits.remove(0);
+        corroborate(resource, entries, &single, &mut notes);
+        return Mapping {
+            id: resource.id.clone(),
+            verdict: Verdict::Confirmed,
+            paths: vec![display(&single)],
+            notes,
+        };
+    }
+    if hits.len() > 1 {
+        // Several hints named several files: a choice between them, never a
+        // silent merge into one resource.
+        return Mapping {
+            id: resource.id.clone(),
+            verdict: Verdict::Ambiguous,
+            paths: capped_paths(hits),
+            notes,
+        };
+    }
+    // No hint named a file: fall back to filename matching over the scan.
+    let mut candidates = Vec::new();
+    for hint in resource.path_hints.iter().chain(resource.urls.iter()) {
+        match crate::job::match_filename(basename(hint), entries) {
+            crate::job::Match::Exact(path) => {
+                if !candidates.contains(&path) {
+                    candidates.push(path);
+                }
+            }
+            crate::job::Match::Ambiguous(mut paths) => {
+                for path in paths.drain(..) {
+                    if !candidates.contains(&path) {
+                        candidates.push(path);
+                    }
+                }
+            }
+            crate::job::Match::Missing => {}
+        }
+    }
+    // A name match outside the root is not a candidate: following it would
+    // read where the user did not point.
+    candidates.retain(|path| resolves_within(root, path));
+    match candidates.len() {
+        0 if elsewhere => Mapping {
+            id: resource.id.clone(),
+            verdict: Verdict::OutOfScope,
+            paths: Vec::new(),
+            notes,
+        },
+        0 => Mapping {
+            id: resource.id.clone(),
+            verdict: Verdict::Unmatched,
+            paths: Vec::new(),
+            notes,
+        },
+        1 => {
+            let single = candidates.remove(0);
+            corroborate(resource, entries, &single, &mut notes);
+            Mapping {
+                id: resource.id.clone(),
+                verdict: Verdict::Candidate,
+                paths: vec![display(&single)],
+                notes,
+            }
+        }
+        _ => Mapping {
+            id: resource.id.clone(),
+            verdict: Verdict::Ambiguous,
+            paths: capped(candidates.into_iter().map(display).collect()),
+            notes,
+        },
+    }
+}
+
+fn push_hit(hits: &mut Vec<std::path::PathBuf>, hit: std::path::PathBuf) {
+    if !hits.contains(&hit) {
+        hits.push(hit);
+    }
+}
+
+fn display(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref().display().to_string()
+}
+
+/// Long candidate lists truncate with their count kept: the report stays a
+/// report, not a directory listing.
+fn capped(mut paths: Vec<String>) -> Vec<String> {
+    const SHOWN: usize = 8;
+    if paths.len() > SHOWN {
+        let hidden = paths.len() - SHOWN;
+        paths.truncate(SHOWN);
+        paths.push(format!("…and {hidden} more"));
+    }
+    paths
+}
+
+fn capped_paths(paths: Vec<std::path::PathBuf>) -> Vec<String> {
+    capped(paths.into_iter().map(display).collect())
+}
+
+/// Compare the report's measurements against the scanned entry, when both
+/// exist. A mismatch is a note, never a verdict change: the local file is
+/// what it is, and H3 decides what a changed source means.
+fn corroborate(
+    resource: &HandoffResource,
+    entries: &[crate::scan::Entry],
+    path: &std::path::Path,
+    notes: &mut Vec<String>,
+) {
+    let Some(entry) = entries.iter().find(|entry| entry.path == path) else {
+        return;
+    };
+    if let (Some(width), Some(height)) = (resource.width, resource.height)
+        && (entry.width != width || entry.height != height)
+    {
+        notes.push(format!(
+            "local {}x{} differs from reported {width}x{height}",
+            entry.width, entry.height
+        ));
+    }
+    if resource.bytes_measured
+        && let Some(bytes) = resource.bytes
+        && entry.bytes != bytes
+    {
+        notes.push(format!(
+            "local {} bytes differ from measured {bytes}",
+            entry.bytes
+        ));
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    fn workdir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("press-handoff-map-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the fixture dir is created");
+        dir
+    }
+
+    fn write(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("the fixture parent is created");
+        }
+        std::fs::write(&path, b"fixture-bytes").expect("the fixture file is written");
+        path
+    }
+
+    fn entry(path: &std::path::Path, width: u32, height: u32) -> crate::scan::Entry {
+        crate::scan::Entry {
+            path: path.to_path_buf(),
+            format: image::ImageFormat::Png.into(),
+            width,
+            height,
+            bytes: std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        }
+    }
+
+    fn named(id: &str, hints: &[&str]) -> HandoffResource {
+        HandoffResource {
+            id: id.into(),
+            urls: Vec::new(),
+            path_hints: hints.iter().map(|hint| hint.to_string()).collect(),
+            width: None,
+            height: None,
+            bytes: None,
+            bytes_measured: false,
+            findings: Vec::new(),
+            max_edge: None,
+            formats: Vec::new(),
+            unknown: serde_json::Map::new(),
+        }
+    }
+
+    fn handoff_with(resources: Vec<HandoffResource>) -> Handoff {
+        Handoff {
+            schema: SCHEMA_VERSION,
+            producer: "imageguide-extension".into(),
+            producer_revision: "report-schema-4".into(),
+            task: "task-1".into(),
+            observed: "2026-09-08T12:00:00Z".into(),
+            resources,
+            redactions: Vec::new(),
+            unknown: serde_json::Map::new(),
+        }
+    }
+
+    fn map(
+        handoff: &Handoff,
+        root: &std::path::Path,
+        files: &[std::path::PathBuf],
+    ) -> Vec<Mapping> {
+        let entries: Vec<crate::scan::Entry> =
+            files.iter().map(|path| entry(path, 800, 600)).collect();
+        map_to_root(handoff, root, &entries)
+    }
+
+    #[test]
+    fn an_exact_hint_confirms_its_file() {
+        let dir = workdir("exact");
+        let hero = write(&dir, "hero.jpg");
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["hero.jpg"])]),
+            &dir,
+            &[hero],
+        );
+        assert_eq!(mappings[0].verdict, Verdict::Confirmed);
+        assert_eq!(mappings[0].paths.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_filename_match_is_a_candidate_until_confirmed() {
+        let dir = workdir("candidate");
+        let hero = write(&dir, "shoots/hero-final.jpg");
+        // The hint names a file that is not there; its basename matches one
+        // file that is. Plausible, not proven.
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["images/hero.jpg"])]),
+            &dir,
+            &[hero],
+        );
+        assert_eq!(mappings[0].verdict, Verdict::Candidate);
+        assert_eq!(mappings[0].paths.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_basenames_stay_ambiguous() {
+        let dir = workdir("ambiguous");
+        let one = write(&dir, "a/hero.jpg");
+        let two = write(&dir, "b/hero.jpg");
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["hero.jpg"])]),
+            &dir,
+            &[one, two],
+        );
+        // Both hints are absent, and the basename matches twice: no guess.
+        assert_eq!(mappings[0].verdict, Verdict::Ambiguous);
+        assert_eq!(mappings[0].paths.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_matching_is_unmatched_not_missing() {
+        let dir = workdir("unmatched");
+        let other = write(&dir, "other.jpg");
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["hero.jpg"])]),
+            &dir,
+            &[other],
+        );
+        assert_eq!(mappings[0].verdict, Verdict::Unmatched);
+        assert!(mappings[0].paths.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hints_at_another_machine_are_out_of_scope() {
+        let dir = workdir("scope");
+        let other = write(&dir, "other.jpg");
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["/elsewhere/hero.jpg"])]),
+            &dir,
+            &[other],
+        );
+        assert_eq!(mappings[0].verdict, Verdict::OutOfScope);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escaping_hints_never_leave_the_root() {
+        let dir = workdir("escape");
+        // The file exists outside the root: only lexical refusal keeps the
+        // verdict unmatched instead of confirming through the climb.
+        write(&dir, "outside.jpg");
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["../outside.jpg"])]),
+            &dir.join("sub"),
+            &[],
+        );
+        assert_eq!(mappings[0].verdict, Verdict::Unmatched);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn measurements_that_disagree_become_notes() {
+        let dir = workdir("notes");
+        let hero = write(&dir, "hero.jpg");
+        let mut resource = named("hero", &["hero.jpg"]);
+        resource.width = Some(1600);
+        resource.height = Some(1200);
+        resource.bytes = Some(999_999);
+        resource.bytes_measured = true;
+        // The entry is 800x600 and far smaller: the hint still identifies
+        // the file, but the disagreement travels with the mapping.
+        let mappings = map(&handoff_with(vec![resource]), &dir, &[hero]);
+        assert_eq!(mappings[0].verdict, Verdict::Confirmed);
+        assert_eq!(mappings[0].notes.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_pointing_out_reads_as_absent() {
+        let dir = workdir("link");
+        let outside = write(&dir, "outside.jpg");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).expect("the root is created");
+        std::os::unix::fs::symlink(&outside, root.join("link.jpg")).unwrap();
+        let mappings = map(
+            &handoff_with(vec![named("hero", &["link.jpg"])]),
+            &root,
+            &[root.join("link.jpg")],
+        );
+        assert_eq!(mappings[0].verdict, Verdict::Unmatched);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

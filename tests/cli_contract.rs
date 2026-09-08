@@ -318,3 +318,103 @@ fn handoff_refuses_garbage_with_exit_two() {
     assert!(stderr(&output).contains("press: "), "{}", stderr(&output));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn mapping_report(dir: &Path, name: &str, resources: serde_json::Value) -> PathBuf {
+    let report = serde_json::json!({
+        "schema": 1,
+        "producer": "imageguide-extension",
+        "producer_revision": "report-schema-4",
+        "task": "task-9",
+        "observed": "2026-09-08T12:00:00Z",
+        "resources": resources,
+        "redactions": [],
+    });
+    let path = dir.join(name);
+    std::fs::write(&path, serde_json::to_vec_pretty(&report).unwrap())
+        .expect("the mapping fixture is written");
+    path
+}
+
+fn minimal_resource(id: &str, hints: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "urls": [],
+        "path_hints": hints,
+        "width": null,
+        "height": null,
+        "bytes": null,
+        "findings": [],
+        "max_edge": null,
+        "formats": [],
+    })
+}
+
+#[test]
+fn handoff_root_maps_hints_to_verdicts() {
+    let dir = workdir("mapping");
+    let root = dir.join("photos");
+    std::fs::create_dir_all(&root).expect("the root is created");
+    std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
+    std::fs::create_dir_all(root.join("gallery")).expect("the subfolder is created");
+    std::fs::write(root.join("gallery").join("shot.jpg"), photo_png()).expect("shot is written");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([
+            minimal_resource("r1", &["hero.jpg"]),
+            minimal_resource("r2", &["missing/shot.jpg"]),
+            minimal_resource("r3", &["/elsewhere/gone.jpg"]),
+            minimal_resource("r4", &["nothing.jpg"]),
+        ]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let doc = stdout_json(&output);
+    assert_eq!(doc["task"], "task-9");
+    let verdicts: Vec<&str> = doc["mappings"]
+        .as_array()
+        .expect("mappings list")
+        .iter()
+        .map(|mapping| mapping["verdict"].as_str().expect("a verdict"))
+        .collect();
+    // An exact hint confirms, a basename match stays a candidate, a foreign
+    // absolute hint is out of scope, and nothing is unmatched. Nothing
+    // converted: mapping only reports.
+    assert_eq!(
+        verdicts,
+        vec!["confirmed", "candidate", "out_of_scope", "unmatched"]
+    );
+    assert_eq!(doc["summary"]["confirmed"], 1);
+    assert_eq!(doc["summary"]["candidate"], 1);
+    assert!(!root.join("optimized").exists(), "mapping writes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_refuses_a_missing_root() {
+    let dir = workdir("mapping-missing-root");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([minimal_resource("r1", &["a.jpg"])]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &dir.join("gone").to_string_lossy(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("is not a folder"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
