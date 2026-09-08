@@ -23,6 +23,7 @@ mod scan;
 mod settings;
 mod sirv;
 mod studio;
+mod studio_ledger;
 mod supplier;
 mod thumbs;
 #[cfg(feature = "updater")]
@@ -39,6 +40,7 @@ use gpui_kit::{
 };
 use scan::{Entry, format_bytes};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// Write `text` to `out`. `Ok(false)` means the reader closed the pipe.
 fn write_text(out: &mut impl std::io::Write, text: &str) -> std::io::Result<bool> {
@@ -93,6 +95,7 @@ const HELP: &str = concat!(
     "  press restore <PATH>\n",
     "  press handoff <FILE>\n",
     "  press supplier <PATH> <verb> [OPTIONS]\n",
+    "  press studio <verb> [OPTIONS]\n",
     "  press skill\n",
     "  press update\n\n",
     "Commands:\n",
@@ -101,6 +104,7 @@ const HELP: &str = concat!(
     "  restore    Put back the originals a --replace run moved aside\n",
     "  handoff    Validate an ImageGuide report into a pending local task\n",
     "  supplier   Prepare, submit and reconcile product images as a supplier\n",
+    "  studio     Rehearse one bounded hosted operation against a local script\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
     "  update     Install the latest signed Press release\n",
     "  help       Print this help\n",
@@ -130,8 +134,14 @@ const HELP: &str = concat!(
     "  --deployed <dir>          Verify the mapping against deployed files\n",
     "                            (needs handoff --root)\n",
     "  --assignment <file>       Supplier assignment snapshot (needs supplier)\n",
-    "  --fake <file>             Rehearse supplier submit/reconcile from a script;\n",
-    "                            without it there is no intake to send to\n",
+    "  --fake <file>             Rehearsal script for supplier or studio service calls\n",
+    "                            (required: there is no live service authority)\n",
+    "  --tool <upscale>          Hosted rehearsal operation (one supported tool)\n",
+    "  --image <file>            Hosted input for quote and acceptance re-check\n",
+    "  --job <id>                Hosted job id for accept/status/cancel/reconcile/retrieve\n",
+    "  --out <file>              Local destination for a retrieved result\n",
+    "  --payer <id>              Explicit payer for a studio quote\n",
+    "  --prompt <text>           Prompt hash input; raw text is never persisted\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -168,6 +178,7 @@ enum Command {
     Convert,
     Handoff,
     Supplier,
+    Studio,
     Restore,
     Skill,
     Update,
@@ -215,6 +226,17 @@ struct Args {
     /// Assignment and rehearsal script files for supplier verbs.
     supplier_assignment: Option<PathBuf>,
     supplier_fake: Option<PathBuf>,
+    /// Rehearsed hosted work: the verb after `studio`, with tool, image, job,
+    /// output, payer and prompt carried as flags so agents spell every
+    /// authorization explicitly.
+    studio_verb: Option<String>,
+    studio_tool: Option<String>,
+    studio_image: Option<PathBuf>,
+    studio_job: Option<String>,
+    studio_out: Option<PathBuf>,
+    studio_payer: Option<String>,
+    studio_prompt: Option<String>,
+    studio_fake: Option<PathBuf>,
     /// Leave a source alone when its planned output is already current.
     skip_existing: bool,
     /// Plan and project the conversion without writing anything.
@@ -271,6 +293,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut supplier_attempt = None;
     let mut supplier_assignment = None;
     let mut supplier_fake = None;
+    let mut studio_verb = None;
+    let mut studio_tool = None;
+    let mut studio_image = None;
+    let mut studio_job = None;
+    let mut studio_out = None;
+    let mut studio_payer = None;
+    let mut studio_prompt = None;
+    let mut studio_fake = None;
     let mut skip_existing = false;
     let mut dry_run = false;
     let mut unknown = Vec::new();
@@ -290,6 +320,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "supplier" if root.is_none() && command == Command::Window => {
                 command = Command::Supplier
             }
+            "studio" if root.is_none() && command == Command::Window => command = Command::Studio,
             "skill" if root.is_none() && command == Command::Window => command = Command::Skill,
             "update" if root.is_none() && command == Command::Window => command = Command::Update,
             "help" if root.is_none() && command == Command::Window => command = Command::Help,
@@ -355,7 +386,37 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--fake" => {
                 let value = next_value(&mut rest, "--fake", "a rehearsal script")?;
-                supplier_fake = Some(PathBuf::from(value));
+                if command == Command::Studio {
+                    studio_fake = Some(PathBuf::from(value));
+                } else {
+                    supplier_fake = Some(PathBuf::from(value));
+                }
+            }
+            "--tool" if command == Command::Studio => {
+                studio_tool = Some(next_value(&mut rest, "--tool", "upscale")?);
+            }
+            "--image" if command == Command::Studio => {
+                studio_image = Some(PathBuf::from(next_value(
+                    &mut rest,
+                    "--image",
+                    "an image file",
+                )?));
+            }
+            "--job" if command == Command::Studio => {
+                studio_job = Some(next_value(&mut rest, "--job", "a hosted job id")?);
+            }
+            "--out" if command == Command::Studio => {
+                studio_out = Some(PathBuf::from(next_value(
+                    &mut rest,
+                    "--out",
+                    "a local output file",
+                )?));
+            }
+            "--payer" if command == Command::Studio => {
+                studio_payer = Some(next_value(&mut rest, "--payer", "an explicit payer id")?);
+            }
+            "--prompt" if command == Command::Studio => {
+                studio_prompt = Some(next_value(&mut rest, "--prompt", "prompt text")?);
             }
             "--deployed" => {
                 let value = next_value(&mut rest, "--deployed", "a folder")?;
@@ -459,6 +520,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                     return Err("supplier takes a folder, a verb and at most an attempt id".into());
                 }
             }
+            _ if command == Command::Studio => {
+                if studio_verb.is_none() {
+                    studio_verb = Some(argument);
+                } else {
+                    return Err("studio takes a verb and options; it has no positional path".into());
+                }
+            }
             _ => set_root(&mut root, argument)?,
         }
     }
@@ -483,6 +551,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             supplier_attempt: None,
             supplier_assignment: None,
             supplier_fake: None,
+            studio_verb: None,
+            studio_tool: None,
+            studio_image: None,
+            studio_job: None,
+            studio_out: None,
+            studio_payer: None,
+            studio_prompt: None,
+            studio_fake: None,
             skip_existing,
             dry_run,
             preset: None,
@@ -576,6 +652,59 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     {
         return Err("--assignment, --fake and supplier verbs need supplier".into());
     }
+    if command != Command::Studio
+        && (studio_verb.is_some()
+            || studio_tool.is_some()
+            || studio_image.is_some()
+            || studio_job.is_some()
+            || studio_out.is_some()
+            || studio_payer.is_some()
+            || studio_prompt.is_some()
+            || studio_fake.is_some())
+    {
+        return Err("studio verbs and options need studio".into());
+    }
+    if command == Command::Studio
+        && (root.is_some()
+            || conversion_option
+            || grid
+            || !subfolders
+            || output.is_some()
+            || preset.is_some()
+            || map_root.is_some()
+            || map_deployed.is_some()
+            || !targets.is_empty()
+            || replace
+            || skip_existing
+            || dry_run
+            || supplier_fake.is_some()
+            || supplier_assignment.is_some()
+            || supplier_verb.is_some()
+            || supplier_attempt.is_some())
+    {
+        return Err("studio takes a verb and hosted rehearsal options only".into());
+    }
+    if command == Command::Studio {
+        let Some(verb) = studio_verb.as_deref() else {
+            return Err(
+                "studio needs a verb: quote, accept, status, cancel, reconcile or retrieve".into(),
+            );
+        };
+        if !matches!(
+            verb,
+            "quote" | "accept" | "status" | "cancel" | "reconcile" | "retrieve"
+        ) {
+            return Err(format!("unknown studio verb {verb:?}"));
+        }
+        if let Some(tool) = studio_tool.as_deref()
+            && tool != crate::studio_ledger::HOSTED_OPERATION
+        {
+            return Err(format!(
+                "studio supports only {:?} in this rehearsal",
+                crate::studio_ledger::HOSTED_OPERATION
+            ));
+        }
+    }
     if command == Command::Supplier
         && (conversion_option
             || grid
@@ -591,7 +720,11 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if json
         && !matches!(
             command,
-            Command::Audit | Command::Convert | Command::Handoff | Command::Supplier
+            Command::Audit
+                | Command::Convert
+                | Command::Handoff
+                | Command::Supplier
+                | Command::Studio
         )
     {
         return Err("--json needs audit, convert, handoff or supplier".into());
@@ -668,6 +801,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         supplier_attempt,
         supplier_assignment,
         supplier_fake,
+        studio_verb,
+        studio_tool,
+        studio_image,
+        studio_job,
+        studio_out,
+        studio_payer,
+        studio_prompt,
+        studio_fake,
         skip_existing,
         dry_run,
         preset,
@@ -1869,6 +2010,7 @@ fn convert_targets(
         .map(|entry| entry.path.clone())
         .collect();
     let mut sections = Vec::new();
+    let ambient_speed = avif::configured_speed();
     for prepared in &prepared {
         // A bare target runs the current settings; the CLI always names a
         // recipe, so this only fires for future callers.
@@ -1881,6 +2023,11 @@ fn convert_targets(
             ),
             |recipe| recipe.effective(),
         );
+        // Each target is an independent run. A pinned recipe speed must reach
+        // the process-wide encoder, while an unpinned target restores the
+        // ambient setting instead of inheriting its sibling's dial.
+        let target_speed = speed.or(ambient_speed);
+        avif::set_speed(target_speed.unwrap_or(avif::DEFAULT_SPEED));
         let out_t = out_dir.join(&prepared.out);
         if !args.json {
             outln!("target {} -> {}", prepared.id, out_t.display());
@@ -1892,6 +2039,10 @@ fn convert_targets(
             manifest: &recorded_t,
         };
         let planned_t = convert::plan_outputs(root, &sources, &sources, &destination_t, format);
+        // `configured_speed` is the manifest representation. An explicit
+        // default speed is equivalent to no setting, so use the normalized
+        // value after setting the process-wide encoder dial.
+        let configured_speed = avif::configured_speed();
         let queued_t = queue_run(
             &audited,
             &planned_t,
@@ -1903,7 +2054,7 @@ fn convert_targets(
             format,
             quality,
             max_edge,
-            speed.or_else(avif::configured_speed),
+            configured_speed,
         );
         let mut run_t = if args.dry_run {
             dry_run_headless(&queued_t, format, quality, max_edge, args.json)
@@ -2031,7 +2182,8 @@ fn main() {
         | Command::Convert
         | Command::Restore
         | Command::Handoff
-        | Command::Supplier => {}
+        | Command::Supplier
+        | Command::Studio => {}
     }
 
     if args.command == Command::Window {
@@ -2041,6 +2193,20 @@ fn main() {
     } else if let Some(first) = args.unknown.first() {
         eprintln!("press: unknown option {first}");
         std::process::exit(2);
+    }
+
+    if args.command == Command::Studio {
+        std::process::exit(studio_headless(
+            args.studio_verb.as_deref(),
+            args.studio_tool.as_deref(),
+            args.studio_image.as_deref(),
+            args.studio_job.as_deref(),
+            args.studio_out.as_deref(),
+            args.studio_payer.as_deref(),
+            args.studio_prompt.as_deref(),
+            args.studio_fake.as_deref(),
+            args.json,
+        ));
     }
 
     // Headless commands do not inherit window state. An agent should get the same
@@ -2504,6 +2670,320 @@ fn restore_headless(root: &Path) -> i32 {
     i32::from(!restore.failures.is_empty())
 }
 
+fn studio_error(error: studio_ledger::LedgerError) -> String {
+    match error {
+        studio_ledger::LedgerError::Refused(message)
+        | studio_ledger::LedgerError::Transport(message)
+        | studio_ledger::LedgerError::Unknown(message) => message,
+    }
+}
+
+fn studio_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn studio_write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "{} cannot be created without replacing an existing file: {error}",
+                path.display()
+            )
+        })?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(format!("{} cannot be written: {error}", path.display()));
+    }
+    Ok(())
+}
+
+fn studio_job_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("h-{}-{nanos}", std::process::id())
+}
+
+fn studio_script(path: Option<&Path>) -> Result<studio_ledger::FakeLedgerScript, (i32, String)> {
+    let Some(path) = path else {
+        return Err((
+            2,
+            "studio verbs need --fake <script>; no production ledger exists".into(),
+        ));
+    };
+    let bytes = studio_ledger::read_bounded(path, studio_ledger::MAX_FILE_BYTES)
+        .map_err(|message| (2, message))?;
+    studio_ledger::parse_script(&bytes).map_err(|message| (2, message))
+}
+
+fn studio_fields(
+    verb: &str,
+    json: bool,
+    code: i32,
+    fields: serde_json::Map<String, serde_json::Value>,
+    error: Option<String>,
+) -> i32 {
+    let mut report = serde_json::Map::from_iter([
+        ("schema_version".into(), serde_json::json!(1)),
+        ("command".into(), serde_json::json!("studio")),
+        ("verb".into(), serde_json::json!(verb)),
+        ("rehearsal".into(), serde_json::json!(true)),
+    ]);
+    report.extend(fields);
+    report.insert(
+        "error".into(),
+        error
+            .clone()
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    if json {
+        if let Err(write_error) = write_json(&serde_json::Value::Object(report)) {
+            eprintln!("press: could not write JSON: {write_error}");
+            return 1;
+        }
+    } else if let Some(error) = error {
+        eprintln!("press: {error}");
+    } else if verb == "quote" {
+        let quote = report.get("quote").and_then(serde_json::Value::as_object);
+        let field = |name: &str| {
+            quote.and_then(|quote| quote.get(name)).map_or_else(
+                || "?".into(),
+                |value| {
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned)
+                },
+            )
+        };
+        let job = report
+            .get("job")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        outln!(
+            "studio rehearsal quote: job {job}, operation {} v{}, model {}, payer {}, max credits {}, expires {}, cancellation {}",
+            field("op"),
+            field("op_version"),
+            field("model_revision"),
+            field("payer"),
+            field("max_credits"),
+            field("expires_at"),
+            field("cancellation")
+        );
+    } else if let Some(state) = report.get("state").and_then(serde_json::Value::as_str) {
+        let job = report
+            .get("job")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        if let Some(settlement) = report.get("settlement")
+            && !settlement.is_null()
+        {
+            outln!(
+                "studio rehearsal {verb}: job {job}, state {state}, settlement {}",
+                settlement
+            );
+        } else {
+            outln!("studio rehearsal {verb}: job {job}, state {state}");
+        }
+    } else {
+        outln!("studio rehearsal {verb}: complete");
+    }
+    code
+}
+
+fn studio_require_job(job: Option<&str>) -> Result<&str, (i32, String)> {
+    job.filter(|id| !id.trim().is_empty())
+        .ok_or((2, "this studio verb needs --job <id>".into()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn studio_headless(
+    verb: Option<&str>,
+    tool: Option<&str>,
+    image: Option<&Path>,
+    job_id: Option<&str>,
+    output: Option<&Path>,
+    payer: Option<&str>,
+    prompt: Option<&str>,
+    fake: Option<&Path>,
+    json: bool,
+) -> i32 {
+    let Some(verb) = verb else {
+        return studio_fields(
+            "",
+            json,
+            2,
+            serde_json::Map::new(),
+            Some(
+                "studio needs a verb: quote, accept, status, cancel, reconcile or retrieve".into(),
+            ),
+        );
+    };
+    let Some(dir) = studio_ledger::studio_dir() else {
+        return studio_fields(
+            verb,
+            json,
+            2,
+            serde_json::Map::new(),
+            Some("no config folder resolves on this machine".into()),
+        );
+    };
+    let run = || -> Result<(serde_json::Map<String, serde_json::Value>, i32), (i32, String)> {
+        match verb {
+            "quote" => {
+                let Some(tool) = tool else {
+                    return Err((2, "studio quote needs --tool upscale".into()));
+                };
+                let Some(image) = image else {
+                    return Err((2, "studio quote needs --image <file>".into()));
+                };
+                let Some(payer) = payer else {
+                    return Err((2, "studio quote needs --payer <id>".into()));
+                };
+                let script = studio_script(fake)?;
+                let bytes = studio_ledger::read_bounded(image, studio_ledger::MAX_INPUT_BYTES)
+                    .map_err(|message| (2, message))?;
+                let capabilities = studio_ledger::Capabilities {
+                    operations: script.capabilities.clone(),
+                };
+                let mut ledger = studio_ledger::FakeLedger::rehearsing(&script);
+                let prompt_hash = prompt.map(|text| studio_hash(text.as_bytes()));
+                let quote = studio_ledger::request_quote(
+                    &mut ledger,
+                    &capabilities,
+                    tool,
+                    studio_ledger::HOSTED_OPERATION_VERSION,
+                    &studio_hash(&bytes),
+                    bytes.len() as u64,
+                    prompt_hash.as_deref(),
+                    payer,
+                )
+                .map_err(studio_error)
+                .map_err(|message| (1, message))?;
+                let id = studio_job_id();
+                let job = studio_ledger::open_job(&id, payer, quote.clone());
+                let _lock = studio_ledger::lock_job(&dir, &id).map_err(|message| (1, message))?;
+                studio_ledger::save_job(&dir, &job).map_err(|message| (1, message))?;
+                Ok((
+                    serde_json::Map::from_iter([
+                        ("job".into(), serde_json::json!(id)),
+                        ("state".into(), serde_json::json!(job.state)),
+                        (
+                            "quote".into(),
+                            serde_json::to_value(quote).unwrap_or_default(),
+                        ),
+                    ]),
+                    0,
+                ))
+            }
+            "accept" | "status" | "cancel" | "reconcile" | "retrieve" => {
+                let id = studio_require_job(job_id)?;
+                let script = studio_script(fake)?;
+                let _lock = studio_ledger::lock_job(&dir, id).map_err(|message| (1, message))?;
+                let mut job = studio_ledger::load_job(&dir, id).map_err(|message| (2, message))?;
+                if verb == "accept" {
+                    let Some(image) = image else {
+                        return Err((
+                            2,
+                            "studio accept needs --image <file> to recheck the quoted input".into(),
+                        ));
+                    };
+                    let bytes = studio_ledger::read_bounded(image, studio_ledger::MAX_INPUT_BYTES)
+                        .map_err(|message| (2, message))?;
+                    let hash = studio_hash(&bytes);
+                    if bytes.len() as u64 != job.quote.input_bytes || hash != job.quote.input_hash {
+                        return Err((
+                            1,
+                            "the quoted input changed; request a new quote before accepting".into(),
+                        ));
+                    }
+                }
+                let journal = dir.join(format!("{id}.rehearsal.json"));
+                let mut ledger = studio_ledger::FakeLedger::rehearsing_journaled(&script, &journal)
+                    .map_err(|message| (1, message))?;
+                let result = match verb {
+                    "accept" => {
+                        if job.state == studio_ledger::HostedState::Quoted {
+                            studio_ledger::begin_accept(&mut job)
+                                .map_err(studio_error)
+                                .map_err(|message| (1, message))?;
+                            studio_ledger::save_job(&dir, &job).map_err(|message| (1, message))?;
+                        }
+                        studio_ledger::accept_job(&mut ledger, &mut job)
+                    }
+                    "status" => studio_ledger::poll_job(&mut ledger, &mut job),
+                    "cancel" => studio_ledger::cancel_job(&mut ledger, &mut job),
+                    "reconcile" => studio_ledger::reconcile_job(&mut ledger, &mut job),
+                    "retrieve" => {
+                        let Some(output) = output else {
+                            return Err((2, "studio retrieve needs --out <file>".into()));
+                        };
+                        let bytes = studio_ledger::retrieve_job(&mut ledger, &job)
+                            .map_err(studio_error)
+                            .map_err(|message| (1, message))?;
+                        if bytes.len() as u64 > studio_ledger::MAX_INPUT_BYTES {
+                            return Err((1, "the rehearsal result exceeds its bound".into()));
+                        }
+                        studio_write_new(output, &bytes).map_err(|message| (1, message))?;
+                        return Ok((
+                            serde_json::Map::from_iter([
+                                ("job".into(), serde_json::json!(id)),
+                                ("state".into(), serde_json::json!(job.state)),
+                                ("output".into(), serde_json::json!(path_text(output))),
+                                ("bytes".into(), serde_json::json!(bytes.len())),
+                            ]),
+                            0,
+                        ));
+                    }
+                    _ => unreachable!(),
+                };
+                let error = result.err().map(studio_error);
+                studio_ledger::save_job(&dir, &job).map_err(|message| (1, message))?;
+                let code = if matches!(
+                    job.state,
+                    studio_ledger::HostedState::Submitting | studio_ledger::HostedState::Unresolved
+                ) {
+                    1
+                } else {
+                    0
+                };
+                if let Some(error) = error {
+                    return Err((code.max(1), error));
+                }
+                Ok((
+                    serde_json::Map::from_iter([
+                        ("job".into(), serde_json::json!(id)),
+                        ("state".into(), serde_json::json!(job.state)),
+                        ("server_job".into(), serde_json::json!(job.server_job)),
+                        ("settlement".into(), serde_json::json!(job.settlement)),
+                    ]),
+                    code,
+                ))
+            }
+            _ => unreachable!(),
+        }
+    };
+    match run() {
+        Ok((fields, code)) => studio_fields(verb, json, code, fields, None),
+        Err((code, error)) => {
+            let mut fields = serde_json::Map::new();
+            if let Some(id) = job_id
+                && let Ok(job) = studio_ledger::load_job(&dir, id)
+            {
+                fields.insert("job".into(), serde_json::json!(id));
+                fields.insert("state".into(), serde_json::json!(job.state));
+                fields.insert("server_job".into(), serde_json::json!(job.server_job));
+            }
+            studio_fields(verb, json, code, fields, Some(error))
+        }
+    }
+}
+
 /// Supplier rehearsal verbs over a saved job: prepare mappings into attempts,
 /// submit them through an explicit `--fake` rehearsal intake, and reconcile,
 /// cancel or correct the queue. Reads the job library and the folder's files;
@@ -2535,16 +3015,61 @@ fn supplier_headless(
         eprintln!("press: supplier {verb} needs an attempt id");
         return 2;
     }
-    let Some(job) = supplier::open_job_for(target) else {
-        eprintln!("press: no saved job covers {}", target.display());
-        return 2;
+    let job = match supplier::open_job_for_checked(target) {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            eprintln!("press: no saved job covers {}", target.display());
+            return 2;
+        }
+        Err(message) => {
+            eprintln!("press: {message}");
+            return 2;
+        }
     };
     let Some(dir) = crate::job::dir() else {
         eprintln!("press: no config folder resolves on this machine");
         return 2;
     };
-    let mut log =
-        supplier::load_log(&dir, &job.id).unwrap_or_else(|_| supplier::AttemptLog::open(&job.id));
+    let _lock = match supplier::MutationLock::acquire(&dir, &job.id) {
+        Ok(lock) => lock,
+        Err(message) => {
+            eprintln!("press: {message}");
+            return 1;
+        }
+    };
+    let log_path = match supplier::attempt_log_path(&dir, &job.id) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("press: {message}");
+            return 1;
+        }
+    };
+    let mut log = match supplier::load_log(&dir, &job.id) {
+        Ok(log) => log,
+        Err(_message)
+            if matches!(
+                std::fs::symlink_metadata(&log_path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            ) =>
+        {
+            supplier::AttemptLog::open(&job.id)
+        }
+        Err(message) => {
+            eprintln!("press: {message}");
+            return 1;
+        }
+    };
+    if verb != "status"
+        && log
+            .attempts
+            .iter()
+            .any(|attempt| !attempt.context_complete())
+    {
+        eprintln!(
+            "press: supplier attempt log contains legacy attempts without full context; preserved, but cannot be reused"
+        );
+        return 1;
+    }
     let report = match verb {
         "prepare" => supplier_prepare(&dir, &job, &mut log, assignment, json),
         "submit" => supplier_submit(&dir, &job, &mut log, assignment, fake, json),
@@ -2579,8 +3104,7 @@ fn supplier_ready(
             "supplier prepare and submit need --assignment <file>".into(),
         ));
     };
-    let bytes = std::fs::read(path)
-        .map_err(|error| (2, format!("{} cannot be read: {error}", path.display())))?;
+    let bytes = supplier::read_bounded(path, "assignment").map_err(|message| (2, message))?;
     let assignment = supplier::parse_assignment(&bytes).map_err(|message| (2, message))?;
     let fingerprint = match crate::job::resolve_target(job, &target_library()) {
         Ok(None) => crate::recipe::fingerprint_settings(
@@ -2602,14 +3126,41 @@ fn supplier_ready(
 }
 
 /// The job's mappings in stable order: every verb walks the same sequence.
-fn supplier_mappings(job: &crate::job::Job) -> Vec<&crate::job::Mapping> {
-    let mut mappings: Vec<&crate::job::Mapping> = job
+fn supplier_mappings(
+    job: &crate::job::Job,
+) -> Vec<(&crate::job::ProductSet, &crate::job::Mapping)> {
+    let mut mappings: Vec<(&crate::job::ProductSet, &crate::job::Mapping)> = job
         .products
         .iter()
-        .flat_map(|product| product.mappings.iter())
+        .flat_map(|product| {
+            product
+                .mappings
+                .iter()
+                .map(move |mapping| (product, mapping))
+        })
         .collect();
-    mappings.sort_by(|left, right| left.id.cmp(&right.id));
+    mappings.sort_by(|left, right| left.1.id.cmp(&right.1.id));
     mappings
+}
+
+fn supplier_binding_error(
+    product: &crate::job::ProductSet,
+    assignment: &supplier::Assignment,
+    mapping: &crate::job::Mapping,
+) -> Option<String> {
+    let binding = product.binding.as_ref()?;
+    if binding.workspace != assignment.workspace
+        || binding.supplier != assignment.supplier
+        || binding.product != product.id
+        || binding.slot != mapping.role_id
+    {
+        Some(format!(
+            "mapping {:?} has a server binding outside assignment {:?}",
+            mapping.id, assignment.id
+        ))
+    } else {
+        None
+    }
 }
 
 fn supplier_prepare(
@@ -2620,10 +3171,22 @@ fn supplier_prepare(
     json: bool,
 ) -> Result<i32, (i32, String)> {
     let ready = supplier_ready(job, assignment)?;
+    log.validate_context(&ready.assignment)
+        .map_err(|message| (1, message))?;
     let mut prepared = Vec::new();
     let mut skipped = Vec::new();
-    for mapping in supplier_mappings(job) {
-        match supplier::prepare_mapping(log, &ready.assignment, &ready.fingerprint, mapping) {
+    for (product, mapping) in supplier_mappings(job) {
+        if let Some(reason) = supplier_binding_error(product, &ready.assignment, mapping) {
+            skipped.push(reason);
+            continue;
+        }
+        match supplier::prepare_mapping_for_product(
+            log,
+            &ready.assignment,
+            &ready.fingerprint,
+            &product.id,
+            mapping,
+        ) {
             supplier::PrepareOutcome::Ready(id) => prepared.push((mapping.id.clone(), id)),
             supplier::PrepareOutcome::Skipped(reason) => skipped.push(reason),
         }
@@ -2670,16 +3233,13 @@ fn supplier_fake(
             "supplier submit and reconcile rehearse with --fake <script>: no production intake exists yet".into(),
         ));
     };
-    let bytes = std::fs::read(path)
-        .map_err(|error| (2, format!("{} cannot be read: {error}", path.display())))?;
+    let bytes = supplier::read_bounded(path, "rehearsal script").map_err(|message| (2, message))?;
     let script = supplier::parse_script(&bytes).map_err(|message| (2, message))?;
     // Accepted receipts journal beside the attempt log under the job's id,
     // so later runs and other scripts reconcile what this one sent instead
     // of meeting a server with amnesia.
     let journal = dir.join(format!("{job_id}.rehearsal.json"));
-    Ok(supplier::FakeIntake::rehearsing_journaled(
-        &script, &journal,
-    ))
+    supplier::FakeIntake::rehearsing_journaled(&script, &journal).map_err(|message| (1, message))
 }
 
 fn supplier_submit(
@@ -2691,18 +3251,37 @@ fn supplier_submit(
     json: bool,
 ) -> Result<i32, (i32, String)> {
     let ready = supplier_ready(job, assignment)?;
+    log.validate_context(&ready.assignment)
+        .map_err(|message| (1, message))?;
     let mut intake = supplier_fake(fake, dir, &job.id)?;
     let mut sent = Vec::new();
     let mut failed = Vec::new();
-    for mapping in supplier_mappings(job) {
-        let attempt =
-            match supplier::prepare_mapping(log, &ready.assignment, &ready.fingerprint, mapping) {
-                supplier::PrepareOutcome::Ready(id) => id,
-                supplier::PrepareOutcome::Skipped(reason) => {
-                    failed.push(reason);
-                    continue;
-                }
-            };
+    for (product, mapping) in supplier_mappings(job) {
+        if let Some(reason) = supplier_binding_error(product, &ready.assignment, mapping) {
+            failed.push(reason);
+            continue;
+        }
+        let attempt = match supplier::prepare_mapping_for_product(
+            log,
+            &ready.assignment,
+            &ready.fingerprint,
+            &product.id,
+            mapping,
+        ) {
+            supplier::PrepareOutcome::Ready(id) => id,
+            supplier::PrepareOutcome::Skipped(reason) => {
+                failed.push(reason);
+                continue;
+            }
+        };
+        if log
+            .attempts
+            .iter()
+            .find(|known| known.id == attempt)
+            .is_some_and(|known| known.state != supplier::AttemptState::Prepared)
+        {
+            continue;
+        }
         let bytes = match std::fs::read(&mapping.source.path) {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -2715,6 +3294,7 @@ fn supplier_submit(
             Err(error) => failed.push(supplier_intake_error(&attempt, error)),
         }
     }
+    intake.save_journal().map_err(|message| (1, message))?;
     if json {
         write_json(&serde_json::json!({
             "schema_version": 1,
@@ -2738,7 +3318,6 @@ fn supplier_submit(
             eprintln!("press: {error}");
         }
     }
-    intake.save_journal();
     Ok(i32::from(!failed.is_empty()))
 }
 
@@ -2748,11 +3327,19 @@ fn supplier_intake_error(attempt: &str, error: supplier::IntakeError) -> String 
         supplier::IntakeError::PolicyChanged { current } => {
             format!("{attempt}: policy moved to {current}; refresh requirements and resubmit")
         }
-        supplier::IntakeError::Duplicate { receipt } => {
+        supplier::IntakeError::Duplicate { receipt, .. } => {
             format!("{attempt}: already received as {receipt}")
         }
         supplier::IntakeError::Transport(reason) => format!("{attempt}: {reason}"),
         supplier::IntakeError::Rejected { reason } => format!("{attempt}: rejected: {reason}"),
+        supplier::IntakeError::PayloadMismatch {
+            expected_hash,
+            actual_hash,
+            expected_bytes,
+            actual_bytes,
+        } => format!(
+            "{attempt}: prepared bytes do not match ({expected_bytes} bytes/{expected_hash}, got {actual_bytes} bytes/{actual_hash})"
+        ),
     }
 }
 
@@ -2833,10 +3420,9 @@ fn supplier_correct(
     let Some(rejected) = rejected else {
         return Err((1, format!("no attempt named {attempt:?} exists")));
     };
-    let Some(mapping) = supplier_mappings(job)
+    let Some((_, mapping)) = supplier_mappings(job)
         .into_iter()
-        .find(|mapping| mapping.id == rejected.mapping_id)
-        .cloned()
+        .find(|(_, mapping)| mapping.id == rejected.mapping_id)
     else {
         return Err((1, format!("mapping {:?} left the job", rejected.mapping_id)));
     };
@@ -2873,8 +3459,8 @@ fn supplier_reconcile(
     json: bool,
 ) -> Result<i32, (i32, String)> {
     let mut intake = supplier_fake(fake, dir, &log.job_id)?;
-    supplier::reconcile(dir, log, &mut intake);
-    intake.save_journal();
+    let failures = supplier::reconcile(dir, log, &mut intake).map_err(|message| (1, message))?;
+    intake.save_journal().map_err(|message| (1, message))?;
     let pending = log.pending().len();
     if json {
         write_json(&serde_json::json!({
@@ -2882,13 +3468,17 @@ fn supplier_reconcile(
             "command": "supplier",
             "verb": "reconcile",
             "pending": pending,
+            "failed": failures,
             "attempts": log.attempts,
         }))
         .map_err(|error| (1, format!("could not write JSON: {error}")))?;
     } else {
         outln!("reconciled; {pending} attempts still pending");
+        for failure in &failures {
+            eprintln!("press: {failure}");
+        }
     }
-    Ok(0)
+    Ok(i32::from(!failures.is_empty()))
 }
 
 fn update_headless() {

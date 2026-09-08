@@ -32,7 +32,57 @@ because its owning design still uses future tense.
 | W7: conveniences/sponsorship | Proposed expansion | Deferred; each gets an independent demand/security/economics decision |
 
 Read [engineering follow-up](engineering-follow-up.md) for exact observations.
-No runtime test was executed for this documentation refresh.
+No runtime test was executed for the original documentation refresh. The
+September 8 implementation follow-up below records later source and verification
+separately; the remaining obligations in this table still apply.
+
+## September 8 implementation follow-up
+
+Muse Spark's implementation through `e447f41` adds the following bounded slices.
+This follow-up starts at that commit and completes the interrupted hosted-service
+rehearsal, with Luna xhigh executing code and Codex reviewing it. These are local
+tools and fixtures, not confirmed Studio contracts or completed pilot journeys.
+
+| Slice | Source evidence | Remaining boundary |
+| --- | --- | --- |
+| F1 | `d3ed98a`: numeric recipe fingerprints include a processing revision; manifests record source hashes and compare them for reuse | The manifest hashes the source at record time, not from the decoder's input buffer. Full processing-boundary identity and GUI/CLI parity remain open |
+| F2 | `8d2462a`, `7062892`: portable paths reject traversal and enforce the chosen root; exported bindings and machine path hints are stripped | Metadata privacy preview, bounded reads throughout the older import/library paths, and native Windows filesystem proof remain open |
+| F3 | `93456ac`: recipe/job writes use shared replacement and refresh results check job revision | Same-root GUI loading is deterministic but still selects a job without an explicit choice; real-window late-result/restart proof remains open |
+| F4/A1 | `56e07dc`: black-box CLI fixtures cover JSON, named skips, failures, dry run and restore; bundled skill updated | Clean-install distribution evidence and the proposed A2/A3 saved-plan protocol remain open |
+| H1-H3 subset | `df76559`, `9f2031a`, `64adc5c`: validate a handoff file, map resources under a chosen root, and inspect a supplied deployment tree | No ImageGuide counterpart contract, browser deployment, or live re-audit is proved by a local tree check |
+| D1 subset | `0b8888c`: repeated `--target recipe=namespace` converts serially through the existing engine and reports each target | GUI target editing/execution, maintained D2 requirements and D3 catalogs are not delivered; memory measurements remain open |
+| S1-S3 rehearsal | `e447f41`: assignment fixtures, attempt files and explicit `--fake` submission/status/correction commands | Native authorization, canonical intake and an authorized retailer pilot remain blocked on S1 |
+| C1 rehearsal | Interrupted `src/studio_ledger.rs` and CLI completed in this follow-up | Fixture-only quote/accept/reconcile/cancel/retrieve behavior; no upload, hosted inference, real credit reservation or billing authority |
+
+The follow-up review also corrects supplier attempt identity/recovery and ensures
+each AVIF target executes with its saved speed. Local rehearsal commands must
+preserve corrupt recovery files, retain ambiguous outcomes for reconciliation,
+and refuse stale input or an existing retrieval destination.
+
+Verified on Linux x86_64 with Rust 1.97.1, against the working tree based on
+`e447f41` (no new commit or remote landing):
+
+- `cargo test --locked --quiet`: 619 passed, 2 ignored.
+- `cargo test --locked --features updater --quiet`: 635 passed, 3 ignored.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- `cargo fmt --check` and `git diff --check`: passed.
+- The built binary's `press skill` output matches its source document byte for byte.
+
+The process fixtures demonstrate corrupt supplier-history preservation, legacy
+attempt refusal, explicit assignment context, cancellation refusal after transfer,
+and receipt recovery across separate processes. Hosted fixtures demonstrate
+quote/accept/status/retrieve, stale-input refusal, lookup-only reconciliation,
+same-attempt explicit retry, expiry, and refusal to overwrite a retrieved file.
+An independent three-target AVIF run recorded speed 10, explicit default 6 and an
+unset default correctly; the repeated run converted zero files and skipped all
+three. The corresponding regression is in `tests/cli_contract.rs`.
+
+Legacy supplier attempts without assignment context remain inspectable but cannot
+be reused for effects. Fake supplier scripts specify each status step explicitly;
+they do not simulate autonomous server progress. No release, native UI
+demonstration, macOS/Windows run or live supplier/hosted pilot was performed.
+The next connected step remains a confirmed Studio contract and authorized pilot;
+the incomplete local foundation/GUI obligations in the table are still open.
 
 ## Work selection and dependencies
 

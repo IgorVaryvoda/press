@@ -85,11 +85,11 @@ press update                                    # install the latest signed rele
 `press --help` is the complete command reference. `audit` never writes. `convert`
 writes mirrored output under `optimized/`, or under `--output`/`-o` when you name a
 folder; the older `PATH --convert --avif` form remains compatible.
-`--skip-existing` leaves a source alone when its planned output is already there and
-is not older than the source. That is a timestamp comparison and nothing else: a
-change of format, quality or maximum edge is **not** noticed, and a file whose source
-has not moved keeps whatever the last run wrote. Clear the output folder when the
-settings change.
+`--skip-existing` checks recorded outputs against the effective recipe and available
+source content hash, so changed settings or detected source edits require another
+conversion. Older outputs without a record use timestamps. Each skipped file has a
+named reason in the JSON report; externally changed outputs retain the existing
+ownership checks.
 `--dry-run` writes nothing: it reports the name each file would be written to and
 projects the total from the same sample the window's estimate uses. With `--json`, stdout contains one document with
 exact byte counts, per-file findings or conversion outcomes, and named failures.
@@ -101,6 +101,13 @@ never established. Diagnostics stay on stderr. Exit `0` means complete success,
 The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discovered
 automatically by Codex when it runs here. Installed builds also carry the same text:
 `press skill` prints it for use by agents in another workspace.
+
+`press handoff` validates an imported ImageGuide report and can inspect mappings
+under an explicitly chosen local root. `press supplier` and `press studio` provide
+local service rehearsals with explicit `--fake` scripts. They do not submit to a
+retailer, upload images, run hosted AI or spend credits. See the
+[execution ledger](docs/workbench-execution-plan.md#september-8-implementation-follow-up)
+for the implemented slices and remaining integration work.
 
 Launched with no path it opens on an empty state: **Open folder…**, **Open images…**,
 or drop one folder or any number of images onto the window. The compact source menu

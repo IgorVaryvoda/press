@@ -572,6 +572,104 @@ fn convert_targets_write_each_namespace_with_its_recipe() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn target_manifest_speed(path: &Path) -> Option<u8> {
+    let manifest = std::fs::read_to_string(path).expect("the target manifest exists");
+    let line = manifest
+        .lines()
+        .next()
+        .expect("the manifest has one output");
+    serde_json::from_str::<serde_json::Value>(line)
+        .expect("the manifest line is JSON")["avif_speed"]
+        .as_u64()
+        .map(|speed| speed as u8)
+}
+
+fn write_target_recipe(dir: &Path, id: &str, speed: &str) {
+    std::fs::write(
+        dir.join(format!("{id}.json")),
+        format!(
+            r#"{{"schema":1,"id":"{id}","name":"{id}","revision":1,"provenance":"personal","format":"avif","quality":{{"lossy":60.0}},"max_edge":null,"avif_speed":{speed}}}"#
+        ),
+    )
+    .expect("the recipe is written");
+}
+
+#[test]
+fn target_recipes_record_normalized_avif_speed_and_skip_on_the_second_run() {
+    let dir = workdir("target-speed");
+    let root = dir.join("images");
+    let recipes = config_root(&dir).join("imageguide/recipes");
+    std::fs::create_dir_all(&root).expect("the image root is created");
+    std::fs::create_dir_all(&recipes).expect("the recipe folder is created");
+    photo(&root, "shot.png");
+    write_target_recipe(&recipes, "fast", "10");
+    write_target_recipe(&recipes, "explicit-default", "6");
+    write_target_recipe(&recipes, "ambient-default", "null");
+    let target = root.to_string_lossy().into_owned();
+    let first = supplier_run(
+        &dir,
+        &[
+            "convert",
+            &target,
+            "--target",
+            "fast=fast",
+            "--target",
+            "explicit-default=explicit-default",
+            "--target",
+            "ambient-default=ambient-default",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(stdout_json(&first)["summary"]["converted"], 3);
+    let output = root.join("optimized");
+    assert_eq!(
+        target_manifest_speed(&output.join("fast/.press-manifest.jsonl")),
+        Some(10)
+    );
+    assert_eq!(
+        target_manifest_speed(&output.join("explicit-default/.press-manifest.jsonl")),
+        None
+    );
+    assert_eq!(
+        target_manifest_speed(&output.join("ambient-default/.press-manifest.jsonl")),
+        None
+    );
+
+    let second = supplier_run(
+        &dir,
+        &[
+            "convert",
+            &target,
+            "--target",
+            "fast=fast",
+            "--target",
+            "explicit-default=explicit-default",
+            "--target",
+            "ambient-default=ambient-default",
+            "--skip-existing",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let report = stdout_json(&second);
+    assert_eq!(report["summary"]["converted"], 0);
+    assert_eq!(report["summary"]["skipped"], 3);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn convert_targets_refuse_before_writing_anything() {
     let dir = workdir("targets-refuse");
@@ -615,6 +713,14 @@ fn supplier_home(tag: &str) -> PathBuf {
     home
 }
 
+fn config_root(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support")
+    } else {
+        home.to_path_buf()
+    }
+}
+
 fn supplier_run(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_press"))
         .args(args)
@@ -633,7 +739,7 @@ fn supplier_fixture(home: &Path, tag: &str) -> (PathBuf, PathBuf) {
     let file = root.join("hero.png");
     std::fs::write(&file, photo_png()).expect("the photo is written");
     let bytes = std::fs::metadata(&file).expect("the photo stats").len();
-    let jobs = home.join("imageguide").join("jobs");
+    let jobs = config_root(home).join("imageguide").join("jobs");
     std::fs::create_dir_all(&jobs).expect("the job library is created");
     let job = format!(
         r#"{{"schema":1,"id":"rehearse","name":"Rehearsal","revision":1,"source_roots":[{root:?}],"target_recipe":null,"products":[{{"id":"hero","name":"Hero","sku_hint":"SKU-1","roles":[{{"id":"main","label":"Main","required":true}}],"mappings":[{{"id":"m1","role_id":"main","source":{{"path":{file:?},"bytes":{bytes},"modified":1700000000}}}}],"binding":null}}]}}"#,
@@ -673,7 +779,8 @@ fn supplier_prepare_submit_and_status_rehearse() {
     );
     assert_eq!(prepare.status.code(), Some(0), "{}", stderr(&prepare));
     assert!(
-        home.join("imageguide")
+        config_root(&home)
+            .join("imageguide")
             .join("jobs")
             .join("rehearse.attempts.json")
             .is_file(),
@@ -697,6 +804,140 @@ fn supplier_prepare_submit_and_status_rehearse() {
     let doc = stdout_json(&status);
     assert_eq!(doc["attempts"][0]["state"], "transferred");
     assert_eq!(doc["attempts"][0]["receipt"], "r-1");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_corrupt_attempt_log_is_reported_and_preserved() {
+    let home = supplier_home("corrupt-log");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "prepare", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let log = config_root(&home)
+        .join("imageguide")
+        .join("jobs")
+        .join("rehearse.attempts.json");
+    let damaged = br"{broken";
+    std::fs::write(&log, damaged).expect("the log is damaged");
+    let output = supplier_run(
+        &home,
+        &[
+            "supplier",
+            &root,
+            "prepare",
+            "--assignment",
+            &assignment,
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("does not parse"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(std::fs::read(&log).unwrap(), damaged);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_legacy_attempts_are_preserved_and_refused() {
+    let home = supplier_home("legacy-log");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let log = config_root(&home)
+        .join("imageguide")
+        .join("jobs")
+        .join("rehearse.attempts.json");
+    let legacy = br#"{"schema":1,"job_id":"rehearse","client_job_id":"cj-old","next_attempt":2,"attempts":[{"id":"a1","mapping_id":"m1","source_hash":"old","source_bytes":1,"slot":"main","recipe_fingerprint":"fp","policy_revision":"policy-7","state":"prepared","receipt":null,"correction_of":null}]}"#;
+    std::fs::write(&log, legacy).expect("the legacy log is written");
+    let output = supplier_run(
+        &home,
+        &["supplier", &root, "prepare", "--assignment", &assignment],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("legacy"), "{}", stderr(&output));
+    assert_eq!(std::fs::read(&log).unwrap(), legacy);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_refuses_to_choose_between_jobs_for_one_root() {
+    let home = supplier_home("ambiguous-job");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let jobs = config_root(&home).join("imageguide").join("jobs");
+    let original = std::fs::read_to_string(jobs.join("rehearse.json")).unwrap();
+    let other = original.replace("\"id\":\"rehearse\"", "\"id\":\"other\"");
+    std::fs::write(jobs.join("other.json"), other).unwrap();
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let output = supplier_run(
+        &home,
+        &["supplier", &root, "prepare", "--assignment", &assignment],
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("multiple saved jobs"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_transferred_attempt_cannot_be_cancelled() {
+    let home = supplier_home("cancel-transferred");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let script = fake_script(
+        &home,
+        "submit.json",
+        r#"{"attempts":{"a1":[{"accept":{"receipt":"r-1"}}]}}"#,
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "prepare", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &[
+                "supplier",
+                &root,
+                "submit",
+                "--assignment",
+                &assignment,
+                "--fake",
+                &script,
+            ]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let cancelled = supplier_run(&home, &["supplier", &root, "cancel", "a1"]);
+    assert_eq!(cancelled.status.code(), Some(1), "{}", stderr(&cancelled));
+    assert!(
+        stderr(&cancelled).contains("Transferred"),
+        "{}",
+        stderr(&cancelled)
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 

@@ -14,12 +14,61 @@
 //! queue instead of minting duplicates.
 
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 /// The only assignment and log schemas this Press reads.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// An attempt log larger than this is not a job queue.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
+
+fn valid_file_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= crate::job::MAX_ID_LEN
+        && id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+fn missing(path: &std::path::Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// Read a small control file after checking its size, so malformed input cannot
+/// make the rehearsal allocate an unbounded buffer.
+pub fn read_bounded(path: &std::path::Path, label: &str) -> Result<Vec<u8>, String> {
+    if !std::fs::metadata(path)
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?
+        .is_file()
+    {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+    if file
+        .metadata()
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?
+        .len()
+        > MAX_FILE_BYTES
+    {
+        return Err(format!(
+            "{label}s larger than {MAX_FILE_BYTES} bytes are refused"
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!(
+            "{label}s larger than {MAX_FILE_BYTES} bytes are refused"
+        ));
+    }
+    Ok(bytes)
+}
 
 /// One retailer's authorized ask: who may submit what, under which policy
 /// revisions, as resolved at one moment. Cached display, not authority: the
@@ -74,10 +123,14 @@ impl Assignment {
         if self.products.is_empty() {
             return Err("an assignment with no products names no work".into());
         }
+        let mut products = std::collections::HashSet::new();
         let mut slots = std::collections::HashSet::new();
         for product in &self.products {
             if product.id.trim().is_empty() {
                 return Err("every assigned product needs an id".into());
+            }
+            if !products.insert(product.id.as_str()) {
+                return Err(format!("duplicate product id {:?}", product.id));
             }
             for slot in &product.slots {
                 if slot.id.trim().is_empty() || slot.policy_revision.trim().is_empty() {
@@ -86,7 +139,7 @@ impl Assignment {
                         slot.id
                     ));
                 }
-                if !slots.insert(slot.id.as_str()) {
+                if !slots.insert((product.id.as_str(), slot.id.as_str())) {
                     return Err(format!("duplicate slot id {:?}", slot.id));
                 }
             }
@@ -140,11 +193,7 @@ impl AttemptState {
     pub fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Approved
-                | Self::Rejected
-                | Self::Delivered
-                | Self::DeliveryFailed
-                | Self::Cancelled
+            Self::Rejected | Self::Delivered | Self::DeliveryFailed | Self::Cancelled
         )
     }
 }
@@ -155,6 +204,16 @@ impl AttemptState {
 #[serde(deny_unknown_fields)]
 pub struct Attempt {
     pub id: String,
+    /// These fields are optional only for reading pre-rehearsal logs. Such
+    /// legacy attempts are retained but refused before any new effect.
+    #[serde(default)]
+    pub assignment_id: String,
+    #[serde(default)]
+    pub workspace: String,
+    #[serde(default)]
+    pub supplier: String,
+    #[serde(default)]
+    pub product: String,
     pub mapping_id: String,
     pub source_hash: String,
     pub source_bytes: u64,
@@ -166,6 +225,15 @@ pub struct Attempt {
     pub receipt: Option<String>,
     /// The rejected attempt this one corrects, if any.
     pub correction_of: Option<String>,
+}
+
+impl Attempt {
+    pub fn context_complete(&self) -> bool {
+        !self.assignment_id.is_empty()
+            && !self.workspace.is_empty()
+            && !self.supplier.is_empty()
+            && !self.product.is_empty()
+    }
 }
 
 /// The durable queue for one job: every attempt plus the counter the next
@@ -205,11 +273,16 @@ impl AttemptLog {
             .collect()
     }
 
-    /// Prepare one file for one slot. Retrying identical bytes reuses the
-    /// sender's identity; changed content, target or recipe mints a distinct
-    /// attempt so the server never confuses the two submissions.
-    pub fn prepare(
+    /// Prepare with the complete assignment context. The context is part of
+    /// retry identity: an identical file for another product or policy is a
+    /// different submission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_for_context(
         &mut self,
+        assignment_id: &str,
+        workspace: &str,
+        supplier: &str,
+        product: &str,
         mapping_id: &str,
         source_hash: &str,
         source_bytes: u64,
@@ -218,10 +291,16 @@ impl AttemptLog {
         policy_revision: &str,
     ) -> String {
         if let Some(known) = self.attempts.iter().find(|attempt| {
-            attempt.mapping_id == mapping_id
+            attempt.assignment_id == assignment_id
+                && attempt.workspace == workspace
+                && attempt.supplier == supplier
+                && attempt.product == product
+                && attempt.mapping_id == mapping_id
                 && attempt.source_hash == source_hash
+                && attempt.source_bytes == source_bytes
                 && attempt.slot == slot
                 && attempt.recipe_fingerprint == recipe_fingerprint
+                && attempt.policy_revision == policy_revision
                 && !attempt.state.terminal()
         }) {
             return known.id.clone();
@@ -230,6 +309,10 @@ impl AttemptLog {
         self.next_attempt += 1;
         self.attempts.push(Attempt {
             id: id.clone(),
+            assignment_id: assignment_id.into(),
+            workspace: workspace.into(),
+            supplier: supplier.into(),
+            product: product.into(),
             mapping_id: mapping_id.into(),
             source_hash: source_hash.into(),
             source_bytes,
@@ -243,6 +326,29 @@ impl AttemptLog {
         id
     }
 
+    /// Existing queue entries must all belong to the same assignment. Empty
+    /// context identifies an older format that cannot be safely redirected.
+    pub fn validate_context(&self, assignment: &Assignment) -> Result<(), String> {
+        for attempt in &self.attempts {
+            if !attempt.context_complete() {
+                return Err(format!(
+                    "attempt {:?} predates supplier context; preserved, but cannot be reused",
+                    attempt.id
+                ));
+            }
+            if attempt.assignment_id != assignment.id
+                || attempt.workspace != assignment.workspace
+                || attempt.supplier != assignment.supplier
+            {
+                return Err(format!(
+                    "attempt {:?} belongs to another assignment context; preserved, but cannot be redirected",
+                    attempt.id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Withdraw an unsent attempt. Server-accepted work is not un-sent by a
     /// client-side decision; cancel reports what actually happened instead.
     pub fn cancel(&mut self, attempt_id: &str) -> Result<(), String> {
@@ -253,8 +359,13 @@ impl AttemptLog {
         else {
             return Err(format!("no attempt named {attempt_id:?} exists"));
         };
+        if !attempt.context_complete() {
+            return Err(format!(
+                "attempt {attempt_id:?} predates supplier context; preserved, but cannot be changed"
+            ));
+        }
         match attempt.state {
-            AttemptState::Prepared | AttemptState::Transferred => {
+            AttemptState::Prepared => {
                 attempt.state = AttemptState::Cancelled;
                 Ok(())
             }
@@ -285,6 +396,11 @@ impl AttemptLog {
                 "attempt {rejected_id:?} is not rejected; only rejections take corrections"
             ));
         }
+        if !rejected.context_complete() {
+            return Err(format!(
+                "attempt {rejected_id:?} predates supplier context; preserved, but cannot be corrected"
+            ));
+        }
         let (mapping_id, slot, policy_revision) = (
             rejected.mapping_id.clone(),
             rejected.slot.clone(),
@@ -294,6 +410,10 @@ impl AttemptLog {
         self.next_attempt += 1;
         self.attempts.push(Attempt {
             id: id.clone(),
+            assignment_id: rejected.assignment_id.clone(),
+            workspace: rejected.workspace.clone(),
+            supplier: rejected.supplier.clone(),
+            product: rejected.product.clone(),
             mapping_id,
             source_hash: source_hash.into(),
             source_bytes,
@@ -325,11 +445,21 @@ pub enum IntakeError {
     /// The policy moved under a prepared attempt; refresh and revalidate.
     PolicyChanged { current: String },
     /// These exact bytes already have a receipt: reuse it, do not resend.
-    Duplicate { receipt: String },
+    Duplicate {
+        receipt: String,
+        state: AttemptState,
+    },
     /// The bytes did not arrive; the attempt stays unconfirmed.
     Transport(String),
     /// Review refused the asset.
     Rejected { reason: String },
+    /// The caller supplied bytes different from the prepared identity.
+    PayloadMismatch {
+        expected_hash: String,
+        actual_hash: String,
+        expected_bytes: u64,
+        actual_bytes: u64,
+    },
 }
 
 /// Canonical intake behind submissions. Implementations never invent server
@@ -340,14 +470,48 @@ pub trait Intake {
 }
 
 /// File holding one job's attempt log beside the job library.
-fn file_for(dir: &std::path::Path, job_id: &str) -> std::path::PathBuf {
-    dir.join(format!("{job_id}.attempts.json"))
+pub fn attempt_log_path(dir: &std::path::Path, job_id: &str) -> Result<std::path::PathBuf, String> {
+    if !valid_file_id(job_id) {
+        return Err(format!("job id {job_id:?} is not safe for a filename"));
+    }
+    Ok(dir.join(format!("{job_id}.attempts.json")))
+}
+
+/// A process-wide queue lock. `File::try_lock` releases the lock on process
+/// exit, while the lock file itself remains as a harmless stable inode.
+pub struct MutationLock {
+    _file: std::fs::File,
+}
+
+impl MutationLock {
+    pub fn acquire(dir: &std::path::Path, job_id: &str) -> Result<Self, String> {
+        if !valid_file_id(job_id) {
+            return Err(format!("job id {job_id:?} is not safe for a filename"));
+        }
+        std::fs::create_dir_all(dir).map_err(|error| format!("attempt library failed: {error}"))?;
+        let path = dir.join(format!(".{job_id}.supplier.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("supplier queue lock failed: {error}"))?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => {
+                "another supplier command is using this job".into()
+            }
+            std::fs::TryLockError::Error(error) => format!("supplier queue lock failed: {error}"),
+        })?;
+        Ok(Self { _file: file })
+    }
 }
 
 /// Persist the queue atomically through the shared commit: attempt IDs are
 /// allocated before sending, so the log on disk must already name an attempt
 /// its bytes may be in flight for.
 pub fn save_log(dir: &std::path::Path, log: &AttemptLog) -> Result<(), String> {
+    validate_log(log)?;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let pretty = serde_json::to_string_pretty(log)
         .map_err(|error| format!("attempt log does not serialize: {error}"))?;
@@ -355,7 +519,7 @@ pub fn save_log(dir: &std::path::Path, log: &AttemptLog) -> Result<(), String> {
         return Err("the attempt log outgrew its bound".into());
     }
     std::fs::create_dir_all(dir).map_err(|error| format!("attempt library failed: {error}"))?;
-    let path = file_for(dir, &log.job_id);
+    let path = attempt_log_path(dir, &log.job_id)?;
     let tmp = path.with_extension(format!(
         "tmp-{}-{}",
         std::process::id(),
@@ -372,11 +536,14 @@ pub fn save_log(dir: &std::path::Path, log: &AttemptLog) -> Result<(), String> {
 /// Reload a persisted queue: restart recovery restores named pending items,
 /// and the saved counter keeps new attempts distinct from old ones.
 pub fn load_log(dir: &std::path::Path, job_id: &str) -> Result<AttemptLog, String> {
-    let bytes = std::fs::read(file_for(dir, job_id))
-        .map_err(|_| format!("no attempt log for job {job_id:?} exists"))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err("the attempt log outgrew its bound".into());
-    }
+    let path = attempt_log_path(dir, job_id)?;
+    let bytes = read_bounded(&path, "attempt log").map_err(|error| {
+        if missing(&path) {
+            format!("no attempt log for job {job_id:?} exists")
+        } else {
+            error
+        }
+    })?;
     let log: AttemptLog = serde_json::from_slice(&bytes)
         .map_err(|error| format!("attempt log does not parse: {error}"))?;
     if log.schema != SCHEMA_VERSION {
@@ -388,28 +555,75 @@ pub fn load_log(dir: &std::path::Path, job_id: &str) -> Result<AttemptLog, Strin
     if log.job_id != job_id {
         return Err("the attempt log names a different job".into());
     }
+    validate_log(&log)?;
     Ok(log)
 }
 
-/// The saved job covering a folder, if the library holds one. Exact roots
-/// win over canonical-only matches, mirroring the window's loader tiers.
-pub fn open_job_for(root: &std::path::Path) -> Option<crate::job::Job> {
-    let dir = crate::job::dir()?;
+fn validate_log(log: &AttemptLog) -> Result<(), String> {
+    if log.schema != SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported attempt schema {} (this Press reads schema {SCHEMA_VERSION})",
+            log.schema
+        ));
+    }
+    if !valid_file_id(&log.job_id) {
+        return Err(format!(
+            "job id {:?} is not safe for a filename",
+            log.job_id
+        ));
+    }
+    if log.next_attempt == 0 {
+        return Err("the next attempt id must be positive".into());
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut highest = 0u32;
+    for attempt in &log.attempts {
+        if !valid_file_id(&attempt.id) || !ids.insert(&attempt.id) {
+            return Err(format!(
+                "attempt id {:?} is invalid or duplicated",
+                attempt.id
+            ));
+        }
+        if let Some(number) = attempt.id.strip_prefix('a').and_then(|id| id.parse().ok()) {
+            highest = highest.max(number);
+        }
+    }
+    if log.next_attempt <= highest {
+        return Err(format!(
+            "next attempt {} would reuse existing attempt a{highest}",
+            log.next_attempt
+        ));
+    }
+    Ok(())
+}
+
+/// The saved job covering a folder, if the library holds one. Multiple jobs
+/// for one root are an explicit choice the CLI cannot safely make for you.
+pub fn open_job_for_checked(root: &std::path::Path) -> Result<Option<crate::job::Job>, String> {
+    let Some(dir) = crate::job::dir() else {
+        return Ok(None);
+    };
     let (jobs, _) = crate::job::list(&dir);
-    jobs.iter()
-        .find(|job| job.source_roots.iter().any(|known| known == root))
-        .or_else(|| {
-            jobs.iter().find(|job| {
-                job.source_roots.iter().any(|known| {
-                    known == root
-                        || matches!(
-                            (std::fs::canonicalize(known), std::fs::canonicalize(root)),
-                            (Ok(left), Ok(right)) if left == right
-                        )
-                })
+    let matches: Vec<&crate::job::Job> = jobs
+        .iter()
+        .filter(|job| {
+            job.source_roots.iter().any(|known| {
+                known == root
+                    || matches!(
+                        (std::fs::canonicalize(known), std::fs::canonicalize(root)),
+                        (Ok(left), Ok(right)) if left == right
+                    )
             })
         })
-        .cloned()
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [job] => Ok(Some((*job).clone())),
+        _ => Err(format!(
+            "multiple saved jobs cover {}; choose one before running supplier",
+            root.display()
+        )),
+    }
 }
 
 /// What preparing one mapping produced: a sender identity, or why the
@@ -421,25 +635,29 @@ pub enum PrepareOutcome {
     Skipped(String),
 }
 
-/// Bind one mapped file to one assignment slot: the slot follows the
-/// mapping's role, the hash follows the bytes on disk right now, and the
-/// fingerprint follows the resolved target recipe. Retrying identical bytes
-/// reuses the attempt; anything changed mints a new one.
-pub fn prepare_mapping(
+/// Bind a mapping to the slot owned by its product. The product id is required
+/// because slot ids are scoped to products and may repeat across an assignment.
+pub fn prepare_mapping_for_product(
     log: &mut AttemptLog,
     assignment: &Assignment,
     fingerprint: &str,
+    product_id: &str,
     mapping: &crate::job::Mapping,
 ) -> PrepareOutcome {
-    let Some(slot) = assignment
+    let Some(product) = assignment
         .products
         .iter()
-        .flat_map(|product| product.slots.iter())
-        .find(|slot| slot.id == mapping.role_id)
+        .find(|product| product.id == product_id)
     else {
         return PrepareOutcome::Skipped(format!(
-            "mapping {:?} has no assignment slot {:?}",
-            mapping.id, mapping.role_id
+            "mapping {:?} has no assigned product {:?}",
+            mapping.id, product_id
+        ));
+    };
+    let Some(slot) = product.slots.iter().find(|slot| slot.id == mapping.role_id) else {
+        return PrepareOutcome::Skipped(format!(
+            "mapping {:?} has no assignment slot {:?} for product {:?}",
+            mapping.id, mapping.role_id, product_id
         ));
     };
     let metadata = match std::fs::metadata(&mapping.source.path) {
@@ -454,7 +672,11 @@ pub fn prepare_mapping(
             return PrepareOutcome::Skipped(format!("mapping {:?} cannot be read", mapping.id));
         }
     };
-    PrepareOutcome::Ready(log.prepare(
+    PrepareOutcome::Ready(log.prepare_for_context(
+        &assignment.id,
+        &assignment.workspace,
+        &assignment.supplier,
+        product_id,
         &mapping.id,
         &hash,
         metadata.len(),
@@ -485,56 +707,146 @@ pub fn submit_attempt<I: Intake>(
             "attempt {attempt_id:?} is already finished"
         )));
     }
-    save_log(dir, log).map_err(IntakeError::Transport)?;
+    if log.attempts[index].state != AttemptState::Prepared {
+        return Err(IntakeError::Transport(format!(
+            "attempt {attempt_id:?} is {:?}; reconcile before retrying",
+            log.attempts[index].state
+        )));
+    }
     let attempt = log.attempts[index].clone();
+    if !attempt.context_complete() {
+        return Err(IntakeError::Transport(format!(
+            "attempt {attempt_id:?} predates supplier context; preserved, but cannot be reused"
+        )));
+    }
+    let actual_hash = hash_bytes(bytes);
+    let actual_bytes = bytes.len() as u64;
+    if attempt.source_bytes != actual_bytes || attempt.source_hash != actual_hash {
+        return Err(IntakeError::PayloadMismatch {
+            expected_hash: attempt.source_hash,
+            actual_hash,
+            expected_bytes: attempt.source_bytes,
+            actual_bytes,
+        });
+    }
+    // A response can be lost after the intake accepts these bytes. Mark the
+    // operation in flight and durably save it before crossing that boundary.
+    log.attempts[index].state = AttemptState::Transferred;
+    save_log(dir, log).map_err(IntakeError::Transport)?;
     match intake.submit(&attempt, bytes) {
         Ok(receipt) => {
-            apply_receipt(log, &receipt);
-            let _ = save_log(dir, log);
+            apply_receipt(log, &receipt).map_err(IntakeError::Transport)?;
+            save_log(dir, log).map_err(IntakeError::Transport)?;
             Ok(receipt)
         }
-        Err(IntakeError::Duplicate { receipt }) => {
+        Err(IntakeError::Duplicate { receipt, state }) => {
             // The bytes already have a server identity: adopt it instead of
             // minting a second submission for the same content.
             let receipt = Receipt {
                 attempt_id: attempt_id.into(),
                 receipt,
-                state: AttemptState::Accepted,
+                state,
             };
-            apply_receipt(log, &receipt);
-            let _ = save_log(dir, log);
-            Ok(receipt)
+            apply_receipt(log, &receipt).map_err(IntakeError::Transport)?;
+            save_log(dir, log).map_err(IntakeError::Transport)?;
+            let attempt = &log.attempts[index];
+            Ok(Receipt {
+                attempt_id: attempt.id.clone(),
+                receipt: attempt.receipt.clone().unwrap_or(receipt.receipt),
+                state: attempt.state,
+            })
+        }
+        Err(
+            error @ (IntakeError::Revoked(_)
+            | IntakeError::PolicyChanged { .. }
+            | IntakeError::Rejected { .. }),
+        ) => {
+            // These answers are definitive refusals, so the prepared item can
+            // be retried after the assignment or bytes change. Transport
+            // errors stay Transferred because their server side is unknown.
+            log.attempts[index].state = AttemptState::Prepared;
+            save_log(dir, log).map_err(IntakeError::Transport)?;
+            Err(error)
         }
         Err(error) => Err(error),
     }
 }
 
+fn hash_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
 /// Look up every unconfirmed attempt after an interruption: an accepted
 /// attempt adopts the server's answer, and anything still unknown stays
 /// unconfirmed for a later lookup instead of being resent blindly.
-pub fn reconcile<I: Intake>(dir: &std::path::Path, log: &mut AttemptLog, intake: &mut I) {
-    let unconfirmed: Vec<String> = log
+pub fn reconcile<I: Intake>(
+    dir: &std::path::Path,
+    log: &mut AttemptLog,
+    intake: &mut I,
+) -> Result<Vec<String>, String> {
+    let ongoing: Vec<String> = log
         .attempts
         .iter()
-        .filter(|attempt| attempt.state == AttemptState::Transferred)
+        .filter(|attempt| {
+            matches!(
+                attempt.state,
+                AttemptState::Transferred
+                    | AttemptState::Accepted
+                    | AttemptState::AwaitingReview
+                    | AttemptState::Approved
+            )
+        })
         .map(|attempt| attempt.id.clone())
         .collect();
-    for attempt_id in unconfirmed {
-        if let Ok(receipt) = intake.status(&attempt_id) {
-            apply_receipt(log, &receipt);
+    let mut failures = Vec::new();
+    for attempt_id in ongoing {
+        match intake.status(&attempt_id) {
+            Ok(receipt) => {
+                if let Err(error) = apply_receipt(log, &receipt) {
+                    failures.push(format!("{attempt_id}: {error}"));
+                }
+            }
+            Err(error) => failures.push(format!("{attempt_id}: {error:?}")),
         }
     }
-    let _ = save_log(dir, log);
+    save_log(dir, log)?;
+    Ok(failures)
 }
 
-fn apply_receipt(log: &mut AttemptLog, receipt: &Receipt) {
+fn apply_receipt(log: &mut AttemptLog, receipt: &Receipt) -> Result<(), String> {
     if let Some(attempt) = log
         .attempts
         .iter_mut()
         .find(|attempt| attempt.id == receipt.attempt_id)
     {
-        attempt.state = receipt.state;
-        attempt.receipt = Some(receipt.receipt.clone());
+        if attempt.state.terminal() {
+            return Ok(());
+        }
+        // A receipt may refresh the details for the same state or advance it;
+        // equal-rank states such as Approved and Rejected are not interchangeable.
+        if receipt.state == attempt.state || state_rank(receipt.state) > state_rank(attempt.state) {
+            attempt.state = receipt.state;
+            attempt.receipt = Some(receipt.receipt.clone());
+        }
+        Ok(())
+    } else {
+        Err(format!(
+            "receipt names unknown attempt {:?}",
+            receipt.attempt_id
+        ))
+    }
+}
+
+fn state_rank(state: AttemptState) -> u8 {
+    match state {
+        AttemptState::Prepared => 0,
+        AttemptState::Transferred => 1,
+        AttemptState::Accepted => 2,
+        AttemptState::AwaitingReview => 3,
+        AttemptState::Approved | AttemptState::Rejected => 4,
+        AttemptState::Delivered | AttemptState::DeliveryFailed => 5,
+        AttemptState::Cancelled => 6,
     }
 }
 
@@ -622,25 +934,51 @@ impl FakeIntake {
     /// Rehearse with the accepted receipts journaled beside the script, so a
     /// later process reconciles what this one sent. Deleting the journal
     /// replays the script from a server that remembers nothing.
-    pub fn rehearsing_journaled(script: &FakeScript, journal: &std::path::Path) -> Self {
+    pub fn rehearsing_journaled(
+        script: &FakeScript,
+        journal: &std::path::Path,
+    ) -> Result<Self, String> {
         let mut intake = Self::rehearsing(script);
         intake.journal = Some(journal.to_path_buf());
-        if let Ok(bytes) = std::fs::read(journal)
-            && let Ok(accepted) = serde_json::from_slice(&bytes)
-        {
-            intake.accepted = accepted;
+        match read_bounded(journal, "rehearsal journal") {
+            Ok(bytes) => {
+                intake.accepted = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("rehearsal journal does not parse: {error}"))?;
+            }
+            Err(_error) if missing(journal) => {}
+            Err(error) => return Err(error),
         }
-        intake
+        Ok(intake)
     }
 
-    /// Persist accepted receipts for the next process. Best effort, like all
-    /// rehearsal bookkeeping: the attempt log stays the durable queue.
-    pub fn save_journal(&self) {
-        if let Some(path) = &self.journal
-            && let Ok(bytes) = serde_json::to_vec_pretty(&self.accepted)
-        {
-            let _ = std::fs::write(path, bytes);
+    /// Persist accepted receipts for the next process through the same atomic
+    /// replacement used by the other local ledgers. A failed journal save is a
+    /// failed command, never a reason to forget what the fake accepted.
+    pub fn save_journal(&self) -> Result<(), String> {
+        let Some(path) = &self.journal else {
+            return Ok(());
+        };
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let bytes = serde_json::to_vec_pretty(&self.accepted)
+            .map_err(|error| format!("rehearsal journal does not serialize: {error}"))?;
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err("the rehearsal journal outgrew its bound".into());
         }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("rehearsal journal directory failed: {error}"))?;
+        }
+        let tmp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&tmp, bytes)
+            .map_err(|error| format!("rehearsal journal write failed: {error}"))?;
+        crate::settings::replace_file(&tmp, path).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("rehearsal journal write failed: {error}")
+        })
     }
 }
 
@@ -649,6 +987,7 @@ impl Intake for FakeIntake {
         if let Some(known) = self.accepted.get(&attempt.id) {
             return Err(IntakeError::Duplicate {
                 receipt: known.receipt.clone(),
+                state: known.state,
             });
         }
         match self.next(&attempt.id) {
@@ -659,6 +998,7 @@ impl Intake for FakeIntake {
                     state: AttemptState::Transferred,
                 };
                 self.accepted.insert(attempt.id.clone(), receipt.clone());
+                self.save_journal().map_err(IntakeError::Transport)?;
                 Ok(receipt)
             }
             Some(FakeAnswer::Revoked) => Err(IntakeError::Revoked(format!(
@@ -689,6 +1029,7 @@ impl Intake for FakeIntake {
                     state,
                 };
                 self.accepted.insert(attempt_id.into(), receipt.clone());
+                self.save_journal().map_err(IntakeError::Transport)?;
                 Ok(receipt)
             }
             _ => Ok(known),
@@ -712,7 +1053,23 @@ mod tests {
     }
 
     fn prepared(log: &mut AttemptLog) -> String {
-        log.prepare("m1", "hash-1", 16, "main", "fp-1", "policy-7")
+        let bytes = prepared_bytes();
+        log.prepare_for_context(
+            "assign-1",
+            "retailer",
+            "studio-9",
+            "hero",
+            "m1",
+            &hash_bytes(bytes),
+            bytes.len() as u64,
+            "main",
+            "fp-1",
+            "policy-7",
+        )
+    }
+
+    fn prepared_bytes() -> &'static [u8] {
+        b"0123456789abcdef"
     }
 
     #[test]
@@ -720,10 +1077,38 @@ mod tests {
         let mut log = queue();
         let first = prepared(&mut log);
         assert_eq!(prepared(&mut log), first, "a retry resends, not re-mints");
+        let policy_change = log.prepare_for_context(
+            "assign-1",
+            "retailer",
+            "studio-9",
+            "hero",
+            "m1",
+            &hash_bytes(prepared_bytes()),
+            prepared_bytes().len() as u64,
+            "main",
+            "fp-1",
+            "policy-8",
+        );
+        assert_ne!(
+            policy_change, first,
+            "a policy change creates a new attempt"
+        );
         // Changed bytes mint a distinct attempt for a distinct submission.
-        let second = log.prepare("m1", "hash-2", 18, "main", "fp-1", "policy-7");
+        let second = log.prepare_for_context(
+            "assign-1", "retailer", "studio-9", "hero", "m1", "hash-2", 18, "main", "fp-1",
+            "policy-7",
+        );
         assert_ne!(second, first);
-        assert_eq!(log.attempts.len(), 2);
+        assert_eq!(log.attempts.len(), 3);
+    }
+
+    #[test]
+    fn an_existing_attempt_cannot_be_redirected_to_another_assignment() {
+        let mut log = queue();
+        prepared(&mut log);
+        let mut changed = assignment();
+        changed.id = "assign-2".into();
+        assert!(log.validate_context(&changed).is_err());
     }
 
     #[test]
@@ -738,7 +1123,7 @@ mod tests {
                 receipt: "r-1".into(),
             }],
         );
-        let receipt = submit_attempt(&dir, &mut log, &mut intake, &id, b"bytes").unwrap();
+        let receipt = submit_attempt(&dir, &mut log, &mut intake, &id, prepared_bytes()).unwrap();
         assert_eq!(receipt.state, AttemptState::Transferred);
         assert_eq!(log.attempts[0].state, AttemptState::Transferred);
         // Restart recovery restores the named attempt with its counter.
@@ -756,7 +1141,8 @@ mod tests {
         let id = prepared(&mut log);
         let mut intake = FakeIntake::default();
         intake.script(&id, vec![FakeAnswer::Revoked]);
-        let refused = submit_attempt(&dir, &mut log, &mut intake, &id, b"bytes").unwrap_err();
+        let refused =
+            submit_attempt(&dir, &mut log, &mut intake, &id, prepared_bytes()).unwrap_err();
         assert!(matches!(refused, IntakeError::Revoked(_)));
         assert_eq!(log.attempts[0].state, AttemptState::Prepared);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -778,17 +1164,23 @@ mod tests {
                     receipt: "r-1".into(),
                     state: AttemptState::Accepted,
                 },
+                FakeAnswer::Advance {
+                    receipt: "r-1".into(),
+                    state: AttemptState::AwaitingReview,
+                },
             ],
         );
-        submit_attempt(&dir, &mut log, &mut intake, &id, b"bytes").unwrap();
+        submit_attempt(&dir, &mut log, &mut intake, &id, prepared_bytes()).unwrap();
         // The reply never arrived, but the server took it: lookup adopts the
         // accepted answer instead of minting a duplicate submission.
-        reconcile(&dir, &mut log, &mut intake);
+        reconcile(&dir, &mut log, &mut intake).unwrap();
         assert_eq!(log.attempts[0].state, AttemptState::Accepted);
         assert_eq!(log.attempts[0].receipt.as_deref(), Some("r-1"));
-        // A retry of the same bytes meets the duplicate answer, not a second job.
-        let again = submit_attempt(&dir, &mut log, &mut intake, &id, b"bytes").unwrap();
-        assert_eq!(again.receipt, "r-1");
+        reconcile(&dir, &mut log, &mut intake).unwrap();
+        assert_eq!(log.attempts[0].state, AttemptState::AwaitingReview);
+        // An ambiguous retry must reconcile first, not create another job.
+        let again = submit_attempt(&dir, &mut log, &mut intake, &id, prepared_bytes()).unwrap_err();
+        assert!(matches!(again, IntakeError::Transport(reason) if reason.contains("reconcile")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -796,8 +1188,30 @@ mod tests {
     fn partial_batches_and_restarts_keep_successful_siblings() {
         let dir = store("partial");
         let mut log = queue();
-        let first = log.prepare("m1", "hash-1", 16, "main", "fp-1", "policy-7");
-        let second = log.prepare("m2", "hash-2", 16, "detail", "fp-1", "policy-7");
+        let first = log.prepare_for_context(
+            "assign-1",
+            "retailer",
+            "studio-9",
+            "hero",
+            "m1",
+            &hash_bytes(b"one"),
+            3,
+            "main",
+            "fp-1",
+            "policy-7",
+        );
+        let second = log.prepare_for_context(
+            "assign-1",
+            "retailer",
+            "studio-9",
+            "hero",
+            "m2",
+            &hash_bytes(b"two"),
+            3,
+            "detail",
+            "fp-1",
+            "policy-7",
+        );
         let mut intake = FakeIntake::default();
         intake.script(
             &first,
@@ -829,6 +1243,94 @@ mod tests {
         assert_eq!(log.attempts[0].state, AttemptState::Cancelled);
         assert!(log.cancel(&id).is_err(), "withdrawing twice fails");
         assert!(log.cancel("nope").is_err());
+        let id = log.prepare_for_context(
+            "assign-1",
+            "retailer",
+            "studio-9",
+            "hero",
+            "m2",
+            &hash_bytes(b"two"),
+            3,
+            "main",
+            "fp-1",
+            "policy-7",
+        );
+        log.attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == id)
+            .unwrap()
+            .state = AttemptState::Transferred;
+        assert!(
+            log.cancel(&id).is_err(),
+            "in-flight work cannot be cancelled locally"
+        );
+    }
+
+    #[test]
+    fn a_payload_change_is_refused_before_the_intake_is_called() {
+        let dir = store("payload");
+        let mut log = queue();
+        let id = prepared(&mut log);
+        let mut intake = FakeIntake::default();
+        intake.script(
+            &id,
+            vec![FakeAnswer::Accept {
+                receipt: "r-1".into(),
+            }],
+        );
+        let refused = submit_attempt(&dir, &mut log, &mut intake, &id, b"changed").unwrap_err();
+        assert!(matches!(refused, IntakeError::PayloadMismatch { .. }));
+        assert_eq!(log.attempts[0].state, AttemptState::Prepared);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn approved_attempts_reconcile_until_delivery_is_known() {
+        let dir = store("approved");
+        let mut log = queue();
+        let id = prepared(&mut log);
+        log.attempts[0].state = AttemptState::Approved;
+        log.attempts[0].receipt = Some("approved".into());
+        let mut intake = FakeIntake::default();
+        intake.accepted.insert(
+            id.clone(),
+            Receipt {
+                attempt_id: id.clone(),
+                receipt: "approved".into(),
+                state: AttemptState::Approved,
+            },
+        );
+        intake.script(
+            &id,
+            vec![FakeAnswer::Advance {
+                receipt: "delivered".into(),
+                state: AttemptState::Delivered,
+            }],
+        );
+        reconcile(&dir, &mut log, &mut intake).unwrap();
+        assert_eq!(log.attempts[0].state, AttemptState::Delivered);
+        assert_eq!(log.attempts[0].receipt.as_deref(), Some("delivered"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn duplicate_retry_keeps_the_newest_canonical_state() {
+        let dir = store("duplicate-state");
+        let mut log = queue();
+        let id = prepared(&mut log);
+        let mut intake = FakeIntake::default();
+        intake.accepted.insert(
+            id.clone(),
+            Receipt {
+                attempt_id: id.clone(),
+                receipt: "accepted".into(),
+                state: AttemptState::Accepted,
+            },
+        );
+        let receipt = submit_attempt(&dir, &mut log, &mut intake, &id, prepared_bytes()).unwrap();
+        assert_eq!(receipt.state, AttemptState::Accepted);
+        assert_eq!(receipt.receipt, "accepted");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -861,7 +1363,8 @@ mod tests {
                 current: "policy-8".into(),
             }],
         );
-        let refused = submit_attempt(&dir, &mut log, &mut intake, &id, b"bytes").unwrap_err();
+        let refused =
+            submit_attempt(&dir, &mut log, &mut intake, &id, prepared_bytes()).unwrap_err();
         assert!(matches!(refused, IntakeError::PolicyChanged { .. }));
         assert_eq!(log.attempts[0].state, AttemptState::Prepared);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -908,8 +1411,77 @@ mod tests {
                 requirements: Vec::new(),
             }],
         });
-        assert!(cloned.validate().is_err(), "slot ids stay unique");
+        cloned.validate().unwrap();
+        cloned.products[1].id = "hero".into();
+        assert!(cloned.validate().is_err(), "product ids stay unique");
         assert!(parse_assignment(&vec![7u8; MAX_FILE_BYTES as usize + 1]).is_err());
+    }
+
+    #[test]
+    fn same_slot_name_is_scoped_to_its_product() {
+        let mut assignment = assignment();
+        assignment.products.push(AssignedProduct {
+            id: "detail-product".into(),
+            slots: vec![AssignedSlot {
+                id: "main".into(),
+                policy_revision: "policy-9".into(),
+                requirements: Vec::new(),
+            }],
+        });
+        assignment.validate().unwrap();
+        let dir = store("product-slot");
+        let file = dir.join("detail.png");
+        std::fs::write(&file, b"detail").unwrap();
+        let mapping = crate::job::Mapping {
+            id: "m-detail".into(),
+            role_id: "main".into(),
+            source: crate::job::SourceRef {
+                path: file,
+                bytes: 6,
+                modified: None,
+            },
+        };
+        let mut log = queue();
+        let PrepareOutcome::Ready(id) =
+            prepare_mapping_for_product(&mut log, &assignment, "fp-1", "detail-product", &mapping)
+        else {
+            panic!("the product-owned slot prepares");
+        };
+        assert_eq!(log.attempts[0].id, id);
+        assert_eq!(log.attempts[0].product, "detail-product");
+        assert_eq!(log.attempts[0].policy_revision, "policy-9");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn damaged_ledgers_are_reported_without_erasing_the_last_bytes() {
+        let dir = store("damaged");
+        let path = attempt_log_path(&dir, "job-1").unwrap();
+        let damaged = br"{broken";
+        std::fs::write(&path, damaged).unwrap();
+        assert!(load_log(&dir, "job-1").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+
+        let journal = dir.join("rehearsal.json");
+        std::fs::write(&journal, damaged).unwrap();
+        let script = FakeScript::default();
+        assert!(FakeIntake::rehearsing_journaled(&script, &journal).is_err());
+        assert_eq!(std::fs::read(&journal).unwrap(), damaged);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_counters_and_duplicate_attempts_are_refused() {
+        let dir = store("counter");
+        let mut log = queue();
+        let id = prepared(&mut log);
+        let duplicate = log.attempts[0].clone();
+        log.attempts.push(duplicate);
+        assert!(save_log(&dir, &log).is_err());
+        log.attempts.truncate(1);
+        log.next_attempt = id[1..].parse::<u32>().unwrap();
+        assert!(save_log(&dir, &log).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -921,6 +1493,10 @@ mod tests {
         let mut intake = FakeIntake::rehearsing(&script);
         let attempt = Attempt {
             id: "a1".into(),
+            assignment_id: "assign-1".into(),
+            workspace: "retailer".into(),
+            supplier: "studio-9".into(),
+            product: "hero".into(),
             mapping_id: "m1".into(),
             source_hash: "h".into(),
             source_bytes: 1,
@@ -952,12 +1528,14 @@ mod tests {
         };
         let assignment = assignment();
         let mut log = queue();
-        let PrepareOutcome::Ready(id) = prepare_mapping(&mut log, &assignment, "fp-1", &mapping)
+        let PrepareOutcome::Ready(id) =
+            prepare_mapping_for_product(&mut log, &assignment, "fp-1", "hero", &mapping)
         else {
             panic!("the mapped file prepares");
         };
         // Same bytes again reuses the identity.
-        let PrepareOutcome::Ready(same) = prepare_mapping(&mut log, &assignment, "fp-1", &mapping)
+        let PrepareOutcome::Ready(same) =
+            prepare_mapping_for_product(&mut log, &assignment, "fp-1", "hero", &mapping)
         else {
             panic!("identical bytes reuse the attempt");
         };
@@ -968,7 +1546,7 @@ mod tests {
             source: mapping.source.clone(),
         };
         assert!(matches!(
-            prepare_mapping(&mut log, &assignment, "fp-1", &stray),
+            prepare_mapping_for_product(&mut log, &assignment, "fp-1", "hero", &stray),
             PrepareOutcome::Skipped(_)
         ));
         let gone = crate::job::Mapping {
@@ -981,7 +1559,7 @@ mod tests {
             },
         };
         assert!(matches!(
-            prepare_mapping(&mut log, &assignment, "fp-1", &gone),
+            prepare_mapping_for_product(&mut log, &assignment, "fp-1", "hero", &gone),
             PrepareOutcome::Skipped(_)
         ));
         std::fs::remove_dir_all(&dir).unwrap();
