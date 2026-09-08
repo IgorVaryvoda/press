@@ -286,13 +286,21 @@ impl Audit {
         cx.notify();
     }
 
-    pub(super) fn open_job_export_preview(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn open_job_export_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.converting || self.job_choice_pending() {
             return;
         }
         match self.work_job.export_draft(&self.root) {
             Ok(draft) => {
                 self.job_export_preview = Some(draft);
+                // `sets-section` is the last child of the rail settings area.
+                // Scroll it to the top before focusing the first review action,
+                // so opening Export always gives the user a visible decision.
+                let item = 2 + usize::from(!self.recipes_skipped.is_empty());
+                self.rail_scroll.scroll_to_top_of_item(item);
+                cx.defer_in(window, |audit, window, cx| {
+                    window.focus(&audit.job_export_preview_focus, cx);
+                });
                 cx.notify();
             }
             Err(message) => {

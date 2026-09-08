@@ -476,6 +476,7 @@ impl Audit {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.rail_scroll)
                     .gap_3()
                     .px_4()
                     .py_2()
@@ -1201,20 +1202,15 @@ impl Audit {
         let preview = &draft.preview;
         let cancel = cx.entity().downgrade();
         let export = cx.entity().downgrade();
-        div()
-            .debug_selector(|| "sets-export-preview".into())
+        let details = div()
+            .id("sets-export-preview-details")
+            .debug_selector(|| "sets-export-preview-details".into())
             .flex()
             .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .gap_1()
-            .p_2()
-            .border_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Review shared job export"),
-            )
             .child(format!("Job: {}", preview.job_name))
             .child(
                 div()
@@ -1248,7 +1244,24 @@ impl Audit {
             .child(format!(
                 "Excluded: {} connected binding(s), base path hint",
                 preview.binding_count
-            ))
+            ));
+        div()
+            .debug_selector(|| "sets-export-preview".into())
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .max_h(px(320.))
+            .gap_1()
+            .p_2()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Review shared job export"),
+            )
+            .child(details)
             .child(
                 div()
                     .flex()
@@ -1257,6 +1270,7 @@ impl Audit {
                         Button::new("sets-export-confirm")
                             .small()
                             .outline()
+                            .track_focus(&self.job_export_preview_focus)
                             .label("Export…")
                             .on_click(move |_, _, cx| {
                                 if let Some(audit) = export.upgrade() {
@@ -1394,9 +1408,15 @@ impl Audit {
                                     move |_, _, cx| act(&import, cx, Audit::import_job_file),
                                 ))
                                 .item(
-                                    PopupMenuItem::new("Export job…").on_click(move |_, _, cx| {
-                                        act(&export, cx, Audit::open_job_export_preview)
-                                    }),
+                                    PopupMenuItem::new("Export job…").on_click(
+                                        move |_, window, cx| {
+                                            if let Some(audit) = export.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    audit.open_job_export_preview(window, cx);
+                                                });
+                                            }
+                                        },
+                                    ),
                                 )
                             }),
                     ),
