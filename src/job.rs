@@ -4,10 +4,10 @@
 //!
 //! Files are versioned JSON beside the settings file, written atomically and
 //! parsed strictly like recipes. A portable export carries the same job with
-//! paths relative to one base plus that base as a display hint; importing
-//! chooses a new root, and anything that does not resolve there becomes a
-//! relink state instead of a guess. The model holds no credentials, tokens,
-//! prompts, or contact details, so there is nothing private to strip.
+//! paths relative to one base plus that base as a legacy display hint;
+//! importing chooses a new root, and anything that does not resolve there
+//! becomes a relink state instead of a guess. Shared exports retain product
+//! names and SKU hints for review, while machine paths and bindings stay out.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,19 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// Jobs hold mappings, so the cap sits above the recipe file cap.
 pub const MAX_FILE_BYTES: u64 = 256 * 1024;
+
+/// CSV mapping sheets are larger than jobs but still bounded before parsing.
+pub const MAX_CSV_BYTES: usize = 1 << 20;
+pub const MAX_CSV_LINES: usize = 16_384;
+pub const MAX_CSV_FIELD_BYTES: usize = 4 * 1024;
+
+/// A byte-bounded import still needs collection caps: a small JSON document
+/// can otherwise contain many empty rows and make later renders walk them.
+pub const MAX_SOURCE_ROOTS: usize = 64;
+pub const MAX_TARGETS: usize = 64;
+pub const MAX_PRODUCTS: usize = 4_096;
+pub const MAX_ROLES_PER_PRODUCT: usize = 256;
+pub const MAX_MAPPINGS_PER_PRODUCT: usize = 8_192;
 
 /// More than this many saved jobs is a catalog problem this app does not have.
 pub const MAX_JOBS: usize = 64;
@@ -120,9 +133,9 @@ pub struct JobTarget {
     pub out: std::path::PathBuf,
 }
 
-/// The portable form: identical except every path is relative to one base,
-/// with that base kept as a display hint only. Importing never reads through
-/// the hint; it joins the new root the user chose.
+/// The portable form: identical except every path is relative to one base.
+/// Older files may carry a display hint, but current exports omit it because
+/// it is machine metadata and importing never uses it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableJob {
@@ -130,6 +143,7 @@ pub struct PortableJob {
     pub id: String,
     pub name: String,
     pub revision: u32,
+    #[serde(default, skip_serializing)]
     pub base_hint: String,
     pub source_roots: Vec<std::path::PathBuf>,
     pub target_recipe: Option<String>,
@@ -149,6 +163,7 @@ pub struct PortableProduct {
     pub sku_hint: String,
     pub roles: Vec<Role>,
     pub mappings: Vec<PortableMapping>,
+    #[serde(default, skip_serializing)]
     pub binding: Option<ServerBinding>,
 }
 
@@ -168,6 +183,126 @@ pub struct PortableSource {
     pub path: std::path::PathBuf,
     pub bytes: u64,
     pub modified: Option<u64>,
+}
+
+/// Read a selected import file only after its size is known to be within the
+/// caller's bound. The second check handles a file that grows between stat and
+/// read, so parser callers never receive an oversized allocation.
+pub fn read_bounded(path: &std::path::Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("{kind} {} cannot be read: {error}", path.display()))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "{kind} {} is larger than {max_bytes} bytes",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    std::fs::File::open(path)
+        .map_err(|error| format!("{kind} {} cannot be read: {error}", path.display()))?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{kind} {} cannot be read: {error}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "{kind} {} grew beyond {max_bytes} bytes while it was read",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn source_is_confined(path: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    let Ok(resolved) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| resolved.starts_with(root))
+}
+
+/// The metadata a user sees before committing a portable export. Names and
+/// SKU hints are useful but can be private, so the preview makes that choice
+/// visible beside the explicit Export action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportPreview {
+    pub job_name: String,
+    pub source_roots: Vec<String>,
+    pub products: Vec<ExportProductPreview>,
+    pub binding_count: usize,
+    pub strips_machine_path: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportProductPreview {
+    pub name: String,
+    pub sku: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportDraft {
+    pub preview: ExportPreview,
+    pub bytes: Vec<u8>,
+    pub job_id: String,
+    pub revision: u32,
+}
+
+impl ExportPreview {
+    fn from_portable(portable: &PortableJob, binding_count: usize) -> Self {
+        Self {
+            job_name: portable.name.clone(),
+            source_roots: portable
+                .source_roots
+                .iter()
+                .map(|path| {
+                    let text = path.to_string_lossy();
+                    if text.is_empty() {
+                        ".".into()
+                    } else {
+                        text.into_owned()
+                    }
+                })
+                .collect(),
+            products: portable
+                .products
+                .iter()
+                .map(|product| ExportProductPreview {
+                    name: product.name.clone(),
+                    sku: product.sku_hint.clone(),
+                    files: product
+                        .mappings
+                        .iter()
+                        .map(|mapping| mapping.source.path.to_string_lossy().into_owned())
+                        .collect(),
+                })
+                .collect(),
+            binding_count,
+            strips_machine_path: true,
+        }
+    }
+}
+
+impl Job {
+    pub fn export_draft(&self, base: &std::path::Path) -> Result<ExportDraft, String> {
+        let portable = self.to_portable(base)?;
+        let bytes = serde_json::to_vec_pretty(&portable)
+            .map_err(|error| format!("the job does not serialize: {error}"))?;
+        Ok(ExportDraft {
+            preview: ExportPreview::from_portable(
+                &portable,
+                self.products
+                    .iter()
+                    .filter(|product| product.binding.is_some())
+                    .count(),
+            ),
+            bytes,
+            job_id: self.id.clone(),
+            revision: self.revision,
+        })
+    }
 }
 
 impl Job {
@@ -219,10 +354,34 @@ impl Job {
         if self.source_roots.is_empty() {
             return Err("a job needs at least one source root".into());
         }
+        if self.source_roots.len() > MAX_SOURCE_ROOTS {
+            return Err(format!(
+                "a job can have at most {MAX_SOURCE_ROOTS} source roots"
+            ));
+        }
+        if self.targets.len() > MAX_TARGETS {
+            return Err(format!("a job can have at most {MAX_TARGETS} targets"));
+        }
+        if self.products.len() > MAX_PRODUCTS {
+            return Err(format!("a job can have at most {MAX_PRODUCTS} products"));
+        }
         let mut products = std::collections::HashSet::new();
         for product in &self.products {
             check_slug(&product.id, "product")?;
             check_name(&product.name, "product")?;
+            check_hint(&product.sku_hint, "SKU hint")?;
+            if product.roles.len() > MAX_ROLES_PER_PRODUCT {
+                return Err(format!(
+                    "product {:?} can have at most {MAX_ROLES_PER_PRODUCT} roles",
+                    product.id
+                ));
+            }
+            if product.mappings.len() > MAX_MAPPINGS_PER_PRODUCT {
+                return Err(format!(
+                    "product {:?} can have at most {MAX_MAPPINGS_PER_PRODUCT} mappings",
+                    product.id
+                ));
+            }
             if !products.insert(product.id.as_str()) {
                 return Err(format!("duplicate product id {:?}", product.id));
             }
@@ -285,13 +444,38 @@ impl Job {
     /// base refuses by name: an export that silently dropped files would
     /// deliver a smaller job than the one reviewed.
     pub fn to_portable(&self, base: &std::path::Path) -> Result<PortableJob, String> {
+        self.validate()?;
+        for target in &self.targets {
+            if !portable_relative(&target.out, false) {
+                return Err(format!(
+                    "target {:?} output is not portable: {}",
+                    target.id,
+                    target.out.display()
+                ));
+            }
+        }
         fn relative(
             base: &std::path::Path,
             path: &std::path::Path,
+            allow_root: bool,
         ) -> Result<std::path::PathBuf, String> {
-            path.strip_prefix(base)
+            let relative = path
+                .strip_prefix(base)
                 .map(PathBuf::from)
-                .map_err(|_| format!("{} is outside the export base", path.display()))
+                .map_err(|_| format!("{} is outside the export base", path.display()))?;
+            if !portable_relative(&relative, allow_root) {
+                return Err(format!(
+                    "{} is not a portable relative path",
+                    path.display()
+                ));
+            }
+            if path.exists() && !source_is_confined(path, &[base.to_path_buf()]) {
+                return Err(format!(
+                    "{} resolves outside the export base",
+                    path.display()
+                ));
+            }
+            Ok(relative)
         }
         use std::path::PathBuf;
         Ok(PortableJob {
@@ -299,16 +483,13 @@ impl Job {
             id: self.id.clone(),
             name: self.name.clone(),
             revision: self.revision,
-            // Display-only: from_portable never resolves it, so no machine
-            // path leaves the export. The file name orients a human reader.
-            base_hint: base
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            // Kept empty for the legacy serde field, which is skipped on
+            // serialization so no machine path hint leaves the export.
+            base_hint: String::new(),
             source_roots: self
                 .source_roots
                 .iter()
-                .map(|root| relative(base, root))
+                .map(|root| relative(base, root, true))
                 .collect::<Result<_, _>>()?,
             target_recipe: self.target_recipe.clone(),
             targets: self.targets.clone(),
@@ -329,14 +510,17 @@ impl Job {
                                     id: mapping.id.clone(),
                                     role_id: mapping.role_id.clone(),
                                     source: PortableSource {
-                                        path: relative(base, &mapping.source.path)?,
+                                        path: relative(base, &mapping.source.path, false)?,
                                         bytes: mapping.source.bytes,
                                         modified: mapping.source.modified,
                                     },
                                 })
                             })
                             .collect::<Result<_, String>>()?,
-                        binding: product.binding.clone(),
+                        // Connected identity is local authority. A portable
+                        // file carries no binding and requires explicit
+                        // rebinding after import.
+                        binding: None,
                     })
                 })
                 .collect::<Result<_, String>>()?,
@@ -357,20 +541,23 @@ impl Job {
         if !root.is_absolute() {
             return Err(format!("job root {} is not absolute", root.display()));
         }
-        let join = |relative: &std::path::Path| {
-            use std::path::Component;
+        for target in &portable.targets {
+            if !portable_relative(&target.out, false) {
+                return Err(format!(
+                    "target {:?} output is not portable: {}",
+                    target.id,
+                    target.out.display()
+                ));
+            }
+        }
+        let join = |relative: &std::path::Path, allow_root: bool| {
             // `has_root` catches what `is_absolute` misses: on Windows a path
             // like `/abs.png` has a root but no prefix, and joining it would
             // rebase the mapping onto the drive root instead of the root its
             // new owner chose. A parent component escapes the root on every
             // platform, including from a nested `sub/../../escape`. Portable
             // paths are never either; refuse them.
-            if relative.is_absolute()
-                || relative.has_root()
-                || relative
-                    .components()
-                    .any(|component| matches!(component, Component::ParentDir))
-            {
+            if !portable_relative(relative, allow_root) {
                 return Err(format!(
                     "portable path {} is not relative",
                     relative.display()
@@ -386,7 +573,7 @@ impl Job {
             source_roots: portable
                 .source_roots
                 .iter()
-                .map(|path| join(path))
+                .map(|path| join(path, true))
                 .collect::<Result<Vec<PathBuf>, String>>()?,
             target_recipe: portable.target_recipe.clone(),
             targets: portable.targets.clone(),
@@ -407,7 +594,7 @@ impl Job {
                                     id: mapping.id.clone(),
                                     role_id: mapping.role_id.clone(),
                                     source: SourceRef {
-                                        path: join(&mapping.source.path)?,
+                                        path: join(&mapping.source.path, false)?,
                                         bytes: mapping.source.bytes,
                                         modified: mapping.source.modified,
                                     },
@@ -449,6 +636,84 @@ fn check_name(name: &str, what: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn check_hint(value: &str, what: &str) -> Result<(), String> {
+    if value.chars().count() > MAX_NAME_LEN || value.chars().any(char::is_control) {
+        return Err(format!(
+            "{what} must be at most {MAX_NAME_LEN} printable characters"
+        ));
+    }
+    Ok(())
+}
+
+fn portable_relative(path: &std::path::Path, allow_root: bool) -> bool {
+    let text = path.to_string_lossy();
+    if text.is_empty() {
+        return allow_root;
+    }
+    if allow_root && text == "." {
+        return true;
+    }
+    let starts_with_root = text
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte == b'/' || byte == 92);
+    if path.is_absolute()
+        || path.has_root()
+        || starts_with_root
+        || (text.len() >= 2
+            && text.as_bytes()[1] == b':'
+            && text.as_bytes()[0].is_ascii_alphabetic())
+    {
+        return false;
+    }
+    !text
+        .split(|cell| cell == '/' || cell as u32 == 92)
+        .any(|part| !portable_component(part))
+}
+
+fn portable_component(part: &str) -> bool {
+    if part.is_empty()
+        || part == "."
+        || part == ".."
+        || part.contains(':')
+        || part.chars().any(char::is_control)
+        || part.ends_with(['.', ' '])
+    {
+        return false;
+    }
+    let device = part
+        .trim_end_matches(['.', ' '])
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    !matches!(
+        device.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 /// Read one job file, strictly. Mirrors the recipe door: size cap, schema
@@ -521,7 +786,11 @@ pub fn list(dir: &std::path::Path) -> (Vec<Job>, Vec<String>) {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match std::fs::read(&path)
+        if jobs.len() >= MAX_JOBS {
+            skipped.push(path.display().to_string());
+            continue;
+        }
+        match read_bounded(&path, MAX_FILE_BYTES, "job")
             .ok()
             .and_then(|bytes| parse_bytes(&bytes).ok())
             .filter(|job| job.id == stem)
@@ -573,7 +842,10 @@ pub fn suggest_id(dir: &std::path::Path, name: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    stem.truncate(MAX_ID_LEN);
+    // Leave room for the smallest deduplication suffix. The library cap
+    // means a free suffix appears quickly, so this also cannot loop forever
+    // when the display name already fills the id budget.
+    stem.truncate(MAX_ID_LEN.saturating_sub(4));
     if stem.is_empty() {
         stem = "job".into();
     }
@@ -783,6 +1055,12 @@ pub fn prepare_targets(
 /// Re-point one mapping at a file that exists, refreshing its recorded size
 /// and mtime. The id stays: history follows the row, not the path.
 pub fn relink(job: &mut Job, mapping_id: &str, path: &std::path::Path) -> Result<(), String> {
+    if !source_is_confined(path, &job.source_roots) {
+        return Err(format!(
+            "relink target {} is outside the job source roots",
+            path.display()
+        ));
+    }
     let metadata = std::fs::metadata(path)
         .map_err(|_| format!("relink target {} is not a file", path.display()))?;
     if !metadata.is_file() {
@@ -925,7 +1203,35 @@ fn split_csv(line: &str) -> Vec<String> {
 /// those columns is accepted and skipped; `#` lines and blanks are ignored.
 /// Exact single file matches write mappings with fresh ids; everything else
 /// is reported per row and writes nothing.
-pub fn apply_csv(job: &mut Job, text: &str, entries: &[crate::scan::Entry]) -> Vec<CsvOutcome> {
+pub fn apply_csv_checked(
+    job: &mut Job,
+    text: &str,
+    entries: &[crate::scan::Entry],
+) -> Result<Vec<CsvOutcome>, String> {
+    if text.len() > MAX_CSV_BYTES {
+        return Err(format!(
+            "mapping sheets larger than {MAX_CSV_BYTES} bytes are refused"
+        ));
+    }
+    if text.lines().count() > MAX_CSV_LINES {
+        return Err(format!(
+            "mapping sheets with more than {MAX_CSV_LINES} rows are refused"
+        ));
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = split_csv(line);
+        if line.len() > MAX_CSV_FIELD_BYTES * 3
+            || fields.iter().any(|field| field.len() > MAX_CSV_FIELD_BYTES)
+        {
+            return Err(format!(
+                "mapping sheet fields are limited to {MAX_CSV_FIELD_BYTES} bytes"
+            ));
+        }
+    }
     let mut outcomes = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -1022,7 +1328,7 @@ pub fn apply_csv(job: &mut Job, text: &str, entries: &[crate::scan::Entry]) -> V
             }
         }
     }
-    outcomes
+    Ok(outcomes)
 }
 
 /// One deliverable the folder still owes an explanation for: which output came
@@ -1180,6 +1486,35 @@ mod tests {
     }
 
     #[test]
+    fn bounded_reads_refuse_oversized_files() {
+        let dir = store("bounded-read");
+        let path = dir.join("job.json");
+        std::fs::write(&path, vec![0u8; MAX_FILE_BYTES as usize + 1]).unwrap();
+        let error = read_bounded(&path, MAX_FILE_BYTES, "job").unwrap_err();
+        assert!(error.contains("larger than"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_long_job_name_still_gets_a_deduplicated_id() {
+        let dir = store("long-id");
+        let name = "x".repeat(MAX_ID_LEN);
+        let first = suggest_id(&dir, &name);
+        assert_eq!(first.len(), MAX_ID_LEN.saturating_sub(4));
+        save(
+            &dir,
+            &Job::new(first.clone(), "First".into(), vec![dir.clone()]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            suggest_id(&dir, &name),
+            format!("{first}-2"),
+            "a maximum-length display name leaves suffix room"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn save_list_remove_round_trip() {
         let dir = store("round-trip");
         save(&dir, &job()).unwrap();
@@ -1246,9 +1581,21 @@ mod tests {
             portable.products[0].mappings[0].source.path,
             PathBuf::from("hero.png")
         );
+        assert!(portable.base_hint.is_empty());
+        let exported = serde_json::to_string(&portable).unwrap();
+        assert!(!exported.contains("base_hint"));
+        assert!(!exported.contains("binding"));
+        let nested = root.join("folder");
+        std::fs::create_dir_all(&nested).unwrap();
+        let nested_file = nested.join("hero.png");
+        std::fs::write(&nested_file, b"nested-pixels").unwrap();
+        let mut nested_job = job.clone();
+        nested_job.products[0].mappings[0].source.path = nested_file.clone();
+        nested_job.products[0].mappings[0].source.bytes =
+            std::fs::metadata(&nested_file).unwrap().len();
         assert_eq!(
-            portable.base_hint, "photos",
-            "the hint orients, not locates"
+            nested_job.export_draft(&root).unwrap().preview.products[0].files,
+            vec!["folder/hero.png"]
         );
         // A connected binding does not survive the export boundary either:
         // the new owner rebinds rather than inheriting server identity.
@@ -1259,6 +1606,16 @@ mod tests {
             product: "prod".into(),
             slot: "main".into(),
         });
+        let bound_draft = bound.export_draft(&root).unwrap();
+        let bound_json = String::from_utf8(bound_draft.bytes.clone()).unwrap();
+        assert!(bound_json.contains("\"name\""));
+        assert!(bound_json.contains("\"sku_hint\""));
+        assert!(!bound_json.contains("workspace"));
+        assert!(!bound_json.contains("base_hint"));
+        assert!(!bound_json.contains(root.to_string_lossy().as_ref()));
+        assert_eq!(bound_draft.preview.source_roots, vec!["."]);
+        assert_eq!(bound_draft.preview.products[0].files, vec!["hero.png"]);
+        assert_eq!(bound_draft.preview.binding_count, 1);
         let back = Job::from_portable(&bound.to_portable(&root).unwrap(), &root).unwrap();
         assert_eq!(back.products[0].binding, None);
         let back = Job::from_portable(&portable, &root).unwrap();
@@ -1274,16 +1631,32 @@ mod tests {
         // A non-relative portable path refuses at import: absolute, rooted,
         // and parent-escaping alike, since joining any of them would land
         // outside the root its new owner chose.
-        let mut evil = portable;
+        let mut evil = portable.clone();
         evil.products[0].mappings[0].source.path = PathBuf::from("/abs.png");
         assert!(Job::from_portable(&evil, &root).is_err());
-        for escape in ["../escape.png", "sub/../../escape.png"] {
+        for escape in [
+            "../escape.png",
+            "sub/../../escape.png",
+            r"..\escape.png",
+            r"sub\..\..\escape.png",
+            r"C:escape.png",
+            r"\\server\share\escape.png",
+            r"\\?\C:\escape.png",
+            "CON.png",
+            r"nested\NUL\file.png",
+            "photo.jpg:stream",
+            "trailing.",
+            "trailing ",
+        ] {
             evil.products[0].mappings[0].source.path = PathBuf::from(escape);
             assert!(
                 Job::from_portable(&evil, &root).is_err(),
                 "{escape} must not escape the import root"
             );
         }
+        let mut rooted = portable;
+        rooted.source_roots = vec![PathBuf::from(".")];
+        assert!(Job::from_portable(&rooted, &root).is_ok());
         // Equal SKUs for different recipients stay distinct products.
         let mut two = job.clone();
         let mut sibling = product();
@@ -1596,11 +1969,12 @@ mod tests {
         let mut job = job();
         job.source_roots = vec![dir.clone()];
         job.products[0].mappings.clear();
-        let outcomes = apply_csv(
+        let outcomes = apply_csv_checked(
             &mut job,
             "# comment\nsku,role,filename\n\nSKU-1,main,detail.png\nSKU-1,detail,hero\nSKU-1,main,missing.png\nNOPE,main,detail.png\nSKU-1,ghost,detail.png\n",
             &entries,
-        );
+        )
+        .unwrap();
         assert_eq!(outcomes.len(), 5);
         assert!(matches!(outcomes[0], CsvOutcome::Mapped { .. }));
         assert!(matches!(outcomes[1], CsvOutcome::AmbiguousFile { .. }));
@@ -1612,17 +1986,44 @@ mod tests {
             1,
             "only the exact row writes"
         );
-        let outcomes = apply_csv(&mut job, "SKU-1,main,detail.png\n", &entries);
+        let outcomes = apply_csv_checked(&mut job, "SKU-1,main,detail.png\n", &entries).unwrap();
         assert!(outcomes.is_empty(), "an idempotent re-import stays silent");
         // Equal SKUs stay distinct products: the shared SKU refuses, either id maps.
         let mut two = job.clone();
         let mut sibling = product();
         sibling.id = "hero-2".into();
         two.products.push(sibling);
-        let outcomes = apply_csv(&mut two, "SKU-1,detail,detail.png\n", &entries);
+        let outcomes = apply_csv_checked(&mut two, "SKU-1,detail,detail.png\n", &entries).unwrap();
         assert!(matches!(outcomes[0], CsvOutcome::AmbiguousSku { .. }));
-        let outcomes = apply_csv(&mut two, "hero-2,detail,detail.png\n", &entries);
+        let outcomes = apply_csv_checked(&mut two, "hero-2,detail,detail.png\n", &entries).unwrap();
         assert!(matches!(outcomes[0], CsvOutcome::Mapped { .. }));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn csv_limits_are_checked_before_any_mapping_is_mutated() {
+        let dir = store("csv-limits");
+        let source = dir.join("detail.png");
+        std::fs::write(&source, b"x").unwrap();
+        let entries = vec![entry(&source)];
+        let mut job = job();
+        job.source_roots = vec![dir.clone()];
+        job.products[0].mappings.clear();
+        let oversized_field = "x".repeat(MAX_CSV_FIELD_BYTES + 1);
+        let error = apply_csv_checked(
+            &mut job,
+            &format!("SKU-1,main,detail.png\nSKU-1,main,{oversized_field}\n"),
+            &entries,
+        )
+        .unwrap_err();
+        assert!(error.contains("fields"));
+        assert!(job.products[0].mappings.is_empty());
+
+        let many_rows =
+            std::iter::repeat_n("SKU-1,main,detail.png\n", MAX_CSV_LINES + 1).collect::<String>();
+        let error = apply_csv_checked(&mut job, &many_rows, &entries).unwrap_err();
+        assert!(error.contains("rows"));
+        assert!(job.products[0].mappings.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
