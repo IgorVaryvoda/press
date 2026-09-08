@@ -437,13 +437,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--preset-file" => {
                 conversion_option = true;
                 let value = next_value(&mut rest, "--preset-file", "a recipe file")?;
-                let bytes = std::fs::metadata(&value)
-                    .ok()
-                    .filter(|metadata| metadata.len() <= crate::recipe::MAX_FILE_BYTES)
-                    .and_then(|_| std::fs::read(&value).ok());
-                let bytes = bytes.ok_or_else(|| {
-                    format!("--preset-file cannot be read as a recipe: {value:?}")
-                })?;
+                let bytes = crate::job::read_bounded(
+                    std::path::Path::new(&value),
+                    crate::recipe::MAX_FILE_BYTES,
+                    "preset",
+                )
+                .map_err(|_| format!("--preset-file cannot be read as a recipe: {value:?}"))?;
                 let recipe = crate::recipe::parse_bytes(&bytes)
                     .map_err(|error| format!("--preset-file {value:?}: {error}"))?;
                 preset = Some(recipe);
@@ -2314,22 +2313,14 @@ fn main() {
         }
         // Bound the read before parsing allocates: the schema check repeats
         // the cap for library callers that skip the CLI.
-        let oversized = std::fs::metadata(&target)
-            .is_ok_and(|metadata| metadata.len() > handoff::MAX_FILE_BYTES);
-        if oversized {
-            eprintln!(
-                "press: {} is larger than any handoff report",
-                target.display()
-            );
-            std::process::exit(2);
-        }
-        let bytes = match std::fs::read(&target) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!("press: {} cannot be read: {error}", target.display());
-                std::process::exit(2);
-            }
-        };
+        let bytes =
+            match crate::job::read_bounded(&target, handoff::MAX_FILE_BYTES, "handoff report") {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("press: {} cannot be read: {error}", target.display());
+                    std::process::exit(2);
+                }
+            };
         match handoff::parse_bytes(&bytes) {
             Ok(pending) => {
                 // Mapping reads the chosen root through the same header-only

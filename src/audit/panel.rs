@@ -1193,12 +1193,101 @@ impl Audit {
         }
     }
 
+    fn job_export_preview_row(
+        &self,
+        draft: &crate::job::ExportDraft,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let preview = &draft.preview;
+        let cancel = cx.entity().downgrade();
+        let export = cx.entity().downgrade();
+        div()
+            .debug_selector(|| "sets-export-preview".into())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Review shared job export"),
+            )
+            .child(format!("Job: {}", preview.job_name))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Names and SKU hints are included; machine paths and connected bindings are removed."),
+            )
+            .child(format!(
+                "Relative source roots kept: {}",
+                if preview.source_roots.is_empty() {
+                    ".".to_string()
+                } else {
+                    preview.source_roots.join(", ")
+                }
+            ))
+            .children(preview.products.iter().map(|product| {
+                let sku = if product.sku.is_empty() {
+                    "no SKU".to_string()
+                } else {
+                    product.sku.clone()
+                };
+                let files = if product.files.is_empty() {
+                    "no mapped files".to_string()
+                } else {
+                    product.files.join(", ")
+                };
+                div()
+                    .debug_selector(|| "sets-export-product".into())
+                    .child(format!("{} · {} · {}", product.name, sku, files))
+            }))
+            .child(format!(
+                "Excluded: {} connected binding(s), base path hint",
+                preview.binding_count
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("sets-export-confirm")
+                            .small()
+                            .outline()
+                            .label("Export…")
+                            .on_click(move |_, _, cx| {
+                                if let Some(audit) = export.upgrade() {
+                                    audit.update(cx, |audit, cx| audit.export_job_file(cx));
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("sets-export-cancel")
+                            .small()
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(move |_, _, cx| {
+                                if let Some(audit) = cancel.upgrade() {
+                                    audit.update(cx, |audit, cx| {
+                                        audit.cancel_job_export_preview(cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+    }
+
     /// Product sets over the current folder: which files belong to which
     /// product views, and whether each view is ready, stale, missing, or
     /// still unmapped. Rendered from cached states only; the filesystem work
     /// happens in actions and refreshes, never here.
     fn sets_section(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let busy = self.converting;
+        let job_pending = self.job_choice_pending();
+        let edit_disabled = busy || job_pending;
         let mut products = Vec::with_capacity(self.work_job.products.len());
         for index in 0..self.work_job.products.len() {
             products.push(self.sets_product(index, cx));
@@ -1208,6 +1297,8 @@ impl Audit {
             stale_rows.push(self.sets_stale_row(index, cx));
         }
         let open = self.sets_open;
+        let choices = self.job_choices.clone();
+        let choice_count = choices.len();
         let job = cx.entity().downgrade();
         // Folded by default: sets are a second job over the folder, and five
         // verbs plus three boxes sat under every conversion whether or not
@@ -1240,10 +1331,14 @@ impl Audit {
                         Button::new("sets-job")
                             .small()
                             .ghost()
-                            .label(self.work_job.name.clone())
+                            .label(if job_pending {
+                                "Choose job…".to_string()
+                            } else {
+                                self.work_job.name.clone()
+                            })
                             .dropdown_caret(true)
                             .disabled(busy)
-                            .dropdown_menu(move |menu, _, _| {
+                            .dropdown_menu(move |mut menu, _, _| {
                                 let new_job = job.clone();
                                 let delete = job.clone();
                                 let csv = job.clone();
@@ -1256,6 +1351,27 @@ impl Audit {
                                     audit.update(cx, act);
                                 }
                             };
+                                for choice in &choices {
+                                    let select = job.clone();
+                                    let id = choice.id.clone();
+                                    menu =
+                                        menu.item(
+                                            PopupMenuItem::new(format!(
+                                                "Use {} · {}",
+                                                choice.name, choice.id
+                                            ))
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(audit) = select.upgrade() {
+                                                    audit.update(cx, |audit, cx| {
+                                                        audit.select_saved_job(&id, cx);
+                                                    });
+                                                }
+                                            }),
+                                        );
+                                }
+                                if job_pending {
+                                    menu = menu.separator();
+                                }
                                 menu.item(
                                     PopupMenuItem::new("New job").on_click(move |_, _, cx| {
                                         act(&new_job, cx, Audit::new_job)
@@ -1279,7 +1395,7 @@ impl Audit {
                                 ))
                                 .item(
                                     PopupMenuItem::new("Export job…").on_click(move |_, _, cx| {
-                                        act(&export, cx, Audit::export_job_file)
+                                        act(&export, cx, Audit::open_job_export_preview)
                                     }),
                                 )
                             }),
@@ -1292,6 +1408,20 @@ impl Audit {
             .flex_shrink_0()
             .gap_1()
             .child(header)
+            .children(job_pending.then(|| {
+                div()
+                    .debug_selector(|| "sets-job-choice-notice".into())
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{choice_count} saved jobs use this folder. Choose one or start a new job."
+                    ))
+            }))
+            .children(
+                self.job_export_preview
+                    .as_ref()
+                    .map(|draft| self.job_export_preview_row(draft, cx)),
+            )
             .children(open.then(|| {
                 div()
                     .flex()
@@ -1314,7 +1444,7 @@ impl Audit {
                             .small()
                             .ghost()
                             .label("Use current")
-                            .disabled(busy)
+                            .disabled(edit_disabled)
                             .on_click(cx.listener(|audit, _, _, cx| {
                                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                                     return;
@@ -1327,7 +1457,7 @@ impl Audit {
                             .small()
                             .ghost()
                             .label("Clear")
-                            .disabled(busy || self.work_job.target_recipe.is_none())
+                            .disabled(edit_disabled || self.work_job.target_recipe.is_none())
                             .on_click(cx.listener(|audit, _, _, cx| {
                                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                                     return;
@@ -1344,14 +1474,18 @@ impl Audit {
                     .flex_col()
                     .gap_1()
                     .child(
-                        div()
-                            .debug_selector(|| "sets-product-name".into())
-                            .child(Input::new(&self.product_name_input).small().disabled(busy)),
+                        div().debug_selector(|| "sets-product-name".into()).child(
+                            Input::new(&self.product_name_input)
+                                .small()
+                                .disabled(edit_disabled),
+                        ),
                     )
                     .child(
-                        div()
-                            .debug_selector(|| "sets-product-sku".into())
-                            .child(Input::new(&self.product_sku_input).small().disabled(busy)),
+                        div().debug_selector(|| "sets-product-sku".into()).child(
+                            Input::new(&self.product_sku_input)
+                                .small()
+                                .disabled(edit_disabled),
+                        ),
                     )
                     .child(
                         Button::new("sets-add-product")
@@ -1359,7 +1493,7 @@ impl Audit {
                             .outline()
                             .w_full()
                             .label("Add product")
-                            .disabled(busy)
+                            .disabled(edit_disabled)
                             .on_click(cx.listener(|audit, _, _, cx| {
                                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                                     return;
@@ -1391,7 +1525,7 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .label("Select stale")
-                                    .disabled(busy)
+                                    .disabled(edit_disabled)
                                     .on_click(cx.listener(|audit, _, _, cx| {
                                         audit.select_stale_sources(cx);
                                     })),
@@ -1408,6 +1542,7 @@ impl Audit {
         let Some(product) = self.work_job.products.get(index) else {
             return div().into_any_element();
         };
+        let edit_disabled = self.converting || self.job_choice_pending();
         let product_id = product.id.clone();
         let mut roles = Vec::with_capacity(product.roles.len());
         for role in &product.roles {
@@ -1438,7 +1573,7 @@ impl Audit {
                             .small()
                             .ghost()
                             .label("Delete")
-                            .disabled(self.converting)
+                            .disabled(edit_disabled)
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                                     return;
@@ -1461,7 +1596,7 @@ impl Audit {
                             .child(
                                 Input::new(&self.role_name_input)
                                     .small()
-                                    .disabled(self.converting),
+                                    .disabled(edit_disabled),
                             ),
                     )
                     .child(
@@ -1469,7 +1604,7 @@ impl Audit {
                             .small()
                             .ghost()
                             .label("Add role")
-                            .disabled(self.converting)
+                            .disabled(edit_disabled)
                             .on_click(cx.listener({
                                 let product_id = product.id.clone();
                                 move |audit, _, window, cx| {
@@ -1492,6 +1627,7 @@ impl Audit {
         role_id: &str,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
+        let edit_disabled = self.converting || self.job_choice_pending();
         let status = self
             .work_states
             .iter()
@@ -1564,7 +1700,7 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .label("Map selected")
-                                    .disabled(self.converting)
+                                    .disabled(edit_disabled)
                                     .on_click(cx.listener({
                                         let product_id = product_id.clone();
                                         let role_id = role_id.clone();
@@ -1581,7 +1717,7 @@ impl Audit {
                                     .small()
                                     .ghost()
                                     .label("Delete")
-                                    .disabled(self.converting)
+                                    .disabled(edit_disabled)
                                     .on_click(cx.listener({
                                         move |audit, _, _, cx| {
                                             let Some(dir) = audit.job_dir_or_notify(cx) else {
@@ -1604,6 +1740,7 @@ impl Audit {
         source: &crate::job::MappedSource,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
+        let edit_disabled = self.converting || self.job_choice_pending();
         let name = source
             .path
             .file_name()
@@ -1648,7 +1785,7 @@ impl Audit {
                                 .small()
                                 .ghost()
                                 .label("Relink")
-                                .disabled(self.converting)
+                                .disabled(edit_disabled)
                                 .on_click(cx.listener(move |audit, _, _, cx| {
                                     audit.relink_mapping(&relink_id, cx);
                                 }))
@@ -1659,7 +1796,7 @@ impl Audit {
                             .small()
                             .ghost()
                             .label("Remove")
-                            .disabled(self.converting)
+                            .disabled(edit_disabled)
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                                     return;

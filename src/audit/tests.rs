@@ -1979,6 +1979,39 @@ fn finding_audit(
     )
 }
 
+#[gpui_kit::test]
+fn replacing_a_job_identity_rejects_an_older_same_id_and_revision_request(cx: &mut TestAppContext) {
+    let root = scan_fixture("job-request-generation");
+    let library = root.join("job-library");
+    std::fs::create_dir_all(&library).unwrap();
+    let original =
+        crate::job::Job::new("same-job".into(), "Same job".into(), vec![root.clone()]).unwrap();
+    let bytes = serde_json::to_vec(&original.to_portable(&root).unwrap()).unwrap();
+    let (audit, cx) = finding_audit(cx);
+    let captured = audit.update(cx, |audit, _| {
+        audit.root = root.clone();
+        audit.work_job = original.clone();
+        audit.job_choices.clear();
+        (
+            audit.dataset_generation,
+            audit.work_job.id.clone(),
+            audit.work_job.revision,
+            audit.job_request_generation,
+        )
+    });
+    audit.update(cx, |audit, cx| {
+        audit.new_job(cx);
+        crate::job::save(&library, &audit.work_job).unwrap();
+        audit.delete_job(&library, cx);
+        audit.import_job_bytes(&library, &bytes, cx);
+        assert!(
+            !audit.owns_job_request(captured.0, &captured.1, captured.2, captured.3),
+            "identity replacement advances the request fence"
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn tree_row_bounds(
     audit: &gpui_kit::Entity<Audit>,
     path: &Path,

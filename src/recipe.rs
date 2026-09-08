@@ -323,7 +323,11 @@ pub fn list(dir: &std::path::Path) -> (Vec<Recipe>, Vec<String>) {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match std::fs::read(&path)
+        if recipes.len() >= MAX_RECIPES {
+            skipped.push(path.display().to_string());
+            continue;
+        }
+        match crate::job::read_bounded(&path, MAX_FILE_BYTES, "recipe")
             .ok()
             .and_then(|bytes| parse_bytes(&bytes).ok())
             .filter(|recipe| recipe.id == stem)
@@ -440,7 +444,8 @@ pub fn import_bytes(dir: &std::path::Path, bytes: &[u8]) -> Result<Recipe, Strin
 /// The exact bytes to hand out on export: what is stored, byte for byte.
 pub fn export_bytes(dir: &std::path::Path, id: &str) -> Result<Vec<u8>, String> {
     check_id(id)?;
-    std::fs::read(file_for(dir, id)).map_err(|_| format!("no recipe named {id:?} exists"))
+    crate::job::read_bounded(&file_for(dir, id), MAX_FILE_BYTES, "recipe")
+        .map_err(|_| format!("no recipe named {id:?} exists"))
 }
 
 /// A file stem from a display name: lowercase alphanumerics and dashes,
@@ -461,7 +466,9 @@ pub fn suggest_id(dir: &std::path::Path, name: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    stem.truncate(MAX_ID_LEN);
+    // Leave room for a deduplication suffix when a display name fills the id
+    // budget; otherwise every candidate would be too long forever.
+    stem.truncate(MAX_ID_LEN.saturating_sub(4));
     if stem.is_empty() {
         stem = "recipe".into();
     }
@@ -815,6 +822,13 @@ mod tests {
         );
         assert_eq!(suggest_id(&dir, "My Print!"), "my-print");
         assert_eq!(suggest_id(&dir, "Kept"), "kept-2", "taken stems dedupe");
+        let long_name = "x".repeat(MAX_ID_LEN);
+        let long_id = suggest_id(&dir, &long_name);
+        assert_eq!(long_id.len(), MAX_ID_LEN.saturating_sub(4));
+        let mut long = personal();
+        long.id = long_id.clone();
+        save(&dir, &long).unwrap();
+        assert_eq!(suggest_id(&dir, &long_name), format!("{long_id}-2"));
         assert_eq!(suggest_id(&dir, "!!!"), "recipe");
         std::fs::remove_dir_all(&dir).unwrap();
     }
