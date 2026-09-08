@@ -209,6 +209,191 @@ fn warn(handoff: &Handoff) -> Vec<String> {
     warnings
 }
 
+/// Whether one mapped resource verifies against the deployed tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployStatus {
+    /// Exactly one deployed file answers to the mapping and meets its
+    /// format and size constraints.
+    Deployed,
+    /// Files answer to the name but violate a constraint.
+    Differs,
+    /// Nothing under the deployed root answers to the mapping.
+    Missing,
+    /// Several deployed files meet the constraints: a choice, not a badge.
+    Ambiguous,
+}
+
+/// One resource's deployment verdict. Findings ride along as open items:
+/// an arrived file proves delivery, never that markup or review concerns
+/// are closed.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DeploymentCheck {
+    pub id: String,
+    pub status: DeployStatus,
+    pub deployed: Vec<String>,
+    pub notes: Vec<String>,
+    pub findings: Vec<String>,
+}
+
+/// The deployed entry's format in the vocabulary constraints use. Content,
+/// never the extension.
+fn entry_format(entry: &crate::scan::Entry) -> &'static str {
+    match entry.format {
+        crate::scan::FileFormat::JpegXl => "jxl",
+        crate::scan::FileFormat::Image(format) => {
+            if format == image::ImageFormat::Png {
+                "png"
+            } else if format == image::ImageFormat::Jpeg {
+                "jpeg"
+            } else if format == image::ImageFormat::WebP {
+                "webp"
+            } else if format == image::ImageFormat::Avif {
+                "avif"
+            } else if format == image::ImageFormat::Gif {
+                "gif"
+            } else if format == image::ImageFormat::Bmp {
+                "bmp"
+            } else if format == image::ImageFormat::Tiff {
+                "tiff"
+            } else {
+                "unknown"
+            }
+        }
+    }
+}
+
+fn stem_of(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// What one deployed candidate violates, if anything. An empty list verifies.
+fn constraint_violations(resource: &HandoffResource, entry: &crate::scan::Entry) -> Vec<String> {
+    let mut violations = Vec::new();
+    if !resource.formats.is_empty()
+        && !resource
+            .formats
+            .iter()
+            .any(|format| format.eq_ignore_ascii_case(entry_format(entry)))
+    {
+        violations.push(format!(
+            "{} is {}, expected {}",
+            entry.name(),
+            entry_format(entry),
+            resource.formats.join("/")
+        ));
+    }
+    if let Some(edge) = resource.max_edge {
+        let longest = entry.width.max(entry.height);
+        if longest > edge {
+            violations.push(format!("{longest}px exceeds the {edge}px limit"));
+        }
+    }
+    violations
+}
+
+/// Verify every pinned-down mapping against a scan of the deployed tree.
+/// Only confirmed and candidate mappings carry exactly one local file, so
+/// only they verify: ambiguous mappings need confirmation first, and the
+/// rest name no file to look for. Association is by file stem, exactly or
+/// with a `-suffix`/`_suffix` derivative name — never by bytes, which
+/// re-encoding changes, and never by resemblance.
+pub fn verify_deployment(
+    handoff: &Handoff,
+    mappings: &[Mapping],
+    deployed: &[crate::scan::Entry],
+) -> Vec<DeploymentCheck> {
+    let mut checks = Vec::new();
+    for mapping in mappings {
+        if !matches!(mapping.verdict, Verdict::Confirmed | Verdict::Candidate)
+            || mapping.paths.len() != 1
+        {
+            continue;
+        }
+        let Some(resource) = handoff
+            .resources
+            .iter()
+            .find(|known| known.id == mapping.id)
+        else {
+            continue;
+        };
+        let stem = stem_of(std::path::Path::new(&mapping.paths[0]));
+        if stem.is_empty() {
+            continue;
+        }
+        let mut exact = Vec::new();
+        let mut suffixed = Vec::new();
+        for entry in deployed {
+            let candidate = stem_of(&entry.path);
+            if candidate == stem {
+                exact.push(entry);
+            } else if candidate.starts_with(&format!("{stem}-"))
+                || candidate.starts_with(&format!("{stem}_"))
+            {
+                suffixed.push(entry);
+            }
+        }
+        // An exact stem wins over derivatives: the derivative set only
+        // matters when no file kept the name.
+        let pool = if exact.is_empty() { suffixed } else { exact };
+        if pool.is_empty() {
+            checks.push(DeploymentCheck {
+                id: mapping.id.clone(),
+                status: DeployStatus::Missing,
+                deployed: Vec::new(),
+                notes: Vec::new(),
+                findings: resource.findings.clone(),
+            });
+            continue;
+        }
+        let mut passing = Vec::new();
+        let mut violations = Vec::new();
+        for &entry in &pool {
+            let mut entry_violations = constraint_violations(resource, entry);
+            if entry_violations.is_empty() {
+                passing.push(entry);
+            } else {
+                violations.append(&mut entry_violations);
+            }
+        }
+        let (status, deployed, mut notes) = match passing.len() {
+            1 => (
+                DeployStatus::Deployed,
+                vec![display(passing[0].path.clone())],
+                Vec::new(),
+            ),
+            0 => (
+                DeployStatus::Differs,
+                pool.iter().map(|entry| display(&entry.path)).collect(),
+                violations,
+            ),
+            _ => (
+                DeployStatus::Ambiguous,
+                passing.iter().map(|entry| display(&entry.path)).collect(),
+                vec![format!(
+                    "{} deployed files meet the constraints",
+                    passing.len()
+                )],
+            ),
+        };
+        if notes.len() > 4 {
+            let hidden = notes.len() - 3;
+            notes.truncate(3);
+            notes.push(format!("…and {hidden} more"));
+        }
+        checks.push(DeploymentCheck {
+            id: mapping.id.clone(),
+            status,
+            deployed,
+            notes,
+            findings: resource.findings.clone(),
+        });
+    }
+    checks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +951,173 @@ mod mapping_tests {
             &[root.join("link.jpg")],
         );
         assert_eq!(mappings[0].verdict, Verdict::Unmatched);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn deployed(
+        path: &std::path::Path,
+        format: image::ImageFormat,
+        width: u32,
+        height: u32,
+    ) -> crate::scan::Entry {
+        crate::scan::Entry {
+            path: path.to_path_buf(),
+            format: format.into(),
+            width,
+            height,
+            bytes: 1000,
+        }
+    }
+
+    fn constrained(
+        id: &str,
+        local: &str,
+        formats: &[&str],
+        max_edge: Option<u32>,
+    ) -> (Handoff, Vec<Mapping>) {
+        let mut resource = named(id, &[]);
+        resource.formats = formats.iter().map(|format| format.to_string()).collect();
+        resource.max_edge = max_edge;
+        resource.findings = vec!["excess-dimensions".into()];
+        let handoff = handoff_with(vec![resource]);
+        let mapping = Mapping {
+            id: id.into(),
+            verdict: Verdict::Confirmed,
+            paths: vec![local.into()],
+            notes: Vec::new(),
+        };
+        (handoff, vec![mapping])
+    }
+
+    #[test]
+    fn an_exact_deployed_derivative_verifies() {
+        let dir = workdir("deployed");
+        let local = dir.join("photos").join("hero.jpg");
+        let (handoff, mappings) =
+            constrained("hero", &local.to_string_lossy(), &["avif"], Some(1600));
+        let out = dir.join("out");
+        let checks = verify_deployment(
+            &handoff,
+            &mappings,
+            &[deployed(
+                &out.join("hero.avif"),
+                image::ImageFormat::Avif,
+                1200,
+                800,
+            )],
+        );
+        assert_eq!(checks[0].status, DeployStatus::Deployed);
+        assert_eq!(checks[0].deployed.len(), 1);
+        assert_eq!(checks[0].findings, vec!["excess-dimensions".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wrong_format_or_size_differs() {
+        let dir = workdir("differs");
+        let local = dir.join("photos").join("hero.jpg");
+        let (handoff, mappings) =
+            constrained("hero", &local.to_string_lossy(), &["jpeg"], Some(1600));
+        let out = dir.join("out");
+        // Avif where JPEG was asked: found, but violating.
+        let checks = verify_deployment(
+            &handoff,
+            &mappings,
+            &[deployed(
+                &out.join("hero.avif"),
+                image::ImageFormat::Avif,
+                1200,
+                800,
+            )],
+        );
+        assert_eq!(checks[0].status, DeployStatus::Differs);
+        assert!(checks[0].notes.iter().any(|note| note.contains("jpeg")));
+        // Right format, over the size limit.
+        let (handoff, mappings) = constrained("hero", &local.to_string_lossy(), &[], Some(1000));
+        let checks = verify_deployment(
+            &handoff,
+            &mappings,
+            &[deployed(
+                &out.join("hero.avif"),
+                image::ImageFormat::Avif,
+                1200,
+                800,
+            )],
+        );
+        assert_eq!(checks[0].status, DeployStatus::Differs);
+        assert!(checks[0].notes.iter().any(|note| note.contains("1000px")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suffixed_derivatives_verify_and_exact_wins() {
+        let dir = workdir("suffix");
+        let local = dir.join("photos").join("hero.jpg");
+        let out = dir.join("out");
+        let (handoff, mappings) =
+            constrained("hero", &local.to_string_lossy(), &["avif"], Some(1600));
+        // No exact stem: the suffixed derivative verifies.
+        let checks = verify_deployment(
+            &handoff,
+            &mappings,
+            &[deployed(
+                &out.join("hero-1600.avif"),
+                image::ImageFormat::Avif,
+                1200,
+                800,
+            )],
+        );
+        assert_eq!(checks[0].status, DeployStatus::Deployed);
+        // An exact stem exists but violates: derivatives do not rescue it.
+        let checks = verify_deployment(
+            &handoff,
+            &mappings,
+            &[
+                deployed(&out.join("hero.png"), image::ImageFormat::Png, 1200, 800),
+                deployed(
+                    &out.join("hero-1600.avif"),
+                    image::ImageFormat::Avif,
+                    1200,
+                    800,
+                ),
+            ],
+        );
+        assert_eq!(checks[0].status, DeployStatus::Differs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_passing_derivatives_stay_ambiguous_and_absent_is_missing() {
+        let dir = workdir("amb-deploy");
+        let local = dir.join("photos").join("hero.jpg");
+        let out = dir.join("out");
+        let (handoff, mappings) = constrained("hero", &local.to_string_lossy(), &["avif"], None);
+        let checks = verify_deployment(
+            &handoff,
+            &mappings,
+            &[
+                deployed(
+                    &out.join("hero-1600.avif"),
+                    image::ImageFormat::Avif,
+                    1200,
+                    800,
+                ),
+                deployed(
+                    &out.join("hero_800.avif"),
+                    image::ImageFormat::Avif,
+                    800,
+                    600,
+                ),
+            ],
+        );
+        assert_eq!(checks[0].status, DeployStatus::Ambiguous);
+        let checks = verify_deployment(&handoff, &mappings, &[]);
+        assert_eq!(checks[0].status, DeployStatus::Missing);
+        // Unpinned mappings verify nothing at all.
+        let mut floating = mappings;
+        floating[0].verdict = Verdict::Ambiguous;
+        floating[0].paths = vec!["a".into(), "b".into()];
+        assert!(verify_deployment(&handoff, &floating, &[]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

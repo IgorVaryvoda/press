@@ -75,7 +75,7 @@ press restore <folder>
 
 `press handoff <report.json> [--root <dir>] [--json]` validates a findings report into a pending task and, with `--root`, resolves each resource against that folder. Import reads the report and the root's headers only: no network, no writes, no conversion.
 
-Each resource gets one verdict: `confirmed` names its file, `candidate` names one plausible file, `ambiguous` lists several, `unmatched` names nothing, and `out_of_scope` points at another machine's layout. Convert only `confirmed` mappings, and only after the user picks them: a `candidate` is a resemblance, not an identification. Reported dimensions and measured bytes that disagree with the local file arrive as `notes`, not verdict changes.
+Each resource gets one verdict: `confirmed` names its file, `candidate` names one plausible file, `ambiguous` lists several, `unmatched` names nothing, and `out_of_scope` points at another machine's layout. Convert only `confirmed` mappings, and only after the user picks them: a `candidate` is a resemblance, not an identification. Reported dimensions and measured bytes that disagree with the local file arrive as `notes`, not verdict changes. With `--deployed <dir>` each pinned-down mapping also verifies against the deployed tree (`deployed`, `differs`, `missing`, `ambiguous`); gaps exit `1`, and every finding stays open as page work.
 
 ## Update Press
 

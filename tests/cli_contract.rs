@@ -418,3 +418,120 @@ fn handoff_refuses_a_missing_root() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn deployed_tree(dir: &Path) -> (PathBuf, PathBuf) {
+    let root = dir.join("photos");
+    std::fs::create_dir_all(&root).expect("the root is created");
+    std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
+    let deployed = dir.join("live");
+    std::fs::create_dir_all(&deployed).expect("the deployed dir is created");
+    // A real conversion produces the deployed derivative: same stem, AVIF.
+    let output = run(&[
+        "convert",
+        &root.to_string_lossy(),
+        "--output",
+        &deployed.to_string_lossy(),
+        "--format",
+        "avif",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(deployed.join("hero.avif").is_file());
+    (root, deployed)
+}
+
+fn deployed_resource(id: &str, formats: &[&str]) -> serde_json::Value {
+    let mut resource = minimal_resource(id, &["hero.jpg"]);
+    resource["formats"] = serde_json::json!(formats);
+    resource["max_edge"] = serde_json::json!(1600);
+    resource
+}
+
+#[test]
+fn handoff_deployed_verifies_constraints_and_names_gaps() {
+    let dir = workdir("deployed");
+    let (root, deployed) = deployed_tree(&dir);
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([
+            deployed_resource("r1", &["avif"]),
+            deployed_resource("r2", &["jpeg"]),
+        ]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &deployed.to_string_lossy(),
+        "--json",
+    ]);
+    // One derivative arrived meeting its constraints, the other answers to
+    // the name in the wrong format: gaps exit 1, like a partial run.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    let statuses: Vec<&str> = doc["deployed"]
+        .as_array()
+        .expect("checks list")
+        .iter()
+        .map(|check| check["status"].as_str().expect("a status"))
+        .collect();
+    assert_eq!(statuses, vec!["deployed", "differs"]);
+    assert_eq!(doc["deploy_summary"]["deployed"], 1);
+    assert_eq!(doc["deploy_summary"]["differs"], 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_deployed_clean_tree_exits_zero() {
+    let dir = workdir("deployed-clean");
+    let (root, deployed) = deployed_tree(&dir);
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([deployed_resource("r1", &["avif"])]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &deployed.to_string_lossy(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("deployed r1"),
+        "the checklist names the verified file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_deployed_missing_tree_reports_missing() {
+    let dir = workdir("deployed-missing");
+    let root = dir.join("photos");
+    std::fs::create_dir_all(&root).expect("the root is created");
+    std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
+    let empty = dir.join("live");
+    std::fs::create_dir_all(&empty).expect("the empty tree is created");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([deployed_resource("r1", &["avif"])]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &empty.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    assert_eq!(doc["deployed"][0]["status"], "missing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
