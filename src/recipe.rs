@@ -235,9 +235,20 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Recipe, String> {
     Ok(recipe)
 }
 
+/// Revision of the encoding contract behind a fingerprint. Bump it whenever an
+/// encoder upgrade or a preparation change alters output bytes for identical
+/// settings, so old records stop matching instead of passing off stale files
+/// as current. Bumping rebuilds every output once; the safe direction.
+pub const FINGERPRINT_REVISION: u32 = 1;
+
 /// The fingerprint recorded with each output: the normalized effective
 /// settings, not the name or revision. Two recipes that transform identically
 /// share it; any output-affecting setting changes it, including AVIF speed.
+///
+/// Quality is encoded by its exact bits, never its display rounding: the WebP
+/// encoder consumes the raw float, so `80.4` and `80.49` write different bytes
+/// behind one `q80` label and must never share an identity. `compare.rs` keys
+/// its cache the same way.
 pub fn fingerprint_settings(
     format: Format,
     quality: Quality,
@@ -245,13 +256,16 @@ pub fn fingerprint_settings(
     avif_speed: Option<u8>,
 ) -> String {
     use sha2::{Digest, Sha256};
+    let quality = match quality.0 {
+        None => "lossless".to_string(),
+        Some(value) => format!("q{:08x}", value.to_bits()),
+    };
     let speed = avif_speed
         .map(|speed| speed.to_string())
         .unwrap_or_default();
     let canonical = format!(
-        "{}|{}|{}|{speed}",
+        "v{FINGERPRINT_REVISION}|{}|{quality}|{}|{speed}",
         format.label(),
-        quality.label(),
         max_edge.0.map(|edge| edge.to_string()).unwrap_or_default(),
     );
     format!("{:x}", Sha256::digest(canonical.as_bytes()))
@@ -501,7 +515,9 @@ mod tests {
     fn the_fingerprint_covers_every_output_affecting_setting() {
         let base = fingerprint_settings(Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None);
         // Pinned: the canonical form must never drift silently, or old outputs
-        // stop matching their records.
+        // stop matching their records. Drift arrives only as a deliberate
+        // FINGERPRINT_REVISION bump, which rebuilds once in the safe direction.
+        assert_eq!(FINGERPRINT_REVISION, 1, "bumping revisits this test");
         assert_eq!(
             base,
             fingerprint_settings(Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None)
@@ -532,7 +548,12 @@ mod tests {
             fingerprint_settings(Format::WebP, Quality::LOSSLESS, MaxEdge::FULL, None),
             "lossless differs from any quality number"
         );
-        // Names, ids and revisions are provenance, not transform.
+        assert_ne!(
+            base,
+            fingerprint_settings(Format::WebP, Quality::lossy(80.4), MaxEdge::FULL, None),
+            "sub-label precision still encodes differently"
+        );
+        // Names, ids and recipe revisions are provenance, not transform.
         assert_eq!(
             fingerprint_settings(Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None),
             base

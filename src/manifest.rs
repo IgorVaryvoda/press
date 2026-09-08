@@ -39,6 +39,11 @@ pub struct Record {
     pub source_bytes: u64,
     /// Seconds since the Unix epoch; `None` when the filesystem would not say.
     pub source_modified: Option<u64>,
+    /// Hex SHA-256 of the source bytes the run consumed, absent on lines
+    /// written before hashes existed. Identical bytes still match; any edit
+    /// mismatches even when the filesystem reports the same timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
     /// Relative to the output root.
     pub output: PathBuf,
     /// What this run installed, so an undo can tell its own file from one
@@ -81,6 +86,14 @@ impl Record {
         std::fs::symlink_metadata(path).is_ok_and(|metadata| {
             metadata.len() == self.output_bytes && modified(&metadata) == self.output_modified
         })
+    }
+    /// Whether the file at `path` still holds the recorded source bytes.
+    /// `None` answers nothing either way: a line from before hashes, or a
+    /// source that vanished mid-check, keeps the caller's legacy timestamp
+    /// decision rather than treating age as proof.
+    pub fn source_changed(&self, path: &Path) -> Option<bool> {
+        let recorded = self.source_hash.as_deref()?;
+        Some(hash_file(path).ok()? != recorded)
     }
 
     /// The line that withdraws this one.
@@ -205,6 +218,9 @@ impl Stamp {
             source: relative_source.to_path_buf(),
             source_bytes: original.as_ref().map_or(0, |metadata| metadata.len()),
             source_modified: original.as_ref().and_then(modified),
+            // Best effort at record time: a source that vanishes mid-run keeps
+            // no hash and falls back to the legacy timestamp decision.
+            source_hash: original.as_ref().and_then(|_| hash_file(source).ok()),
             output: relative_output.to_path_buf(),
             output_bytes: installed.as_ref().map_or(0, |metadata| metadata.len()),
             output_modified: installed.as_ref().and_then(modified),
@@ -506,6 +522,17 @@ fn prune_empty(directory: Option<&Path>, backups: &Path) {
     }
 }
 
+/// Hex SHA-256 of a file's bytes, streamed so a large source never sits in
+/// memory twice. Recording hashes the source the run already decoded; skipping
+/// hashes only the outputs it would otherwise reuse.
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 fn modified(metadata: &std::fs::Metadata) -> Option<u64> {
     metadata
         .modified()
@@ -540,6 +567,7 @@ mod tests {
             source: PathBuf::from(source),
             source_bytes: 0,
             source_modified: None,
+            source_hash: None,
             output: PathBuf::from(output),
             output_bytes: 0,
             output_modified: None,
@@ -687,6 +715,39 @@ mod tests {
         assert!(!record.installed(&staged));
         assert!(remove_output(&staged, &record).is_err());
         assert!(staged.is_file(), "a refused undo leaves the edit alone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_rewritten_source_mismatches_its_recorded_hash() {
+        let dir = test_dir("source-hash");
+        let source = dir.join("source.png");
+        std::fs::write(&source, vec![1u8; 16]).expect("the source is written");
+        let record = stamp()
+            .record(
+                (&dir, &dir),
+                &source,
+                &dir.join("out.webp"),
+                &dir.join("out.webp"),
+                None,
+            )
+            .expect("plain relative paths record");
+        assert!(
+            record.source_hash.is_some(),
+            "recording hashes what it consumed"
+        );
+        assert_eq!(record.source_changed(&source), Some(false));
+        std::fs::write(&source, vec![2u8; 16]).expect("the edit lands");
+        assert_eq!(record.source_changed(&source), Some(true));
+        // Identical bytes rewritten are still the same content, whatever the
+        // clock says: reuse stays valid.
+        std::fs::write(&source, vec![1u8; 16]).expect("the rewrite lands");
+        assert_eq!(record.source_changed(&source), Some(false));
+        // Lines from before hashes, and vanished sources, answer nothing: the
+        // caller keeps its legacy timestamp decision.
+        let mut legacy = record.clone();
+        legacy.source_hash = None;
+        assert_eq!(legacy.source_changed(&source), None);
+        assert_eq!(record.source_changed(&dir.join("gone.png")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

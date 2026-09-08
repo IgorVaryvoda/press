@@ -901,6 +901,10 @@ fn queue_run<'a>(
                             && record.avif_speed == wanted_speed
                     }
                 };
+                // A recorded content hash beats timestamps: a same-second edit
+                // with different bytes rebuilds, while identical bytes still
+                // skip. Lines from before hashes keep the legacy decision.
+                let same = same && !record.source_changed(&entry.path).unwrap_or(false);
                 (same, !same)
             }
             _ => (false, false),
@@ -2599,6 +2603,50 @@ mod tests {
             b"already converted"
         );
         assert!(std::fs::metadata(out_dir.join("stale.webp")).unwrap().len() > 100);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn skip_existing_rebuilds_when_bytes_changed_under_the_same_timestamp() {
+        let base = temp_root("skip-hash");
+        let root = base.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let out_dir = base.join("exports");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let source = root.join("shot.png");
+        write_photo(&source, 64, 64);
+        let output = out_dir.join("shot.webp");
+        std::fs::write(&output, b"already converted").unwrap();
+        record_at(
+            &root,
+            &out_dir,
+            &source,
+            &output,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            None,
+        );
+        // Different bytes, then backdate the source so timestamps alone would
+        // call the output current: only the recorded content hash rebuilds.
+        write_photo(&source, 32, 32);
+        backdate(&source);
+        let entries = probe_all(&[source]);
+        let queued = plan_history(
+            &root,
+            &out_dir,
+            &entries,
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            true,
+            None,
+        );
+        assert!(
+            queued.skipped.is_empty(),
+            "the edit rebuilds despite the timestamps"
+        );
+        assert_eq!(queued.entries.len(), 1);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
