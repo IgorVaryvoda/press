@@ -1,6 +1,9 @@
 //! Minimal safe boundary around the system libavif encoder.
 
-use std::ffi::{c_int, c_uchar};
+use std::ffi::{CString, c_char, c_int, c_uchar};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// libaom's speed dial, 0 (slowest, smallest) to 10 (fastest, largest).
@@ -41,6 +44,28 @@ struct ImageGuideAvifData {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct ImageGuideAvifHeader {
+    width: u32,
+    height: u32,
+    depth: u32,
+    alpha_present: c_int,
+    icc_present: c_int,
+    orientation_swaps: c_int,
+}
+
+/// Facts libavif can read from the container before any AV1 pixels are decoded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Header {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u8,
+    pub alpha: bool,
+    pub profile: bool,
+    pub orientation_swaps: bool,
+}
+
 unsafe extern "C" {
     fn imageguide_avif_encode(
         pixels: *const c_uchar,
@@ -56,6 +81,51 @@ unsafe extern "C" {
     fn imageguide_avif_data(encoded: *const ImageGuideAvifData) -> *const c_uchar;
     fn imageguide_avif_size(encoded: *const ImageGuideAvifData) -> usize;
     fn imageguide_avif_free(encoded: *mut ImageGuideAvifData);
+    fn imageguide_avif_probe_memory(
+        data: *const c_uchar,
+        size: usize,
+        header: *mut ImageGuideAvifHeader,
+    ) -> c_int;
+    fn imageguide_avif_probe_file(path: *const c_char, header: *mut ImageGuideAvifHeader) -> c_int;
+}
+
+fn header(raw: ImageGuideAvifHeader) -> Option<Header> {
+    Some(Header {
+        width: raw.width,
+        height: raw.height,
+        depth: u8::try_from(raw.depth).ok()?,
+        alpha: raw.alpha_present != 0,
+        profile: raw.icc_present != 0,
+        orientation_swaps: raw.orientation_swaps != 0,
+    })
+}
+
+/// Parse AVIF container metadata without constructing an AV1 image buffer.
+pub fn probe_bytes(bytes: &[u8]) -> Option<Header> {
+    let mut raw = ImageGuideAvifHeader::default();
+    // SAFETY: the bridge reads the byte slice only during this synchronous call
+    // and writes one initialized header into the valid output pointer.
+    let parsed = unsafe { imageguide_avif_probe_memory(bytes.as_ptr(), bytes.len(), &mut raw) };
+    (parsed != 0).then(|| header(raw)).flatten()
+}
+
+/// Parse an AVIF file through libavif's file reader, without reading its pixels.
+pub fn probe_file(path: &Path) -> Option<Header> {
+    let path = {
+        #[cfg(unix)]
+        {
+            CString::new(path.as_os_str().as_bytes()).ok()?
+        }
+        #[cfg(not(unix))]
+        {
+            CString::new(path.to_str()?).ok()?
+        }
+    };
+    let mut raw = ImageGuideAvifHeader::default();
+    // SAFETY: the NUL-terminated path and output header remain alive for the
+    // synchronous bridge call; libavif opens and closes the file itself.
+    let parsed = unsafe { imageguide_avif_probe_file(path.as_ptr(), &mut raw) };
+    (parsed != 0).then(|| header(raw)).flatten()
 }
 
 // One argument per parameter of `imageguide_avif_encode`, which is what a boundary

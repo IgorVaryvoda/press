@@ -981,6 +981,21 @@ struct HeaderFacts {
 }
 
 fn header_from_bytes(bytes: &[u8]) -> Option<HeaderFacts> {
+    if let Some(info) = crate::avif::probe_bytes(bytes) {
+        let (width, height) = if info.orientation_swaps {
+            (info.height, info.width)
+        } else {
+            (info.width, info.height)
+        };
+        return Some(HeaderFacts {
+            format: ContentFormat::Avif,
+            width,
+            height,
+            profile: Some(info.profile),
+            depth_bits: Some(info.depth),
+        });
+    }
+
     if let Some(reader) = ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()
@@ -1294,6 +1309,59 @@ mod tests {
         assert_eq!(receipt.outputs[0].actual.format, Some(ContentFormat::Png));
         assert_eq!(receipt.outputs[0].checks[0].status, CheckStatus::Pass);
         assert_eq!(receipt.outputs[0].checks[1].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn avif_header_evidence_is_reported_before_a_budgeted_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("result.avif");
+        let mut bytes =
+            crate::avif::encode(&[128u8; 2 * 2 * 3], 2, 2, false, 80, 6, 1, None).unwrap();
+        let ispe = bytes.windows(4).position(|chunk| chunk == b"ispe").unwrap();
+        bytes[ispe + 8..ispe + 12].copy_from_slice(&12_000u32.to_be_bytes());
+        bytes[ispe + 12..ispe + 16].copy_from_slice(&12_000u32.to_be_bytes());
+        std::fs::write(&output, bytes).unwrap();
+        let pack = snapshot(vec![
+            rule(
+                "format",
+                true,
+                Constraint::Format {
+                    allowed: vec![ContentFormat::Avif],
+                },
+            ),
+            rule(
+                "dimensions",
+                true,
+                Constraint::Dimensions {
+                    min_width: Some(1),
+                    max_width: Some(20_000),
+                    min_height: Some(1),
+                    max_height: Some(20_000),
+                },
+            ),
+        ]);
+        let receipt = inspect_outputs_at(
+            dir.path(),
+            &[OutputRef {
+                source: None,
+                output: PathBuf::from("result.avif"),
+                processing: None,
+            }],
+            &pack,
+            "2026-09-08",
+        )
+        .unwrap();
+        let actual = &receipt.outputs[0].actual;
+        assert_eq!(actual.format, Some(ContentFormat::Avif));
+        assert_eq!((actual.width, actual.height), (Some(12_000), Some(12_000)));
+        assert_eq!(actual.depth_bits, Some(8));
+        assert!(
+            receipt.outputs[0]
+                .inspection_error
+                .as_deref()
+                .is_some_and(|error| error.contains("budget"))
+        );
+        assert!(!receipt.all_required_pass);
     }
 
     #[test]

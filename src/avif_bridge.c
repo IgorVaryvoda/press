@@ -6,6 +6,68 @@ typedef struct ImageGuideAvifData {
     avifRWData raw;
 } ImageGuideAvifData;
 
+typedef struct ImageGuideAvifHeader {
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    int alpha_present;
+    int icc_present;
+    int orientation_swaps;
+} ImageGuideAvifHeader;
+
+static int imageguide_avif_header(avifDecoder *decoder,
+                                  ImageGuideAvifHeader *header) {
+    if (!decoder || !decoder->image || !header || !decoder->image->width ||
+        !decoder->image->height || !decoder->image->depth) {
+        return 0;
+    }
+    header->width = decoder->image->width;
+    header->height = decoder->image->height;
+    header->depth = decoder->image->depth;
+    header->alpha_present = decoder->alphaPresent;
+    header->icc_present = decoder->image->icc.size != 0;
+    header->orientation_swaps =
+        (decoder->image->transformFlags & AVIF_TRANSFORM_IROT) &&
+        (decoder->image->irot.angle & 1);
+    return 1;
+}
+
+int imageguide_avif_probe_memory(const uint8_t *data,
+                                 size_t size,
+                                 ImageGuideAvifHeader *header) {
+    if (!data || !size || !header) {
+        return 0;
+    }
+    avifDecoder *decoder = avifDecoderCreate();
+    if (!decoder) {
+        return 0;
+    }
+    decoder->ignoreExif = AVIF_TRUE;
+    decoder->ignoreXMP = AVIF_TRUE;
+    int parsed = avifDecoderSetIOMemory(decoder, data, size) == AVIF_RESULT_OK &&
+                 avifDecoderParse(decoder) == AVIF_RESULT_OK &&
+                 imageguide_avif_header(decoder, header);
+    avifDecoderDestroy(decoder);
+    return parsed;
+}
+
+int imageguide_avif_probe_file(const char *path, ImageGuideAvifHeader *header) {
+    if (!path || !header) {
+        return 0;
+    }
+    avifDecoder *decoder = avifDecoderCreate();
+    if (!decoder) {
+        return 0;
+    }
+    decoder->ignoreExif = AVIF_TRUE;
+    decoder->ignoreXMP = AVIF_TRUE;
+    int parsed = avifDecoderSetIOFile(decoder, path) == AVIF_RESULT_OK &&
+                 avifDecoderParse(decoder) == AVIF_RESULT_OK &&
+                 imageguide_avif_header(decoder, header);
+    avifDecoderDestroy(decoder);
+    return parsed;
+}
+
 ImageGuideAvifData *imageguide_avif_encode(const uint8_t *pixels,
                                            uint32_t width,
                                            uint32_t height,
