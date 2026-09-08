@@ -6,48 +6,53 @@
 use super::*;
 use crate::job::{self, Job};
 
-/// Open the saved job covering `root`, or an anonymous one for it. A saved
-/// job matches by exact or canonical root; the first match wins and the rest
-/// stay listed nowhere, because two jobs claiming one folder is itself a
-/// conflict to resolve rather than guess at.
-pub(super) fn load_job_for(root: &Path) -> Job {
-    if let Some(dir) = job::dir() {
-        return load_job_for_in(&dir, root);
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct JobSelection {
+    pub job: Job,
+    pub choices: Vec<Job>,
+}
+
+pub(super) fn job_selection_for(root: &Path) -> JobSelection {
+    match job::dir() {
+        Some(dir) => job_selection_for_in(&dir, root),
+        None => JobSelection {
+            job: anonymous_job(root),
+            choices: Vec::new(),
+        },
     }
-    anonymous_job(root)
+}
+
+pub(super) fn job_selection_for_in(dir: &Path, root: &Path) -> JobSelection {
+    let (jobs, _) = job::list(dir);
+    let choices: Vec<Job> = jobs
+        .into_iter()
+        .filter(|known| {
+            known
+                .source_roots
+                .iter()
+                .any(|stored| roots_match(stored, root))
+        })
+        .collect();
+    if choices.len() > 1 {
+        return JobSelection {
+            job: anonymous_job_in(dir, root),
+            choices,
+        };
+    }
+    JobSelection {
+        job: choices
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| anonymous_job_in(dir, root)),
+        choices: Vec::new(),
+    }
 }
 
 /// The same lookup against an explicit library directory, so tests drive it
 /// without touching the real config folder.
+#[cfg(test)]
 pub(super) fn load_job_for_in(dir: &Path, root: &Path) -> Job {
-    {
-        // `list` sorts by name, so every tier below is deterministic. An exact
-        // root beats a canonical-only match: the stored spelling is the
-        // stronger claim that this job means this folder.
-        let (jobs, _) = job::list(dir);
-        if let Some(known) = jobs
-            .iter()
-            .find(|job| job.source_roots.iter().any(|known| known == root))
-        {
-            return known.clone();
-        }
-        if let Some(known) = jobs.into_iter().find(|job| {
-            job.source_roots
-                .iter()
-                .any(|known| roots_match(known, root))
-        }) {
-            return known;
-        }
-        let name = root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Job".into());
-        if let Ok(job) = Job::new(job::suggest_id(dir, &name), name, vec![root.to_path_buf()]) {
-            return job;
-        }
-    }
-    anonymous_job(root)
+    job_selection_for_in(dir, root).job
 }
 
 fn anonymous_job(root: &Path) -> Job {
@@ -63,6 +68,16 @@ fn anonymous_job(root: &Path) -> Job {
     }
 }
 
+fn anonymous_job_in(dir: &Path, root: &Path) -> Job {
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Job".into());
+    Job::new(job::suggest_id(dir, &name), name, vec![root.to_path_buf()])
+        .unwrap_or_else(|_| anonymous_job(root))
+}
+
 fn roots_match(known: &Path, root: &Path) -> bool {
     if known == root {
         return true;
@@ -73,7 +88,37 @@ fn roots_match(known: &Path, root: &Path) -> bool {
     }
 }
 
+fn job_request_matches(current: (u64, &str, u32, u64), expected: (u64, &str, u32, u64)) -> bool {
+    current == expected
+}
+
 impl Audit {
+    pub(super) fn job_choice_pending(&self) -> bool {
+        !self.job_choices.is_empty()
+    }
+
+    pub(super) fn owns_job_request(
+        &self,
+        dataset: u64,
+        id: &str,
+        revision: u32,
+        request_generation: u64,
+    ) -> bool {
+        job_request_matches(
+            (
+                self.dataset_generation,
+                &self.work_job.id,
+                self.work_job.revision,
+                self.job_request_generation,
+            ),
+            (dataset, id, revision, request_generation),
+        )
+    }
+
+    fn bump_job_request_generation(&mut self) {
+        self.job_request_generation = self.job_request_generation.wrapping_add(1);
+    }
+
     pub(super) fn job_dir_or_notify(&self, cx: &mut Context<Self>) -> Option<PathBuf> {
         match job::dir() {
             Some(dir) => Some(dir),
@@ -92,6 +137,16 @@ impl Audit {
     /// Run a mutation, persist it, and refresh states. Every action below
     /// goes through here so no edit path forgets persistence.
     fn mutate_job(&mut self, dir: &Path, cx: &mut Context<Self>, f: impl FnOnce(&mut Job)) {
+        if self.job_choice_pending() {
+            self.notify_error(
+                "jobs",
+                "Choose a job first",
+                "select a saved job or start a new one before editing",
+                cx,
+            );
+            return;
+        }
+        self.job_export_preview = None;
         f(&mut self.work_job);
         self.persist_job(dir, cx);
         self.refresh_job_states(cx);
@@ -109,13 +164,17 @@ impl Audit {
     /// Delete the open job's file and go anonymous. Sources, outputs and
     /// recipes live elsewhere; only the grouping goes, like deleting a recipe.
     pub(super) fn delete_job(&mut self, dir: &Path, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.job_choice_pending() {
             return;
         }
         let id = self.work_job.id.clone();
         match job::remove(dir, &id) {
             Ok(()) => {
-                self.work_job = load_job_for_in(dir, &self.root.clone());
+                let JobSelection { job, choices } = job_selection_for_in(dir, &self.root.clone());
+                self.bump_job_request_generation();
+                self.work_job = job;
+                self.job_choices = choices;
+                self.job_export_preview = None;
                 self.work_states.clear();
                 self.work_stale.clear();
                 cx.notify();
@@ -127,7 +186,7 @@ impl Audit {
     /// checked at prepare time, not here: a deleted recipe must refuse by
     /// name rather than silently convert with current settings.
     pub(super) fn bind_current_recipe_as_target(&mut self, dir: &Path, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.job_choice_pending() {
             return;
         }
         let Some(id) = self.selected_recipe.clone() else {
@@ -163,7 +222,9 @@ impl Audit {
         // A newer mutation in the same dataset supersedes this refresh: every
         // mutation bumps the revision before refreshing, so fencing on both
         // drops a late landing from the mapping that no longer exists.
+        let job_id = self.work_job.id.clone();
         let revision = self.work_job.revision;
+        let request_generation = self.job_request_generation;
         let job = self.work_job.clone();
         let root = self.root.clone();
         let out_dir = self.output.root(&self.root);
@@ -182,7 +243,7 @@ impl Audit {
                 })
                 .await;
             let _ = this.update(cx, |audit, cx| {
-                if audit.dataset_generation != generation || audit.work_job.revision != revision {
+                if !audit.owns_job_request(generation, &job_id, revision, request_generation) {
                     return;
                 }
                 audit.work_states = states;
@@ -200,9 +261,56 @@ impl Audit {
     /// Start over with an anonymous job for the current folder. Saved files
     /// stay on disk; nothing is deleted.
     pub(super) fn new_job(&mut self, cx: &mut Context<Self>) {
-        self.work_job = load_job_for(&self.root.clone());
+        self.bump_job_request_generation();
+        self.work_job = job::dir()
+            .map(|dir| anonymous_job_in(&dir, &self.root.clone()))
+            .unwrap_or_else(|| anonymous_job(&self.root.clone()));
+        self.job_choices.clear();
+        self.job_export_preview = None;
         self.work_states.clear();
         self.work_stale.clear();
+        cx.notify();
+    }
+
+    pub(super) fn select_saved_job(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.job_choices.iter().position(|job| job.id == id) else {
+            return;
+        };
+        self.bump_job_request_generation();
+        self.work_job = self.job_choices.remove(index);
+        self.job_choices.clear();
+        self.job_export_preview = None;
+        self.work_states.clear();
+        self.work_stale.clear();
+        self.refresh_job_states(cx);
+        cx.notify();
+    }
+
+    pub(super) fn open_job_export_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.converting || self.job_choice_pending() {
+            return;
+        }
+        match self.work_job.export_draft(&self.root) {
+            Ok(draft) => {
+                self.job_export_preview = Some(draft);
+                // `sets-section` is the last child of the rail settings area.
+                // Scroll it to the top before focusing the first review action,
+                // so opening Export always gives the user a visible decision.
+                let item = 2 + usize::from(!self.recipes_skipped.is_empty());
+                self.rail_scroll.scroll_to_top_of_item(item);
+                cx.defer_in(window, |audit, window, cx| {
+                    window.focus(&audit.job_export_preview_focus, cx);
+                });
+                cx.notify();
+            }
+            Err(message) => {
+                self.notify_error("jobs", "Couldn’t prepare the job export", message, cx)
+            }
+        }
+    }
+
+    pub(super) fn cancel_job_export_preview(&mut self, cx: &mut Context<Self>) {
+        self.job_export_preview = None;
         cx.notify();
     }
 
@@ -484,10 +592,14 @@ impl Audit {
     /// file; the row id stays so history follows the correction. A refusal
     /// names its path and the row keeps pointing where it did.
     pub(super) fn relink_mapping(&mut self, mapping_id: &str, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.job_choice_pending() {
             return;
         }
         let mapping_id = mapping_id.to_string();
+        let dataset = self.dataset_generation;
+        let job_id = self.work_job.id.clone();
+        let revision = self.work_job.revision;
+        let request_generation = self.job_request_generation;
         cx.spawn(async move |this, cx| {
             let picked = cx
                 .background_executor()
@@ -495,11 +607,15 @@ impl Audit {
                 .await;
             let Some(path) = picked else { return };
             let _ = this.update(cx, |audit, cx| {
+                if !audit.owns_job_request(dataset, &job_id, revision, request_generation) {
+                    return;
+                }
                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                     return;
                 };
                 match crate::job::relink(&mut audit.work_job, &mapping_id, &path) {
                     Ok(()) => {
+                        audit.job_export_preview = None;
                         audit.persist_job(&dir, cx);
                         audit.refresh_job_states(cx);
                         cx.notify();
@@ -539,9 +655,13 @@ impl Audit {
     /// Import a mapping sheet through a picker. Outcomes report per row: what
     /// mapped, what needs a choice, and what names nothing on disk.
     pub(super) fn import_csv_file(&mut self, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.job_choice_pending() {
             return;
         }
+        let dataset = self.dataset_generation;
+        let job_id = self.work_job.id.clone();
+        let revision = self.work_job.revision;
+        let request_generation = self.job_request_generation;
         cx.spawn(async move |this, cx| {
             let picked = cx
                 .background_executor()
@@ -552,22 +672,28 @@ impl Audit {
                 })
                 .await;
             let Some(path) = picked else { return };
-            let bytes = std::fs::metadata(&path)
-                .ok()
-                .filter(|metadata| metadata.len() <= 1 << 20)
-                .and_then(|_| std::fs::read(&path).ok());
+            let bytes = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::job::read_bounded(
+                        &path,
+                        crate::job::MAX_CSV_BYTES as u64,
+                        "mapping sheet",
+                    )
+                })
+                .await;
             let _ = this.update(cx, |audit, cx| {
+                if !audit.owns_job_request(dataset, &job_id, revision, request_generation) {
+                    return;
+                }
                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                     return;
                 };
                 match bytes {
-                    Some(bytes) => audit.import_csv_bytes(&dir, &bytes, cx),
-                    None => audit.notify_error(
-                        "jobs",
-                        "Couldn’t import the sheet",
-                        "that file cannot be read as a mapping sheet",
-                        cx,
-                    ),
+                    Ok(bytes) => audit.import_csv_bytes(&dir, &bytes, cx),
+                    Err(message) => {
+                        audit.notify_error("jobs", "Couldn’t import the sheet", message, cx)
+                    }
                 }
             });
         })
@@ -578,7 +704,7 @@ impl Audit {
     /// filename columns. Reports what mapped and names every row that needs
     /// a human, without writing a single ambiguous mapping.
     pub(super) fn import_csv_bytes(&mut self, dir: &Path, bytes: &[u8], cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.job_choice_pending() {
             return;
         }
         let Ok(text) = std::str::from_utf8(bytes) else {
@@ -601,30 +727,39 @@ impl Audit {
                 bytes: entry.bytes,
             })
             .collect();
+        let mut candidate = self.work_job.clone();
+        let outcomes = match crate::job::apply_csv_checked(&mut candidate, text, &entries) {
+            Ok(outcomes) => outcomes,
+            Err(message) => {
+                self.notify_error("jobs", "Couldn’t import the sheet", message, cx);
+                return;
+            }
+        };
+        self.work_job = candidate;
+        self.persist_job(dir, cx);
+        self.refresh_job_states(cx);
         let mut report = Vec::new();
         let mut mapped = 0;
-        self.mutate_job(dir, cx, |job| {
-            for outcome in crate::job::apply_csv(job, text, &entries) {
-                match outcome {
-                    crate::job::CsvOutcome::Mapped { .. } => mapped += 1,
-                    crate::job::CsvOutcome::AmbiguousFile { filename, .. } => {
-                        report.push(format!("{filename}: several files match"));
-                    }
-                    crate::job::CsvOutcome::MissingFile { filename } => {
-                        report.push(format!("{filename}: no such file"));
-                    }
-                    crate::job::CsvOutcome::UnknownProduct { sku } => {
-                        report.push(format!("{sku}: no such product"));
-                    }
-                    crate::job::CsvOutcome::UnknownRole { product_id, role } => {
-                        report.push(format!("{product_id}: no role {role}"));
-                    }
-                    crate::job::CsvOutcome::AmbiguousSku { sku } => {
-                        report.push(format!("{sku}: two products share it; use an id"));
-                    }
+        for outcome in outcomes {
+            match outcome {
+                crate::job::CsvOutcome::Mapped { .. } => mapped += 1,
+                crate::job::CsvOutcome::AmbiguousFile { filename, .. } => {
+                    report.push(format!("{filename}: several files match"));
+                }
+                crate::job::CsvOutcome::MissingFile { filename } => {
+                    report.push(format!("{filename}: no such file"));
+                }
+                crate::job::CsvOutcome::UnknownProduct { sku } => {
+                    report.push(format!("{sku}: no such product"));
+                }
+                crate::job::CsvOutcome::UnknownRole { product_id, role } => {
+                    report.push(format!("{product_id}: no role {role}"));
+                }
+                crate::job::CsvOutcome::AmbiguousSku { sku } => {
+                    report.push(format!("{sku}: two products share it; use an id"));
                 }
             }
-        });
+        }
         let mut message = format!("mapped {mapped}");
         let problems = !report.is_empty();
         if problems {
@@ -644,18 +779,26 @@ impl Audit {
 
     /// Export the open job beside a picker-chosen path, portable form.
     pub(super) fn export_job_file(&mut self, cx: &mut Context<Self>) {
-        if self.converting {
+        let Some(draft) = self.job_export_preview.clone() else {
+            return;
+        };
+        if self.converting || self.job_choice_pending() {
             return;
         }
-        let name: String = self
-            .work_job
-            .name
+        let name: String = draft
+            .preview
+            .job_name
             .chars()
             .map(|cell| match cell {
                 '/' | '\\' => '-',
                 _ => cell,
             })
             .collect();
+        let dataset = self.dataset_generation;
+        let job_id = draft.job_id.clone();
+        let revision = draft.revision;
+        let request_generation = self.job_request_generation;
+        let bytes = draft.bytes;
         cx.spawn(async move |this, cx| {
             let picked = cx
                 .background_executor()
@@ -668,20 +811,30 @@ impl Audit {
                 .await;
             let Some(path) = picked else { return };
             let _ = this.update(cx, |audit, cx| {
-                audit.export_job_to(&path, cx);
+                if !audit.owns_job_request(dataset, &job_id, revision, request_generation) {
+                    return;
+                }
+                if let Err(error) = std::fs::write(&path, &bytes) {
+                    audit.notify_error(
+                        "jobs",
+                        "Couldn’t export the job",
+                        format!("{} cannot be written: {error}", path.display()),
+                        cx,
+                    );
+                } else {
+                    audit.job_export_preview = None;
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
+    #[cfg(test)]
     pub(super) fn export_job_to(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        match self.work_job.to_portable(&root).and_then(|portable| {
-            serde_json::to_string_pretty(&portable)
-                .map_err(|error| format!("the job does not serialize: {error}"))
-        }) {
-            Ok(json) => {
-                if let Err(error) = std::fs::write(path, json.as_bytes()) {
+        match self.work_job.export_draft(&self.root) {
+            Ok(draft) => {
+                if let Err(error) = std::fs::write(path, &draft.bytes) {
                     self.notify_error(
                         "jobs",
                         "Couldn’t export the job",
@@ -724,7 +877,10 @@ impl Audit {
                 );
             }
             Ok(job) => {
+                self.bump_job_request_generation();
                 self.work_job = job;
+                self.job_choices.clear();
+                self.job_export_preview = None;
                 if let Err(message) = job::save(dir, &self.work_job) {
                     self.notify_error("jobs", "Couldn’t import the job", message, cx);
                 }
@@ -741,6 +897,10 @@ impl Audit {
         if self.converting {
             return;
         }
+        let dataset = self.dataset_generation;
+        let job_id = self.work_job.id.clone();
+        let revision = self.work_job.revision;
+        let request_generation = self.job_request_generation;
         cx.spawn(async move |this, cx| {
             let picked = cx
                 .background_executor()
@@ -751,22 +911,24 @@ impl Audit {
                 })
                 .await;
             let Some(path) = picked else { return };
-            let bytes = std::fs::metadata(&path)
-                .ok()
-                .filter(|metadata| metadata.len() <= crate::job::MAX_FILE_BYTES)
-                .and_then(|_| std::fs::read(&path).ok());
+            let bytes =
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::job::read_bounded(&path, crate::job::MAX_FILE_BYTES, "job")
+                    })
+                    .await;
             let _ = this.update(cx, |audit, cx| {
+                if !audit.owns_job_request(dataset, &job_id, revision, request_generation) {
+                    return;
+                }
                 let Some(dir) = audit.job_dir_or_notify(cx) else {
                     return;
                 };
                 match bytes {
-                    Some(bytes) => audit.import_job_bytes(&dir, &bytes, cx),
-                    None => audit.notify_error(
-                        "jobs",
-                        "Couldn’t import the job",
-                        "that file cannot be read as a job",
-                        cx,
-                    ),
+                    Ok(bytes) => audit.import_job_bytes(&dir, &bytes, cx),
+                    Err(message) => {
+                        audit.notify_error("jobs", "Couldn’t import the job", message, cx)
+                    }
                 }
             });
         })
@@ -784,9 +946,13 @@ mod tests {
         dir
     }
 
-    /// Two jobs claiming one root load the same job every time, and an exact
-    /// stored root beats a canonical-only match: the stored spelling is the
-    /// stronger claim that the job means the queried folder.
+    #[test]
+    fn same_job_identity_needs_the_current_request_generation() {
+        assert!(job_request_matches((4, "job", 7, 8), (4, "job", 7, 8)));
+        assert!(!job_request_matches((4, "job", 7, 8), (4, "job", 7, 9)));
+    }
+
+    /// Two jobs claiming one root stay as explicit choices on every lookup.
     #[test]
     fn shared_roots_load_the_same_job_every_time() {
         let dir = library("shared");
@@ -797,38 +963,72 @@ mod tests {
         job::save(&dir, &zebra).unwrap();
         let alpha = Job::new("alpha".into(), "Alpha".into(), vec![root.clone()]).unwrap();
         job::save(&dir, &alpha).unwrap();
-        // Both claim the folder: the name-sorted first wins, every time.
         for _ in 0..2 {
-            assert_eq!(load_job_for_in(&dir, &root).id, "alpha");
+            let selection = job_selection_for_in(&dir, &root);
+            assert_eq!(selection.choices.len(), 2);
+            assert!(selection.choices.iter().any(|job| job.id == "alpha"));
+            assert!(selection.choices.iter().any(|job| job.id == "zebra"));
+            assert!(selection.job.products.is_empty());
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// With no exact spelling anywhere, the canonical tier still answers the
-    /// same job on every load. Symlink creation needs privileges Windows CI
-    /// may not grant, so this runs where the call always exists.
+    #[test]
+    fn loading_ambiguous_job_never_picks_one() {
+        let dir = library("ambiguous-loader");
+        let root = dir.join("photos");
+        std::fs::create_dir_all(&root).expect("the root exists");
+        let alpha = Job::new("alpha".into(), "Alpha".into(), vec![root.clone()]).unwrap();
+        job::save(&dir, &alpha).unwrap();
+        let zebra = Job::new("zebra".into(), "Zebra".into(), vec![root.clone()]).unwrap();
+        job::save(&dir, &zebra).unwrap();
+        let loaded = load_job_for_in(&dir, &root);
+        assert!(loaded.products.is_empty());
+        assert!(!matches!(loaded.id.as_str(), "alpha" | "zebra"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Canonical matches also remain explicit choices, including when the
+    /// queried spelling is a symlink.
     #[cfg(unix)]
     #[test]
-    fn canonical_matches_fall_back_deterministically() {
+    fn canonical_matches_are_explicit_choices() {
         let dir = library("canonical");
         let root = dir.join("photos");
         std::fs::create_dir_all(&root).expect("the root exists");
         let link = dir.join("linked");
         std::os::unix::fs::symlink(&root, &link).unwrap();
-        let zebra = Job::new("zebra".into(), "Zebra".into(), vec![root]).unwrap();
+        let zebra = Job::new("zebra".into(), "Zebra".into(), vec![root.clone()]).unwrap();
         job::save(&dir, &zebra).unwrap();
-        let alpha = Job::new("alpha".into(), "Alpha".into(), vec![dir.join("photos")]).unwrap();
+        let alpha = Job::new("alpha".into(), "Alpha".into(), vec![root]).unwrap();
         job::save(&dir, &alpha).unwrap();
-        // Neither stored spelling is the queried one, but both canonicalize
-        // to it: the name-sorted first wins, every time.
-        for _ in 0..2 {
-            assert_eq!(load_job_for_in(&dir, &link).id, "alpha");
+        let selection = job_selection_for_in(&dir, &link);
+        assert_eq!(selection.choices.len(), 2);
+        assert!(selection.choices.iter().any(|job| job.id == "alpha"));
+        assert!(selection.choices.iter().any(|job| job.id == "zebra"));
+        assert!(selection.job.products.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An exact stored spelling does not hide canonical claimants.
+    #[cfg(unix)]
+    #[test]
+    fn exact_matches_do_not_hide_canonical_claimants() {
+        let dir = library("canonical-exact");
+        let root = dir.join("photos");
+        std::fs::create_dir_all(&root).expect("the root exists");
+        let link = dir.join("linked");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        for (id, name, path) in [
+            ("alpha", "Alpha", root.clone()),
+            ("zebra", "Zebra", root),
+            ("zed", "Zed", link.clone()),
+        ] {
+            job::save(&dir, &Job::new(id.into(), name.into(), vec![path]).unwrap()).unwrap();
         }
-        // An exact stored spelling beats the canonical tier even from the
-        // back of the name order.
-        let exact = Job::new("zed".into(), "Zed".into(), vec![link.clone()]).unwrap();
-        job::save(&dir, &exact).unwrap();
-        assert_eq!(load_job_for_in(&dir, &link).id, "zed");
+        let selection = job_selection_for_in(&dir, &link);
+        assert_eq!(selection.choices.len(), 3);
+        assert!(selection.choices.iter().any(|job| job.id == "zed"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

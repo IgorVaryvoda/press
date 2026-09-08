@@ -358,24 +358,21 @@ impl Audit {
                 })
                 .await;
             let Some(path) = picked else { return };
-            // Cap the read before it starts: the strict parser caps too, but
-            // only after the bytes are already in memory.
-            let bytes = std::fs::metadata(&path)
-                .ok()
-                .filter(|metadata| metadata.len() <= recipe::MAX_FILE_BYTES)
-                .and_then(|_| std::fs::read(&path).ok());
+            let bytes =
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::job::read_bounded(&path, recipe::MAX_FILE_BYTES, "preset")
+                    })
+                    .await;
             let _ = this.update(cx, |audit, cx| {
                 let Some(dir) = audit.recipe_dir_or_notify(cx) else {
                     return;
                 };
                 match bytes {
-                    Some(bytes) => audit.import_recipe_bytes(&dir, &bytes, cx),
-                    None => audit.notify_error(
-                        "recipes",
-                        "Couldn’t import the preset",
-                        "that file cannot be read as a preset",
-                        cx,
-                    ),
+                    Ok(bytes) => audit.import_recipe_bytes(&dir, &bytes, cx),
+                    Err(message) => {
+                        audit.notify_error("recipes", "Couldn’t import the preset", message, cx)
+                    }
                 }
             });
         })

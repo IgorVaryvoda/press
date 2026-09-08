@@ -71,7 +71,7 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, ElementExt, Icon, IconName, Selectable, Sizable, WindowExt,
 };
 use gpui_kit::{
-    App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage,
+    App, Context, Decorations, FocusHandle, Focusable as _, FontWeight, RenderImage, ScrollHandle,
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
     uniform_list,
 };
@@ -457,6 +457,16 @@ pub(crate) struct Audit {
     /// The open product-set job: anonymous until its first auto-save. Never
     /// absent, so actions never branch on its existence.
     work_job: crate::job::Job,
+    /// Saved jobs claiming the current folder. Mutations stay disabled until
+    /// the user chooses one or starts a new job.
+    job_choices: Vec<crate::job::Job>,
+    /// Portable metadata waiting for the user's explicit export click.
+    job_export_preview: Option<crate::job::ExportDraft>,
+    /// The first export action owns focus while its review card is open.
+    job_export_preview_focus: FocusHandle,
+    /// Distinguishes identity replacements that happen to reuse an id and
+    /// revision, so an older detached job task cannot land in the new job.
+    job_request_generation: u64,
     /// Resolved role states, refreshed after actions and runs — never during
     /// render, which must not touch the filesystem.
     work_states: Vec<crate::job::RoleState>,
@@ -613,6 +623,8 @@ pub(crate) struct Audit {
     grid: bool,
     /// The gallery scroll state survives renders so a width transition can reset it.
     gallery_scroll: UniformListScrollHandle,
+    /// The settings rail scrolls the review card into view when export opens.
+    rail_scroll: ScrollHandle,
     /// The column count laid out last frame. `None` deliberately leaves initial layout alone.
     gallery_columns: Option<usize>,
     /// Bands GPUI asked the virtualised gallery to render this frame.
@@ -1248,9 +1260,13 @@ impl Audit {
         }
         self.studio_source = None;
         self.root = root;
-        // Product sets follow the folder, not the run: a new dataset opens
-        // whatever job claims it, with states resolved fresh below.
-        self.work_job = job_actions::load_job_for(&self.root);
+        // Product sets follow the folder, not the run. Multiple saved jobs
+        // remain choices until the user selects one explicitly.
+        let job_actions::JobSelection { job, choices } = job_actions::job_selection_for(&self.root);
+        self.job_request_generation = self.job_request_generation.wrapping_add(1);
+        self.work_job = job;
+        self.job_choices = choices;
+        self.job_export_preview = None;
         self.work_states.clear();
         self.work_stale.clear();
         self.refresh_job_states(cx);
@@ -2189,6 +2205,7 @@ pub(crate) fn build_audit(
     let audit = cx.new(|cx| {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let job_export_preview_focus = cx.focus_handle();
 
         let filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name (Ctrl+K)"));
@@ -2321,7 +2338,10 @@ pub(crate) fn build_audit(
         let (recipes, recipes_skipped) = crate::recipe::dir()
             .map(|dir| crate::recipe::list(&dir))
             .unwrap_or_default();
-        let work_job = job_actions::load_job_for(&root);
+        let job_actions::JobSelection {
+            job: work_job,
+            choices: job_choices,
+        } = job_actions::job_selection_for(&root);
         let mut audit = Audit {
             window: window.window_handle(),
             table: None,
@@ -2397,6 +2417,10 @@ pub(crate) fn build_audit(
             filter_input,
             recipe_name_input,
             work_job,
+            job_choices,
+            job_export_preview: None,
+            job_export_preview_focus,
+            job_request_generation: 0,
             work_states: Vec::new(),
             work_stale: Vec::new(),
             product_name_input,
@@ -2408,6 +2432,7 @@ pub(crate) fn build_audit(
             slider_quality: quality.0.unwrap_or(80.),
             grid,
             gallery_scroll: UniformListScrollHandle::new(),
+            rail_scroll: ScrollHandle::new(),
             gallery_columns: None,
             gallery_visible: 0..0,
             estimate: None,

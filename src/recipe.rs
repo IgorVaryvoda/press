@@ -325,7 +325,11 @@ pub fn list(dir: &std::path::Path) -> (Vec<Recipe>, Vec<String>) {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match std::fs::read(&path)
+        if recipes.len() >= MAX_RECIPES {
+            skipped.push(path.display().to_string());
+            continue;
+        }
+        match crate::job::read_bounded(&path, MAX_FILE_BYTES, "recipe")
             .ok()
             .and_then(|bytes| parse_bytes(&bytes).ok())
             .filter(|recipe| recipe.id == stem)
@@ -442,7 +446,8 @@ pub fn import_bytes(dir: &std::path::Path, bytes: &[u8]) -> Result<Recipe, Strin
 /// The exact bytes to hand out on export: what is stored, byte for byte.
 pub fn export_bytes(dir: &std::path::Path, id: &str) -> Result<Vec<u8>, String> {
     check_id(id)?;
-    std::fs::read(file_for(dir, id)).map_err(|_| format!("no recipe named {id:?} exists"))
+    crate::job::read_bounded(&file_for(dir, id), MAX_FILE_BYTES, "recipe")
+        .map_err(|_| format!("no recipe named {id:?} exists"))
 }
 
 /// A file stem from a display name: lowercase alphanumerics and dashes,
@@ -474,10 +479,13 @@ pub fn suggest_id(dir: &std::path::Path, name: &str) -> String {
         return stem;
     }
     for counter in 2.. {
-        let candidate = format!("{stem}-{counter}");
-        if candidate.len() > MAX_ID_LEN {
-            continue;
+        let suffix = format!("-{counter}");
+        if suffix.len() >= MAX_ID_LEN {
+            break;
         }
+        let mut prefix = stem.clone();
+        prefix.truncate(MAX_ID_LEN - suffix.len());
+        let candidate = format!("{prefix}{suffix}");
         if !taken.contains(candidate.as_str()) && !file_for(dir, &candidate).exists() {
             return candidate;
         }
@@ -817,6 +825,26 @@ mod tests {
         );
         assert_eq!(suggest_id(&dir, "My Print!"), "my-print");
         assert_eq!(suggest_id(&dir, "Kept"), "kept-2", "taken stems dedupe");
+        let long_name = "x".repeat(MAX_ID_LEN);
+        let long_id = suggest_id(&dir, &long_name);
+        assert_eq!(long_id.len(), MAX_ID_LEN);
+        let mut long = personal();
+        long.id = long_id;
+        save(&dir, &long).unwrap();
+        let mut expected = long_name.clone();
+        expected.truncate(MAX_ID_LEN - 2);
+        expected.push_str("-2");
+        assert_eq!(suggest_id(&dir, &long_name), expected);
+        for counter in 2..=1_001 {
+            let suffix = format!("-{counter}");
+            let mut prefix = long_name.clone();
+            prefix.truncate(MAX_ID_LEN - suffix.len());
+            std::fs::write(dir.join(format!("{}{suffix}.json", prefix)), b"broken").unwrap();
+        }
+        let mut expected = long_name;
+        expected.truncate(MAX_ID_LEN - 5);
+        expected.push_str("-1002");
+        assert_eq!(suggest_id(&dir, &"x".repeat(MAX_ID_LEN)), expected);
         assert_eq!(suggest_id(&dir, "!!!"), "recipe");
         std::fs::remove_dir_all(&dir).unwrap();
     }
