@@ -44,17 +44,14 @@ impl SourceIdentity {
 
     /// Read the current source for a reuse check. A failed read is a mismatch.
     pub fn from_path(path: &Path) -> std::io::Result<Self> {
-        let bytes = std::fs::metadata(path)?.len();
-        if bytes > crate::convert::MAX_SOURCE_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "source snapshot exceeds the bounded input size",
-            ));
-        }
-        Ok(Self {
-            bytes,
-            hash: hash_file(path)?,
-        })
+        crate::scan::read_source_bytes(path)
+            .map(|bytes| Self::from_bytes(&bytes))
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("could not read source snapshot: {error:?}"),
+                )
+            })
     }
 
     pub fn matches_path(&self, path: &Path) -> bool {
@@ -132,16 +129,6 @@ impl Record {
             }
         })
     }
-    /// Whether the file at `path` still holds the recorded source bytes.
-    /// `None` answers nothing either way: a line from before hashes, or a
-    /// source that vanished mid-check, keeps the caller's legacy timestamp
-    /// decision rather than treating age as proof.
-    #[allow(dead_code)]
-    pub fn source_changed(&self, path: &Path) -> Option<bool> {
-        let recorded = self.source_hash.as_deref()?;
-        Some(hash_file(path).ok()? != recorded)
-    }
-
     /// Whether a fingerprinted record still names the bytes at `path`.
     /// Unreadable sources are mismatches, so verified reuse fails closed.
     pub fn source_matches(&self, path: &Path) -> Option<bool> {
@@ -255,7 +242,7 @@ impl Stamp {
     /// Written from the staged file, before anything moves: `staged` carries the
     /// bytes and the timestamp the installed file will have, and the source is
     /// still under its own name.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn record(
         &self,
         roots: (&Path, &Path),
@@ -869,19 +856,19 @@ mod tests {
             record.source_hash.is_some(),
             "recording hashes what it consumed"
         );
-        assert_eq!(record.source_changed(&source), Some(false));
+        assert_eq!(record.source_matches(&source), Some(true));
         std::fs::write(&source, vec![2u8; 16]).expect("the edit lands");
-        assert_eq!(record.source_changed(&source), Some(true));
+        assert_eq!(record.source_matches(&source), Some(false));
         // Identical bytes rewritten are still the same content, whatever the
         // clock says: reuse stays valid.
         std::fs::write(&source, vec![1u8; 16]).expect("the rewrite lands");
-        assert_eq!(record.source_changed(&source), Some(false));
-        // Lines from before hashes, and vanished sources, answer nothing: the
-        // caller keeps its legacy timestamp decision.
+        assert_eq!(record.source_matches(&source), Some(true));
+        // Lines from before hashes answer nothing. A vanished modern source is
+        // a mismatch, so verified reuse fails closed.
         let mut legacy = record.clone();
         legacy.source_hash = None;
-        assert_eq!(legacy.source_changed(&source), None);
-        assert_eq!(record.source_changed(&dir.join("gone.png")), None);
+        assert_eq!(legacy.source_matches(&source), None);
+        assert_eq!(record.source_matches(&dir.join("gone.png")), Some(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

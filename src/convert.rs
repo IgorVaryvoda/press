@@ -273,17 +273,7 @@ impl Format {
         if self != Format::Same {
             return Ok(self);
         }
-        let extension = source
-            .extension()
-            .map(|extension| extension.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        if extension.is_empty() {
-            return Err(Failure::KeepFormatUnavailable(
-                "a file with no extension".into(),
-            ));
-        }
-        let format = Self::from_extension(source)
-            .ok_or_else(|| Failure::KeepFormatUnavailable(extension.to_uppercase()))?;
+        let (extension, format) = same_extension(source)?;
         if let Some(entry) = crate::scan::probe(source)
             && entry.extension_lies()
         {
@@ -294,6 +284,39 @@ impl Format {
         }
         Ok(format)
     }
+
+    /// Resolve after decoding the bounded source snapshot. `Same` must not use
+    /// `resolve` at the processing boundary: that path probe could see one file,
+    /// while the decoder later consumes a replacement under the same name.
+    pub(crate) fn resolve_content(
+        self,
+        source: &Path,
+        content: crate::scan::FileFormat,
+    ) -> Result<Format, Failure> {
+        if self != Format::Same {
+            return Ok(self);
+        }
+        let (extension, format) = same_extension(source)?;
+        if let Some((_, actual)) = crate::scan::extension_lie(source, content) {
+            return Err(Failure::ExtensionLies(extension, actual));
+        }
+        Ok(format)
+    }
+}
+
+fn same_extension(source: &Path) -> Result<(String, Format), Failure> {
+    let extension = source
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if extension.is_empty() {
+        return Err(Failure::KeepFormatUnavailable(
+            "a file with no extension".into(),
+        ));
+    }
+    let format = Format::from_extension(source)
+        .ok_or_else(|| Failure::KeepFormatUnavailable(extension.to_uppercase()))?;
+    Ok((extension, format))
 }
 
 /// The result of re-encoding one file.
@@ -1364,6 +1387,8 @@ fn output_guard(
     let relative_output = written
         .strip_prefix(recording.out_dir)
         .map_err(|_| Failure::OutsideOutput)?;
+    // Ponytail ceiling: this fallback reloads one manifest for one existing
+    // destination; batch planning already loaded the manifest once.
     let manifest = crate::manifest::load(recording.out_dir);
     let Some(record) = manifest.latest(relative_source, relative_output) else {
         if crate::manifest::path(recording.out_dir)
@@ -1692,7 +1717,6 @@ fn convert_to_inner(
     max_edge: MaxEdge,
     expected: Option<&crate::manifest::SourceIdentity>,
 ) -> Result<Converted, Failure> {
-    let format = format.resolve(source)?;
     let decoded = match expected {
         Some(expected) => crate::scan::decode_for_conversion_checked(source, max_edge, expected),
         None => crate::scan::decode_for_conversion_with_identity(source, max_edge),
@@ -1710,7 +1734,9 @@ fn convert_to_inner(
         image,
         profile,
         identity: source_identity,
+        format: source_format,
     } = decoded;
+    let format = format.resolve_content(source, source_format)?;
     let decoded = max_edge.apply(image);
     check_image_budget(&decoded)?;
     check_lossless_depth(&decoded, format, quality)?;
@@ -2146,6 +2172,34 @@ pub(crate) mod tests {
             Some("named .jpg but the bytes are PNG; convert it explicitly".into())
         );
         assert!(!out.exists(), "nothing was written under the lying name");
+    }
+
+    #[test]
+    fn keep_format_rechecks_content_after_a_named_file_is_swapped() {
+        let dir = temp_dir("keep-swapped-name");
+        let source = dir.join("photo.jpg");
+        photo(16, 16)
+            .save_with_format(&source, image::ImageFormat::Jpeg)
+            .unwrap();
+        let resolved_before_swap = Format::Same
+            .resolve(&source)
+            .expect("the original JPEG name resolves");
+        photo(16, 16)
+            .save_with_format(&source, image::ImageFormat::Png)
+            .unwrap();
+
+        let decoded = crate::scan::decode_for_conversion_with_identity(&source, MaxEdge::FULL)
+            .expect("the replacement PNG decodes");
+        assert_eq!(resolved_before_swap, Format::Jpeg);
+        assert_eq!(
+            decoded.format,
+            crate::scan::FileFormat::Image(image::ImageFormat::Png)
+        );
+        assert_eq!(
+            Format::Same.resolve_content(&source, decoded.format),
+            Err(Failure::ExtensionLies("jpg".into(), "PNG"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A grayscale source stays a one-plane JPEG. Promoted to RGB with 4:2:0 it came

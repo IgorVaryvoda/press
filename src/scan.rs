@@ -215,6 +215,18 @@ impl FileFormat {
     }
 }
 
+/// Return the extension mismatch for a format already identified from bytes.
+/// Keeping this beside `FileFormat` means conversion and the header scan use the
+/// same aliases (`jpg`/`jpeg`, `tif`/`tiff`) without opening the path again.
+pub(crate) fn extension_lie(path: &Path, format: FileFormat) -> Option<(String, &'static str)> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    (!format
+        .extensions_str()
+        .iter()
+        .any(|expected| extension == *expected))
+    .then(|| (extension, format_name(format)))
+}
+
 impl From<ImageFormat> for FileFormat {
     fn from(format: ImageFormat) -> Self {
         Self::Image(format)
@@ -337,6 +349,8 @@ pub struct DecodedSource {
     pub image: DynamicImage,
     pub profile: Option<Vec<u8>>,
     pub identity: crate::manifest::SourceIdentity,
+    /// The container identified in the same bytes that produced `image`.
+    pub format: FileFormat,
 }
 
 /// Decode one still image for conversion, with the source's ICC profile beside it.
@@ -404,6 +418,7 @@ pub(crate) fn decode_for_conversion_from_bytes(
             image: DynamicImage::ImageRgba8(first.into_buffer()),
             profile: None,
             identity,
+            format: FileFormat::Image(ImageFormat::Gif),
         });
     }
 
@@ -422,6 +437,7 @@ pub(crate) fn decode_for_conversion_from_bytes(
             image,
             profile,
             identity,
+            format: FileFormat::Image(ImageFormat::Png),
         });
     }
 
@@ -440,6 +456,7 @@ pub(crate) fn decode_for_conversion_from_bytes(
             image,
             profile,
             identity,
+            format: FileFormat::Image(ImageFormat::WebP),
         });
     }
 
@@ -455,11 +472,13 @@ pub(crate) fn decode_for_conversion_from_bytes(
                 image,
                 profile,
                 identity,
+                format: FileFormat::Image(ImageFormat::Jpeg),
             });
         }
     }
 
     if let Some(reader) = reader
+        && let Some(format) = reader.format().map(FileFormat::Image)
         && let Ok(decoder) = reader.into_decoder()
     {
         check_decoder_budget(&decoder)?;
@@ -468,6 +487,7 @@ pub(crate) fn decode_for_conversion_from_bytes(
             image,
             profile,
             identity,
+            format,
         });
     }
 
@@ -482,6 +502,7 @@ pub(crate) fn decode_for_conversion_from_bytes(
         image,
         profile: rgb_profile(profile),
         identity,
+        format: FileFormat::JpegXl,
     })
 }
 
