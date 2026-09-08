@@ -36,11 +36,11 @@ press convert <file-or-folder> --skip-existing --json
 press convert <file-or-folder> --dry-run --json
 ```
 
-`--output <dir>` (short `-o`) writes the mirrored tree into that folder instead of `optimized/`. It is refused, with the reason on stderr and exit status `2`, when it is or contains the source folder or ends in a symlink.
+`--output <dir>` (short `-o`) writes the mirrored tree into that folder instead of `optimized/`. It is refused with exit status `2` when it is or contains the source folder or ends in a symlink. With `--json` the refusal is the schema-two error document (`output` null, `error` naming the reason, every file `failed`); without it, the reason is one stderr line plus per-file stdout lines.
 
-`--skip-existing` leaves a source alone when its planned output already exists and is not older than the source. Those files come back with `status` `skipped`, `skipped: true`, a named `reason`, and the size already on disk in `output_bytes`; they are counted in `summary.skipped` and never in `converted` or `failed`.
+`--skip-existing` leaves a source alone when its planned output is already current. Those files come back with `status` `skipped`, `skipped: true`, a named `reason`, and the size already on disk in `output_bytes`; they are counted in `summary.skipped` and never in `converted` or `failed`.
 
-The comparison is modification time and nothing else. A change of `--format`, `--quality` or `--max-edge` is **not** noticed: a source that has not moved since the last run keeps whatever that run wrote, at the old settings. Clear the output folder, or leave the flag off, whenever the settings change. Under this flag `summary.source_bytes` and `summary.output_bytes` cover only the files this run re-encoded, so they are not the size of the whole tree.
+A recorded run first matches its recipe fingerprint and the source content hash: changed settings or edited bytes rebuild even when the timestamps look current. An output with no record skips on timestamps alone. Under this flag `summary.source_bytes` and `summary.output_bytes` cover only the files this run re-encoded, so they are not the size of the whole tree.
 
 `--dry-run` writes nothing. A file that would be written comes back with `status` `planned` and the `planned_output` it would go to; `summary.converted` is `0`, and `summary.projected_bytes` holds the projected size of the whole run with `summary.projected_samples` real encodes behind it. The document carries `dry_run: true`. Report a projection as a projection, never as a measured saving.
 
@@ -52,7 +52,7 @@ Use quality `1` through `100`. `--lossless` supports WebP and JPEG XL, not AVIF,
 
 Treat exit status `1` as a partial result, not as proof that nothing was written. Read each file's `status`, report named failures, and use each successful `output` path as the source of truth. Never claim savings from the requested settings alone; use `summary.source_bytes` and `summary.output_bytes` from the completed run.
 
-Exit status `2` means the destination itself was refused before any file was converted, and no JSON is written. The reason is one line on stderr — usually that `optimized` already exists as a file or a symlink. Report that line; nothing was written.
+Exit status `2` means the destination itself was refused before any file was converted. With `--json` that refusal is the schema-two error document; without it, the reason is one line on stderr — usually that `optimized` already exists as a file or a symlink. Report it; nothing was written.
 
 Every file also carries `planned_output`, the name the plan gave it, whether or not this run wrote it. It is null when the plan itself was refused.
 

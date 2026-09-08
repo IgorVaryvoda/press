@@ -684,7 +684,7 @@ fn print_scan_errors(scanned: &scan::Scan) {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ConversionFile {
     source: String,
     status: &'static str,
@@ -1254,6 +1254,10 @@ fn convert_headless(
         },
     );
     let mut totals = totals.into_inner();
+    // Skipped files report alongside converted and failed ones: the text
+    // lines already name them, and the JSON files array must show every
+    // file's outcome in one place. The sort below orders the merger.
+    totals.files.extend(queued.skipped.iter().cloned());
     totals
         .files
         .sort_by(|left, right| left.source.cmp(&right.source));
@@ -2543,6 +2547,22 @@ mod tests {
         assert!(parse(&["skill", "--skip-existing"]).is_err());
     }
 
+    /// `press skill` prints the checked-in document verbatim, so the agent
+    /// contract cannot drift from the file agents actually read.
+    #[test]
+    fn the_printed_skill_is_the_checked_in_skill() {
+        for marker in [
+            "press convert <file-or-folder> --format webp --quality 80 --json",
+            "schema-two error document",
+            "recipe fingerprint and the source content hash",
+        ] {
+            assert!(
+                AGENT_SKILL.contains(marker),
+                "the skill still says: {marker}"
+            );
+        }
+    }
+
     /// The point of the flag: a re-run over a tree that mostly has not changed does
     /// the work only for the files that did.
     #[test]
@@ -2595,8 +2615,11 @@ mod tests {
             true,
         );
         assert_eq!(run.failed, 0);
-        assert_eq!(run.files.len(), 1);
-        assert_eq!(run.files[0].status, "converted");
+        // The report names every outcome: the converted stale file and the
+        // skipped current one side by side.
+        assert_eq!(run.files.len(), 2);
+        assert!(run.files.iter().any(|file| file.status == "converted"));
+        assert!(run.files.iter().any(|file| file.status == "skipped"));
         // The skipped output is untouched; the stale one was rewritten.
         assert_eq!(
             std::fs::read(out_dir.join("current.webp")).unwrap(),
