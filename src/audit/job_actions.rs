@@ -157,8 +157,11 @@ impl Audit {
             let (states, stale) = cx
                 .background_executor()
                 .spawn(async move {
-                    let states: Vec<_> =
-                        job.products.iter().flat_map(job::resolve_product).collect();
+                    let states: Vec<_> = job
+                        .products
+                        .iter()
+                        .flat_map(|product| job::resolve_product(product, &root))
+                        .collect();
                     let manifest = crate::manifest::load(&out_dir);
                     let stale = job::stale_deliverables(&manifest, &job, &root, &out_dir);
                     (states, stale)

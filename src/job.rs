@@ -249,7 +249,12 @@ impl Job {
             id: self.id.clone(),
             name: self.name.clone(),
             revision: self.revision,
-            base_hint: base.display().to_string(),
+            // Display-only: from_portable never resolves it, so no machine
+            // path leaves the export. The file name orients a human reader.
+            base_hint: base
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             source_roots: self
                 .source_roots
                 .iter()
@@ -357,7 +362,10 @@ impl Job {
                                 })
                             })
                             .collect::<Result<_, String>>()?,
-                        binding: product.binding.clone(),
+                        // Connected bindings never survive an import: the new
+                        // owner rebinds explicitly rather than inheriting server
+                        // identity from a file.
+                        binding: None,
                     })
                 })
                 .collect::<Result<_, String>>()?,
@@ -569,9 +577,23 @@ pub enum RoleStatus {
     Unmapped,
 }
 
-fn file_status(source: &SourceRef) -> SourceStatus {
+/// Freshness of one mapped file against the disk, confined to the audited
+/// root. A mapping that resolves outside it — an absolute escape or a symlink
+/// pointing out — reads as missing, so the row offers relink instead of
+/// following the link elsewhere. Without a canonical root the check falls back
+/// to a plain stat, which is today's behavior on exotic filesystems rather
+/// than a new refusal.
+fn file_status(source: &SourceRef, confined: Option<&std::path::Path>) -> SourceStatus {
     let Ok(metadata) = std::fs::metadata(&source.path) else {
         return SourceStatus::Missing;
+    };
+    if let Some(root) = confined {
+        let escaped = std::fs::canonicalize(&source.path)
+            .map(|resolved| !resolved.starts_with(root))
+            .unwrap_or(false);
+        if escaped {
+            return SourceStatus::Missing;
+        }
     };
     let modified = metadata
         .modified()
@@ -587,7 +609,8 @@ fn file_status(source: &SourceRef) -> SourceStatus {
 
 /// Resolve every role of one product against the disk. Pure filesystem reads,
 /// no writes, no network: safe to run whenever the view needs the truth.
-pub fn resolve_product(product: &ProductSet) -> Vec<RoleState> {
+pub fn resolve_product(product: &ProductSet, root: &std::path::Path) -> Vec<RoleState> {
+    let confined = std::fs::canonicalize(root).ok();
     product
         .roles
         .iter()
@@ -599,7 +622,7 @@ pub fn resolve_product(product: &ProductSet) -> Vec<RoleState> {
                 .map(|mapping| MappedSource {
                     mapping_id: mapping.id.clone(),
                     path: mapping.source.path.clone(),
-                    status: file_status(&mapping.source),
+                    status: file_status(&mapping.source, confined.as_deref()),
                 })
                 .collect();
             let status = if sources.is_empty() {
@@ -931,7 +954,7 @@ pub fn stale_deliverables(
 ) -> Vec<StaleDeliverable> {
     let mut stale = Vec::new();
     for product in &job.products {
-        for state in resolve_product(product) {
+        for state in resolve_product(product, root) {
             for source in &state.sources {
                 let Ok(relative) = source.path.strip_prefix(root) else {
                     continue;
@@ -944,19 +967,9 @@ pub fn stale_deliverables(
                 if outputs.is_empty() {
                     continue;
                 }
-                let mapping = job
-                    .products
-                    .iter()
-                    .find(|product| product.id == state.product_id)
-                    .and_then(|product| {
-                        product
-                            .mappings
-                            .iter()
-                            .find(|mapping| mapping.id == source.mapping_id)
-                    });
-                let current = mapping.map_or(SourceStatus::Missing, |mapping| {
-                    file_status(&mapping.source)
-                });
+                // Already confined by the resolve above: no second stat that
+                // could disagree with the status the row shows.
+                let current = source.status;
                 for record in outputs {
                     let output = out_dir.join(&record.output);
                     if !record.installed(&output) {
@@ -1107,6 +1120,21 @@ mod tests {
             portable.products[0].mappings[0].source.path,
             PathBuf::from("hero.png")
         );
+        assert_eq!(
+            portable.base_hint, "photos",
+            "the hint orients, not locates"
+        );
+        // A connected binding does not survive the export boundary either:
+        // the new owner rebinds rather than inheriting server identity.
+        let mut bound = job.clone();
+        bound.products[0].binding = Some(ServerBinding {
+            workspace: "ws".into(),
+            supplier: "sup".into(),
+            product: "prod".into(),
+            slot: "main".into(),
+        });
+        let back = Job::from_portable(&bound.to_portable(&root).unwrap(), &root).unwrap();
+        assert_eq!(back.products[0].binding, None);
         let back = Job::from_portable(&portable, &root).unwrap();
         // Rebased onto the same root, the job is itself.
         let mut expected = job.clone();
@@ -1260,7 +1288,7 @@ mod tests {
     fn resolution_names_fresh_stale_missing_and_unmapped() {
         let dir = store("resolve");
         let (job, _, _) = mapped_job(&dir);
-        let states = resolve_product(&job.products[0]);
+        let states = resolve_product(&job.products[0], &dir);
         assert_eq!(states.len(), 2);
         let detail = states
             .iter()
@@ -1272,7 +1300,7 @@ mod tests {
         assert_eq!(main.status, RoleStatus::Stale);
         assert_eq!(main.sources.len(), 2);
         std::fs::remove_file(dir.join("fresh.png")).unwrap();
-        let main = resolve_product(&job.products[0])
+        let main = resolve_product(&job.products[0], &dir)
             .into_iter()
             .find(|state| state.role_id == "main")
             .unwrap();
@@ -1289,13 +1317,66 @@ mod tests {
         assert!(relink(&mut job, "m1", &dir.join("gone.png")).is_err());
         std::fs::write(&target, b"new-bytes").unwrap();
         relink(&mut job, "m1", &target).unwrap();
-        let states = resolve_product(&job.products[0]);
+        let states = resolve_product(&job.products[0], &dir);
         let main = states.iter().find(|state| state.role_id == "main").unwrap();
         assert!(
             main.sources
                 .iter()
                 .any(|source| source.mapping_id == "m1" && source.status == SourceStatus::Fresh)
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    /// A mapping that resolves outside the audited root through a symlink
+    /// reads as missing: the row offers relink instead of following the link
+    /// elsewhere. Symlink creation needs privileges Windows CI may not grant,
+    /// so this runs where the call always exists.
+    #[cfg(unix)]
+    #[test]
+    fn escaped_symlink_sources_read_as_missing() {
+        let dir = store("symlink-escape");
+        let outside = dir.join("outside.png");
+        std::fs::write(&outside, b"outside-bytes").unwrap();
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.png")).unwrap();
+        let metadata = std::fs::metadata(&outside).unwrap();
+        let mut product = ProductSet {
+            id: "hero".into(),
+            name: "Hero".into(),
+            sku_hint: "SKU-1".into(),
+            roles: vec![Role {
+                id: "main".into(),
+                label: "Main".into(),
+                required: true,
+            }],
+            mappings: vec![Mapping {
+                id: "m1".into(),
+                role_id: "main".into(),
+                source: SourceRef {
+                    path: root.join("link.png"),
+                    bytes: metadata.len(),
+                    modified: metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|age| age.as_secs()),
+                },
+            }],
+            binding: None,
+        };
+        let main = resolve_product(&product, &root)
+            .into_iter()
+            .find(|state| state.role_id == "main")
+            .unwrap();
+        assert_eq!(main.status, RoleStatus::Missing);
+        // The same link resolves fresh without confinement lies: pointed at
+        // from its real parent, it is an ordinary fresh file.
+        product.mappings[0].source.path = outside;
+        let main = resolve_product(&product, &dir)
+            .into_iter()
+            .find(|state| state.role_id == "main")
+            .unwrap();
+        assert_eq!(main.status, RoleStatus::Ready);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
