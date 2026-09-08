@@ -1190,7 +1190,7 @@ fn queue_run<'a>(
 ) -> Queued<'a> {
     debug_assert_eq!(entries.len(), planned.len(), "one plan per audited source");
     let wanted = (format.label().to_string(), quality.label(), max_edge.0);
-    let wanted_speed = avif_speed;
+    let wanted_speed = crate::recipe::canonical_avif_speed(avif_speed);
     let wanted_recipe =
         crate::recipe::fingerprint_settings(format, quality, max_edge, wanted_speed);
     let matched = format!(
@@ -1241,7 +1241,12 @@ fn queue_run<'a>(
                 // A recorded content hash beats timestamps: a same-second edit
                 // with different bytes rebuilds, while identical bytes still
                 // skip. Lines from before hashes keep the legacy decision.
-                let same = same && !record.source_changed(&entry.path).unwrap_or(false);
+                let source_matches = if record.source_hash.is_some() {
+                    record.source_matches(&entry.path) == Some(true)
+                } else {
+                    true
+                };
+                let same = same && source_matches;
                 (same, !same)
             }
             _ => (false, false),

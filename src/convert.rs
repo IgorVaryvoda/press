@@ -63,6 +63,8 @@ pub enum Failure {
     AnimatedPng,
     AnimatedWebP,
     AnimatedJpegXl,
+    SourceChanged,
+    OutputChanged,
     OutsideOutput,
     UnsafeOutputPath,
     OverwritesSource,
@@ -97,6 +99,12 @@ impl Failure {
             Self::AnimatedPng => Some("animated PNG files are not converted".into()),
             Self::AnimatedWebP => Some("animated WebP files are not converted".into()),
             Self::AnimatedJpegXl => Some("animated JPEG XL files are not converted".into()),
+            Self::SourceChanged => Some(
+                "the source changed while it was being converted; nothing was installed".into(),
+            ),
+            Self::OutputChanged => {
+                Some("the output changed after planning; it was left untouched".into())
+            }
             Self::OutsideOutput => Some("the target is outside the output folder".into()),
             Self::UnsafeOutputPath => {
                 Some("a folder on the way to the target is not a plain folder".into())
@@ -1145,15 +1153,21 @@ pub fn write_recorded(
     written: &Path,
     encoded: &[u8],
     recording: &Recording,
+    source_identity: &crate::manifest::SourceIdentity,
 ) -> Result<(), Failure> {
-    write_inner(output_root, written, encoded, Some((source, recording)))
+    write_inner(
+        output_root,
+        written,
+        encoded,
+        Some((source, recording, source_identity)),
+    )
 }
 
 fn write_inner(
     output_root: &Path,
     written: &Path,
     encoded: &[u8],
-    recorded: Option<(&Path, &Recording)>,
+    recorded: Option<(&Path, &Recording, &crate::manifest::SourceIdentity)>,
 ) -> Result<(), Failure> {
     write_inner_with_hook(output_root, written, encoded, recorded, || {})
 }
@@ -1162,7 +1176,7 @@ fn write_inner_with_hook(
     output_root: &Path,
     written: &Path,
     encoded: &[u8],
-    recorded: Option<(&Path, &Recording)>,
+    recorded: Option<(&Path, &Recording, &crate::manifest::SourceIdentity)>,
     before_final_validation: impl FnOnce(),
 ) -> Result<(), Failure> {
     let relative = written
@@ -1180,6 +1194,10 @@ fn write_inner_with_hook(
     // destination would otherwise redirect the whole write elsewhere, and the
     // old walk from the output root never looked that high.
     ensure_absolute_parents(final_parent)?;
+    let (same_name, expected_output) = match recorded {
+        Some((source, recording, _)) => output_guard(written, source, recording)?,
+        None => (false, None),
+    };
     before_final_validation();
     // Revalidate immediately before staging so the swap above is the one that
     // fails, not a later rename. The hook is a deterministic test seam, not a
@@ -1214,15 +1232,25 @@ fn write_inner_with_hook(
     }
 
     let mut claim = None;
-    if let Some((source, recording)) = recorded {
+    if let Some((source, recording, source_identity)) = recorded {
+        if !source_identity.matches_path(source) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(Failure::SourceChanged);
+        }
+        if !same_name && !output_matches(written, expected_output.as_ref()) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(Failure::OutputChanged);
+        }
         let described = recording
             .stamp
-            .record(
+            .record_with_identity(
                 (recording.root, recording.out_dir),
                 source,
                 written,
                 &partial,
                 recording.backup.map(|backup| backup.path.as_path()),
+                source_identity,
+                encoded,
             )
             .ok_or(Failure::OutsideOutput);
         let appended = described.and_then(|record| {
@@ -1237,6 +1265,25 @@ fn write_inner_with_hook(
                 return Err(failure);
             }
         }
+        if !same_name && !output_matches(written, expected_output.as_ref()) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(withdraw(
+                recording.out_dir,
+                claim.as_ref(),
+                Failure::OutputChanged,
+            ));
+        }
+        // A source can change while the manifest append is being flushed. Refuse
+        // before moving it into backup, so the record never claims a different
+        // file than the one the decoder consumed.
+        if !source_identity.matches_path(source) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(withdraw(
+                recording.out_dir,
+                claim.as_ref(),
+                Failure::SourceChanged,
+            ));
+        }
         if let Some(backup) = recording.backup.filter(|backup| backup.moved)
             && let Err(failure) = move_to_backup(
                 source,
@@ -1247,11 +1294,24 @@ fn write_inner_with_hook(
             let _ = std::fs::remove_file(&partial);
             return Err(withdraw(recording.out_dir, claim.as_ref(), failure));
         }
+        if !same_name && !output_matches(written, expected_output.as_ref()) {
+            let _ = std::fs::remove_file(&partial);
+            if let Some(backup) = recording.backup.filter(|backup| backup.moved)
+                && std::fs::rename(&backup.path, source).is_err()
+            {
+                return Err(Failure::OriginalLeftInBackup(backup.path.clone()));
+            }
+            return Err(withdraw(
+                recording.out_dir,
+                claim.as_ref(),
+                Failure::OutputChanged,
+            ));
+        }
     }
 
     if std::fs::rename(&partial, written).is_err() {
         let _ = std::fs::remove_file(&partial);
-        if let Some((source, recording)) = recorded {
+        if let Some((source, recording, _)) = recorded {
             // The original is out of its own name and nothing took that name, so
             // put it back. A folder left with a hole where an image was is worse
             // than a file this run could not convert.
@@ -1271,6 +1331,88 @@ fn write_inner_with_hook(
         return Err(Failure::InstallFailed);
     }
     Ok(())
+}
+
+/// Capture ownership of an existing destination before the staged file is built.
+/// A current or newer unrecorded destination is somebody else's file and is
+/// never overwritten; the pre-manifest stale timestamp case remains compatible.
+fn output_guard(
+    written: &Path,
+    source: &Path,
+    recording: &Recording,
+) -> Result<(bool, Option<crate::manifest::FileIdentity>), Failure> {
+    let same_name = recording.backup.is_some() && path_key(source) == path_key(written);
+    if same_name {
+        return Ok((true, None));
+    }
+    // Keep the old install failure for a directory occupying the target. It
+    // cannot be renamed over, and allowing the final rename to report that
+    // failure lets replace mode put its original back without touching the
+    // directory.
+    if written
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Ok((false, None));
+    }
+    let Some(snapshot) = output_snapshot(written)? else {
+        return Ok((false, None));
+    };
+    let relative_source = source
+        .strip_prefix(recording.root)
+        .map_err(|_| Failure::OutsideOutput)?;
+    let relative_output = written
+        .strip_prefix(recording.out_dir)
+        .map_err(|_| Failure::OutsideOutput)?;
+    let manifest = crate::manifest::load(recording.out_dir);
+    let Some(record) = manifest.latest(relative_source, relative_output) else {
+        if crate::manifest::path(recording.out_dir)
+            .symlink_metadata()
+            .is_ok()
+        {
+            return Err(Failure::OutputChanged);
+        }
+        // Before manifests existed, headless runs used the source/output
+        // timestamp rule. Preserve that compatibility for an output that is
+        // already stale, while a current or newer unowned file remains closed.
+        return if output_is_older_than_source(source, written) {
+            Ok((false, Some(snapshot)))
+        } else {
+            Err(Failure::OutputChanged)
+        };
+    };
+    if !record.installed(written) {
+        return Err(Failure::OutputChanged);
+    }
+    Ok((false, Some(snapshot)))
+}
+
+fn output_snapshot(path: &Path) -> Result<Option<crate::manifest::FileIdentity>, Failure> {
+    match path.symlink_metadata() {
+        Ok(_) => crate::manifest::file_identity(path)
+            .map(Some)
+            .ok_or(Failure::OutputChanged),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Failure::OutputChanged),
+    }
+}
+
+fn output_matches(path: &Path, expected: Option<&crate::manifest::FileIdentity>) -> bool {
+    output_snapshot(path).is_ok_and(|current| current.as_ref() == expected)
+        || expected.is_none()
+            && path
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_dir())
+}
+
+fn output_is_older_than_source(source: &Path, output: &Path) -> bool {
+    let source = std::fs::metadata(source)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    let output = std::fs::metadata(output)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    matches!((source, output), (Some(source), Some(output)) if output < source)
 }
 
 /// Take back the record for a file that failed after it was written.
@@ -1417,6 +1559,12 @@ fn reject_windows_reparse(path: &Path) -> Result<(), Failure> {
 /// why the cap sits an order of magnitude below physical RAM rather than at it.
 pub const MAX_DECODE_BYTES: u64 = 1 << 30;
 
+/// The compressed snapshot is retained beside decoded pixels until the write
+/// boundary. Keep that second allocation bounded too, so a highly compressed
+/// source cannot consume the entire process budget before its dimensions are
+/// checked.
+pub const MAX_SOURCE_BYTES: u64 = MAX_DECODE_BYTES / 4;
+
 /// Header evidence for the budget: dimensions times eight bytes a pixel, the
 /// costliest frame these dimensions could decode to (sixteen-bit RGBA).
 /// Saturated, so a lying header refuses instead of overflowing. A hint, not a
@@ -1496,27 +1644,87 @@ pub fn convert_to(
     quality: Quality,
     max_edge: MaxEdge,
 ) -> Result<Converted, Failure> {
+    convert_to_inner(
+        output_root,
+        source,
+        written,
+        recording,
+        format,
+        quality,
+        max_edge,
+        None,
+    )
+}
+
+/// Convert only when the source still matches a saved byte snapshot.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub fn convert_to_expected(
+    output_root: &Path,
+    source: &Path,
+    written: &Path,
+    recording: Option<&Recording>,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    expected: &crate::manifest::SourceIdentity,
+) -> Result<Converted, Failure> {
+    convert_to_inner(
+        output_root,
+        source,
+        written,
+        recording,
+        format,
+        quality,
+        max_edge,
+        Some(expected),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_to_inner(
+    output_root: &Path,
+    source: &Path,
+    written: &Path,
+    recording: Option<&Recording>,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    expected: Option<&crate::manifest::SourceIdentity>,
+) -> Result<Converted, Failure> {
     let format = format.resolve(source)?;
-    // A lying header refuses here, before any decoder allocates on its word.
-    // The precise check runs again on the decoded frame below.
-    if let Some(header) = crate::scan::probe(source) {
-        check_budget_bytes(decode_budget_estimate(header.width, header.height))?;
+    let decoded = match expected {
+        Some(expected) => crate::scan::decode_for_conversion_checked(source, max_edge, expected),
+        None => crate::scan::decode_for_conversion_with_identity(source, max_edge),
     }
-    let (decoded, profile) =
-        crate::scan::decode_for_conversion(source, max_edge).map_err(|error| match error {
-            crate::scan::ConversionDecodeError::Failed => Failure::Failed,
-            crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
-            crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
-            crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
-            crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
-        })?;
-    let decoded = max_edge.apply(decoded);
+    .map_err(|error| match error {
+        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
+        crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
+        crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
+        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+        crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
+        crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
+        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
+    })?;
+    let crate::scan::DecodedSource {
+        image,
+        profile,
+        identity: source_identity,
+    } = decoded;
+    let decoded = max_edge.apply(image);
     check_image_budget(&decoded)?;
     check_lossless_depth(&decoded, format, quality)?;
     let (width, height) = (decoded.width(), decoded.height());
     let encoded = encode(&decoded, format, quality, profile.as_deref())?;
     match recording {
-        Some(recording) => write_recorded(output_root, source, written, &encoded, recording)?,
+        Some(recording) => write_recorded(
+            output_root,
+            source,
+            written,
+            &encoded,
+            recording,
+            &source_identity,
+        )?,
         None => write_output(output_root, written, &encoded)?,
     }
 
@@ -2897,6 +3105,123 @@ pub(crate) mod tests {
             quality,
             MaxEdge::FULL,
         )
+    }
+
+    #[test]
+    fn a_source_swapped_after_decode_is_not_moved_into_backup() {
+        let dir = temp_dir("source-swapped-after-decode");
+        let out = dir.join("optimized");
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("source.png");
+        photo(49, 48).save(&source).unwrap();
+        let decoded = crate::scan::decode_for_conversion_with_identity(&source, MaxEdge::FULL)
+            .expect("the source decodes");
+        let encoded = encode(
+            &decoded.image,
+            Format::WebP,
+            Quality::lossy(80.),
+            decoded.profile.as_deref(),
+        )
+        .expect("the output encodes");
+        let identity = decoded.identity;
+        photo(48, 48).save(&source).unwrap();
+        let stamp = crate::manifest::Stamp::new(Format::WebP, Quality::lossy(80.), MaxEdge::FULL);
+        let recording = Recording {
+            root: &dir,
+            out_dir: &out,
+            stamp: &stamp,
+            backup: None,
+        };
+
+        assert_eq!(
+            write_recorded(
+                &out,
+                &source,
+                &out.join("source.webp"),
+                &encoded,
+                &recording,
+                &identity,
+            ),
+            Err(Failure::SourceChanged)
+        );
+        assert!(source.is_file(), "the replacement stays in place");
+        assert!(!out.join("source.webp").exists());
+        assert!(crate::manifest::load(&out).outputs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_edited_output_with_the_same_stats_is_not_overwritten() {
+        let dir = temp_dir("output-same-stats");
+        let out = dir.join("optimized");
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("source.png");
+        photo(56, 56).save(&source).unwrap();
+        let written = out.join("source.webp");
+        convert_recorded(&dir, &out, &source, &written, None, Quality::lossy(80.))
+            .expect("the first run converts");
+        assert!(crate::manifest::load(&out).outputs[0].output_hash.is_some());
+        let mut edited = std::fs::read(&written).unwrap();
+        let modified = std::fs::metadata(&written).unwrap().modified().unwrap();
+        edited[0] ^= 1;
+        std::fs::write(&written, &edited).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&written)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        let refused = convert_recorded(&dir, &out, &source, &written, None, Quality::lossy(80.));
+        assert_eq!(refused, Err(Failure::OutputChanged));
+        assert_eq!(std::fs::read(&written).unwrap(), edited);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_output_edited_after_planning_is_refused_before_the_manifest_claim() {
+        let dir = temp_dir("output-edited-after-plan");
+        let out = dir.join("optimized");
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("source.png");
+        photo(56, 56).save(&source).unwrap();
+        let written = out.join("source.webp");
+        convert_recorded(&dir, &out, &source, &written, None, Quality::lossy(80.))
+            .expect("the first run converts");
+        let mut edited = std::fs::read(&written).unwrap();
+        edited[0] ^= 1;
+        let modified = std::fs::metadata(&written).unwrap().modified().unwrap();
+        let decoded = crate::scan::decode_for_conversion_with_identity(&source, MaxEdge::FULL)
+            .expect("the source decodes");
+        let identity = decoded.identity;
+        let stamp = crate::manifest::Stamp::new(Format::WebP, Quality::lossy(80.), MaxEdge::FULL);
+        let recording = Recording {
+            root: &dir,
+            out_dir: &out,
+            stamp: &stamp,
+            backup: None,
+        };
+
+        let failure = write_inner_with_hook(
+            &out,
+            &written,
+            b"replacement",
+            Some((&source, &recording, &identity)),
+            || {
+                std::fs::write(&written, &edited).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&written)
+                    .unwrap()
+                    .set_modified(modified)
+                    .unwrap();
+            },
+        );
+        assert_eq!(failure, Err(Failure::OutputChanged));
+        assert_eq!(std::fs::read(&written).unwrap(), edited);
+        assert_eq!(crate::manifest::load(&out).outputs.len(), 1);
+        assert!(stray_parts(&out).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn write_webp(path: &Path, image: &DynamicImage) {
