@@ -271,6 +271,9 @@ pub fn probe(path: &Path) -> Option<Entry> {
     {
         if format == ImageFormat::Avif {
             let info = crate::avif::probe_file(path)?;
+            if info.unsupported_transform {
+                return None;
+            }
             if crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(
                 info.width,
                 info.height,
@@ -329,6 +332,9 @@ pub fn decode(path: &Path) -> Option<DynamicImage> {
         if format == ImageFormat::Avif {
             let bytes = read_source_bytes(path).ok()?;
             let info = crate::avif::probe_bytes(&bytes)?;
+            if info.unsupported_transform {
+                return None;
+            }
             crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(
                 info.width,
                 info.height,
@@ -356,6 +362,9 @@ pub fn decode(path: &Path) -> Option<DynamicImage> {
 pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
     if image::guess_format(bytes).ok() == Some(ImageFormat::Avif) {
         let info = crate::avif::probe_bytes(bytes)?;
+        if info.unsupported_transform {
+            return None;
+        }
         crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(
             info.width,
             info.height,
@@ -378,6 +387,7 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
 pub enum ConversionDecodeError {
     Failed,
     TooLarge,
+    UnsupportedAvifTransform,
     SourceChanged,
     AnimatedGif,
     AnimatedPng,
@@ -443,6 +453,9 @@ pub(crate) fn decode_for_conversion_from_bytes(
         .is_some_and(|reader| reader.format() == Some(ImageFormat::Avif))
     {
         let info = crate::avif::probe_bytes(bytes).ok_or(ConversionDecodeError::Failed)?;
+        if info.unsupported_transform {
+            return Err(ConversionDecodeError::UnsupportedAvifTransform);
+        }
         check_budget_dimensions(info.width, info.height)?;
         let decoded = crate::avif::decode_bytes_with_limits(
             bytes,
@@ -608,21 +621,15 @@ fn avif_image(
         depth,
         profile,
     } = decoded;
-    let image = match depth {
-        8 => DynamicImage::ImageRgba8(
+    let image = match (depth, pixels) {
+        (8, crate::avif::DecodedPixels::U8(pixels)) => DynamicImage::ImageRgba8(
             image::RgbaImage::from_raw(width, height, pixels)
                 .ok_or(ConversionDecodeError::Failed)?,
         ),
-        10 | 12 | 16 => {
-            let samples = pixels
-                .chunks_exact(2)
-                .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
-                .collect::<Vec<_>>();
-            DynamicImage::ImageRgba16(
-                ImageBuffer::<Rgba<u16>, _>::from_raw(width, height, samples)
-                    .ok_or(ConversionDecodeError::Failed)?,
-            )
-        }
+        (10 | 12 | 16, crate::avif::DecodedPixels::U16(pixels)) => DynamicImage::ImageRgba16(
+            ImageBuffer::<Rgba<u16>, _>::from_raw(width, height, pixels)
+                .ok_or(ConversionDecodeError::Failed)?,
+        ),
         _ => return Err(ConversionDecodeError::Failed),
     };
     crate::convert::check_image_budget(&image).map_err(|_| ConversionDecodeError::TooLarge)?;
@@ -1648,13 +1655,16 @@ mod tests {
     }
 
     #[test]
-    fn rotated_nonsquare_avif_keeps_header_and_decoded_dimensions_agree() {
+    fn rotated_nonsquare_avif_is_named_unsupported_until_transforms_are_applied() {
         let bytes = include_bytes!("../fixtures/avif/rotated-nonsquare.avif");
         let header = crate::avif::probe_bytes(bytes).expect("the native parser reads the AVIF");
-        let decoded = decode_for_conversion_from_bytes(bytes, crate::convert::MaxEdge::FULL)
-            .expect("the rotated AVIF decodes");
+        assert!(header.unsupported_transform);
         assert_eq!((header.width, header.height), (3, 2));
-        assert_eq!((decoded.image.width(), decoded.image.height()), (3, 2));
+        assert!(matches!(
+            decode_for_conversion_from_bytes(bytes, crate::convert::MaxEdge::FULL),
+            Err(ConversionDecodeError::UnsupportedAvifTransform)
+        ));
+        assert!(decode_bytes(bytes).is_none());
     }
 
     #[test]

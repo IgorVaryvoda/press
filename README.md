@@ -376,7 +376,9 @@ cargo build --release   # fetches the pinned Rust toolchain on first run
 cargo test
 ```
 
-Needs `dav1d` to decode AVIF and libavif with libaom to encode it. JPEG XL encoding
+Needs `dav1d` to decode AVIF and libavif with libaom to encode it. The libavif
+build must include its dav1d decoder backend because Press selects that backend
+explicitly to enforce the native frame-size limit. JPEG XL encoding
 and decoding are Rust dependencies. Linux packages also provide libyuv for faster
 AVIF pixel conversion:
 

@@ -55,6 +55,8 @@ pub enum Failure {
     LosslessNeedsIntegerSamples,
     /// The image would need more decoded memory than one file may hold.
     TooLarge,
+    /// AVIF orientation or crop metadata is outside the supported preparation subset.
+    UnsupportedAvifTransform,
     ProfileNotAttached,
     JpegNeedsOpaque,
     KeepFormatUnavailable(String),
@@ -87,6 +89,9 @@ impl Failure {
                 Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
             }
             Self::TooLarge => Some("this image is too large to convert".into()),
+            Self::UnsupportedAvifTransform => {
+                Some("AVIF orientation transforms are not supported".into())
+            }
             Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
             Self::JpegNeedsOpaque => Some("JPEG cannot keep transparency".into()),
             Self::KeepFormatUnavailable(name) => {
@@ -1704,6 +1709,9 @@ fn convert_to_inner(
     .map_err(|error| match error {
         crate::scan::ConversionDecodeError::Failed => Failure::Failed,
         crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
+        crate::scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            Failure::UnsupportedAvifTransform
+        }
         crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
         crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
         crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,

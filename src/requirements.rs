@@ -487,7 +487,11 @@ fn inspect_one(
                     }
                 }
             } else {
-                decode_evidence = Some("output is not a supported image".into());
+                decode_evidence = Some(if avif_transform_refusal(&bytes) {
+                    "AVIF orientation transforms are unsupported".into()
+                } else {
+                    "output is not a supported image".into()
+                });
             }
         }
         Err(SnapshotFailure::NotFound) => {
@@ -990,6 +994,9 @@ struct HeaderFacts {
 fn header_from_bytes(bytes: &[u8]) -> Option<HeaderFacts> {
     if image::guess_format(bytes).ok() == Some(ImageFormat::Avif) {
         let info = crate::avif::probe_bytes(bytes)?;
+        if info.unsupported_transform {
+            return None;
+        }
         return Some(HeaderFacts {
             format: ContentFormat::Avif,
             width: info.width,
@@ -1030,6 +1037,11 @@ fn header_from_bytes(bytes: &[u8]) -> Option<HeaderFacts> {
         profile: None,
         depth_bits: None,
     })
+}
+
+fn avif_transform_refusal(bytes: &[u8]) -> bool {
+    image::guess_format(bytes).ok() == Some(ImageFormat::Avif)
+        && crate::avif::probe_bytes(bytes).is_some_and(|info| info.unsupported_transform)
 }
 
 fn content_format_from_image(format: ImageFormat) -> ContentFormat {
@@ -1120,6 +1132,9 @@ fn conversion_decode_evidence(error: crate::scan::ConversionDecodeError) -> Stri
         }
         crate::scan::ConversionDecodeError::TooLarge => {
             format!("output exceeds the {MAX_OUTPUT_SNAPSHOT_BYTES}-byte inspection bound")
+        }
+        crate::scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            "AVIF orientation transforms are unsupported".into()
         }
         crate::scan::ConversionDecodeError::SourceChanged => {
             "output changed during inspection".into()
@@ -1371,6 +1386,60 @@ mod tests {
         let bytes = include_bytes!("../fixtures/avif/native-refused.avif");
         assert_eq!(image::guess_format(bytes).ok(), Some(ImageFormat::Avif));
         assert!(header_from_bytes(bytes).is_none());
+    }
+
+    #[test]
+    fn a_transformed_avif_receipt_names_its_unsupported_orientation() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("result.avif");
+        let bytes = include_bytes!("../fixtures/avif/rotated-nonsquare.avif");
+        std::fs::write(&output, bytes).unwrap();
+        let pack = snapshot(vec![
+            rule(
+                "format",
+                true,
+                Constraint::Format {
+                    allowed: vec![ContentFormat::Avif],
+                },
+            ),
+            rule(
+                "dimensions",
+                true,
+                Constraint::Dimensions {
+                    min_width: Some(1),
+                    max_width: Some(20_000),
+                    min_height: Some(1),
+                    max_height: Some(20_000),
+                },
+            ),
+        ]);
+        let receipt = inspect_outputs_at(
+            dir.path(),
+            &[OutputRef {
+                source: None,
+                output: PathBuf::from("result.avif"),
+                processing: None,
+            }],
+            &pack,
+            "2026-09-08",
+        )
+        .unwrap();
+        let output = &receipt.outputs[0];
+        assert_eq!(output.actual.bytes, Some(bytes.len() as u64));
+        assert!(output.actual.format.is_none());
+        assert!(
+            output
+                .inspection_error
+                .as_deref()
+                .is_some_and(|error| error.contains("orientation transforms"))
+        );
+        assert!(
+            output
+                .checks
+                .iter()
+                .all(|check| check.status == CheckStatus::NotChecked)
+        );
+        assert!(!receipt.all_required_pass);
     }
 
     #[test]
