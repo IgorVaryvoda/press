@@ -177,6 +177,7 @@ impl Audit {
                 self.job_export_preview = None;
                 self.work_states.clear();
                 self.work_stale.clear();
+                self.refresh_target_progress(cx);
                 cx.notify();
             }
             Err(message) => self.notify_error("jobs", "Couldn’t delete the job", message, cx),
@@ -210,9 +211,149 @@ impl Audit {
         self.mutate_job(dir, cx, |job| crate::job::bind_target(job, None));
     }
 
+    /// Add one of the two first-class local delivery targets. The UI keeps the
+    /// initial set deliberately small, while `Job.targets` remains bounded and
+    /// reusable for later target editors. Each target owns its folder and recipe.
+    pub(super) fn add_delivery_target(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        if self.converting || self.job_choice_pending() {
+            return;
+        }
+        if self.work_job.targets.len() >= 2 {
+            self.notify_error(
+                "jobs",
+                "Couldn’t add a delivery target",
+                "the first two target folders are already configured",
+                cx,
+            );
+            return;
+        }
+        let name_input = self.delivery_target_name_input.clone();
+        let out_input = self.delivery_target_out_input.clone();
+        let typed_name = self.job_text(cx, &name_input);
+        let typed_out = self.job_text(cx, &out_input);
+        let use_default_recipe = typed_name.is_empty() && typed_out.is_empty();
+        let default = if self.work_job.targets.is_empty() {
+            ("Lossless WebP", "lossless-webp", "pixel-perfect")
+        } else {
+            ("Small delivery", "small-delivery", "small-files")
+        };
+        let name = if typed_name.is_empty() {
+            default.0.to_string()
+        } else {
+            typed_name
+        };
+        let out = if typed_out.is_empty() {
+            default.1.to_string()
+        } else {
+            typed_out
+        };
+        let mut id_base: String = name
+            .to_lowercase()
+            .chars()
+            .map(|cell| {
+                if cell.is_ascii_alphanumeric() {
+                    cell
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        if id_base.is_empty() {
+            id_base = "target".into();
+        }
+        id_base.truncate(crate::job::MAX_ID_LEN);
+        let mut id = id_base.clone();
+        for counter in 2.. {
+            if !self.work_job.targets.iter().any(|target| target.id == id) {
+                break;
+            }
+            let suffix = format!("-{counter}");
+            let prefix_len = crate::job::MAX_ID_LEN.saturating_sub(suffix.len());
+            let mut prefix = id_base.clone();
+            prefix.truncate(prefix_len);
+            id = format!("{prefix}{suffix}");
+        }
+        let (recipe, recipe_snapshot) = if use_default_recipe {
+            let recipe = default.2.to_string();
+            let snapshot = crate::recipe::Recipe::builtins()
+                .into_iter()
+                .find(|row| row.id == recipe);
+            (Some(recipe), snapshot)
+        } else {
+            let recipe = self.selected_recipe.clone();
+            let snapshot = recipe.as_deref().and_then(|id| {
+                crate::recipe::Recipe::builtins()
+                    .into_iter()
+                    .chain(self.recipes.iter().cloned())
+                    .find(|row| row.id == id)
+            });
+            (recipe, snapshot)
+        };
+        let target = crate::job::JobTarget {
+            id,
+            name,
+            recipe,
+            recipe_snapshot,
+            out: out.into(),
+        };
+        let mut candidate = self.work_job.targets.clone();
+        candidate.push(target.clone());
+        if let Err(message) = crate::job::validate_target_namespaces(&candidate) {
+            self.notify_error("jobs", "Couldn’t add a delivery target", message, cx);
+            return;
+        }
+        self.mutate_job(dir, cx, |job| job.targets.push(target));
+    }
+
+    pub(super) fn remove_delivery_target(
+        &mut self,
+        dir: &Path,
+        target_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.converting || self.job_choice_pending() {
+            return;
+        }
+        let target_id = target_id.to_string();
+        self.mutate_job(dir, cx, move |job| {
+            job.targets.retain(|target| target.id != target_id);
+        });
+    }
+
+    pub(super) fn set_delivery_target_recipe(
+        &mut self,
+        dir: &Path,
+        target_id: &str,
+        recipe: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.converting || self.job_choice_pending() {
+            return;
+        }
+        let target_id = target_id.to_string();
+        let recipe = recipe.map(str::to_string);
+        let recipe_snapshot = recipe.as_deref().and_then(|id| {
+            crate::recipe::Recipe::builtins()
+                .into_iter()
+                .chain(self.recipes.iter().cloned())
+                .find(|recipe| recipe.id == id)
+        });
+        self.mutate_job(dir, cx, move |job| {
+            if let Some(target) = job.targets.iter_mut().find(|target| target.id == target_id) {
+                target.recipe = recipe;
+                target.recipe_snapshot = recipe_snapshot;
+            }
+        });
+    }
+
     /// Re-resolve roles and staleness off the update path. The landing keeps
     /// the newest dataset's results only.
     pub(super) fn refresh_job_states(&mut self, cx: &mut Context<Self>) {
+        self.refresh_target_progress(cx);
         if self.work_job.products.is_empty() {
             self.work_states.clear();
             self.work_stale.clear();
@@ -269,6 +410,7 @@ impl Audit {
         self.job_export_preview = None;
         self.work_states.clear();
         self.work_stale.clear();
+        self.refresh_target_progress(cx);
         cx.notify();
     }
 
@@ -300,6 +442,12 @@ impl Audit {
                 self.rail_scroll.scroll_to_top_of_item(item);
                 cx.defer_in(window, |audit, window, cx| {
                     window.focus(&audit.job_export_preview_focus, cx);
+                    // A dropdown restores the focus it had before opening after
+                    // its close callback. A second deferred focus wins that
+                    // restoration, so Return reaches the review card itself.
+                    cx.defer_in(window, |audit, window, cx| {
+                        window.focus(&audit.job_export_preview_focus, cx);
+                    });
                 });
                 cx.notify();
             }

@@ -882,7 +882,9 @@ fn count_files(root: &Path, cancelled: Option<&AtomicBool>) -> Option<usize> {
         // The run record sits with the outputs and is not one of them, so a folder
         // holding one converted image still reports one file.
         if item.is_ok_and(|item| {
-            item.file_type().is_file() && item.file_name() != crate::manifest::NAME
+            item.file_type().is_file()
+                && item.file_name() != crate::manifest::NAME
+                && item.file_name() != crate::manifest::TARGET_STATE_NAME
         }) {
             count += 1;
         }
@@ -1200,7 +1202,9 @@ fn scan_progressive_cancellable_inner(
                 let in_output = file.path().starts_with(output_root);
                 if in_output {
                     // The run record is not an image the next run would replace.
-                    if file.file_name() != crate::manifest::NAME {
+                    if file.file_name() != crate::manifest::NAME
+                        && file.file_name() != crate::manifest::TARGET_STATE_NAME
+                    {
                         summary.existing_output += 1;
                     }
                     continue;

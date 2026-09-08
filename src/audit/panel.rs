@@ -1194,6 +1194,277 @@ impl Audit {
         }
     }
 
+    fn delivery_target_recipe_label(&self, target: &crate::job::JobTarget) -> String {
+        let Some(id) = target.recipe.as_deref() else {
+            return "Current settings".into();
+        };
+        if let Some(snapshot) = target.recipe_snapshot.as_ref() {
+            let changed = builtin_recipes()
+                .into_iter()
+                .chain(self.recipes.iter().cloned())
+                .find(|recipe| recipe.id == id)
+                .is_some_and(|recipe| recipe.revision != snapshot.revision);
+            return if changed {
+                format!("{} (pinned; recipe changed)", snapshot.name)
+            } else {
+                format!("{} (pinned)", snapshot.name)
+            };
+        }
+        builtin_recipes()
+            .into_iter()
+            .chain(self.recipes.iter().cloned())
+            .find(|recipe| recipe.id == id)
+            .map(|recipe| recipe.name)
+            .unwrap_or_else(|| format!("Missing recipe: {id}"))
+    }
+
+    fn delivery_target_row(
+        &self,
+        target: &crate::job::JobTarget,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let busy = self.converting || self.job_choice_pending();
+        let target_id = target.id.clone();
+        let remove_id = target.id.clone();
+        let recipe_id = target.recipe.clone();
+        let recipes: Vec<_> = builtin_recipes()
+            .into_iter()
+            .chain(self.recipes.iter().cloned())
+            .collect();
+        let recipe_menu = cx.entity().downgrade();
+        let remove = cx.entity().downgrade();
+        let recipe_label = self.delivery_target_recipe_label(target);
+        let progress = self.target_progress.get(&target.id);
+        let can_retry = progress.is_some_and(|progress| progress.failed() > 0);
+        let can_regenerate = progress.is_some_and(|progress| progress.outdated() > 0);
+        let progress_label = progress.map(|progress| {
+            format!(
+                "{} written · {} failed · {} outdated · {} unstarted{}",
+                progress.written(),
+                progress.failed(),
+                progress.outdated(),
+                progress.unstarted(),
+                if progress.cancelled() > 0 {
+                    format!(" · {} cancelled", progress.cancelled())
+                } else {
+                    String::new()
+                }
+            )
+        });
+        let retry = cx.entity().downgrade();
+        let regenerate = cx.entity().downgrade();
+        let retry_id = target.id.clone();
+        let regenerate_id = target.id.clone();
+        let selector_id = target_id.clone();
+        div()
+            .debug_selector(move || format!("sets-delivery-target-{}", selector_id))
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(format!("{} · {}/", target.name, target.out.display())),
+                    )
+                    .child(
+                        Button::new(format!("sets-delivery-recipe-{}", target.id))
+                            .small()
+                            .ghost()
+                            .label(recipe_label)
+                            .dropdown_caret(true)
+                            .disabled(busy)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                let current = recipe_menu.clone();
+                                let current_target_id = target_id.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new("Use current settings")
+                                        .checked(recipe_id.is_none())
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(audit) = current.upgrade() {
+                                                audit.update(cx, |audit, cx| {
+                                                    let Some(dir) = audit.job_dir_or_notify(cx)
+                                                    else {
+                                                        return;
+                                                    };
+                                                    audit.set_delivery_target_recipe(
+                                                        &dir,
+                                                        &current_target_id,
+                                                        None,
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        }),
+                                );
+                                for recipe in recipes.iter().cloned() {
+                                    let audit = recipe_menu.clone();
+                                    let id = recipe.id.clone();
+                                    let target_id = target_id.clone();
+                                    menu =
+                                        menu.item(
+                                            PopupMenuItem::new(format!(
+                                                "{} · {}",
+                                                recipe.name,
+                                                recipe.summary()
+                                            ))
+                                            .checked(recipe_id.as_deref() == Some(id.as_str()))
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(audit) = audit.upgrade() {
+                                                    audit.update(cx, |audit, cx| {
+                                                        let Some(dir) = audit.job_dir_or_notify(cx)
+                                                        else {
+                                                            return;
+                                                        };
+                                                        audit.set_delivery_target_recipe(
+                                                            &dir,
+                                                            &target_id,
+                                                            Some(&id),
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                        );
+                                }
+                                menu
+                            }),
+                    )
+                    .children(progress_label.map(|label| {
+                        div()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label)
+                    }))
+                    .children(can_retry.then(|| {
+                        Button::new(format!("sets-delivery-retry-{}", target.id))
+                            .small()
+                            .ghost()
+                            .label("Retry failed")
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| {
+                                if let Some(audit) = retry.upgrade() {
+                                    audit.update(cx, |audit, cx| {
+                                        audit.retry_delivery_target(&retry_id, cx);
+                                    });
+                                }
+                            })
+                    }))
+                    .children(can_regenerate.then(|| {
+                        Button::new(format!("sets-delivery-regenerate-{}", target.id))
+                            .small()
+                            .ghost()
+                            .label("Regenerate outdated")
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| {
+                                if let Some(audit) = regenerate.upgrade() {
+                                    audit.update(cx, |audit, cx| {
+                                        audit.regenerate_delivery_target(&regenerate_id, cx);
+                                    });
+                                }
+                            })
+                    })),
+            )
+            .child(
+                Button::new(format!("sets-delivery-remove-{}", remove_id))
+                    .small()
+                    .ghost()
+                    .icon(IconName::Close)
+                    .tooltip("Remove delivery target")
+                    .disabled(busy)
+                    .on_click(move |_, _, cx| {
+                        if let Some(audit) = remove.upgrade() {
+                            audit.update(cx, |audit, cx| {
+                                let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                    return;
+                                };
+                                audit.remove_delivery_target(&dir, &remove_id, cx);
+                            });
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn delivery_targets_section(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let targets = self.work_job.targets.clone();
+        let can_add = targets.len() < 2;
+        let add = cx.entity().downgrade();
+        div()
+            .debug_selector(|| "sets-delivery-targets".into())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .pt_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Delivery targets"),
+                    )
+                    .child(
+                        Button::new("sets-add-delivery-target")
+                            .small()
+                            .ghost()
+                            .label("Add target")
+                            .disabled(!can_add || self.converting || self.job_choice_pending())
+                            .on_click(move |_, _, cx| {
+                                if let Some(audit) = add.upgrade() {
+                                    audit.update(cx, |audit, cx| {
+                                        let Some(dir) = audit.job_dir_or_notify(cx) else {
+                                            return;
+                                        };
+                                        audit.add_delivery_target(&dir, cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Input::new(&self.delivery_target_name_input)
+                            .small()
+                            .disabled(self.converting || self.job_choice_pending()),
+                    )
+                    .child(
+                        Input::new(&self.delivery_target_out_input)
+                            .small()
+                            .disabled(self.converting || self.job_choice_pending()),
+                    ),
+            )
+            .children(
+                targets
+                    .iter()
+                    .map(|target| self.delivery_target_row(target, cx)),
+            )
+            .children((targets.len() > 1).then(|| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Each target is generated from the selected source snapshot.")
+            }))
+            .into_any_element()
+    }
+
     fn job_export_preview_row(
         &self,
         draft: &crate::job::ExportDraft,
@@ -1255,6 +1526,26 @@ impl Audit {
             .p_2()
             .border_1()
             .border_color(cx.theme().border)
+            .track_focus(&self.job_export_preview_focus)
+            .on_key_down(
+                cx.listener(|audit, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    // The wrapper owns the shortcut only while it owns focus. A
+                    // button below it must keep Enter for its own action, especially
+                    // Cancel, so a bubbling key cannot export by accident.
+                    if !audit.job_export_preview_focus.is_focused(window) {
+                        return;
+                    }
+                    if event.keystroke.modifiers != gpui_kit::Modifiers::none() {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "enter" => audit.export_job_file(cx),
+                        "escape" => audit.cancel_job_export_preview(cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .text_size(px(12.))
@@ -1270,7 +1561,6 @@ impl Audit {
                         Button::new("sets-export-confirm")
                             .small()
                             .outline()
-                            .track_focus(&self.job_export_preview_focus)
                             .label("Export…")
                             .on_click(move |_, _, cx| {
                                 if let Some(audit) = export.upgrade() {
@@ -1442,6 +1732,7 @@ impl Audit {
                     .as_ref()
                     .map(|draft| self.job_export_preview_row(draft, cx)),
             )
+            .children(open.then(|| self.delivery_targets_section(cx)))
             .children(open.then(|| {
                 div()
                     .flex()
@@ -1973,7 +2264,7 @@ impl Audit {
         // Four states, one shape: a headline, its tone, a sentence of detail,
         // the share remaining, and the percent tag.
         let (state, headline, tone, detail, bar, tag) = if self.converting {
-            let done = self.results.len() + self.failures.len();
+            let done = self.conversion_done();
             let total = self.active_target_count.unwrap_or(target_count);
             (
                 Some(("CONVERTING".to_string(), cx.theme().foreground)),

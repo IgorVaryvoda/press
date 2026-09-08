@@ -130,6 +130,11 @@ pub struct JobTarget {
     pub id: String,
     pub name: String,
     pub recipe: Option<String>,
+    /// The effective recipe used when this target was saved. Keeping the
+    /// snapshot beside the id prevents editing or deleting a preset from
+    /// changing an existing job's output contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_snapshot: Option<crate::recipe::Recipe>,
     pub out: std::path::PathBuf,
 }
 
@@ -426,17 +431,17 @@ impl Job {
             {
                 return Err(format!("target {:?} names an empty recipe", target.id));
             }
-            // Namespaces stay relative and dot-free, like every stored run
-            // path: an absolute or escaping `out` would pin one machine's
-            // layout or climb out of the run's output root.
-            crate::output::normal_relative(&target.out).map_err(|_| {
-                format!(
-                    "target {:?} output is not a plain relative path: {}",
-                    target.id,
-                    target.out.display()
-                )
-            })?;
+            if let Some(snapshot) = &target.recipe_snapshot {
+                snapshot.validate()?;
+                if target.recipe.as_deref() != Some(snapshot.id.as_str()) {
+                    return Err(format!(
+                        "target {:?} recipe snapshot does not match its recipe id",
+                        target.id
+                    ));
+                }
+            }
         }
+        validate_target_namespaces(&self.targets)?;
         Ok(())
     }
 
@@ -604,6 +609,46 @@ impl Job {
         job.validate()?;
         Ok(job)
     }
+}
+
+/// Validate the output namespaces once for both the saved-job model and every
+/// execution caller. Separate targets may share a root only when their paths do
+/// not overlap; otherwise one target could overwrite a sibling's deliverable.
+pub fn validate_target_namespaces(targets: &[JobTarget]) -> Result<(), String> {
+    for target in targets {
+        crate::output::normal_relative(&target.out).map_err(|_| {
+            format!(
+                "target {:?} output is not a plain relative path: {}",
+                target.id,
+                target.out.display()
+            )
+        })?;
+    }
+    for (index, left) in targets.iter().enumerate() {
+        for right in &targets[index + 1..] {
+            if left.out == right.out {
+                return Err(format!(
+                    "targets {:?} and {:?} write to the same folder {}",
+                    left.id,
+                    right.id,
+                    left.out.display()
+                ));
+            }
+            if left.out.starts_with(&right.out) || right.out.starts_with(&left.out) {
+                return Err(format!(
+                    "targets {:?} and {:?} overlap at {}",
+                    left.id,
+                    right.id,
+                    if left.out.starts_with(&right.out) {
+                        left.out.display().to_string()
+                    } else {
+                        right.out.display().to_string()
+                    }
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_slug(id: &str, what: &str) -> Result<(), String> {
@@ -813,11 +858,17 @@ fn write_atomic_replace(
 pub fn list(dir: &std::path::Path) -> (Vec<Job>, Vec<String>) {
     let mut jobs = Vec::new();
     let mut skipped = Vec::new();
+    let mut inspected = 0;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (jobs, skipped);
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        if inspected >= MAX_JOBS {
+            skipped.push(path.display().to_string());
+            continue;
+        }
+        inspected += 1;
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
@@ -1073,6 +1124,20 @@ pub fn prepare_targets(
         .map(|target| {
             let recipe = match target.recipe.as_deref() {
                 None => None,
+                Some(id)
+                    if target
+                        .recipe_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.id == id) =>
+                {
+                    Some(
+                        target
+                            .recipe_snapshot
+                            .as_ref()
+                            .expect("snapshot matched")
+                            .clone(),
+                    )
+                }
                 Some(id) => Some(
                     recipes
                         .iter()
@@ -1767,6 +1832,7 @@ mod tests {
             id: "web".into(),
             name: "Web".into(),
             recipe: None,
+            recipe_snapshot: None,
             out: PathBuf::from("nested/out"),
         }];
         let mut portable = targeted.to_portable(&root).unwrap();
@@ -1854,6 +1920,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             recipe: recipe.map(str::to_string),
+            recipe_snapshot: None,
             out: PathBuf::from(out),
         }
     }
@@ -1967,6 +2034,42 @@ mod tests {
         assert_eq!(match_filename("missing.png", &entries), Match::Missing);
         assert_eq!(match_filename("", &entries), Match::Missing);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn target_namespaces_reject_duplicate_and_ancestor_paths() {
+        let mut first = target("master", None, "deliverables/master");
+        let second = target("web", None, "deliverables/web");
+        validate_target_namespaces(&[first.clone(), second]).unwrap();
+
+        first.out = PathBuf::from("deliverables");
+        assert!(
+            validate_target_namespaces(&[first.clone(), target("web", None, "deliverables/web")])
+                .unwrap_err()
+                .contains("overlap")
+        );
+
+        first.out = PathBuf::from("deliverables/web");
+        assert!(
+            validate_target_namespaces(&[first, target("web", None, "deliverables/web")])
+                .unwrap_err()
+                .contains("same folder")
+        );
+    }
+
+    #[test]
+    fn target_preparation_uses_pinned_recipe_snapshot() {
+        let mut target = target("web", Some("night"), "web");
+        let mut pinned = crate::recipe::Recipe::builtins()[0].clone();
+        pinned.id = "night".into();
+        pinned.name = "Pinned night".into();
+        pinned.revision = 3;
+        target.recipe_snapshot = Some(pinned.clone());
+        let mut edited = pinned.clone();
+        edited.name = "Edited night".into();
+        edited.revision = 4;
+        let prepared = prepare_targets(&[target], &[edited]).unwrap();
+        assert_eq!(prepared[0].recipe.as_ref(), Some(&pinned));
     }
 
     #[test]

@@ -621,28 +621,18 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "replace mode takes no --target: name one output namespace per target instead".into(),
         );
     }
-    for spec in &targets {
-        crate::output::normal_relative(&spec.out).map_err(|_| {
-            format!(
-                "--target {} names an output that is not a plain relative folder",
-                spec.out.display()
-            )
-        })?;
-    }
-    for (index, left) in targets.iter().enumerate() {
-        for right in &targets[index + 1..] {
-            if left.out == right.out {
-                return Err(format!("two targets write to {}", left.out.display()));
-            }
-            if left.out.starts_with(&right.out) || right.out.starts_with(&left.out) {
-                return Err(format!(
-                    "targets {} and {} overlap",
-                    left.out.display(),
-                    right.out.display()
-                ));
-            }
-        }
-    }
+    let target_namespaces: Vec<_> = targets
+        .iter()
+        .map(|spec| crate::job::JobTarget {
+            id: spec.recipe.clone(),
+            name: spec.recipe.clone(),
+            recipe: Some(spec.recipe.clone()),
+            recipe_snapshot: None,
+            out: spec.out.clone(),
+        })
+        .collect();
+    crate::job::validate_target_namespaces(&target_namespaces)
+        .map_err(|error| format!("--target validation failed: {error}"))?;
     if command != Command::Supplier
         && (supplier_verb.is_some()
             || supplier_attempt.is_some()
@@ -1997,6 +1987,7 @@ fn convert_targets(
             id: spec.recipe.clone(),
             name: spec.recipe.clone(),
             recipe: Some(spec.recipe.clone()),
+            recipe_snapshot: None,
             out: spec.out.clone(),
         })
         .collect();
@@ -3278,7 +3269,11 @@ fn supplier_submit(
         {
             continue;
         }
-        let bytes = match std::fs::read(&mapping.source.path) {
+        let bytes = match crate::job::read_bounded(
+            &mapping.source.path,
+            supplier::MAX_FILE_BYTES,
+            "mapping",
+        ) {
             Ok(bytes) => bytes,
             Err(_) => {
                 failed.push(format!("mapping {:?} cannot be read", mapping.id));

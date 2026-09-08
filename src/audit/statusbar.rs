@@ -3,6 +3,27 @@
 use super::*;
 
 impl Audit {
+    pub(super) fn conversion_done(&self) -> usize {
+        if self.active_delivery_items.is_empty() {
+            return self.results.len() + self.failures.len();
+        }
+        self.active_delivery_items
+            .iter()
+            .filter(|(target, index)| {
+                matches!(
+                    self.target_progress
+                        .get(target)
+                        .and_then(|progress| progress.items.get(index)),
+                    Some(
+                        TargetItemState::Written
+                            | TargetItemState::Failed(_)
+                            | TargetItemState::Cancelled
+                    )
+                )
+            })
+            .count()
+    }
+
     /// One sentence for a finished run, toasted once on completion so the
     /// outcome survives the results view closing.
     pub(super) fn conversion_summary(&self) -> String {
@@ -103,7 +124,7 @@ impl Audit {
     pub(super) fn status_bar(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let left = self.status_line(count);
         let right = if self.converting {
-            let done = self.results.len() + self.failures.len();
+            let done = self.conversion_done();
             let total = self
                 .active_target_count
                 .unwrap_or_else(|| self.target_count());

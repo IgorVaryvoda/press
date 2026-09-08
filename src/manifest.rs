@@ -62,6 +62,31 @@ impl SourceIdentity {
 /// Dot-prefixed so a file browser hides it, and named so the walk and the output
 /// count can step over it rather than report it as an image.
 pub const NAME: &str = ".press-manifest.jsonl";
+/// Per-target outcomes are separate from output records because a failed or
+/// cancelled item has no installed file to describe. It stays beside that
+/// target's manifest and is read only for the target status panel.
+pub const TARGET_STATE_NAME: &str = ".press-target-state.jsonl";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetState {
+    Written,
+    Failed,
+    Cancelled,
+    Unstarted,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetStateRecord {
+    pub run: u64,
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub recipe: String,
+    pub state: TargetState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
 
 /// One output this folder holds, and where it came from.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -236,6 +261,10 @@ impl Stamp {
         }
     }
 
+    pub fn run_id(&self) -> u64 {
+        self.written
+    }
+
     /// One output as a record, or `None` when its paths do not sit under the roots
     /// they were planned against — which would make the record a lie.
     ///
@@ -336,6 +365,52 @@ pub fn backup_root(root: &Path) -> PathBuf {
 
 pub fn path(output_root: &Path) -> PathBuf {
     output_root.join(NAME)
+}
+
+pub fn target_state_path(output_root: &Path) -> PathBuf {
+    output_root.join(TARGET_STATE_NAME)
+}
+
+/// Read bounded per-target outcome history. A malformed or oversized journal
+/// cannot affect output reuse; it simply leaves the filesystem evidence to be
+/// classified as missing or outdated.
+pub fn load_target_states(output_root: &Path) -> Vec<TargetStateRecord> {
+    let Ok(bytes) =
+        crate::job::read_bounded(&target_state_path(output_root), 1 << 20, "target state")
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut states = Vec::new();
+    for line in text.lines() {
+        let Ok(state) = serde_json::from_str::<TargetStateRecord>(line) else {
+            continue;
+        };
+        if crate::output::normal_relative(&state.source).is_err()
+            || crate::output::normal_relative(&state.output).is_err()
+        {
+            continue;
+        }
+        states.push(state);
+    }
+    states
+}
+
+pub fn append_target_state(output_root: &Path, state: &TargetStateRecord) -> Result<(), String> {
+    crate::output::normal_relative(&state.source)
+        .map_err(|_| "target state source is not a plain relative path".to_string())?;
+    crate::output::normal_relative(&state.output)
+        .map_err(|_| "target state output is not a plain relative path".to_string())?;
+    let mut line = serde_json::to_vec(state).map_err(|error| error.to_string())?;
+    line.push(b'\n');
+    std::fs::create_dir_all(output_root).map_err(|error| error.to_string())?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target_state_path(output_root))
+        .map_err(|error| error.to_string())?;
+    file.write_all(&line).map_err(|error| error.to_string())?;
+    file.sync_data().map_err(|error| error.to_string())
 }
 
 /// A missing or unreadable manifest reads as an empty one, and so does a line
@@ -878,6 +953,38 @@ mod tests {
         append_record(&dir, &record("one.png", "one.webp", Some("shared.png"), 1)).expect("append");
         append_record(&dir, &record("two.png", "two.webp", Some("shared.png"), 2)).expect("append");
         assert_eq!(restorable(&dir), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn target_state_journal_round_trips_and_refuses_oversize() {
+        let dir = test_dir("target-state");
+        let unstarted = TargetStateRecord {
+            run: 7,
+            source: PathBuf::from("source/photo.png"),
+            output: PathBuf::from("lossless/photo.webp"),
+            recipe: "recipe-a".into(),
+            state: TargetState::Unstarted,
+            reason: None,
+        };
+        let failed = TargetStateRecord {
+            run: 7,
+            source: PathBuf::from("source/other.png"),
+            output: PathBuf::from("lossless/other.webp"),
+            recipe: "recipe-a".into(),
+            state: TargetState::Failed,
+            reason: Some("source changed".into()),
+        };
+        append_target_state(&dir, &unstarted).expect("unstarted state appends");
+        append_target_state(&dir, &failed).expect("failed state appends");
+        assert_eq!(load_target_states(&dir), vec![unstarted, failed]);
+
+        std::fs::write(target_state_path(&dir), vec![b'x'; (1 << 20) + 1])
+            .expect("oversized journal writes");
+        assert!(
+            load_target_states(&dir).is_empty(),
+            "oversized history is ignored"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

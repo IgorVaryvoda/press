@@ -340,6 +340,19 @@ pub fn encode(
     quality: Quality,
     profile: Option<&[u8]>,
 ) -> Result<Vec<u8>, Failure> {
+    encode_with_avif_speed(image, format, quality, profile, crate::avif::speed())
+}
+
+/// Encode with a run-local AVIF speed. Normal previews and the legacy conversion
+/// path use the process setting through [`encode`]; a multi-target run passes its
+/// frozen recipe value here so another target or preview cannot change it mid-run.
+pub(crate) fn encode_with_avif_speed(
+    image: &DynamicImage,
+    format: Format,
+    quality: Quality,
+    profile: Option<&[u8]>,
+    avif_speed: u8,
+) -> Result<Vec<u8>, Failure> {
     let profile = profile.filter(|profile| !profile.is_empty());
     match format {
         Format::WebP => {
@@ -351,7 +364,7 @@ pub fn encode(
                 None => Ok(encoded),
             }
         }
-        Format::Avif => encode_avif(image, quality, profile).ok_or(Failure::Failed),
+        Format::Avif => encode_avif(image, quality, profile, avif_speed).ok_or(Failure::Failed),
         Format::JpegXl => encode_jpeg_xl(image, quality, profile).ok_or(Failure::Failed),
         Format::Jpeg => {
             let encoded = encode_jpeg(image, quality)?;
@@ -645,12 +658,14 @@ fn encode_webp_pixels(
 /// AVIF keeps alpha in a separate plane, so transparency needs no special case here.
 /// libaom and rav1e calibrate their 1-100 scales differently; 75% matches the former
 /// rav1e output size and measured PSNR on the real corpus.
-fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -> Option<Vec<u8>> {
+fn encode_avif(
+    image: &DynamicImage,
+    quality: Quality,
+    profile: Option<&[u8]>,
+    speed: u8,
+) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
     let quality = aom_quality(quality);
-    // The one read of the process-wide speed. Everything below this takes it as an
-    // argument, so a test can ask for a speed without writing anything shared.
-    let speed = crate::avif::speed();
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
     let threads = (cores / workers(Format::Avif)).clamp(1, 8);
 
@@ -1678,6 +1693,7 @@ pub fn convert_to(
         quality,
         max_edge,
         None,
+        crate::avif::speed(),
     )
 }
 
@@ -1694,6 +1710,33 @@ pub fn convert_to_expected(
     max_edge: MaxEdge,
     expected: &crate::manifest::SourceIdentity,
 ) -> Result<Converted, Failure> {
+    convert_to_expected_with_avif_speed(
+        output_root,
+        source,
+        written,
+        recording,
+        format,
+        quality,
+        max_edge,
+        expected,
+        crate::avif::speed(),
+    )
+}
+
+/// Convert only when the source still matches a saved byte snapshot, using a
+/// caller-owned AVIF speed for a target run.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn convert_to_expected_with_avif_speed(
+    output_root: &Path,
+    source: &Path,
+    written: &Path,
+    recording: Option<&Recording>,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    expected: &crate::manifest::SourceIdentity,
+    avif_speed: u8,
+) -> Result<Converted, Failure> {
     convert_to_inner(
         output_root,
         source,
@@ -1703,6 +1746,7 @@ pub fn convert_to_expected(
         quality,
         max_edge,
         Some(expected),
+        avif_speed,
     )
 }
 
@@ -1716,6 +1760,7 @@ fn convert_to_inner(
     quality: Quality,
     max_edge: MaxEdge,
     expected: Option<&crate::manifest::SourceIdentity>,
+    avif_speed: u8,
 ) -> Result<Converted, Failure> {
     let decoded = match expected {
         Some(expected) => crate::scan::decode_for_conversion_checked(source, max_edge, expected),
@@ -1741,7 +1786,8 @@ fn convert_to_inner(
     check_image_budget(&decoded)?;
     check_lossless_depth(&decoded, format, quality)?;
     let (width, height) = (decoded.width(), decoded.height());
-    let encoded = encode(&decoded, format, quality, profile.as_deref())?;
+    let encoded =
+        encode_with_avif_speed(&decoded, format, quality, profile.as_deref(), avif_speed)?;
     match recording {
         Some(recording) => write_recorded(
             output_root,

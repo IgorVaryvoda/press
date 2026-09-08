@@ -147,7 +147,7 @@ impl Recipe {
         (format, quality, MaxEdge(self.max_edge), self.avif_speed)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA_VERSION {
             return Err(format!(
                 "unsupported recipe schema {} (this Press reads schema {SCHEMA_VERSION})",
@@ -311,11 +311,17 @@ fn check_id(id: &str) -> Result<(), String> {
 pub fn list(dir: &std::path::Path) -> (Vec<Recipe>, Vec<String>) {
     let mut recipes = Vec::new();
     let mut skipped = Vec::new();
+    let mut inspected = 0;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (recipes, skipped);
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        if inspected >= MAX_RECIPES {
+            skipped.push(path.display().to_string());
+            continue;
+        }
+        inspected += 1;
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }

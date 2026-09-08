@@ -362,6 +362,65 @@ fn root_horizontal_chrome(window: &Window) -> (f32, f32) {
     )
 }
 
+/// The state of one source in one named delivery target. Missing output is
+/// kept separate from a failed write so retry and regenerate actions can make
+/// a deliberate choice after a partial run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TargetItemState {
+    Written,
+    Failed(String),
+    Cancelled,
+    Unstarted,
+    Outdated,
+}
+
+/// A target's persisted and current-run summary. `items` is keyed by immutable
+/// audit row index, so reopening or resorting the table cannot relabel a result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TargetProgress {
+    pub id: String,
+    pub name: String,
+    pub out: PathBuf,
+    pub recipe: Option<String>,
+    pub items: HashMap<usize, TargetItemState>,
+}
+
+impl TargetProgress {
+    pub fn new(target: &crate::job::JobTarget) -> Self {
+        Self {
+            id: target.id.clone(),
+            name: target.name.clone(),
+            out: target.out.clone(),
+            recipe: target.recipe.clone(),
+            items: HashMap::new(),
+        }
+    }
+
+    fn count(&self, state: impl Fn(&TargetItemState) -> bool) -> usize {
+        self.items.values().filter(|item| state(item)).count()
+    }
+
+    pub fn written(&self) -> usize {
+        self.count(|item| matches!(item, TargetItemState::Written))
+    }
+
+    pub fn failed(&self) -> usize {
+        self.count(|item| matches!(item, TargetItemState::Failed(_)))
+    }
+
+    pub fn cancelled(&self) -> usize {
+        self.count(|item| matches!(item, TargetItemState::Cancelled))
+    }
+
+    pub fn unstarted(&self) -> usize {
+        self.count(|item| matches!(item, TargetItemState::Unstarted))
+    }
+
+    pub fn outdated(&self) -> usize {
+        self.count(|item| matches!(item, TargetItemState::Outdated))
+    }
+}
+
 /// Which band a file's byte density falls in. Green is carrying its weight, amber
 /// is suspicious, red is a screenshot saved as a PNG.
 fn density_colour(density: f32, cx: &App) -> gpui_kit::Hsla {
@@ -472,11 +531,22 @@ pub(crate) struct Audit {
     work_states: Vec<crate::job::RoleState>,
     /// Recorded outputs that no longer match their mapped sources.
     work_stale: Vec<crate::job::StaleDeliverable>,
+    /// Per-target output state. Unlike the legacy result maps this survives
+    /// recipe changes and keeps successful siblings visible during retries.
+    target_progress: HashMap<String, TargetProgress>,
+    /// The rows and targets owned by the current delivery run. This keeps the
+    /// progress bar honest when a retry covers one target and old sibling
+    /// results remain visible.
+    active_delivery_items: HashSet<(String, usize)>,
     /// New product name and SKU, and new role label. Unfocused text, applied
     /// on click beside the product they belong to.
     product_name_input: gpui_kit::Entity<InputState>,
     product_sku_input: gpui_kit::Entity<InputState>,
     role_name_input: gpui_kit::Entity<InputState>,
+    /// New delivery target name and output namespace. Values apply when the
+    /// user presses Add target, so an unfinished field never changes a job.
+    delivery_target_name_input: gpui_kit::Entity<InputState>,
+    delivery_target_out_input: gpui_kit::Entity<InputState>,
     /// Bounds of the rendered rows or tiles. Marquee selection only needs the
     /// visible objects, so virtualised items never get measured eagerly.
     selection_bounds: Rc<RefCell<HashMap<usize, gpui_kit::Bounds<gpui_kit::Pixels>>>>,
@@ -1245,6 +1315,7 @@ impl Audit {
         self.estimate_decodes.lock().clear();
         self.converting = false;
         self.active_target_count = None;
+        self.active_delivery_items.clear();
         self.stopped_run = None;
         // The dataset guard already dropped a stale run's results; now the run
         // itself stops, rather than writing out the rest of a folder nobody is
@@ -2241,6 +2312,10 @@ pub(crate) fn build_audit(
         let product_sku_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("SKU hint (optional)"));
         let role_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Role label"));
+        let delivery_target_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Target name"));
+        let delivery_target_out_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Folder (relative)"));
 
         let recipe_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Preset name"));
         let quality_slider = cx.new(|_| {
@@ -2423,9 +2498,13 @@ pub(crate) fn build_audit(
             job_request_generation: 0,
             work_states: Vec::new(),
             work_stale: Vec::new(),
+            target_progress: HashMap::new(),
+            active_delivery_items: HashSet::new(),
             product_name_input,
             product_sku_input,
             role_name_input,
+            delivery_target_name_input,
+            delivery_target_out_input,
             cursor: 0,
             cursor_redraw_pending: false,
             anchor: 0,
