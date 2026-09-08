@@ -606,3 +606,379 @@ fn convert_targets_refuse_before_writing_anything() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn supplier_home(tag: &str) -> PathBuf {
+    let home =
+        std::env::temp_dir().join(format!("press-supplier-home-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("the fake home is created");
+    home
+}
+
+fn supplier_run(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_press"))
+        .args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("APPDATA", home)
+        .output()
+        .expect("the binary runs")
+}
+
+/// A saved job, assignment and photo set that the rehearsal verbs can run
+/// against: the job lives in the isolated config library, the photo in root.
+fn supplier_fixture(home: &Path, tag: &str) -> (PathBuf, PathBuf) {
+    let root = home.join(tag);
+    std::fs::create_dir_all(&root).expect("the root is created");
+    let file = root.join("hero.png");
+    std::fs::write(&file, photo_png()).expect("the photo is written");
+    let bytes = std::fs::metadata(&file).expect("the photo stats").len();
+    let jobs = home.join("imageguide").join("jobs");
+    std::fs::create_dir_all(&jobs).expect("the job library is created");
+    let job = format!(
+        r#"{{"schema":1,"id":"rehearse","name":"Rehearsal","revision":1,"source_roots":[{root:?}],"target_recipe":null,"products":[{{"id":"hero","name":"Hero","sku_hint":"SKU-1","roles":[{{"id":"main","label":"Main","required":true}}],"mappings":[{{"id":"m1","role_id":"main","source":{{"path":{file:?},"bytes":{bytes},"modified":1700000000}}}}],"binding":null}}]}}"#,
+        root = root.to_string_lossy(),
+        file = file.to_string_lossy(),
+    );
+    std::fs::write(jobs.join("rehearse.json"), job).expect("the job is saved");
+    let assignment = home.join("assignment.json");
+    std::fs::write(
+        &assignment,
+        r#"{"schema":1,"id":"assign-1","workspace":"retailer","supplier":"studio-9","products":[{"id":"hero","slots":[{"id":"main","policy_revision":"policy-7","requirements":[]}]}],"retrieved_at":1}"#,
+    )
+    .expect("the assignment is written");
+    (root, assignment)
+}
+
+fn fake_script(home: &Path, name: &str, body: &str) -> String {
+    let path = home.join(name);
+    std::fs::write(&path, body).expect("the script is written");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn supplier_prepare_submit_and_status_rehearse() {
+    let home = supplier_home("round-trip");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let script = fake_script(
+        &home,
+        "submit.json",
+        r#"{"attempts":{"a1":[{"accept":{"receipt":"r-1"}}]}}"#,
+    );
+    let prepare = supplier_run(
+        &home,
+        &["supplier", &root, "prepare", "--assignment", &assignment],
+    );
+    assert_eq!(prepare.status.code(), Some(0), "{}", stderr(&prepare));
+    assert!(
+        home.join("imageguide")
+            .join("jobs")
+            .join("rehearse.attempts.json")
+            .is_file(),
+        "prepare persists the queue"
+    );
+    let submit = supplier_run(
+        &home,
+        &[
+            "supplier",
+            &root,
+            "submit",
+            "--assignment",
+            &assignment,
+            "--fake",
+            &script,
+        ],
+    );
+    assert_eq!(submit.status.code(), Some(0), "{}", stderr(&submit));
+    let status = supplier_run(&home, &["supplier", &root, "status", "--json"]);
+    assert_eq!(status.status.code(), Some(0));
+    let doc = stdout_json(&status);
+    assert_eq!(doc["attempts"][0]["state"], "transferred");
+    assert_eq!(doc["attempts"][0]["receipt"], "r-1");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_reconcile_adopts_the_server_answer_across_restarts() {
+    let home = supplier_home("reconcile");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let submit_script = fake_script(
+        &home,
+        "submit.json",
+        r#"{"attempts":{"a1":[{"accept":{"receipt":"r-1"}}]}}"#,
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "prepare", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &[
+                "supplier",
+                &root,
+                "submit",
+                "--assignment",
+                &assignment,
+                "--fake",
+                &submit_script
+            ]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    // A new process meets a server that already took the bytes: the journal
+    // beside the script remembers the acceptance the attempt log cannot see.
+    let reconcile_script = fake_script(
+        &home,
+        "reconcile.json",
+        r#"{"attempts":{"a1":[{"advance":{"receipt":"r-1","state":"accepted"}}]}}"#,
+    );
+    let reconcile = supplier_run(
+        &home,
+        &[
+            "supplier",
+            &root,
+            "reconcile",
+            "--fake",
+            &reconcile_script,
+            "--json",
+        ],
+    );
+    assert_eq!(reconcile.status.code(), Some(0), "{}", stderr(&reconcile));
+    let doc = stdout_json(&reconcile);
+    assert_eq!(doc["attempts"][0]["state"], "accepted");
+    assert_eq!(doc["attempts"][0]["receipt"], "r-1");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_submit_names_refusals_and_duplicates() {
+    let home = supplier_home("refusals");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "prepare", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    // A revoked assignment keeps its name and sends nothing.
+    let revoked = fake_script(&home, "revoked.json", r#"{"attempts":{"a1":["revoked"]}}"#);
+    let output = supplier_run(
+        &home,
+        &[
+            "supplier",
+            &root,
+            "submit",
+            "--assignment",
+            &assignment,
+            "--fake",
+            &revoked,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("revoked"), "{}", stderr(&output));
+    // The accepted bytes meet their duplicate on retry, not a second job.
+    let accept = fake_script(
+        &home,
+        "accept.json",
+        r#"{"attempts":{"a1":[{"accept":{"receipt":"r-1"}}]}}"#,
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &[
+                "supplier",
+                &root,
+                "submit",
+                "--assignment",
+                &assignment,
+                "--fake",
+                &accept
+            ]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let again = supplier_run(
+        &home,
+        &[
+            "supplier",
+            &root,
+            "submit",
+            "--assignment",
+            &assignment,
+            "--fake",
+            &accept,
+            "--json",
+        ],
+    );
+    assert_eq!(again.status.code(), Some(0));
+    assert_eq!(stdout_json(&again)["failed"], serde_json::json!([]));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_verbs_refuse_bad_usage() {
+    let home = supplier_home("usage");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    // No verb, unknown verb, missing attempt id, missing files, unknown job.
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root]).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "launch"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "cancel"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "prepare"])
+            .status
+            .code(),
+        Some(2),
+        "prepare needs its assignment"
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "submit", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(2),
+        "submit needs its rehearsal intake"
+    );
+    let empty = home.join("empty");
+    std::fs::create_dir_all(&empty).expect("the empty folder is created");
+    assert_eq!(
+        supplier_run(&home, &["supplier", &empty.to_string_lossy(), "status"])
+            .status
+            .code(),
+        Some(2),
+        "no saved job covers the folder"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn supplier_cancel_and_correct_relink_history() {
+    let home = supplier_home("cancel");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let script = fake_script(
+        &home,
+        "s.json",
+        r#"{"attempts":{"a1":[{"accept":{"receipt":"r-1"}}]}}"#,
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "prepare", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "cancel", "a1"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "cancel", "a1", "--json"])
+            .status
+            .code(),
+        Some(1),
+        "withdrawing twice fails"
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "correct", "a1"])
+            .status
+            .code(),
+        Some(1),
+        "a cancelled attempt takes no correction"
+    );
+    // Rehearse the rejection loop: accept, advance to rejected, correct.
+    let home = supplier_home("correct");
+    let (root, assignment) = supplier_fixture(&home, "photos");
+    let root = root.to_string_lossy().into_owned();
+    let assignment = assignment.to_string_lossy().into_owned();
+    let accept = fake_script(
+        &home,
+        "accept.json",
+        r#"{"attempts":{"a1":[{"accept":{"receipt":"r-9"}}]}}"#,
+    );
+    let reject = fake_script(
+        &home,
+        "reject.json",
+        r#"{"attempts":{"a1":[{"advance":{"receipt":"too dark","state":"rejected"}}]}}"#,
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &["supplier", &root, "prepare", "--assignment", &assignment]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        supplier_run(
+            &home,
+            &[
+                "supplier",
+                &root,
+                "submit",
+                "--assignment",
+                &assignment,
+                "--fake",
+                &accept
+            ]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        supplier_run(&home, &["supplier", &root, "reconcile", "--fake", &reject])
+            .status
+            .code(),
+        Some(0)
+    );
+    // New bytes for the correction: review refused the old ones.
+    std::fs::write(root.clone() + "/hero.png", photo_png())
+        .expect("identical bytes stay identical");
+    let correct = supplier_run(&home, &["supplier", &root, "correct", "a1", "--json"]);
+    assert_eq!(correct.status.code(), Some(0), "{}", stderr(&correct));
+    assert_eq!(stdout_json(&correct)["correction_of"], "a1");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = script;
+}

@@ -23,6 +23,7 @@ mod scan;
 mod settings;
 mod sirv;
 mod studio;
+mod supplier;
 mod thumbs;
 #[cfg(feature = "updater")]
 mod update;
@@ -91,6 +92,7 @@ const HELP: &str = concat!(
     "  press convert <PATH> [OPTIONS]\n",
     "  press restore <PATH>\n",
     "  press handoff <FILE>\n",
+    "  press supplier <PATH> <verb> [OPTIONS]\n",
     "  press skill\n",
     "  press update\n\n",
     "Commands:\n",
@@ -98,6 +100,7 @@ const HELP: &str = concat!(
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
     "  restore    Put back the originals a --replace run moved aside\n",
     "  handoff    Validate an ImageGuide report into a pending local task\n",
+    "  supplier   Prepare, submit and reconcile product images as a supplier\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
     "  update     Install the latest signed Press release\n",
     "  help       Print this help\n",
@@ -126,6 +129,9 @@ const HELP: &str = concat!(
     "  --root <dir>              Map handoff resources against this folder\n",
     "  --deployed <dir>          Verify the mapping against deployed files\n",
     "                            (needs handoff --root)\n",
+    "  --assignment <file>       Supplier assignment snapshot (needs supplier)\n",
+    "  --fake <file>             Rehearse supplier submit/reconcile from a script;\n",
+    "                            without it there is no intake to send to\n",
     "  --grid                    Open the window in gallery view\n",
     "  -h, --help                Print this help\n",
     "  -V, --version             Print the version\n\n",
@@ -161,6 +167,7 @@ enum Command {
     Audit,
     Convert,
     Handoff,
+    Supplier,
     Restore,
     Skill,
     Update,
@@ -202,6 +209,12 @@ struct Args {
     /// One run per target for `convert`: a saved recipe id and the output
     /// namespace under the run's output root. Empty is a plain convert.
     targets: Vec<TargetSpec>,
+    /// Supplier rehearsal: the verb and optional attempt id after the folder.
+    supplier_verb: Option<String>,
+    supplier_attempt: Option<String>,
+    /// Assignment and rehearsal script files for supplier verbs.
+    supplier_assignment: Option<PathBuf>,
+    supplier_fake: Option<PathBuf>,
     /// Leave a source alone when its planned output is already current.
     skip_existing: bool,
     /// Plan and project the conversion without writing anything.
@@ -254,6 +267,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut map_root = None;
     let mut map_deployed = None;
     let mut targets = Vec::new();
+    let mut supplier_verb = None;
+    let mut supplier_attempt = None;
+    let mut supplier_assignment = None;
+    let mut supplier_fake = None;
     let mut skip_existing = false;
     let mut dry_run = false;
     let mut unknown = Vec::new();
@@ -270,6 +287,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
             "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
             "handoff" if root.is_none() && command == Command::Window => command = Command::Handoff,
+            "supplier" if root.is_none() && command == Command::Window => {
+                command = Command::Supplier
+            }
             "skill" if root.is_none() && command == Command::Window => command = Command::Skill,
             "update" if root.is_none() && command == Command::Window => command = Command::Update,
             "help" if root.is_none() && command == Command::Window => command = Command::Help,
@@ -328,6 +348,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--root" => {
                 let value = next_value(&mut rest, "--root", "a folder")?;
                 map_root = Some(PathBuf::from(value));
+            }
+            "--assignment" => {
+                let value = next_value(&mut rest, "--assignment", "an assignment file")?;
+                supplier_assignment = Some(PathBuf::from(value));
+            }
+            "--fake" => {
+                let value = next_value(&mut rest, "--fake", "a rehearsal script")?;
+                supplier_fake = Some(PathBuf::from(value));
             }
             "--deployed" => {
                 let value = next_value(&mut rest, "--deployed", "a folder")?;
@@ -422,6 +450,15 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 break;
             }
             _ if argument.starts_with('-') => unknown.push(argument),
+            _ if command == Command::Supplier && root.is_some() => {
+                if supplier_verb.is_none() {
+                    supplier_verb = Some(argument);
+                } else if supplier_attempt.is_none() {
+                    supplier_attempt = Some(argument);
+                } else {
+                    return Err("supplier takes a folder, a verb and at most an attempt id".into());
+                }
+            }
             _ => set_root(&mut root, argument)?,
         }
     }
@@ -442,6 +479,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             map_root: None,
             map_deployed: None,
             targets: Vec::new(),
+            supplier_verb: None,
+            supplier_attempt: None,
+            supplier_assignment: None,
+            supplier_fake: None,
             skip_existing,
             dry_run,
             preset: None,
@@ -527,6 +568,34 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
         }
     }
+    if command != Command::Supplier
+        && (supplier_verb.is_some()
+            || supplier_attempt.is_some()
+            || supplier_assignment.is_some()
+            || supplier_fake.is_some())
+    {
+        return Err("--assignment, --fake and supplier verbs need supplier".into());
+    }
+    if command == Command::Supplier
+        && (conversion_option
+            || grid
+            || !subfolders
+            || output.is_some()
+            || preset.is_some()
+            || map_root.is_some()
+            || map_deployed.is_some()
+            || !targets.is_empty())
+    {
+        return Err("supplier takes a folder, a verb and --assignment/--fake only".into());
+    }
+    if json
+        && !matches!(
+            command,
+            Command::Audit | Command::Convert | Command::Handoff | Command::Supplier
+        )
+    {
+        return Err("--json needs audit, convert, handoff or supplier".into());
+    }
     if command == Command::Handoff && !subfolders {
         return Err("--no-subfolders needs audit or convert".into());
     }
@@ -555,14 +624,6 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if command == Command::Convert && grid {
         return Err("--grid is available only for the window".into());
-    }
-    if json
-        && !matches!(
-            command,
-            Command::Audit | Command::Convert | Command::Handoff
-        )
-    {
-        return Err("--json needs audit, convert or handoff".into());
     }
     if command == Command::Window && !subfolders {
         return Err(
@@ -603,6 +664,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         map_root,
         map_deployed,
         targets,
+        supplier_verb,
+        supplier_attempt,
+        supplier_assignment,
+        supplier_fake,
         skip_existing,
         dry_run,
         preset,
@@ -1965,7 +2030,8 @@ fn main() {
         | Command::Audit
         | Command::Convert
         | Command::Restore
-        | Command::Handoff => {}
+        | Command::Handoff
+        | Command::Supplier => {}
     }
 
     if args.command == Command::Window {
@@ -2008,6 +2074,7 @@ fn main() {
                     Command::Audit => "audit",
                     Command::Restore => "restore",
                     Command::Handoff => "handoff",
+                    Command::Supplier => "supplier",
                     _ => "convert",
                 }
             );
@@ -2047,6 +2114,24 @@ fn main() {
             std::process::exit(2);
         }
         std::process::exit(restore_headless(&target));
+    }
+
+    // Supplier verbs run a saved job's attempt queue: prepare off the folder's
+    // files, submit and reconcile through an explicit rehearsal intake, and
+    // cancel, correct or report locally. Only the attempt log is written.
+    if args.command == Command::Supplier {
+        if !target.is_dir() {
+            eprintln!("press: {} is not a folder", target.display());
+            std::process::exit(2);
+        }
+        std::process::exit(supplier_headless(
+            &target,
+            args.supplier_verb.as_deref(),
+            args.supplier_attempt.as_deref(),
+            args.supplier_assignment.as_deref(),
+            args.supplier_fake.as_deref(),
+            args.json,
+        ));
     }
     // A report import reads one file and validates it: no scan, no window,
     // no writes. Mapping its resources to a local folder is later work that
@@ -2417,6 +2502,393 @@ fn restore_headless(root: &Path) -> i32 {
         restore.failures.len()
     );
     i32::from(!restore.failures.is_empty())
+}
+
+/// Supplier rehearsal verbs over a saved job: prepare mappings into attempts,
+/// submit them through an explicit `--fake` rehearsal intake, and reconcile,
+/// cancel or correct the queue. Reads the job library and the folder's files;
+/// writes only the attempt log beside the library. Submission without `--fake`
+/// refuses: there is no production intake to send to yet.
+#[allow(clippy::too_many_arguments)]
+fn supplier_headless(
+    target: &Path,
+    verb: Option<&str>,
+    attempt: Option<&str>,
+    assignment: Option<&Path>,
+    fake: Option<&Path>,
+    json: bool,
+) -> i32 {
+    let Some(verb) = verb else {
+        eprintln!(
+            "press: supplier needs a verb: prepare, submit, status, cancel, correct or reconcile"
+        );
+        return 2;
+    };
+    if !matches!(
+        verb,
+        "prepare" | "submit" | "status" | "cancel" | "correct" | "reconcile"
+    ) {
+        eprintln!("press: unknown supplier verb {verb:?}");
+        return 2;
+    }
+    if matches!(verb, "cancel" | "correct") && attempt.is_none() {
+        eprintln!("press: supplier {verb} needs an attempt id");
+        return 2;
+    }
+    let Some(job) = supplier::open_job_for(target) else {
+        eprintln!("press: no saved job covers {}", target.display());
+        return 2;
+    };
+    let Some(dir) = crate::job::dir() else {
+        eprintln!("press: no config folder resolves on this machine");
+        return 2;
+    };
+    let mut log =
+        supplier::load_log(&dir, &job.id).unwrap_or_else(|_| supplier::AttemptLog::open(&job.id));
+    let report = match verb {
+        "prepare" => supplier_prepare(&dir, &job, &mut log, assignment, json),
+        "submit" => supplier_submit(&dir, &job, &mut log, assignment, fake, json),
+        "status" => supplier_status(&job, &log, json),
+        "cancel" => supplier_cancel(&dir, &mut log, attempt.unwrap_or_default(), json),
+        "correct" => supplier_correct(&dir, &job, &mut log, attempt.unwrap_or_default(), json),
+        _ => supplier_reconcile(&dir, &mut log, fake, json),
+    };
+    match report {
+        Ok(code) => code,
+        Err((code, message)) => {
+            eprintln!("press: {message}");
+            code
+        }
+    }
+}
+
+/// Readiness shared by verbs that walk mappings: the assignment file and the
+/// resolved target fingerprint every attempt pins.
+struct SupplierReady {
+    assignment: supplier::Assignment,
+    fingerprint: String,
+}
+
+fn supplier_ready(
+    job: &crate::job::Job,
+    assignment: Option<&Path>,
+) -> Result<SupplierReady, (i32, String)> {
+    let Some(path) = assignment else {
+        return Err((
+            2,
+            "supplier prepare and submit need --assignment <file>".into(),
+        ));
+    };
+    let bytes = std::fs::read(path)
+        .map_err(|error| (2, format!("{} cannot be read: {error}", path.display())))?;
+    let assignment = supplier::parse_assignment(&bytes).map_err(|message| (2, message))?;
+    let fingerprint = match crate::job::resolve_target(job, &target_library()) {
+        Ok(None) => crate::recipe::fingerprint_settings(
+            Format::WebP,
+            Quality::lossy(80.),
+            MaxEdge::FULL,
+            crate::avif::configured_speed(),
+        ),
+        Ok(Some(recipe)) => {
+            let (format, quality, max_edge, speed) = recipe.effective();
+            crate::recipe::fingerprint_settings(format, quality, max_edge, speed)
+        }
+        Err(message) => return Err((2, message)),
+    };
+    Ok(SupplierReady {
+        assignment,
+        fingerprint,
+    })
+}
+
+/// The job's mappings in stable order: every verb walks the same sequence.
+fn supplier_mappings(job: &crate::job::Job) -> Vec<&crate::job::Mapping> {
+    let mut mappings: Vec<&crate::job::Mapping> = job
+        .products
+        .iter()
+        .flat_map(|product| product.mappings.iter())
+        .collect();
+    mappings.sort_by(|left, right| left.id.cmp(&right.id));
+    mappings
+}
+
+fn supplier_prepare(
+    dir: &Path,
+    job: &crate::job::Job,
+    log: &mut supplier::AttemptLog,
+    assignment: Option<&Path>,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    let ready = supplier_ready(job, assignment)?;
+    let mut prepared = Vec::new();
+    let mut skipped = Vec::new();
+    for mapping in supplier_mappings(job) {
+        match supplier::prepare_mapping(log, &ready.assignment, &ready.fingerprint, mapping) {
+            supplier::PrepareOutcome::Ready(id) => prepared.push((mapping.id.clone(), id)),
+            supplier::PrepareOutcome::Skipped(reason) => skipped.push(reason),
+        }
+    }
+    supplier::save_log(dir, log).map_err(|message| (1, message))?;
+    if json {
+        write_json(&serde_json::json!({
+            "schema_version": 1,
+            "command": "supplier",
+            "verb": "prepare",
+            "job": job.id,
+            "prepared": prepared.iter().map(|(mapping, attempt)| serde_json::json!({
+                "mapping": mapping, "attempt": attempt
+            })).collect::<Vec<_>>(),
+            "skipped": skipped,
+        }))
+        .map_err(|error| (1, format!("could not write JSON: {error}")))?;
+    } else {
+        outln!(
+            "prepared {} attempts ({} skipped)",
+            prepared.len(),
+            skipped.len()
+        );
+        for (mapping, attempt) in &prepared {
+            outln!("  {mapping} -> {attempt}");
+        }
+        for reason in &skipped {
+            outln!("  skipped: {reason}");
+        }
+    }
+    Ok(0)
+}
+
+/// A rehearsal intake, explicitly opted in: without `--fake` there is no
+/// intake to send to, and submission refuses rather than inventing one.
+fn supplier_fake(
+    fake: Option<&Path>,
+    dir: &Path,
+    job_id: &str,
+) -> Result<supplier::FakeIntake, (i32, String)> {
+    let Some(path) = fake else {
+        return Err((
+            2,
+            "supplier submit and reconcile rehearse with --fake <script>: no production intake exists yet".into(),
+        ));
+    };
+    let bytes = std::fs::read(path)
+        .map_err(|error| (2, format!("{} cannot be read: {error}", path.display())))?;
+    let script = supplier::parse_script(&bytes).map_err(|message| (2, message))?;
+    // Accepted receipts journal beside the attempt log under the job's id,
+    // so later runs and other scripts reconcile what this one sent instead
+    // of meeting a server with amnesia.
+    let journal = dir.join(format!("{job_id}.rehearsal.json"));
+    Ok(supplier::FakeIntake::rehearsing_journaled(
+        &script, &journal,
+    ))
+}
+
+fn supplier_submit(
+    dir: &Path,
+    job: &crate::job::Job,
+    log: &mut supplier::AttemptLog,
+    assignment: Option<&Path>,
+    fake: Option<&Path>,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    let ready = supplier_ready(job, assignment)?;
+    let mut intake = supplier_fake(fake, dir, &job.id)?;
+    let mut sent = Vec::new();
+    let mut failed = Vec::new();
+    for mapping in supplier_mappings(job) {
+        let attempt =
+            match supplier::prepare_mapping(log, &ready.assignment, &ready.fingerprint, mapping) {
+                supplier::PrepareOutcome::Ready(id) => id,
+                supplier::PrepareOutcome::Skipped(reason) => {
+                    failed.push(reason);
+                    continue;
+                }
+            };
+        let bytes = match std::fs::read(&mapping.source.path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                failed.push(format!("mapping {:?} cannot be read", mapping.id));
+                continue;
+            }
+        };
+        match supplier::submit_attempt(dir, log, &mut intake, &attempt, &bytes) {
+            Ok(receipt) => sent.push((attempt, receipt)),
+            Err(error) => failed.push(supplier_intake_error(&attempt, error)),
+        }
+    }
+    if json {
+        write_json(&serde_json::json!({
+            "schema_version": 1,
+            "command": "supplier",
+            "verb": "submit",
+            "job": job.id,
+            "sent": sent.iter().map(|(attempt, receipt)| serde_json::json!({
+                "attempt": attempt,
+                "state": receipt.state,
+                "receipt": receipt.receipt,
+            })).collect::<Vec<_>>(),
+            "failed": failed,
+        }))
+        .map_err(|error| (1, format!("could not write JSON: {error}")))?;
+    } else {
+        outln!("sent {} attempts ({} failed)", sent.len(), failed.len());
+        for (attempt, receipt) in &sent {
+            outln!("  {attempt}: {:?} {}", receipt.state, receipt.receipt);
+        }
+        for error in &failed {
+            eprintln!("press: {error}");
+        }
+    }
+    intake.save_journal();
+    Ok(i32::from(!failed.is_empty()))
+}
+
+fn supplier_intake_error(attempt: &str, error: supplier::IntakeError) -> String {
+    match error {
+        supplier::IntakeError::Revoked(reason) => format!("{attempt}: revoked: {reason}"),
+        supplier::IntakeError::PolicyChanged { current } => {
+            format!("{attempt}: policy moved to {current}; refresh requirements and resubmit")
+        }
+        supplier::IntakeError::Duplicate { receipt } => {
+            format!("{attempt}: already received as {receipt}")
+        }
+        supplier::IntakeError::Transport(reason) => format!("{attempt}: {reason}"),
+        supplier::IntakeError::Rejected { reason } => format!("{attempt}: rejected: {reason}"),
+    }
+}
+
+fn supplier_status(
+    job: &crate::job::Job,
+    log: &supplier::AttemptLog,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    if json {
+        write_json(&serde_json::json!({
+            "schema_version": 1,
+            "command": "supplier",
+            "verb": "status",
+            "job": job.id,
+            "pending": log.pending().len(),
+            "attempts": log.attempts,
+        }))
+        .map_err(|error| (1, format!("could not write JSON: {error}")))?;
+    } else {
+        outln!(
+            "job {}: {} attempts ({} pending)",
+            job.id,
+            log.attempts.len(),
+            log.pending().len()
+        );
+        for attempt in &log.attempts {
+            outln!(
+                "  {} {} {:?} {}",
+                attempt.id,
+                attempt.mapping_id,
+                attempt.state,
+                attempt.receipt.as_deref().unwrap_or("-")
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn supplier_cancel(
+    dir: &Path,
+    log: &mut supplier::AttemptLog,
+    attempt: &str,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    match log.cancel(attempt) {
+        Ok(()) => {
+            supplier::save_log(dir, log).map_err(|message| (1, message))?;
+            if json {
+                write_json(&serde_json::json!({
+                    "schema_version": 1,
+                    "command": "supplier",
+                    "verb": "cancel",
+                    "attempt": attempt,
+                    "state": "cancelled",
+                }))
+                .map_err(|error| (1, format!("could not write JSON: {error}")))?;
+            } else {
+                outln!("cancelled {attempt}");
+            }
+            Ok(0)
+        }
+        Err(message) => Err((1, message)),
+    }
+}
+
+fn supplier_correct(
+    dir: &Path,
+    job: &crate::job::Job,
+    log: &mut supplier::AttemptLog,
+    attempt: &str,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    let rejected = log
+        .attempts
+        .iter()
+        .find(|known| known.id == attempt)
+        .cloned();
+    let Some(rejected) = rejected else {
+        return Err((1, format!("no attempt named {attempt:?} exists")));
+    };
+    let Some(mapping) = supplier_mappings(job)
+        .into_iter()
+        .find(|mapping| mapping.id == rejected.mapping_id)
+        .cloned()
+    else {
+        return Err((1, format!("mapping {:?} left the job", rejected.mapping_id)));
+    };
+    // Corrections carry the file as it reads now, not the bytes that were
+    // rejected: review refused those.
+    let len = std::fs::metadata(&mapping.source.path)
+        .map(|metadata| metadata.len())
+        .map_err(|_| (1, format!("mapping {:?} cannot be read", mapping.id)))?;
+    let hash = crate::manifest::hash_file(&mapping.source.path)
+        .map_err(|_| (1, format!("mapping {:?} cannot be read", mapping.id)))?;
+    let correction = log
+        .correct(attempt, &hash, len, &rejected.recipe_fingerprint)
+        .map_err(|message| (1, message))?;
+    supplier::save_log(dir, log).map_err(|message| (1, message))?;
+    if json {
+        write_json(&serde_json::json!({
+            "schema_version": 1,
+            "command": "supplier",
+            "verb": "correct",
+            "attempt": correction,
+            "correction_of": attempt,
+        }))
+        .map_err(|error| (1, format!("could not write JSON: {error}")))?;
+    } else {
+        outln!("correction {correction} answers {attempt}");
+    }
+    Ok(0)
+}
+
+fn supplier_reconcile(
+    dir: &Path,
+    log: &mut supplier::AttemptLog,
+    fake: Option<&Path>,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    let mut intake = supplier_fake(fake, dir, &log.job_id)?;
+    supplier::reconcile(dir, log, &mut intake);
+    intake.save_journal();
+    let pending = log.pending().len();
+    if json {
+        write_json(&serde_json::json!({
+            "schema_version": 1,
+            "command": "supplier",
+            "verb": "reconcile",
+            "pending": pending,
+            "attempts": log.attempts,
+        }))
+        .map_err(|error| (1, format!("could not write JSON: {error}")))?;
+    } else {
+        outln!("reconciled; {pending} attempts still pending");
+    }
+    Ok(0)
 }
 
 fn update_headless() {
@@ -3734,7 +4206,7 @@ mod tests {
     /// error, and the counts agree. An empty scan keeps the error with zero files.
     #[test]
     fn headless_invalid_output_context_reports_every_target_failed() {
-        let base = temp_root("refused");
+        let base = temp_root("refused-output");
         let root = base.join("photos");
         std::fs::create_dir_all(&root).unwrap();
         write_photo(&root.join("one.png"), 16, 16);
@@ -4126,6 +4598,31 @@ mod tests {
         );
         assert!(parse(&["handoff", "r.json", "--deployed", "live"]).is_err());
         assert!(parse(&["convert", "x", "--deployed", "live"]).is_err());
+    }
+
+    #[test]
+    fn supplier_takes_a_folder_a_verb_and_rehearsal_files() {
+        let args = parse(&[
+            "supplier",
+            "/photos",
+            "submit",
+            "--assignment",
+            "a.json",
+            "--fake",
+            "s.json",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(args.command, Command::Supplier);
+        assert_eq!(args.supplier_verb.as_deref(), Some("submit"));
+        assert!(args.supplier_assignment.is_some());
+        assert!(args.supplier_fake.is_some());
+        assert!(args.json);
+        assert!(parse(&["supplier", "/photos", "submit", "--quality", "80"]).is_err());
+        assert!(parse(&["supplier", "/photos", "submit", "--root", "x"]).is_err());
+        assert!(parse(&["audit", "x", "status", "--assignment", "a"]).is_err());
+        assert!(parse(&["convert", "x", "status", "--fake", "s"]).is_err());
+        assert!(parse(&["supplier", "/photos", "submit", "a1", "extra"]).is_err());
     }
 
     #[test]

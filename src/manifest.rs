@@ -525,7 +525,7 @@ fn prune_empty(directory: Option<&Path>, backups: &Path) {
 /// Hex SHA-256 of a file's bytes, streamed so a large source never sits in
 /// memory twice. Recording hashes the source the run already decoded; skipping
 /// hashes only the outputs it would otherwise reuse.
-fn hash_file(path: &Path) -> std::io::Result<String> {
+pub(crate) fn hash_file(path: &Path) -> std::io::Result<String> {
     use sha2::Digest;
     let mut file = std::fs::File::open(path)?;
     let mut hash = sha2::Sha256::new();
