@@ -96,8 +96,28 @@ pub struct Job {
     pub source_roots: Vec<std::path::PathBuf>,
     /// Personal recipe id resolved at prepare time. A missing recipe refuses
     /// with its name rather than falling back to whatever is selected.
+    /// Kept for single-target jobs; jobs with `targets` below resolve those
+    /// instead, so old files keep their meaning without migration.
     pub target_recipe: Option<String>,
+    /// Independent delivery targets, each with its own recipe reference and
+    /// output namespace. Empty on jobs written before targets existed, which
+    /// keep the single-target behavior above.
+    #[serde(default)]
+    pub targets: Vec<JobTarget>,
     pub products: Vec<ProductSet>,
+}
+
+/// One named delivery target: which saved recipe prepares it and which output
+/// namespace it owns. `recipe` is resolved at prepare time like
+/// `target_recipe`; `None` means the run's current settings. `out` stays
+/// relative so a portable job never pins one machine's layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobTarget {
+    pub id: String,
+    pub name: String,
+    pub recipe: Option<String>,
+    pub out: std::path::PathBuf,
 }
 
 /// The portable form: identical except every path is relative to one base,
@@ -113,6 +133,10 @@ pub struct PortableJob {
     pub base_hint: String,
     pub source_roots: Vec<std::path::PathBuf>,
     pub target_recipe: Option<String>,
+    /// Saved delivery targets ride along unchanged: recipe ids re-resolve
+    /// against the new owner's library and `out` namespaces stay relative.
+    #[serde(default)]
+    pub targets: Vec<JobTarget>,
     pub products: Vec<PortableProduct>,
 }
 
@@ -161,6 +185,7 @@ impl Job {
             revision: 1,
             source_roots,
             target_recipe: None,
+            targets: Vec::new(),
             products: Vec::new(),
         };
         job.validate()?;
@@ -228,6 +253,31 @@ impl Job {
                 }
             }
         }
+        let mut targets = std::collections::HashSet::new();
+        for target in &self.targets {
+            check_slug(&target.id, "target")?;
+            check_name(&target.name, "target")?;
+            if !targets.insert(target.id.as_str()) {
+                return Err(format!("duplicate target id {:?}", target.id));
+            }
+            if target
+                .recipe
+                .as_deref()
+                .is_some_and(|recipe| recipe.trim().is_empty())
+            {
+                return Err(format!("target {:?} names an empty recipe", target.id));
+            }
+            // Namespaces stay relative and dot-free, like every stored run
+            // path: an absolute or escaping `out` would pin one machine's
+            // layout or climb out of the run's output root.
+            crate::output::normal_relative(&target.out).map_err(|_| {
+                format!(
+                    "target {:?} output is not a plain relative path: {}",
+                    target.id,
+                    target.out.display()
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -261,6 +311,7 @@ impl Job {
                 .map(|root| relative(base, root))
                 .collect::<Result<_, _>>()?,
             target_recipe: self.target_recipe.clone(),
+            targets: self.targets.clone(),
             products: self
                 .products
                 .iter()
@@ -338,6 +389,7 @@ impl Job {
                 .map(|path| join(path))
                 .collect::<Result<Vec<PathBuf>, String>>()?,
             target_recipe: portable.target_recipe.clone(),
+            targets: portable.targets.clone(),
             products: portable
                 .products
                 .iter()
@@ -684,6 +736,48 @@ pub fn resolve_target<'a>(
             .map(Some)
             .ok_or_else(|| format!("{id:?} is not saved as a recipe anymore")),
     }
+}
+
+/// One delivery target ready to prepare: identity, the resolved recipe (or
+/// the run's current settings when the target names none), and the output
+/// namespace relative to the run's output root. Owned throughout so headless
+/// runs and the window share one resolution without lifetime plumbing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedTarget {
+    pub id: String,
+    pub name: String,
+    pub recipe: Option<crate::recipe::Recipe>,
+    pub out: std::path::PathBuf,
+}
+
+/// Resolve target recipe references against known recipes. Like the
+/// single-target path, a bound id with no recipe refuses with its name
+/// rather than falling back to whatever is selected.
+pub fn prepare_targets(
+    targets: &[JobTarget],
+    recipes: &[crate::recipe::Recipe],
+) -> Result<Vec<PreparedTarget>, String> {
+    targets
+        .iter()
+        .map(|target| {
+            let recipe = match target.recipe.as_deref() {
+                None => None,
+                Some(id) => Some(
+                    recipes
+                        .iter()
+                        .find(|recipe| recipe.id == id)
+                        .cloned()
+                        .ok_or_else(|| format!("{id:?} is not saved as a recipe anymore"))?,
+                ),
+            };
+            Ok(PreparedTarget {
+                id: target.id.clone(),
+                name: target.name.clone(),
+                recipe,
+                out: target.out.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Re-point one mapping at a file that exists, refreshing its recorded size
@@ -1060,6 +1154,7 @@ mod tests {
             revision: 2,
             source_roots: vec![PathBuf::from("/photos")],
             target_recipe: Some("night".into()),
+            targets: Vec::new(),
             products: vec![product()],
         }
     }
@@ -1270,6 +1365,83 @@ mod tests {
         );
         let missing = resolve_target(&job, &[]).unwrap_err();
         assert!(missing.contains("night"), "the refusal names it: {missing}");
+    }
+
+    fn target(id: &str, recipe: Option<&str>, out: &str) -> JobTarget {
+        JobTarget {
+            id: id.into(),
+            name: id.into(),
+            recipe: recipe.map(str::to_string),
+            out: PathBuf::from(out),
+        }
+    }
+
+    #[test]
+    fn saved_targets_validate_resolve_and_ride_portable() {
+        // Old jobs carry no targets and keep the single-target meaning.
+        assert!(job().targets.is_empty());
+        let mut job = job();
+        job.targets = vec![
+            target("web", Some("night"), "web"),
+            target("master", None, "masters"),
+        ];
+        job.validate().unwrap();
+        assert_eq!(job.targets[0].out.as_os_str(), "web");
+        // Duplicate ids, empty recipes and non-relative namespaces refuse.
+        let mut dup = job.clone();
+        dup.targets.push(target("web", None, "other"));
+        assert!(dup.validate().is_err());
+        for bad in ["/abs", "", "../up", "a/./b"] {
+            let mut outside = job.clone();
+            outside.targets[0].out = PathBuf::from(bad);
+            assert!(outside.validate().is_err(), "{bad} is not a namespace");
+        }
+        let mut blank = job.clone();
+        blank.targets[0].recipe = Some("  ".into());
+        assert!(blank.validate().is_err());
+        // Preparation refuses a missing recipe by name, passes a bare target
+        // through, and hands back owned values both callers share.
+        assert!(
+            prepare_targets(&job.targets, &[])
+                .unwrap_err()
+                .contains("night")
+        );
+        let night = crate::recipe::Recipe {
+            schema: crate::recipe::SCHEMA_VERSION,
+            id: "night".into(),
+            name: "Night".into(),
+            revision: 2,
+            provenance: crate::recipe::Provenance::Personal,
+            format: crate::recipe::RecipeFormat::WebP,
+            quality: crate::recipe::RecipeQuality::Lossy(80.),
+            max_edge: None,
+            avif_speed: None,
+        };
+        let library = [night];
+        let prepared = prepare_targets(&job.targets, &library).unwrap();
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(
+            prepared[0].recipe.as_ref().map(|recipe| &recipe.name),
+            Some(&"Night".to_string())
+        );
+        assert_eq!(prepared[0].out.as_os_str(), "web");
+        assert_eq!(prepared[1].recipe, None);
+        // The portable round trip keeps targets; old lines without them read
+        // as target-less jobs.
+        let root = store("targets-portable");
+        job.source_roots = vec![root.clone()];
+        job.products[0].mappings.clear();
+        let portable = job.to_portable(&root).unwrap();
+        assert_eq!(portable.targets.len(), 2);
+        let back = Job::from_portable(&portable, &root).unwrap();
+        assert_eq!(back.targets, job.targets);
+        let mut legacy = serde_json::to_value(&portable).unwrap();
+        legacy.as_object_mut().unwrap().remove("targets");
+        let reread: PortableJob = serde_json::from_value(legacy).unwrap();
+        assert!(reread.targets.is_empty());
+        let back = Job::from_portable(&reread, &root).unwrap();
+        assert!(back.targets.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

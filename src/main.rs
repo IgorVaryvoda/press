@@ -117,6 +117,8 @@ const HELP: &str = concat!(
     "  --skip-existing           Skip a source whose output already matches this\n",
     "                            format, quality, max edge and AVIF speed\n",
     "  --dry-run                 Plan and project a conversion, write nothing\n",
+    "  --target <recipe>=<dir>    Convert once more with a saved recipe into\n",
+    "                            its own folder; repeatable, convert only\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
     "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
@@ -166,6 +168,14 @@ enum Command {
     Version,
 }
 
+/// One `convert --target`: a saved recipe id and the output namespace under
+/// the run's output root. Recipes resolve against personal saves first, then
+/// built-ins, and refuse by name when missing.
+struct TargetSpec {
+    recipe: String,
+    out: PathBuf,
+}
+
 struct Args {
     /// `None` when launched with no path: the window opens on its empty state.
     root: Option<PathBuf>,
@@ -189,6 +199,9 @@ struct Args {
     /// The deployed tree `handoff --root` verifies against. Needs `--root`;
     /// anything else refuses the flag.
     map_deployed: Option<PathBuf>,
+    /// One run per target for `convert`: a saved recipe id and the output
+    /// namespace under the run's output root. Empty is a plain convert.
+    targets: Vec<TargetSpec>,
     /// Leave a source alone when its planned output is already current.
     skip_existing: bool,
     /// Plan and project the conversion without writing anything.
@@ -240,6 +253,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut output = None;
     let mut map_root = None;
     let mut map_deployed = None;
+    let mut targets = Vec::new();
     let mut skip_existing = false;
     let mut dry_run = false;
     let mut unknown = Vec::new();
@@ -362,6 +376,20 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 dry_run = true;
             }
+            "--target" => {
+                let value =
+                    next_value(&mut rest, "--target", "a recipe and folder like night=web")?;
+                let Some((recipe, out)) = value.split_once('=') else {
+                    return Err("--target needs a recipe and folder like night=web".into());
+                };
+                if recipe.trim().is_empty() || out.trim().is_empty() {
+                    return Err("--target needs a recipe and folder like night=web".into());
+                }
+                targets.push(TargetSpec {
+                    recipe: recipe.to_string(),
+                    out: PathBuf::from(out),
+                });
+            }
             "--grid" => grid = true,
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
@@ -413,6 +441,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             output,
             map_root: None,
             map_deployed: None,
+            targets: Vec::new(),
             skip_existing,
             dry_run,
             preset: None,
@@ -458,6 +487,45 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if map_deployed.is_some() && (command != Command::Handoff || map_root.is_none()) {
         return Err("--deployed needs handoff --root".into());
+    }
+    if !targets.is_empty() && command != Command::Convert {
+        return Err("--target needs convert".into());
+    }
+    if !targets.is_empty() && (format_set || quality_set || edge_set || speed_set) {
+        return Err(
+            "targets carry their own recipes: explicit conversion options need a plain convert"
+                .into(),
+        );
+    }
+    if !targets.is_empty() && preset.is_some() {
+        return Err("targets carry their own recipes: --preset-file needs a plain convert".into());
+    }
+    if !targets.is_empty() && replace {
+        return Err(
+            "replace mode takes no --target: name one output namespace per target instead".into(),
+        );
+    }
+    for spec in &targets {
+        crate::output::normal_relative(&spec.out).map_err(|_| {
+            format!(
+                "--target {} names an output that is not a plain relative folder",
+                spec.out.display()
+            )
+        })?;
+    }
+    for (index, left) in targets.iter().enumerate() {
+        for right in &targets[index + 1..] {
+            if left.out == right.out {
+                return Err(format!("two targets write to {}", left.out.display()));
+            }
+            if left.out.starts_with(&right.out) || right.out.starts_with(&left.out) {
+                return Err(format!(
+                    "targets {} and {} overlap",
+                    left.out.display(),
+                    right.out.display()
+                ));
+            }
+        }
     }
     if command == Command::Handoff && !subfolders {
         return Err("--no-subfolders needs audit or convert".into());
@@ -534,6 +602,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         output,
         map_root,
         map_deployed,
+        targets,
         skip_existing,
         dry_run,
         preset,
@@ -786,6 +855,19 @@ struct ConversionSummary {
     projected_samples: Option<usize>,
 }
 
+/// One `--target` run inside a multi-target report: its recipe, namespace,
+/// files and summary. A failed target never touches its siblings; each
+/// section stands on its own manifest.
+#[derive(Serialize)]
+struct TargetSection {
+    recipe: String,
+    out: String,
+    manifest: Option<String>,
+    options: ConversionOptions,
+    files: Vec<ConversionFile>,
+    summary: ConversionSummary,
+}
+
 #[derive(Serialize)]
 struct ConversionReport {
     schema_version: u32,
@@ -805,6 +887,10 @@ struct ConversionReport {
     summary: ConversionSummary,
     manifest: Option<String>,
     backup: Option<String>,
+    /// One section per `--target`, absent on a plain convert. Each section
+    /// carries its own files, summary and manifest; the top-level `files`
+    /// and `summary` cover every target together.
+    targets: Option<Vec<TargetSection>>,
     files: Vec<ConversionFile>,
     unreadable: Vec<String>,
     walk_errors: Vec<String>,
@@ -1592,6 +1678,7 @@ fn refused_report(
         manifest: None,
         backup: None,
         files,
+        targets: None,
         unreadable: sorted_paths(&scanned.unreadable),
         walk_errors: sorted_paths(&scanned.walk_errors),
     }
@@ -1632,6 +1719,224 @@ fn refused_headless(
         }
     }
     std::process::exit(2);
+}
+
+/// Personal saves first, built-ins as fallback: a saved recipe with a
+/// built-in id is the user overriding the default, not a collision.
+fn target_library() -> Vec<crate::recipe::Recipe> {
+    let mut library = Vec::new();
+    if let Some(dir) = crate::recipe::dir() {
+        let (mut saved, _) = crate::recipe::list(&dir);
+        library.append(&mut saved);
+    }
+    library.extend(crate::recipe::Recipe::builtins());
+    library
+}
+
+/// One section's summary from its queue and run, with the same arithmetic
+/// as the single-target report: only re-encoded bytes count as output.
+fn target_summary(
+    attempted: usize,
+    queued: &Queued,
+    run: &ConversionRun,
+    dry_run: bool,
+) -> ConversionSummary {
+    ConversionSummary {
+        attempted,
+        converted: if dry_run {
+            0
+        } else {
+            queued.entries.len() - run.failed
+        },
+        failed: run.failed,
+        skipped: queued.skipped.len(),
+        source_bytes: run.before,
+        output_bytes: if dry_run { 0 } else { run.after },
+        grew: !dry_run && run.after > run.before,
+        changed_bytes: if dry_run {
+            0
+        } else {
+            run.before.abs_diff(run.after)
+        },
+        projected_bytes: run.projected.map(|(bytes, _)| bytes),
+        projected_samples: run.projected.map(|(_, samples)| samples),
+    }
+}
+
+/// One `convert` per `--target`: the same plan/queue/convert pipeline with
+/// each target's recipe settings under its own namespace. Recipes resolve
+/// before anything converts, so a missing recipe fails the run instead of
+/// one sibling; a failed target never touches its siblings' outputs. Each
+/// target owns its manifest, so refingerprinting and skip decisions stay
+/// independent across namespaces.
+#[allow(clippy::too_many_arguments)]
+fn convert_targets(
+    target: &Path,
+    scanned: &scan::Scan,
+    scope: Option<bool>,
+    args: &Args,
+    root: &Path,
+    out_dir: &Path,
+    unread: usize,
+) -> ! {
+    let library = target_library();
+    let job_targets: Vec<crate::job::JobTarget> = args
+        .targets
+        .iter()
+        .map(|spec| crate::job::JobTarget {
+            id: spec.recipe.clone(),
+            name: spec.recipe.clone(),
+            recipe: Some(spec.recipe.clone()),
+            out: spec.out.clone(),
+        })
+        .collect();
+    let prepared = match crate::job::prepare_targets(&job_targets, &library) {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            eprintln!("press: {message}");
+            std::process::exit(2);
+        }
+    };
+    let audited: Vec<&Entry> = scanned.entries.iter().collect();
+    let sources: Vec<PathBuf> = scanned
+        .entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    let mut sections = Vec::new();
+    for prepared in &prepared {
+        // A bare target runs the current settings; the CLI always names a
+        // recipe, so this only fires for future callers.
+        let (format, quality, max_edge, speed) = prepared.recipe.as_ref().map_or(
+            (
+                args.format,
+                args.quality,
+                args.max_edge,
+                avif::configured_speed(),
+            ),
+            |recipe| recipe.effective(),
+        );
+        let out_t = out_dir.join(&prepared.out);
+        if !args.json {
+            outln!("target {} -> {}", prepared.id, out_t.display());
+        }
+        let recorded_t = manifest::load(&out_t);
+        let destination_t = convert::Destination {
+            out_dir: &out_t,
+            backups: None,
+            manifest: &recorded_t,
+        };
+        let planned_t = convert::plan_outputs(root, &sources, &sources, &destination_t, format);
+        let queued_t = queue_run(
+            &audited,
+            &planned_t,
+            args.skip_existing,
+            args.json,
+            &recorded_t,
+            root,
+            &out_t,
+            format,
+            quality,
+            max_edge,
+            speed.or_else(avif::configured_speed),
+        );
+        let mut run_t = if args.dry_run {
+            dry_run_headless(&queued_t, format, quality, max_edge, args.json)
+        } else {
+            convert_headless(
+                root,
+                &queued_t,
+                &destination_t,
+                format,
+                quality,
+                max_edge,
+                args.json,
+            )
+        };
+        run_t
+            .files
+            .sort_by(|left, right| left.source.cmp(&right.source));
+        sections.push(TargetSection {
+            recipe: prepared.id.clone(),
+            out: path_text(&out_t),
+            manifest: run_t.written_manifest.as_deref().map(path_text),
+            options: ConversionOptions {
+                format: format.label(),
+                quality: quality.0,
+                max_edge: max_edge.0,
+            },
+            summary: target_summary(scanned.entries.len(), &queued_t, &run_t, args.dry_run),
+            files: std::mem::take(&mut run_t.files),
+        });
+    }
+    let mut files: Vec<ConversionFile> = sections
+        .iter()
+        .flat_map(|section| section.files.clone())
+        .collect();
+    files.sort_by(|left, right| left.source.cmp(&right.source));
+    let mut summary = ConversionSummary {
+        attempted: 0,
+        converted: 0,
+        failed: 0,
+        skipped: 0,
+        source_bytes: 0,
+        output_bytes: 0,
+        grew: false,
+        changed_bytes: 0,
+        projected_bytes: None,
+        projected_samples: None,
+    };
+    for section in &sections {
+        let section = &section.summary;
+        summary.attempted += section.attempted;
+        summary.converted += section.converted;
+        summary.failed += section.failed;
+        summary.skipped += section.skipped;
+        summary.source_bytes += section.source_bytes;
+        summary.output_bytes += section.output_bytes;
+        summary.changed_bytes += section.changed_bytes;
+        summary.projected_bytes = summary
+            .projected_bytes
+            .map_or(section.projected_bytes, |total| {
+                Some(total + section.projected_bytes.unwrap_or(0))
+            });
+        summary.projected_samples = summary
+            .projected_samples
+            .map_or(section.projected_samples, |total| {
+                Some(total + section.projected_samples.unwrap_or(0))
+            });
+    }
+    summary.grew = summary.output_bytes > summary.source_bytes;
+    let failed = summary.failed;
+    if args.json {
+        let report = ConversionReport {
+            schema_version: 2,
+            command: "convert",
+            target: path_text(target),
+            output: Some(path_text(out_dir)),
+            error: None,
+            dry_run: args.dry_run,
+            subfolders: scope,
+            options: ConversionOptions {
+                format: args.format.label(),
+                quality: args.quality.0,
+                max_edge: args.max_edge.0,
+            },
+            scan: ScanSummary::from_scan(scanned),
+            manifest: None,
+            backup: None,
+            targets: Some(sections),
+            summary,
+            files,
+            unreadable: sorted_paths(&scanned.unreadable),
+            walk_errors: sorted_paths(&scanned.walk_errors),
+        };
+        if let Err(error) = write_json(&report) {
+            eprintln!("press: could not write JSON: {error}");
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
 
 fn main() {
@@ -1975,6 +2280,11 @@ fn main() {
         ),
     };
     let out_dir = context.output_root().to_path_buf();
+    // Named targets run the same pipeline once each under their own
+    // namespaces; the single-target flow below never sees them.
+    if !args.targets.is_empty() {
+        convert_targets(&target, &scanned, scope, &args, &root, &out_dir, unread);
+    }
     let backups = args.replace.then(|| manifest::backup_root(&out_dir));
     let recorded = manifest::load(&out_dir);
     let destination = convert::Destination {
@@ -2076,6 +2386,7 @@ fn main() {
                 projected_samples: run.projected.map(|(_, samples)| samples),
             },
             files: run.files,
+            targets: None,
             unreadable: sorted_paths(&scanned.unreadable),
             walk_errors: sorted_paths(&scanned.walk_errors),
         };
@@ -2874,6 +3185,44 @@ mod tests {
         assert!(parse(&["skill", "--skip-existing"]).is_err());
     }
 
+    #[test]
+    fn targets_name_a_recipe_and_a_namespace() {
+        let args = parse(&["convert", "/photos", "--target", "night=web"]).unwrap();
+        assert_eq!(args.targets.len(), 1);
+        assert_eq!(args.targets[0].recipe, "night");
+        assert_eq!(args.targets[0].out.as_os_str(), "web");
+        let args = parse(&[
+            "convert",
+            "/photos",
+            "--target",
+            "night=web",
+            "--target",
+            "night=small",
+        ])
+        .unwrap();
+        assert_eq!(args.targets.len(), 2);
+        assert!(parse(&["convert", "/photos", "--target", "night"]).is_err());
+        assert!(parse(&["convert", "/photos", "--target", "=web"]).is_err());
+        assert!(parse(&["convert", "/photos", "--target", "night="]).is_err());
+        assert!(parse(&["audit", "x", "--target", "night=web"]).is_err());
+        assert!(parse(&["convert", "x", "--target", "night=web", "--replace"]).is_err());
+        assert!(parse(&["convert", "x", "--target", "night=web", "--quality", "70"]).is_err());
+        assert!(
+            parse(&[
+                "convert",
+                "x",
+                "--target",
+                "night=web",
+                "--preset-file",
+                "f"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["convert", "x", "--target", "n=/abs"]).is_err());
+        assert!(parse(&["convert", "x", "--target", "n=a", "--target", "m=a"]).is_err());
+        assert!(parse(&["convert", "x", "--target", "n=a", "--target", "m=a/b"]).is_err());
+    }
+
     /// `press skill` prints the checked-in document verbatim, so the agent
     /// contract cannot drift from the file agents actually read.
     #[test]
@@ -3363,6 +3712,7 @@ mod tests {
             manifest: None,
             backup: None,
             files: run.files,
+            targets: None,
             unreadable: vec![],
             walk_errors: vec![],
         };

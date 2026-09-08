@@ -42,6 +42,8 @@ press convert <file-or-folder> --dry-run --json
 
 A recorded run first matches its recipe fingerprint and the source content hash: changed settings or edited bytes rebuild even when the timestamps look current. An output with no record skips on timestamps alone. Under this flag `summary.source_bytes` and `summary.output_bytes` cover only the files this run re-encoded, so they are not the size of the whole tree.
 
+Repeat `--target <recipe>=<dir>` to convert once per saved recipe into its own folder under the output root, e.g. `--target recommended=web --target small-files=small`. Each target keeps its own manifest and skip decisions; the report carries one `targets` section per target plus combined `files` and `summary`. Targets refuse unknown recipes, overlapping folders, `--replace`, and explicit `--format`/`--quality`/`--preset-file` siblings: a target's recipe already answers those.
+
 `--dry-run` writes nothing. A file that would be written comes back with `status` `planned` and the `planned_output` it would go to; `summary.converted` is `0`, and `summary.projected_bytes` holds the projected size of the whole run with `summary.projected_samples` real encodes behind it. The document carries `dry_run: true`. Report a projection as a projection, never as a measured saving.
 
 A file whose destination or format is refused comes back from a dry run as `status` `failed` with the reason and a null `planned_output`, and the run exits `1`. A dry run cannot make the refusals that need the pixels: JPEG over a source with real transparency, an animated GIF, PNG, WebP or JPEG XL, and `--lossless` over a bit depth the format cannot keep. A clean dry run is not a promise that every file converts.

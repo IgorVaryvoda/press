@@ -535,3 +535,74 @@ fn handoff_deployed_missing_tree_reports_missing() {
     assert_eq!(doc["deployed"][0]["status"], "missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn convert_targets_write_each_namespace_with_its_recipe() {
+    let dir = workdir("targets");
+    photo(&dir, "a.png");
+    let target = dir.to_string_lossy().into_owned();
+    let output = run(&[
+        "convert",
+        &target,
+        "--target",
+        "recommended=web",
+        "--target",
+        "small-files=small",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(dir.join("optimized").join("web").join("a.webp").is_file());
+    assert!(dir.join("optimized").join("small").join("a.avif").is_file());
+    let doc = stdout_json(&output);
+    assert_eq!(doc["targets"].as_array().map(Vec::len), Some(2));
+    assert_eq!(doc["summary"]["converted"], 2);
+    // The second run reuses both namespaces without rewriting them.
+    let again = run(&[
+        "convert",
+        &target,
+        "--target",
+        "recommended=web",
+        "--target",
+        "small-files=small",
+        "--skip-existing",
+        "--json",
+    ]);
+    assert_eq!(again.status.code(), Some(0));
+    assert_eq!(stdout_json(&again)["summary"]["skipped"], 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn convert_targets_refuse_before_writing_anything() {
+    let dir = workdir("targets-refuse");
+    photo(&dir, "a.png");
+    let target = dir.to_string_lossy().into_owned();
+    // Unknown recipes fail the run, not one sibling.
+    let output = run(&["convert", &target, "--target", "nope=web"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        !dir.join("optimized").exists(),
+        "nothing converts on refusal"
+    );
+    // Overlapping namespaces and replace mode refuse at parse time.
+    for args in [
+        vec![
+            "convert",
+            &target,
+            "--target",
+            "recommended=a",
+            "--target",
+            "recommended=a/b",
+        ],
+        vec![
+            "convert",
+            &target,
+            "--target",
+            "recommended=web",
+            "--replace",
+        ],
+    ] {
+        assert_eq!(run(&args).status.code(), Some(2));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

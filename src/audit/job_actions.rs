@@ -58,6 +58,7 @@ fn anonymous_job(root: &Path) -> Job {
         revision: 1,
         source_roots: vec![root.to_path_buf()],
         target_recipe: None,
+        targets: Vec::new(),
         products: Vec::new(),
     }
 }
