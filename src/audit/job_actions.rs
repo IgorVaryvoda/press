@@ -21,7 +21,16 @@ pub(super) fn load_job_for(root: &Path) -> Job {
 /// without touching the real config folder.
 pub(super) fn load_job_for_in(dir: &Path, root: &Path) -> Job {
     {
+        // `list` sorts by name, so every tier below is deterministic. An exact
+        // root beats a canonical-only match: the stored spelling is the
+        // stronger claim that this job means this folder.
         let (jobs, _) = job::list(dir);
+        if let Some(known) = jobs
+            .iter()
+            .find(|job| job.source_roots.iter().any(|known| known == root))
+        {
+            return known.clone();
+        }
         if let Some(known) = jobs.into_iter().find(|job| {
             job.source_roots
                 .iter()
@@ -150,6 +159,10 @@ impl Audit {
             return;
         }
         let generation = self.dataset_generation;
+        // A newer mutation in the same dataset supersedes this refresh: every
+        // mutation bumps the revision before refreshing, so fencing on both
+        // drops a late landing from the mapping that no longer exists.
+        let revision = self.work_job.revision;
         let job = self.work_job.clone();
         let root = self.root.clone();
         let out_dir = self.output.root(&self.root);
@@ -168,7 +181,7 @@ impl Audit {
                 })
                 .await;
             let _ = this.update(cx, |audit, cx| {
-                if audit.dataset_generation != generation {
+                if audit.dataset_generation != generation || audit.work_job.revision != revision {
                     return;
                 }
                 audit.work_states = states;
@@ -757,5 +770,64 @@ impl Audit {
             });
         })
         .detach();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn library(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("press-job-load-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the job library is created");
+        dir
+    }
+
+    /// Two jobs claiming one root load the same job every time, and an exact
+    /// stored root beats a canonical-only match: the stored spelling is the
+    /// stronger claim that the job means the queried folder.
+    #[test]
+    fn shared_roots_load_the_same_job_every_time() {
+        let dir = library("shared");
+        let root = dir.join("photos");
+        std::fs::create_dir_all(&root).expect("the root exists");
+        let mut zebra = Job::new("zebra".into(), "Zebra".into(), vec![root.clone()]).unwrap();
+        zebra.revision = 2;
+        job::save(&dir, &zebra).unwrap();
+        let alpha = Job::new("alpha".into(), "Alpha".into(), vec![root.clone()]).unwrap();
+        job::save(&dir, &alpha).unwrap();
+        // Both claim the folder: the name-sorted first wins, every time.
+        for _ in 0..2 {
+            assert_eq!(load_job_for_in(&dir, &root).id, "alpha");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With no exact spelling anywhere, the canonical tier still answers the
+    /// same job on every load. Symlink creation needs privileges Windows CI
+    /// may not grant, so this runs where the call always exists.
+    #[cfg(unix)]
+    #[test]
+    fn canonical_matches_fall_back_deterministically() {
+        let dir = library("canonical");
+        let root = dir.join("photos");
+        std::fs::create_dir_all(&root).expect("the root exists");
+        let link = dir.join("linked");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let zebra = Job::new("zebra".into(), "Zebra".into(), vec![root]).unwrap();
+        job::save(&dir, &zebra).unwrap();
+        let alpha = Job::new("alpha".into(), "Alpha".into(), vec![dir.join("photos")]).unwrap();
+        job::save(&dir, &alpha).unwrap();
+        // Neither stored spelling is the queried one, but both canonicalize
+        // to it: the name-sorted first wins, every time.
+        for _ in 0..2 {
+            assert_eq!(load_job_for_in(&dir, &link).id, "alpha");
+        }
+        // An exact stored spelling beats the canonical tier even from the
+        // back of the name order.
+        let exact = Job::new("zed".into(), "Zed".into(), vec![link.clone()]).unwrap();
+        job::save(&dir, &exact).unwrap();
+        assert_eq!(load_job_for_in(&dir, &link).id, "zed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

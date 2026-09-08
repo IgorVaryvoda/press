@@ -330,9 +330,20 @@ pub fn list(dir: &std::path::Path) -> (Vec<Recipe>, Vec<String>) {
     (recipes, skipped)
 }
 
-/// Write one recipe file atomically: temp file in the same directory, then a
-/// rename. Same shape as the Studio result install, without its backup dance.
+/// Write one recipe file: temp file in the same directory, then the shared
+/// atomic commit. Same shape as the Studio result install, without its backup
+/// dance, and never delete-first on any platform.
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    write_atomic_replace(path, bytes, crate::settings::replace_file)
+}
+
+/// The same commit with an injectable replace step, so tests prove the last
+/// good file survives a failed commit.
+fn write_atomic_replace(
+    path: &std::path::Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "tmp-{}-{}",
@@ -340,9 +351,7 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes).map_err(|error| format!("recipe write failed: {error}"))?;
-    #[cfg(windows)]
-    let _ = std::fs::remove_file(path);
-    std::fs::rename(&tmp, path).map_err(|error| {
+    replace(&tmp, path).map_err(|error| {
         let _ = std::fs::remove_file(&tmp);
         format!("recipe write failed: {error}")
     })
@@ -558,6 +567,27 @@ mod tests {
             fingerprint_settings(Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None),
             base
         );
+    }
+
+    #[test]
+    fn a_failed_commit_keeps_the_last_good_recipe() {
+        let dir = std::env::temp_dir().join(format!("press-recipe-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the fixture dir is created");
+        let path = dir.join("night.json");
+        std::fs::write(&path, b"old").expect("the old file is written");
+        write_atomic_replace(&path, b"new", |_, _| {
+            Err(std::io::Error::other("injected commit failure"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            std::fs::read(&path).expect("the old file is still there"),
+            b"old"
+        );
+        write_atomic_replace(&path, b"new", crate::settings::replace_file)
+            .expect("the retry lands");
+        assert_eq!(std::fs::read(&path).expect("the new file is there"), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

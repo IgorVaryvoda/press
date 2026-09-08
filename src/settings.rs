@@ -426,16 +426,27 @@ fn save_to(path: &Path, settings: &Settings, fault: Fault) -> Result<Option<Stri
     result
 }
 
-/// Atomically replace the old settings with the staged file: the previous
-/// contents stay byte-identical on every injected or real failure, and temp
-/// residue is cleaned by the caller. Unix renames over the old file and syncs
-/// the parent best-effort with a warning; Windows replaces atomically first
-/// and only falls back to a non-replacing move when the destination is
-/// missing, retrying the replace once on a race. Never delete-first: a crash
-/// between delete and rename would leave no settings at all.
+/// The commit step every library shares: an atomic file replacement that never
+/// deletes first. Unix renames over the destination; Windows uses ReplaceFileW
+/// with a non-replacing move only when the destination is missing. A crash
+/// between staging and this call leaves the old complete file, never neither.
+#[cfg(not(windows))]
+pub(crate) fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+/// The commit step every library shares: an atomic file replacement that never
+/// deletes first. Unix renames over the destination; Windows uses ReplaceFileW
+/// with a non-replacing move only when the destination is missing. A crash
+/// between staging and this call leaves the old complete file, never neither.
+#[cfg(windows)]
+pub(crate) fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    windows_replace(from, to)
+}
+
 #[cfg(not(windows))]
 fn replace(from: &Path, to: &Path, fault: Fault) -> Result<Option<String>, SaveError> {
-    std::fs::rename(from, to).map_err(|error| SaveError::Replace { error })?;
+    replace_file(from, to).map_err(|error| SaveError::Replace { error })?;
     if fault == Fault::ParentSync {
         return Ok(Some(format!(
             "could not sync the settings directory: {}",
@@ -455,7 +466,7 @@ fn replace(from: &Path, to: &Path, fault: Fault) -> Result<Option<String>, SaveE
 #[cfg(windows)]
 fn replace(from: &Path, to: &Path, fault: Fault) -> Result<Option<String>, SaveError> {
     let _ = fault;
-    windows_replace(from, to).map_err(|error| SaveError::Replace { error })?;
+    replace_file(from, to).map_err(|error| SaveError::Replace { error })?;
     Ok(None)
 }
 

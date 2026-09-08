@@ -428,6 +428,17 @@ fn file_for(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    write_atomic_replace(path, bytes, crate::settings::replace_file)
+}
+
+/// The same commit with an injectable replace step, so tests prove the last
+/// good file survives a failed commit. Production passes the shared atomic
+/// replacement, which never deletes first on any platform.
+fn write_atomic_replace(
+    path: &std::path::Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "tmp-{}-{}",
@@ -435,9 +446,7 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes).map_err(|error| format!("job write failed: {error}"))?;
-    #[cfg(windows)]
-    let _ = std::fs::remove_file(path);
-    std::fs::rename(&tmp, path).map_err(|error| {
+    replace(&tmp, path).map_err(|error| {
         let _ = std::fs::remove_file(&tmp);
         format!("job write failed: {error}")
     })
@@ -1100,6 +1109,28 @@ mod tests {
             "roots are required"
         );
         assert!(Job::new("x".into(), "X".into(), vec![PathBuf::from("relative")]).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_failed_commit_keeps_the_last_good_job() {
+        let dir = store("failed-commit");
+        save(&dir, &job()).unwrap();
+        let path = dir.join("job.json");
+        let before = std::fs::read(&path).expect("the saved job is on disk");
+        let failed = write_atomic_replace(&path, b"{\"schema\":1", |_, _| {
+            Err(std::io::Error::other("injected commit failure"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("the old file is still there"),
+            before,
+            "a failed commit never touches the last good file"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("the library lists").count(),
+            1,
+            "the staged temp is cleaned up"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
