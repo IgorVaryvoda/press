@@ -302,11 +302,19 @@ impl Job {
             return Err(format!("job root {} is not absolute", root.display()));
         }
         let join = |relative: &std::path::Path| {
+            use std::path::Component;
             // `has_root` catches what `is_absolute` misses: on Windows a path
             // like `/abs.png` has a root but no prefix, and joining it would
             // rebase the mapping onto the drive root instead of the root its
-            // new owner chose. Portable paths are never that; refuse them.
-            if relative.is_absolute() || relative.has_root() {
+            // new owner chose. A parent component escapes the root on every
+            // platform, including from a nested `sub/../../escape`. Portable
+            // paths are never either; refuse them.
+            if relative.is_absolute()
+                || relative.has_root()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+            {
                 return Err(format!(
                     "portable path {} is not relative",
                     relative.display()
@@ -1109,10 +1117,19 @@ mod tests {
         let mut stray = job.clone();
         stray.products[0].mappings[0].source.path = PathBuf::from("/elsewhere/x.png");
         assert!(stray.to_portable(&root).is_err());
-        // A non-relative portable path refuses at import.
+        // A non-relative portable path refuses at import: absolute, rooted,
+        // and parent-escaping alike, since joining any of them would land
+        // outside the root its new owner chose.
         let mut evil = portable;
         evil.products[0].mappings[0].source.path = PathBuf::from("/abs.png");
         assert!(Job::from_portable(&evil, &root).is_err());
+        for escape in ["../escape.png", "sub/../../escape.png"] {
+            evil.products[0].mappings[0].source.path = PathBuf::from(escape);
+            assert!(
+                Job::from_portable(&evil, &root).is_err(),
+                "{escape} must not escape the import root"
+            );
+        }
         // Equal SKUs for different recipients stay distinct products.
         let mut two = job.clone();
         let mut sibling = product();
