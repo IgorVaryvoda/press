@@ -6,6 +6,7 @@
 
 use std::{
     borrow::Cow,
+    io::Read as _,
     ops::{ControlFlow, Range},
     path::{Path, PathBuf},
     sync::{
@@ -323,10 +324,19 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversionDecodeError {
     Failed,
+    TooLarge,
+    SourceChanged,
     AnimatedGif,
     AnimatedPng,
     AnimatedWebP,
     AnimatedJpegXl,
+}
+
+/// A decoded image plus the identity of the exact source bytes it used.
+pub struct DecodedSource {
+    pub image: DynamicImage,
+    pub profile: Option<Vec<u8>>,
+    pub identity: crate::manifest::SourceIdentity,
 }
 
 /// Decode one still image for conversion, with the source's ICC profile beside it.
@@ -347,58 +357,182 @@ pub fn decode_for_conversion(
     path: &Path,
     max_edge: crate::convert::MaxEdge,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
-    if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format) {
-        if reader.format() == Some(ImageFormat::Gif) {
-            let file = std::fs::File::open(path).map_err(|_| ConversionDecodeError::Failed)?;
-            let decoder = GifDecoder::new(std::io::BufReader::new(file))
-                .map_err(|_| ConversionDecodeError::Failed)?;
-            let mut frames = decoder.into_frames();
-            let first = frames
-                .next()
-                .ok_or(ConversionDecodeError::Failed)?
-                .map_err(|_| ConversionDecodeError::Failed)?;
-            if frames.next().is_some() {
-                return Err(ConversionDecodeError::AnimatedGif);
-            }
-            return Ok((DynamicImage::ImageRgba8(first.into_buffer()), None));
-        }
+    let decoded = decode_for_conversion_with_identity(path, max_edge)?;
+    Ok((decoded.image, decoded.profile))
+}
 
-        if reader.format() == Some(ImageFormat::Png) {
-            let decoder =
-                PngDecoder::new(reader.into_inner()).map_err(|_| ConversionDecodeError::Failed)?;
-            if decoder.is_apng().unwrap_or(false) {
-                return Err(ConversionDecodeError::AnimatedPng);
-            }
-            return still(decoder);
-        }
+/// Decode from one bounded byte snapshot and retain its identity for a processing
+/// record. Every decoder and profile read below uses this same buffer.
+pub fn decode_for_conversion_with_identity(
+    path: &Path,
+    max_edge: crate::convert::MaxEdge,
+) -> Result<DecodedSource, ConversionDecodeError> {
+    let bytes = read_source_bytes(path)?;
+    decode_for_conversion_from_bytes(&bytes, max_edge)
+}
 
-        if reader.format() == Some(ImageFormat::WebP) {
-            let decoder =
-                WebPDecoder::new(reader.into_inner()).map_err(|_| ConversionDecodeError::Failed)?;
-            if decoder.has_animation() {
-                return Err(ConversionDecodeError::AnimatedWebP);
-            }
-            return still(decoder);
+/// Decode a caller-owned bounded snapshot. The caller can hash or inspect the
+/// same bytes without opening the source again; `DecodedSource` still omits the
+/// buffer so conversion workers do not retain it after decoding.
+pub(crate) fn decode_for_conversion_from_bytes(
+    bytes: &[u8],
+    max_edge: crate::convert::MaxEdge,
+) -> Result<DecodedSource, ConversionDecodeError> {
+    if bytes.len() as u64 > crate::convert::MAX_SOURCE_BYTES {
+        return Err(ConversionDecodeError::TooLarge);
+    }
+    let identity = crate::manifest::SourceIdentity::from_bytes(bytes);
+    let reader = ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok();
+    if reader
+        .as_ref()
+        .is_some_and(|reader| reader.format() == Some(ImageFormat::Gif))
+    {
+        let decoder = GifDecoder::new(std::io::Cursor::new(bytes))
+            .map_err(|_| ConversionDecodeError::Failed)?;
+        check_decoder_budget(&decoder)?;
+        let mut frames = decoder.into_frames();
+        let first = frames
+            .next()
+            .ok_or(ConversionDecodeError::Failed)?
+            .map_err(|_| ConversionDecodeError::Failed)?;
+        if frames.next().is_some() {
+            return Err(ConversionDecodeError::AnimatedGif);
         }
+        return Ok(DecodedSource {
+            image: DynamicImage::ImageRgba8(first.into_buffer()),
+            profile: None,
+            identity,
+        });
+    }
 
-        if reader.format() == Some(ImageFormat::Jpeg)
-            && let Some(decoded) = scaled_jpeg(path, max_edge)
-        {
-            return Ok(decoded);
+    if reader
+        .as_ref()
+        .is_some_and(|reader| reader.format() == Some(ImageFormat::Png))
+    {
+        let decoder = PngDecoder::new(std::io::Cursor::new(bytes))
+            .map_err(|_| ConversionDecodeError::Failed)?;
+        check_decoder_budget(&decoder)?;
+        if decoder.is_apng().unwrap_or(false) {
+            return Err(ConversionDecodeError::AnimatedPng);
         }
+        let (image, profile) = still(decoder)?;
+        return Ok(DecodedSource {
+            image,
+            profile,
+            identity,
+        });
+    }
 
-        if let Ok(decoder) = reader.into_decoder() {
-            return still(decoder);
+    if reader
+        .as_ref()
+        .is_some_and(|reader| reader.format() == Some(ImageFormat::WebP))
+    {
+        let decoder = WebPDecoder::new(std::io::Cursor::new(bytes))
+            .map_err(|_| ConversionDecodeError::Failed)?;
+        check_decoder_budget(&decoder)?;
+        if decoder.has_animation() {
+            return Err(ConversionDecodeError::AnimatedWebP);
+        }
+        let (image, profile) = still(decoder)?;
+        return Ok(DecodedSource {
+            image,
+            profile,
+            identity,
+        });
+    }
+
+    if reader
+        .as_ref()
+        .is_some_and(|reader| reader.format() == Some(ImageFormat::Jpeg))
+    {
+        if let Some((width, height)) = jpeg_header(bytes) {
+            check_budget_dimensions(width, height)?;
+        }
+        if let Some((image, profile)) = scaled_jpeg(bytes, max_edge) {
+            return Ok(DecodedSource {
+                image,
+                profile,
+                identity,
+            });
         }
     }
 
-    let info = crate::jxl::probe(path).ok_or(ConversionDecodeError::Failed)?;
+    if let Some(reader) = reader
+        && let Ok(decoder) = reader.into_decoder()
+    {
+        check_decoder_budget(&decoder)?;
+        let (image, profile) = still(decoder)?;
+        return Ok(DecodedSource {
+            image,
+            profile,
+            identity,
+        });
+    }
+
+    let info = crate::jxl::probe_bytes(bytes).ok_or(ConversionDecodeError::Failed)?;
+    check_budget_dimensions(info.width, info.height)?;
     if info.animated {
         return Err(ConversionDecodeError::AnimatedJpegXl);
     }
-    crate::jxl::decode_path(path)
-        .map(|(image, profile)| (image, rgb_profile(profile)))
-        .ok_or(ConversionDecodeError::Failed)
+    let (image, profile) =
+        crate::jxl::decode_bytes_with_profile(bytes).ok_or(ConversionDecodeError::Failed)?;
+    Ok(DecodedSource {
+        image,
+        profile: rgb_profile(profile),
+        identity,
+    })
+}
+
+/// Decode only when the bytes consumed match a saved source snapshot.
+pub fn decode_for_conversion_checked(
+    path: &Path,
+    max_edge: crate::convert::MaxEdge,
+    expected: &crate::manifest::SourceIdentity,
+) -> Result<DecodedSource, ConversionDecodeError> {
+    let bytes = read_source_bytes(path)?;
+    let identity = crate::manifest::SourceIdentity::from_bytes(&bytes);
+    if identity != *expected {
+        return Err(ConversionDecodeError::SourceChanged);
+    }
+    decode_for_conversion_from_bytes(&bytes, max_edge)
+}
+
+pub(crate) fn read_source_bytes(path: &Path) -> Result<Vec<u8>, ConversionDecodeError> {
+    let metadata = std::fs::metadata(path).map_err(|_| ConversionDecodeError::Failed)?;
+    if metadata.len() > crate::convert::MAX_SOURCE_BYTES {
+        return Err(ConversionDecodeError::TooLarge);
+    }
+    let file = std::fs::File::open(path).map_err(|_| ConversionDecodeError::Failed)?;
+    let capacity = usize::try_from(metadata.len()).map_err(|_| ConversionDecodeError::TooLarge)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(crate::convert::MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConversionDecodeError::Failed)?;
+    if bytes.len() as u64 > crate::convert::MAX_SOURCE_BYTES {
+        return Err(ConversionDecodeError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+fn check_decoder_budget<D: ImageDecoder>(decoder: &D) -> Result<(), ConversionDecodeError> {
+    let (width, height) = decoder.dimensions();
+    check_budget_dimensions(width, height)
+}
+
+fn check_budget_dimensions(width: u32, height: u32) -> Result<(), ConversionDecodeError> {
+    crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(width, height))
+        .map_err(|_| ConversionDecodeError::TooLarge)
+}
+
+fn jpeg_header(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
+    let header = decompressor.read_header(bytes).ok()?;
+    Some((
+        header.width.try_into().ok()?,
+        header.height.try_into().ok()?,
+    ))
 }
 
 /// Decode a JPEG with libjpeg-turbo, stopping the inverse DCT at the smallest
@@ -422,12 +556,11 @@ pub fn decode_for_conversion(
 /// a full decode is that scaled-DCT step; the exported pixels are not bit-identical
 /// to what a full decode produced, and they are not meant to be.
 fn scaled_jpeg(
-    path: &Path,
+    bytes: &[u8],
     max_edge: crate::convert::MaxEdge,
 ) -> Option<(DynamicImage, Option<Vec<u8>>)> {
-    let bytes = std::fs::read(path).ok()?;
     let mut decompressor = turbojpeg::Decompressor::new().ok()?;
-    let header = decompressor.read_header(&bytes).ok()?;
+    let header = decompressor.read_header(bytes).ok()?;
     // `ONE` when the run wants full size or nothing smaller covers the edge.
     // Falling back there would hand every full-size photo to the scalar decoder.
     let factor = max_edge.0.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
@@ -446,7 +579,7 @@ fn scaled_jpeg(
     let mut pixels = vec![0u8; width.checked_mul(height)?.checked_mul(channels)?];
     decompressor
         .decompress(
-            &bytes,
+            bytes,
             turbojpeg::Image {
                 pixels: &mut pixels,
                 width,
@@ -1541,6 +1674,25 @@ mod tests {
             probe(&liar).unwrap().format,
             FileFormat::Image(ImageFormat::Png)
         );
+    }
+
+    #[test]
+    fn a_checked_decode_refuses_bytes_swapped_after_the_saved_snapshot() {
+        let dir = temp_dir("checked-source");
+        let path = write_sample(&dir, "source.png", 24, 16);
+        let original = std::fs::read(&path).expect("the original bytes are readable");
+        let expected = crate::manifest::SourceIdentity::from_bytes(&original);
+        let decoded = decode_for_conversion_with_identity(&path, crate::convert::MaxEdge::FULL)
+            .expect("the original decodes");
+        assert_eq!(decoded.identity, expected);
+
+        write_sample(&dir, "replacement.png", 25, 16);
+        std::fs::copy(dir.join("replacement.png"), &path).expect("the replacement lands");
+        assert!(matches!(
+            decode_for_conversion_checked(&path, crate::convert::MaxEdge::FULL, &expected),
+            Err(ConversionDecodeError::SourceChanged)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

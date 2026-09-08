@@ -142,6 +142,12 @@ pub fn process(
             scan::ConversionDecodeError::AnimatedJpegXl => {
                 "animated JPEG XL files cannot use local AI".to_string()
             }
+            scan::ConversionDecodeError::TooLarge => {
+                "the source image is too large for local AI".to_string()
+            }
+            scan::ConversionDecodeError::SourceChanged => {
+                "the source image changed while being read".to_string()
+            }
             scan::ConversionDecodeError::Failed => "the source image would not decode".to_string(),
         })?;
     let (width, height) = (decoded.width(), decoded.height());

@@ -1,6 +1,5 @@
 //! JPEG XL header reads, decoding, and encoding in Rust.
 
-use std::io::Read as _;
 use std::path::Path;
 
 use image::{DynamicImage, ImageDecoder as _};
@@ -15,9 +14,17 @@ pub struct Info {
     pub animated: bool,
 }
 
+/// Read the JPEG XL header from bytes already owned by the caller.
+pub fn probe_bytes(bytes: &[u8]) -> Option<Info> {
+    probe_reader(std::io::Cursor::new(bytes))
+}
+
 /// Read only enough of a JPEG XL file to initialize its image header.
 pub fn probe(path: &Path) -> Option<Info> {
-    let mut reader = std::fs::File::open(path).ok()?;
+    probe_reader(std::fs::File::open(path).ok()?)
+}
+
+fn probe_reader(mut reader: impl std::io::Read) -> Option<Info> {
     let mut uninit = JxlImage::builder().build_uninit();
     let mut buffer = vec![0u8; 4096];
     let mut valid = 0usize;
@@ -59,6 +66,10 @@ pub fn decode_path(path: &Path) -> Option<(DynamicImage, Option<Vec<u8>>)> {
 
 pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
     decode(std::io::Cursor::new(bytes)).map(|(image, _)| image)
+}
+
+pub fn decode_bytes_with_profile(bytes: &[u8]) -> Option<(DynamicImage, Option<Vec<u8>>)> {
+    decode(std::io::Cursor::new(bytes))
 }
 
 fn decode(reader: impl std::io::Read) -> Option<(DynamicImage, Option<Vec<u8>>)> {

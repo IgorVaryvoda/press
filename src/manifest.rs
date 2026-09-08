@@ -27,6 +27,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::convert::{Format, MaxEdge, Quality, path_key};
 
+/// The bytes a decoder consumed at a processing boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceIdentity {
+    pub bytes: u64,
+    pub hash: String,
+}
+
+impl SourceIdentity {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.len() as u64,
+            hash: hash_bytes(bytes),
+        }
+    }
+
+    /// Read the current source for a reuse check. A failed read is a mismatch.
+    pub fn from_path(path: &Path) -> std::io::Result<Self> {
+        let bytes = std::fs::metadata(path)?.len();
+        if bytes > crate::convert::MAX_SOURCE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "source snapshot exceeds the bounded input size",
+            ));
+        }
+        Ok(Self {
+            bytes,
+            hash: hash_file(path)?,
+        })
+    }
+
+    pub fn matches_path(&self, path: &Path) -> bool {
+        Self::from_path(path).is_ok_and(|current| &current == self)
+    }
+}
+
 /// Dot-prefixed so a file browser hides it, and named so the walk and the output
 /// count can step over it rather than report it as an image.
 pub const NAME: &str = ".press-manifest.jsonl";
@@ -50,6 +85,10 @@ pub struct Record {
     /// somebody has edited since.
     pub output_bytes: u64,
     pub output_modified: Option<u64>,
+    /// Hex SHA-256 of the output bytes at install time. Absent on older lines,
+    /// which retain their size and timestamp restore check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_hash: Option<String>,
     pub format: String,
     pub quality: String,
     pub max_edge: Option<u32>,
@@ -84,16 +123,34 @@ impl Record {
     /// timestamp, the only two facts the record kept about it.
     pub fn installed(&self, path: &Path) -> bool {
         std::fs::symlink_metadata(path).is_ok_and(|metadata| {
-            metadata.len() == self.output_bytes && modified(&metadata) == self.output_modified
+            let stats = metadata.is_file()
+                && metadata.len() == self.output_bytes
+                && modified(&metadata) == self.output_modified;
+            match self.output_hash.as_deref() {
+                Some(expected) => stats && hash_file(path).is_ok_and(|actual| actual == expected),
+                None => stats,
+            }
         })
     }
     /// Whether the file at `path` still holds the recorded source bytes.
     /// `None` answers nothing either way: a line from before hashes, or a
     /// source that vanished mid-check, keeps the caller's legacy timestamp
     /// decision rather than treating age as proof.
+    #[allow(dead_code)]
     pub fn source_changed(&self, path: &Path) -> Option<bool> {
         let recorded = self.source_hash.as_deref()?;
         Some(hash_file(path).ok()? != recorded)
+    }
+
+    /// Whether a fingerprinted record still names the bytes at `path`.
+    /// Unreadable sources are mismatches, so verified reuse fails closed.
+    pub fn source_matches(&self, path: &Path) -> Option<bool> {
+        let recorded = self.source_hash.as_deref()?;
+        Some(
+            SourceIdentity::from_path(path).is_ok_and(|identity| {
+                identity.bytes == self.source_bytes && identity.hash == recorded
+            }),
+        )
     }
 
     /// The line that withdraws this one.
@@ -181,6 +238,7 @@ impl Stamp {
         max_edge: MaxEdge,
         avif_speed: Option<u8>,
     ) -> Self {
+        let avif_speed = crate::recipe::canonical_avif_speed(avif_speed);
         Self {
             format: format.label().to_string(),
             quality: quality.label(),
@@ -197,6 +255,7 @@ impl Stamp {
     /// Written from the staged file, before anything moves: `staged` carries the
     /// bytes and the timestamp the installed file will have, and the source is
     /// still under its own name.
+    #[allow(dead_code)]
     pub fn record(
         &self,
         roots: (&Path, &Path),
@@ -204,6 +263,44 @@ impl Stamp {
         output: &Path,
         staged: &Path,
         backup: Option<&Path>,
+    ) -> Option<Record> {
+        self.record_inner(roots, source, output, staged, backup, None, None)
+    }
+
+    /// Record the source identity captured from the decoder's input buffer and
+    /// hash the exact encoded bytes that will be installed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_identity(
+        &self,
+        roots: (&Path, &Path),
+        source: &Path,
+        output: &Path,
+        staged: &Path,
+        backup: Option<&Path>,
+        identity: &SourceIdentity,
+        encoded: &[u8],
+    ) -> Option<Record> {
+        self.record_inner(
+            roots,
+            source,
+            output,
+            staged,
+            backup,
+            Some(identity),
+            Some(hash_bytes(encoded)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_inner(
+        &self,
+        roots: (&Path, &Path),
+        source: &Path,
+        output: &Path,
+        staged: &Path,
+        backup: Option<&Path>,
+        identity: Option<&SourceIdentity>,
+        output_hash: Option<String>,
     ) -> Option<Record> {
         let (root, out_dir) = roots;
         let relative_source = source.strip_prefix(root).ok()?;
@@ -216,14 +313,22 @@ impl Stamp {
         let installed = std::fs::metadata(staged).ok();
         Some(Record {
             source: relative_source.to_path_buf(),
-            source_bytes: original.as_ref().map_or(0, |metadata| metadata.len()),
+            source_bytes: identity.map_or_else(
+                || original.as_ref().map_or(0, |metadata| metadata.len()),
+                |identity| identity.bytes,
+            ),
             source_modified: original.as_ref().and_then(modified),
-            // Best effort at record time: a source that vanishes mid-run keeps
-            // no hash and falls back to the legacy timestamp decision.
-            source_hash: original.as_ref().and_then(|_| hash_file(source).ok()),
+            // New runs use the exact bytes decoded. Older callers retain the
+            // record-time hash for manifest compatibility.
+            source_hash: identity.map_or_else(
+                || original.as_ref().and_then(|_| hash_file(source).ok()),
+                |identity| Some(identity.hash.clone()),
+            ),
             output: relative_output.to_path_buf(),
             output_bytes: installed.as_ref().map_or(0, |metadata| metadata.len()),
             output_modified: installed.as_ref().and_then(modified),
+            output_hash: output_hash
+                .or_else(|| installed.as_ref().and_then(|_| hash_file(staged).ok())),
             format: self.format.clone(),
             quality: self.quality.clone(),
             max_edge: self.max_edge,
@@ -533,6 +638,30 @@ pub(crate) fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    pub bytes: u64,
+    pub modified: Option<u64>,
+    pub hash: String,
+}
+
+pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(FileIdentity {
+        bytes: metadata.len(),
+        modified: modified(&metadata),
+        hash: hash_file(path).ok()?,
+    })
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 fn modified(metadata: &std::fs::Metadata) -> Option<u64> {
     metadata
         .modified()
@@ -571,6 +700,7 @@ mod tests {
             output: PathBuf::from(output),
             output_bytes: 0,
             output_modified: None,
+            output_hash: None,
             format: Format::WebP.label().to_string(),
             quality: Quality::lossy(80.).label(),
             max_edge: MaxEdge::FULL.0,
@@ -706,12 +836,16 @@ mod tests {
             )
             .expect("plain relative paths record");
         assert!(record.installed(&staged));
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&staged)
-            .expect("the output opens")
-            .write_all(b"somebody edited this")
-            .expect("the edit lands");
+        let original_modified = record.output_modified;
+        std::fs::write(&staged, vec![8u8; 64]).expect("the output opens");
+        if let Some(seconds) = original_modified {
+            std::fs::File::options()
+                .write(true)
+                .open(&staged)
+                .expect("the edited output opens")
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .expect("the original timestamp is restored");
+        }
         assert!(!record.installed(&staged));
         assert!(remove_output(&staged, &record).is_err());
         assert!(staged.is_file(), "a refused undo leaves the edit alone");

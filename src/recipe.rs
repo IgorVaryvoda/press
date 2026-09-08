@@ -241,6 +241,12 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Recipe, String> {
 /// as current. Bumping rebuilds every output once; the safe direction.
 pub const FINGERPRINT_REVISION: u32 = 1;
 
+/// Store only non-default AVIF speeds. An explicit `6` and an omitted speed
+/// select the same encoder behaviour and therefore the same identity.
+pub fn canonical_avif_speed(speed: Option<u8>) -> Option<u8> {
+    speed.filter(|speed| *speed != crate::avif::DEFAULT_SPEED)
+}
+
 /// The fingerprint recorded with each output: the normalized effective
 /// settings, not the name or revision. Two recipes that transform identically
 /// share it; any output-affecting setting changes it, including AVIF speed.
@@ -260,7 +266,7 @@ pub fn fingerprint_settings(
         None => "lossless".to_string(),
         Some(value) => format!("q{:08x}", value.to_bits()),
     };
-    let speed = avif_speed
+    let speed = canonical_avif_speed(avif_speed)
         .map(|speed| speed.to_string())
         .unwrap_or_default();
     let canonical = format!(
@@ -566,6 +572,16 @@ mod tests {
         assert_eq!(
             fingerprint_settings(Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None),
             base
+        );
+        assert_eq!(
+            fingerprint_settings(Format::Avif, Quality::lossy(80.), MaxEdge::FULL, None),
+            fingerprint_settings(
+                Format::Avif,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+                Some(crate::avif::DEFAULT_SPEED),
+            ),
+            "the explicit default is the effective default"
         );
     }
 
