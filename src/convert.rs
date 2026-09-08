@@ -1565,6 +1565,10 @@ pub const MAX_DECODE_BYTES: u64 = 1 << 30;
 /// checked.
 pub const MAX_SOURCE_BYTES: u64 = MAX_DECODE_BYTES / 4;
 
+/// The native AVIF decoder accepts a pixel-count limit, so keep it equal to the
+/// worst-case sixteen-bit RGBA budget used by every other decoder admission check.
+pub const MAX_DECODE_PIXELS: u32 = (MAX_DECODE_BYTES / 8) as u32;
+
 /// Header evidence for the budget: dimensions times eight bytes a pixel, the
 /// costliest frame these dimensions could decode to (sixteen-bit RGBA).
 /// Saturated, so a lying header refuses instead of overflowing. A hint, not a

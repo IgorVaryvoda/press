@@ -52,7 +52,18 @@ struct ImageGuideAvifHeader {
     depth: u32,
     alpha_present: c_int,
     icc_present: c_int,
-    orientation_swaps: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ImageGuideAvifDecoded {
+    pixels: *mut c_uchar,
+    pixels_size: usize,
+    width: u32,
+    height: u32,
+    depth: u32,
+    icc: *mut c_uchar,
+    icc_size: usize,
 }
 
 /// Facts libavif can read from the container before any AV1 pixels are decoded.
@@ -63,7 +74,14 @@ pub struct Header {
     pub depth: u8,
     pub alpha: bool,
     pub profile: bool,
-    pub orientation_swaps: bool,
+}
+
+pub(crate) struct Decoded {
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) depth: u8,
+    pub(crate) profile: Option<Vec<u8>>,
 }
 
 unsafe extern "C" {
@@ -87,6 +105,14 @@ unsafe extern "C" {
         header: *mut ImageGuideAvifHeader,
     ) -> c_int;
     fn imageguide_avif_probe_file(path: *const c_char, header: *mut ImageGuideAvifHeader) -> c_int;
+    fn imageguide_avif_decode_memory(
+        data: *const c_uchar,
+        size: usize,
+        image_size_limit: u32,
+        image_dimension_limit: u32,
+        decoded: *mut ImageGuideAvifDecoded,
+    ) -> c_int;
+    fn imageguide_avif_decoded_free(decoded: *mut ImageGuideAvifDecoded);
 }
 
 fn header(raw: ImageGuideAvifHeader) -> Option<Header> {
@@ -96,7 +122,6 @@ fn header(raw: ImageGuideAvifHeader) -> Option<Header> {
         depth: u8::try_from(raw.depth).ok()?,
         alpha: raw.alpha_present != 0,
         profile: raw.icc_present != 0,
-        orientation_swaps: raw.orientation_swaps != 0,
     })
 }
 
@@ -126,6 +151,56 @@ pub fn probe_file(path: &Path) -> Option<Header> {
     // synchronous bridge call; libavif opens and closes the file itself.
     let parsed = unsafe { imageguide_avif_probe_file(path.as_ptr(), &mut raw) };
     (parsed != 0).then(|| header(raw)).flatten()
+}
+
+/// Decode through the same libavif instance that admits the header. Its size and
+/// dimension limits are applied before libavif asks the AV1 codec for a frame.
+pub(crate) fn decode_bytes_with_limits(
+    bytes: &[u8],
+    image_size_limit: u32,
+    image_dimension_limit: u32,
+) -> Option<Decoded> {
+    let mut raw = ImageGuideAvifDecoded::default();
+    // SAFETY: the bridge borrows `bytes` only for this synchronous call and owns
+    // the returned buffers until the matching free function below.
+    let decoded = unsafe {
+        imageguide_avif_decode_memory(
+            bytes.as_ptr(),
+            bytes.len(),
+            image_size_limit,
+            image_dimension_limit,
+            &mut raw,
+        )
+    };
+    if decoded == 0 {
+        return None;
+    }
+    let pixels = if raw.pixels.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: the bridge returned `pixels_size` initialized bytes owned by
+        // `raw`, which remains alive until it is freed below.
+        unsafe { std::slice::from_raw_parts(raw.pixels, raw.pixels_size).to_vec() }
+    };
+    let profile = if raw.icc.is_null() {
+        None
+    } else {
+        // SAFETY: the bridge returned `icc_size` initialized bytes owned by
+        // `raw`, which remains alive until it is freed below.
+        Some(unsafe { std::slice::from_raw_parts(raw.icc, raw.icc_size).to_vec() })
+    };
+    let depth = u8::try_from(raw.depth).ok();
+    let result = depth.map(|depth| Decoded {
+        pixels,
+        width: raw.width,
+        height: raw.height,
+        depth,
+        profile,
+    });
+    // SAFETY: `raw` is exactly the object initialized by the bridge call, and all
+    // copied slices above are independent Rust allocations.
+    unsafe { imageguide_avif_decoded_free(&mut raw) };
+    result
 }
 
 // One argument per parameter of `imageguide_avif_encode`, which is what a boundary

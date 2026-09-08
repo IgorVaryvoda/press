@@ -238,8 +238,10 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Recipe, String> {
 /// Revision of the encoding contract behind a fingerprint. Bump it whenever an
 /// encoder upgrade or a preparation change alters output bytes for identical
 /// settings, so old records stop matching instead of passing off stale files
-/// as current. Bumping rebuilds every output once; the safe direction.
-pub const FINGERPRINT_REVISION: u32 = 1;
+/// as current. The AVIF preparation path now uses the bounded native decoder,
+/// so its decoded pixels can differ from the previous image-crate path.
+/// Bumping rebuilds every output once; the safe direction.
+pub const FINGERPRINT_REVISION: u32 = 2;
 
 /// Store only non-default AVIF speeds. An explicit `6` and an omitted speed
 /// select the same encoder behaviour and therefore the same identity.
@@ -532,7 +534,7 @@ mod tests {
         // Pinned: the canonical form must never drift silently, or old outputs
         // stop matching their records. Drift arrives only as a deliberate
         // FINGERPRINT_REVISION bump, which rebuilds once in the safe direction.
-        assert_eq!(FINGERPRINT_REVISION, 1, "bumping revisits this test");
+        assert_eq!(FINGERPRINT_REVISION, 2, "bumping revisits this test");
         assert_eq!(
             base,
             fingerprint_settings(Format::WebP, Quality::lossy(80.), MaxEdge::FULL, None)

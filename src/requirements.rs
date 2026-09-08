@@ -16,8 +16,12 @@ use serde::{Deserialize, Serialize};
 /// The only requirements schema this build reads.
 pub const SCHEMA_VERSION: u32 = 1;
 pub const SUPPORTED_ENGINE: &str = "press";
-pub const SUPPORTED_ENGINE_VERSION: u32 = 1;
+/// The rule semantics understood by this requirements evaluator.
 pub const SUPPORTED_CHECKER_VERSION: u32 = 1;
+/// `engine_version` names this same requirements evaluator contract. Keep it
+/// tied to the checker version; `recipe::FINGERPRINT_REVISION` identifies
+/// output preparation bytes and is carried in `ProcessingIdentity` instead.
+pub const SUPPORTED_ENGINE_VERSION: u32 = SUPPORTED_CHECKER_VERSION;
 
 /// Requirements are typed data, so a larger file is refused before JSON parsing
 /// can allocate a collection that this checker does not need.
@@ -150,7 +154,10 @@ impl ContentFormat {
 
 /// The processing identity that prepared an output. All fields are optional
 /// except the processing revision because a caller may only have a manifest
-/// fingerprint while a saved plan can provide the full recipe identity.
+/// fingerprint while a saved plan can provide the full recipe identity. The
+/// processing revision is the output-preparation contract revision, normally
+/// `recipe::FINGERPRINT_REVISION`; it is separate from the requirements checker
+/// version above.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessingIdentity {
@@ -981,16 +988,12 @@ struct HeaderFacts {
 }
 
 fn header_from_bytes(bytes: &[u8]) -> Option<HeaderFacts> {
-    if let Some(info) = crate::avif::probe_bytes(bytes) {
-        let (width, height) = if info.orientation_swaps {
-            (info.height, info.width)
-        } else {
-            (info.width, info.height)
-        };
+    if image::guess_format(bytes).ok() == Some(ImageFormat::Avif) {
+        let info = crate::avif::probe_bytes(bytes)?;
         return Some(HeaderFacts {
             format: ContentFormat::Avif,
-            width,
-            height,
+            width: info.width,
+            height: info.height,
             profile: Some(info.profile),
             depth_bits: Some(info.depth),
         });
@@ -1315,12 +1318,11 @@ mod tests {
     fn avif_header_evidence_is_reported_before_a_budgeted_decode() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("result.avif");
-        let mut bytes =
-            crate::avif::encode(&[128u8; 2 * 2 * 3], 2, 2, false, 80, 6, 1, None).unwrap();
-        let ispe = bytes.windows(4).position(|chunk| chunk == b"ispe").unwrap();
-        bytes[ispe + 8..ispe + 12].copy_from_slice(&12_000u32.to_be_bytes());
-        bytes[ispe + 12..ispe + 16].copy_from_slice(&12_000u32.to_be_bytes());
-        std::fs::write(&output, bytes).unwrap();
+        std::fs::write(
+            &output,
+            include_bytes!("../fixtures/avif/lying-header.avif"),
+        )
+        .unwrap();
         let pack = snapshot(vec![
             rule(
                 "format",
@@ -1362,6 +1364,13 @@ mod tests {
                 .is_some_and(|error| error.contains("budget"))
         );
         assert!(!receipt.all_required_pass);
+    }
+
+    #[test]
+    fn a_native_avif_parse_refusal_is_not_reopened_by_the_generic_decoder() {
+        let bytes = include_bytes!("../fixtures/avif/native-refused.avif");
+        assert_eq!(image::guess_format(bytes).ok(), Some(ImageFormat::Avif));
+        assert!(header_from_bytes(bytes).is_none());
     }
 
     #[test]
@@ -1538,7 +1547,7 @@ mod tests {
                     recipe_id: Some("local".into()),
                     recipe_revision: Some(1),
                     recipe_fingerprint: Some("abc".into()),
-                    processing_revision: 1,
+                    processing_revision: crate::recipe::FINGERPRINT_REVISION,
                 }),
             }],
             &pack,
