@@ -55,11 +55,12 @@ folder, run `chmod +x press_*.AppImage`, then `./press_*.AppImage`. In Files, th
 equivalent is **Properties → Permissions → Allow executing file as program**. The
 install script above and the `.deb` both avoid that step.
 
-AppImage, macOS, and Windows builds check that release feed in the background at
-launch. An available update is downloaded, signature-checked, and installed before
-Press relaunches itself. Native Linux packages update through their package manager.
-Run `press update` to check and install one immediately. Source and package-manager
-builds do not update themselves.
+AppImage, macOS, and Windows builds check the release feed at launch. A persistent,
+dismissible notice offers **Download update**, then **Apply and restart** after the
+signature is verified. Press waits for your click at each step and refuses to apply
+while image or transfer work is active. Reopen the notice from **Menu → Check for
+updates…**. Native Linux packages use their package manager. `press update` explicitly
+downloads and installs the latest release from the command line.
 
 ## Status
 
@@ -384,7 +385,7 @@ while the other platforms use their native dialogs by default. gpui's platform
 features (`wayland`, `x11`, `font-kit`, `runtime_shaders`) are enabled unconditionally.
 
 Release tags build the Linux, macOS, and Windows installers on their native GitHub
-Actions runners and sign each auto-update artifact.
+Actions runners and sign each update artifact.
 
 The UI is [GPUI](https://www.gpui.rs) with [gpui-kit](https://github.com/longbridge/gpui-kit)
 as the single UI dependency: it re-exports the matching gpui, platform, component

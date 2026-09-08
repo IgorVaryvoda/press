@@ -3,14 +3,25 @@
 use super::*;
 
 impl Audit {
-    /// An update may replace the installed package while background reads continue,
-    /// but Press must not restart in the middle of a file-writing job.
+    /// Applying can exit the process on Windows, so guard before installation too.
     #[cfg(any(test, feature = "updater"))]
-    pub(crate) fn automatic_update_can_restart(&self) -> bool {
-        !self.converting
+    pub(crate) fn update_can_restart(&self) -> bool {
+        !self.scan_blocks_delivery()
+            && !self.converting
             && !self.local_ai_busy()
             && !self.studio_busy()
             && self.sirv_job.as_ref().is_none_or(|job| job.finished)
+    }
+
+    pub(crate) fn update_is_applying(&self) -> bool {
+        #[cfg(feature = "updater")]
+        {
+            matches!(self.updater.state, super::updates::State::Applying)
+        }
+        #[cfg(not(feature = "updater"))]
+        {
+            false
+        }
     }
 
     /// Store settings and schedule the write. The write is debounced: each

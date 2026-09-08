@@ -2224,13 +2224,13 @@ fn render_totals_change_with_selection_and_results(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext) {
+fn an_update_never_restarts_during_file_writes(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
-        assert!(audit.automatic_update_can_restart());
+        assert!(audit.update_can_restart());
 
         audit.converting = true;
-        assert!(!audit.automatic_update_can_restart());
+        assert!(!audit.update_can_restart());
         audit.converting = false;
 
         audit.sirv_job = Some(SirvJob {
@@ -2244,9 +2244,9 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             stopping: false,
             generation: audit.sirv_generation,
         });
-        assert!(!audit.automatic_update_can_restart());
+        assert!(!audit.update_can_restart());
         audit.sirv_job.as_mut().unwrap().finished = true;
-        assert!(audit.automatic_update_can_restart());
+        assert!(audit.update_can_restart());
 
         audit.local_ai_job = Some(LocalAiJob {
             tool: local_ai::Tool::Upscale,
@@ -2257,10 +2257,10 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             state: LocalAiJobState::Running,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
-        assert!(!audit.automatic_update_can_restart());
+        assert!(!audit.update_can_restart());
         audit.local_ai_job.as_mut().unwrap().state =
             LocalAiJobState::Done(PathBuf::from("optimized/photo-4x.png"));
-        assert!(audit.automatic_update_can_restart());
+        assert!(audit.update_can_restart());
 
         audit.studio_job = Some(StudioJob {
             tool: studio::Tool::Upscale,
@@ -2273,10 +2273,10 @@ fn an_automatic_update_never_restarts_during_file_writes(cx: &mut TestAppContext
             state: StudioJobState::Running,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
-        assert!(!audit.automatic_update_can_restart());
+        assert!(!audit.update_can_restart());
         audit.studio_job.as_mut().unwrap().state =
             StudioJobState::Done(PathBuf::from("optimized/photo-studio-2x.png"));
-        assert!(audit.automatic_update_can_restart());
+        assert!(audit.update_can_restart());
     });
 }
 
@@ -5346,7 +5346,7 @@ fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppConte
         assert!(!audit.converting, "the stop ends the run");
         assert!(audit.convert_cancel.is_none());
         assert!(
-            audit.automatic_update_can_restart(),
+            audit.update_can_restart(),
             "the controls a run owns are handed back"
         );
         assert_eq!(audit.stopped_run, Some(total));
@@ -7647,5 +7647,268 @@ fn comparison_grip_and_canvas_own_pointer_and_keyboard_input(cx: &mut TestAppCon
     cx.simulate_keystrokes("right");
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.compare.as_ref().unwrap().index, expected_next)
+    });
+}
+
+#[cfg(feature = "updater")]
+#[gpui_kit::test]
+fn updates_wait_for_download_and_apply_and_keep_dismissed_state(cx: &mut TestAppContext) {
+    use crate::update::tests::{PAYLOAD, fixture_update};
+    use std::io::{Read, Write};
+    use updates::State;
+
+    let installed = tempfile::tempdir().unwrap();
+    let target = installed.path().join("Press.AppImage");
+    std::fs::write(&target, b"old version").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let update = fixture_update(
+        &format!("http://{}/update", listener.local_addr().unwrap()),
+        target.clone(),
+    );
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.updater.state = State::Available(update);
+        audit.updater.message = "Press 9.9.9 is available".into();
+        audit.updater.dismissed = true;
+        assert!(audit.update_banner(cx).is_none());
+        audit.check_for_updates(true, cx);
+        assert!(audit.update_banner(cx).is_some());
+        assert!(matches!(audit.updater.state, State::Available(_)));
+        audit.apply_update(cx);
+        assert!(
+            matches!(audit.updater.state, State::Available(_)),
+            "Apply cannot skip download"
+        );
+    });
+    // No request until the user chooses Download.
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    listener.set_nonblocking(false).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            PAYLOAD.len()
+        )
+        .unwrap();
+        stream.write_all(PAYLOAD).unwrap();
+    });
+    audit.update(cx, |audit, cx| {
+        audit.download_update(cx);
+        assert!(matches!(audit.updater.state, State::Downloading));
+        audit.download_update(cx); // A double click cannot start a second request.
+        audit.updater.dismissed = true;
+    });
+    cx.run_until_parked();
+    server.join().unwrap();
+    audit.update(cx, |audit, cx| {
+        assert!(matches!(&audit.updater.state, State::Ready(_, bytes) if bytes == PAYLOAD));
+        assert!(
+            audit.update_banner(cx).is_none(),
+            "download completion respects dismissal"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"old version",
+            "download must not install"
+        );
+        audit.check_for_updates(true, cx);
+        assert!(
+            matches!(audit.updater.state, State::Ready(..)),
+            "reopening keeps the download"
+        );
+        audit.converting = true;
+        audit.apply_update(cx);
+        assert!(
+            matches!(audit.updater.state, State::Ready(..)),
+            "busy work keeps the package ready"
+        );
+        audit.converting = false;
+        audit.scanning = Some("folder".into());
+        audit.apply_update(cx);
+        assert!(
+            matches!(audit.updater.state, State::Ready(..)),
+            "a scan blocks apply too"
+        );
+        audit.scanning = None;
+        audit.settings_writer = settings::SettingsWriter::new(None);
+        audit.apply_update(cx);
+        assert!(
+            matches!(audit.updater.state, State::Ready(..)),
+            "failed settings save must not install"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"old version");
+    });
+}
+
+#[cfg(feature = "updater")]
+#[gpui_kit::test]
+fn applying_an_update_blocks_new_work_and_can_recover_from_install_failure(
+    cx: &mut TestAppContext,
+) {
+    use updates::State;
+    let (audit, cx) = finding_audit(cx);
+    let config = tempfile::tempdir().unwrap();
+    audit.update(cx, |audit, cx| {
+        audit.updater.state = State::Applying;
+        assert!(audit.scan_blocks_delivery());
+        audit.pick(true, cx);
+        audit.request_path(config.path().into(), cx);
+        assert!(audit.scanning.is_none());
+        audit.updater.state = State::Ready(
+            crate::update::tests::fixture_update(
+                "http://127.0.0.1/update",
+                config.path().join("missing.AppImage"),
+            ),
+            crate::update::tests::PAYLOAD.to_vec(),
+        );
+        audit.settings_writer = settings::SettingsWriter::new(Some(config.path().join("settings")));
+        audit.apply_update(cx);
+        assert!(audit.update_is_applying());
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(matches!(audit.updater.state, State::Available(_)));
+        assert!(audit.updater.message.contains("Couldn’t apply"));
+        assert!(!audit.scan_blocks_delivery());
+    });
+}
+
+/// Run under Gamescope with an isolated signed fixture server and install target.
+/// This uses the production content view and actions, without a production feed override.
+#[cfg(all(feature = "updater", target_os = "linux"))]
+#[test]
+#[ignore = "real-window updater proof; requires PRESS_UPDATE_FIXTURE_URL and APPIMAGE"]
+fn updater_real_window() {
+    use gpui_kit::{WindowBounds, WindowOptions};
+    let url = std::env::var("PRESS_UPDATE_FIXTURE_URL").unwrap();
+    let target = PathBuf::from(std::env::var_os("APPIMAGE").unwrap());
+    assert!(target.is_file());
+    assert_ne!(target, std::env::current_exe().unwrap());
+    gpui_kit::platform::application()
+        .with_assets(crate::assets::Assets)
+        .run(move |cx| {
+            init_theme(cx);
+            cx.set_quit_mode(gpui_kit::QuitMode::LastWindowClosed);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(gpui_kit::Bounds::centered(
+                        None,
+                        size(px(1100.), px(720.)),
+                        cx,
+                    ))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let audit = build_audit(finding_launch(), window, cx);
+                    audit.update(cx, |audit, _| {
+                        audit.updater.state = updates::State::Available(
+                            crate::update::tests::fixture_update(&url, target),
+                        );
+                        audit.updater.message = "Press 9.9.9 is available".into();
+                    });
+                    let content = cx.new(|cx| {
+                        cx.observe(&audit, |_, _, cx| cx.notify()).detach();
+                        crate::WindowContent { audit }
+                    });
+                    cx.new(|cx| Root::new(content, window, cx).bg(cx.theme().background))
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
+}
+
+#[cfg(feature = "updater")]
+#[gpui_kit::test]
+fn update_banner_buttons_support_keyboard_and_dismissal(cx: &mut TestAppContext) {
+    cx.update(init_theme);
+    let mut audit = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let built = build_audit(finding_launch(), window, cx);
+        audit = Some(built.clone());
+        let content = cx.new(|cx| {
+            cx.observe(&built, |_, _, cx| cx.notify()).detach();
+            crate::WindowContent { audit: built }
+        });
+        Root::new(content, window, cx).bg(cx.theme().background)
+    });
+    let audit = audit.unwrap();
+    audit.update(cx, |audit, cx| {
+        audit.updater.state = updates::State::Ready(
+            crate::update::tests::fixture_update("http://127.0.0.1/update", PathBuf::new()),
+            crate::update::tests::PAYLOAD.to_vec(),
+        );
+        audit.updater.message = "Press 9.9.9 is ready to apply".into();
+        audit.converting = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let action = cx.debug_bounds("update-action").unwrap();
+    cx.simulate_click(action.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.updater.message.contains("Finish the current work"))
+    });
+    cx.update(|window, cx| {
+        window.blur(cx);
+        window.focus_next(cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for key in ["enter", "tab", "enter"] {
+        let keystroke = gpui_kit::Keystroke::parse(key).unwrap();
+        cx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("update-banner").is_none(),
+        "Tab from Apply then Enter dismisses the banner"
+    );
+    audit.update(cx, |audit, cx| audit.check_for_updates(true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("update-banner").is_some());
+    let dismiss = cx.debug_bounds("dismiss-update").unwrap();
+    cx.simulate_click(dismiss.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("update-banner").is_none());
+}
+
+#[cfg(feature = "updater")]
+#[gpui_kit::test]
+fn an_invalid_update_signature_keeps_download_available_for_retry(cx: &mut TestAppContext) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/update", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntampered")
+            .unwrap();
+    });
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.updater.state =
+            updates::State::Available(crate::update::tests::fixture_update(&url, PathBuf::new()));
+        audit.download_update(cx);
+    });
+    cx.run_until_parked();
+    server.join().unwrap();
+    audit.read_with(cx, |audit, _| {
+        assert!(matches!(audit.updater.state, updates::State::Available(_)));
+        assert!(audit.updater.message.contains("Couldn’t download"));
     });
 }

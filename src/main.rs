@@ -1775,18 +1775,23 @@ fn restore_headless(root: &Path) -> i32 {
 
 fn update_headless() {
     #[cfg(feature = "updater")]
-    match update::install() {
-        update::Outcome::Installed => {
-            outln!("Press updated; start it again to use the new version")
-        }
-        update::Outcome::Current => outln!("Press {} is up to date", env!("CARGO_PKG_VERSION")),
-        update::Outcome::Unsupported => {
-            eprintln!(
-                "press: this installation cannot self-update; use its package manager or replace it manually"
-            );
+    {
+        let result = update::check().and_then(|check| match check {
+            update::Check::Available(update) => update.download_and_install()
+                .map(|()| outln!("Press updated; start it again to use the new version"))
+                .map_err(|error| error.to_string()),
+            update::Check::Current => {
+                outln!("Press {} is up to date", env!("CARGO_PKG_VERSION"));
+                Ok(())
+            }
+            update::Check::Unsupported => Err(
+                "this installation cannot self-update; use its package manager or replace it manually".into(),
+            ),
+        });
+        if let Err(error) = result {
+            eprintln!("press: {error}");
             std::process::exit(1);
         }
-        update::Outcome::Failed => std::process::exit(1),
     }
 
     #[cfg(not(feature = "updater"))]
@@ -1945,10 +1950,13 @@ impl Render for WindowContent {
         let sheet = Root::render_sheet_layer(window, cx);
         let dialog = Root::render_dialog_layer(window, cx);
         let notifications = Root::render_notification_layer(window, cx);
+        let content = gpui_kit::div().flex().flex_col().size_full();
+        #[cfg(feature = "updater")]
+        let content = content.children(self.audit.update(cx, |audit, cx| audit.update_banner(cx)));
         gpui_kit::div()
             .relative()
             .size_full()
-            .child(self.audit.clone())
+            .child(content.child(gpui_kit::div().flex_1().min_h_0().child(self.audit.clone())))
             .children(sheet)
             .children(dialog)
             .children(notifications)
@@ -1991,7 +1999,11 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Opti
                         let audit = audit::build_audit(launch, window, cx);
                         audit_slot = Some(audit.clone());
                         // Root owns modal state; WindowContent paints its overlays.
-                        let content = cx.new(|_| WindowContent { audit });
+                        let content = cx.new(|_cx| {
+                            #[cfg(feature = "updater")]
+                            _cx.observe(&audit, |_, _, cx| cx.notify()).detach();
+                            WindowContent { audit }
+                        });
                         cx.new(|cx| Root::new(content, window, cx).bg(cx.theme().background))
                     },
                 )
@@ -2001,76 +2013,7 @@ fn run_window(launch: Launch, startup_path: Option<PathBuf>, pending_crash: Opti
                     audit.update(cx, |audit, cx| audit.request_path(path, cx));
                 }
                 #[cfg(feature = "updater")]
-                {
-                    let audit = audit.clone();
-                    cx.spawn(async move |cx| {
-                        let installed = cx
-                            .background_executor()
-                            .spawn(async { update::install_if_available() })
-                            .await;
-                        if installed {
-                            let restart = audit.update(cx, |audit, _| {
-                                if !audit.automatic_update_can_restart() {
-                                    return false;
-                                }
-                                // A failed flush aborts the restart: relaunching
-                                // into a half-remembered window is worse than
-                                // staying on the installed update.
-                                match audit.flush_settings() {
-                                    settings::WriteOutcome::Failed { error, .. } => {
-                                        eprintln!(
-                                            "press: installed update but settings would not save: {error}"
-                                        );
-                                        false
-                                    }
-                                    _ => true,
-                                }
-                            });
-                            if restart {
-                                match update::relaunch() {
-                                    Ok(()) => {
-                                        cx.update(|cx| cx.quit());
-                                        return;
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "press: installed update but could not restart: {error}"
-                                        );
-                                        audit.update(cx, |audit, cx| {
-                                            audit.notify_error(
-                                                "update",
-                                                "Update installed, but restart failed",
-                                                format!(
-                                                    "Restart Press manually to finish updating: {error}"
-                                                ),
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }
-                            } else {
-                                // Installed while work was active: the run finishes
-                                // first, and the toast says what is waiting.
-                                audit.update(cx, |audit, cx| {
-                                    audit.notify_success(
-                                        "update",
-                                        "Update installed",
-                                        "Restart Press to use it",
-                                        cx,
-                                    );
-                                });
-                            }
-                        } else if let Some(line) = update::notice() {
-                            // No update installed and the attempt said why: that
-                            // used to sit in the notice lane, now it toasts once.
-                            audit.update(cx, |audit, cx| {
-                                audit.notify_error("update", "Couldn’t update", line, cx);
-                            });
-                        }
-                        audit.update(cx, |_, cx| cx.notify());
-                    })
-                    .detach();
-                }
+                audit.update(cx, |audit, cx| audit.check_for_updates(false, cx));
                 // cfg! keeps the call compiled (and the module alive) on every
                 // platform while running it only where a menu bar exists.
                 if cfg!(target_os = "macos") {

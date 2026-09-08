@@ -1,37 +1,10 @@
 use cargo_packager_updater::{Config, check_update};
-use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The repository was renamed from `imageguide-desktop` to `press`. Every copy
 /// installed before that polls the old path, and GitHub redirects it here for
 /// as long as nothing else claims the old name — so the old name must never be
 /// used for another repository under this account.
 const ENDPOINT: &str = "https://github.com/IgorVaryvoda/press/releases/latest/download/latest.json";
-
-/// What the last update attempt did, for the window to show.
-/// 0 = nothing attempted yet, 1 = installed while work was active,
-/// 2 = install or check failed (message in `UPDATE_MESSAGE`).
-static UPDATE_STATE: AtomicU8 = AtomicU8::new(0);
-static UPDATE_MESSAGE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
-
-pub fn update_state() -> u8 {
-    UPDATE_STATE.load(Ordering::Relaxed)
-}
-
-/// One line, only meaningful when `update_state()` is nonzero.
-pub fn update_message() -> Option<String> {
-    UPDATE_MESSAGE.lock().clone()
-}
-
-/// The one-line notice the window shows about the last update attempt, if any.
-/// `None` when the updater is idle or the feature is compiled out.
-#[cfg(feature = "updater")]
-pub fn notice() -> Option<String> {
-    match update_state() {
-        1 => Some("installed an update — restart to use it".to_string()),
-        2 => update_message().map(|message| format!("could not update: {message}")),
-        _ => None,
-    }
-}
 
 /// True when the executable path has the shape of an installed macOS app
 /// bundle. The bar is `.app/Contents/MacOS/`, not just `Contents/MacOS/`:
@@ -114,28 +87,19 @@ fn public_key() -> &'static str {
     include_str!("../assets/updater.pub").trim()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Installed,
+#[derive(Debug)]
+pub enum Check {
+    Available(Box<cargo_packager_updater::Update>),
     Current,
     Unsupported,
-    Failed,
 }
 
-pub fn install() -> Outcome {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => {
-            *UPDATE_MESSAGE.lock() = Some(error.to_string());
-            UPDATE_STATE.store(2, Ordering::Relaxed);
-            eprintln!("press: could not locate this installation: {error}");
-            return Outcome::Failed;
-        }
-    };
+/// Only fetch release metadata. Download and installation require separate actions.
+pub fn check() -> Result<Check, String> {
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     if !updatable_install(&exe) {
-        return Outcome::Unsupported;
+        return Ok(Check::Unsupported);
     }
-
     let config = Config {
         endpoints: vec![ENDPOINT.parse().expect("the update URL is valid")],
         pubkey: public_key().into(),
@@ -144,34 +108,9 @@ pub fn install() -> Outcome {
     let version = env!("CARGO_PKG_VERSION")
         .parse()
         .expect("the package version is semver");
-
-    match check_update(version, config) {
-        Ok(Some(update)) => match update.download_and_install() {
-            Ok(()) => {
-                *UPDATE_MESSAGE.lock() = None;
-                UPDATE_STATE.store(1, Ordering::Relaxed);
-                eprintln!("press: installed update");
-                Outcome::Installed
-            }
-            Err(error) => {
-                *UPDATE_MESSAGE.lock() = Some(error.to_string());
-                UPDATE_STATE.store(2, Ordering::Relaxed);
-                eprintln!("press: could not install update: {error}");
-                Outcome::Failed
-            }
-        },
-        Ok(None) => Outcome::Current,
-        Err(error) => {
-            *UPDATE_MESSAGE.lock() = Some(error.to_string());
-            UPDATE_STATE.store(2, Ordering::Relaxed);
-            eprintln!("press: could not check for updates: {error}");
-            Outcome::Failed
-        }
-    }
-}
-
-pub fn install_if_available() -> bool {
-    install() == Outcome::Installed
+    check_update(version, config)
+        .map(|update| update.map_or(Check::Current, |update| Check::Available(Box::new(update))))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -204,8 +143,30 @@ pub fn relaunch() -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub const PAYLOAD: &[u8] = b"#!/bin/sh\nexit 0\n";
+
+    pub fn fixture_update(
+        url: &str,
+        target: std::path::PathBuf,
+    ) -> Box<cargo_packager_updater::Update> {
+        Box::new(cargo_packager_updater::Update {
+            config: Config { pubkey: "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1OTgwQTJBMDE5NDg2MTYKUldRV2hwUUJLZ3FZUmRiZjBvbG5Saldoa2lhaFVzRkNCNlE2NG9YK3UxQnhVNDdoQjlvTWllK0gK".into(), ..Default::default() },
+            body: None,
+            current_version: env!("CARGO_PKG_VERSION").into(),
+            version: "9.9.9".into(),
+            date: None,
+            target: "linux-x86_64".into(),
+            extract_path: target,
+            download_url: url.parse().unwrap(),
+            signature: "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNhcmdvLXBhY2thZ2VyIHNlY3JldCBrZXkKUlVRV2hwUUJLZ3FZUlUwdTlOY3k4TURublgyZmUvcTVHTFRwRVI2ZjJTRVVmRU1tWGpnUmJsZm1Rd2dlYTRWaVV1Ry80ZXBvRFB6MDE1Sm1HVzdDRDlBMmlhbko0Y1pSUHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODQ3MDQ5CWZpbGU6dXBkYXRlClMzNjYrMi9sZ3M3QmJhSTdibitvS2NncDF3ZndPY05iRnVxSDVHRGJKaEt5Qy92TStXRDJmcUNYR1V5cExPd093OXNGY2xCYTVmQm4vMjFmSWhsRkRBPT0K".into(),
+            timeout: Some(std::time::Duration::from_secs(5)),
+            headers: Default::default(),
+            format: cargo_packager_updater::UpdateFormat::AppImage,
+        })
+    }
 
     #[test]
     fn release_endpoint_is_https() {
@@ -349,32 +310,5 @@ mod tests {
             path
         );
         assert!(appimage_path(None).is_err());
-    }
-}
-
-#[cfg(test)]
-mod notice_tests {
-    use super::*;
-    use std::sync::atomic::Ordering;
-
-    // One test, not several: the slot is a process global, so parallel tests
-    // would overwrite each other's state.
-    #[test]
-    fn the_notice_names_each_state() {
-        UPDATE_STATE.store(0, Ordering::Relaxed);
-        assert_eq!(notice(), None, "an idle updater is silent");
-
-        UPDATE_STATE.store(1, Ordering::Relaxed);
-        assert_eq!(
-            notice(),
-            Some("installed an update — restart to use it".to_string())
-        );
-
-        UPDATE_STATE.store(2, Ordering::Relaxed);
-        *UPDATE_MESSAGE.lock() = Some("disk full".to_string());
-        assert_eq!(notice(), Some("could not update: disk full".to_string()));
-
-        UPDATE_STATE.store(0, Ordering::Relaxed);
-        *UPDATE_MESSAGE.lock() = None;
     }
 }

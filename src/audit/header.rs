@@ -285,6 +285,8 @@ impl Audit {
                                 let pair_sirv = source_menu.clone();
                                 let settings = source_menu.clone();
                                 let shortcuts = source_menu.clone();
+                                #[cfg(feature = "updater")]
+                                let updates = source_menu.clone();
                                 let reveal_root = reveal_root.clone();
                                 let reveal_source = reveal_source.clone();
                                 menu.item(
@@ -353,6 +355,21 @@ impl Audit {
                                         }),
                                 )
                                 .separator()
+                                .map(|menu| {
+                                    #[cfg(feature = "updater")]
+                                    let menu = menu.separator().item(
+                                        PopupMenuItem::new("Check for updates…").on_click(
+                                            move |_, _, cx| {
+                                                if let Some(audit) = updates.upgrade() {
+                                                    audit.update(cx, |audit, cx| {
+                                                        audit.check_for_updates(true, cx)
+                                                    });
+                                                }
+                                            },
+                                        ),
+                                    );
+                                    menu
+                                })
                                 .item(
                                     PopupMenuItem::new("Settings…")
                                         .icon(IconName::Settings)

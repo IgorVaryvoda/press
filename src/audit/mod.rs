@@ -20,6 +20,8 @@ mod table;
 #[cfg(test)]
 mod tests;
 mod toolbar;
+#[cfg(feature = "updater")]
+mod updates;
 mod view;
 
 use crate::settings::{ColumnPrefs, Output};
@@ -495,6 +497,8 @@ pub(crate) struct Audit {
     /// the job advances.
     converted_totals: (u64, u64),
     converting: bool,
+    #[cfg(feature = "updater")]
+    updater: updates::Updater,
     /// The running conversion's stop flag, read between files. Sirv transfers and
     /// both AI jobs already owned one; the app's headline verb was the only long
     /// job with no way out of it.
@@ -1155,7 +1159,7 @@ impl Audit {
     }
 
     pub(super) fn scan_blocks_delivery(&self) -> bool {
-        self.scanning.is_some()
+        self.scanning.is_some() || self.update_is_applying()
     }
 
     /// Rows are named relative to the root whenever one list can hold files from
@@ -1403,7 +1407,7 @@ impl Audit {
     /// Open a requested folder or exact file away from the UI thread. A newer
     /// request wins, while a failed current request leaves the last usable dataset.
     pub(super) fn request_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.update_is_applying() {
             return;
         }
         let path = navigation_path(path);
@@ -1603,7 +1607,7 @@ impl Audit {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.converting || paths.is_empty() {
+        if self.converting || self.update_is_applying() || paths.is_empty() {
             return;
         }
         paths = paths.into_iter().map(navigation_path).collect();
@@ -1958,7 +1962,7 @@ impl Audit {
     }
 
     pub(crate) fn pick(&mut self, folders: bool, cx: &mut Context<Self>) {
-        if self.converting {
+        if self.converting || self.update_is_applying() {
             return;
         }
         let start = self.root.clone();
@@ -2435,6 +2439,8 @@ pub(crate) fn build_audit(
             restorable,
             converted_totals: (0, 0),
             converting: false,
+            #[cfg(feature = "updater")]
+            updater: updates::Updater::default(),
             convert_cancel: None,
             active_target_count: None,
             stopped_run: None,

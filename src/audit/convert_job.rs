@@ -57,7 +57,10 @@ fn conversion_landing_applies(
 
 impl Audit {
     pub(super) fn start_conversion(&mut self, cx: &mut Context<Self>) {
-        if self.converting || self.local_ai_busy() || self.studio_busy() || self.scanning.is_some()
+        if self.converting
+            || self.local_ai_busy()
+            || self.studio_busy()
+            || self.scan_blocks_delivery()
         {
             return;
         }

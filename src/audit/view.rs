@@ -626,6 +626,16 @@ impl Render for Audit {
     // erases to one type rather than making the caller's `impl Trait` pick a winner.
     #[allow(refining_impl_trait)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if self.update_is_applying() {
+            return div()
+                .size_full()
+                .bg(cx.theme().background)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("Applying update… Press will restart when it is ready.")
+                .into_any_element();
+        }
         let count = if self.sirv_scope == Some(SirvScope::OnlyRemote) {
             self.sirv_remote_only.len()
         } else {
