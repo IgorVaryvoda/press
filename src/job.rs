@@ -445,15 +445,6 @@ impl Job {
     /// deliver a smaller job than the one reviewed.
     pub fn to_portable(&self, base: &std::path::Path) -> Result<PortableJob, String> {
         self.validate()?;
-        for target in &self.targets {
-            if !portable_relative(&target.out, false) {
-                return Err(format!(
-                    "target {:?} output is not portable: {}",
-                    target.id,
-                    target.out.display()
-                ));
-            }
-        }
         fn relative(
             base: &std::path::Path,
             path: &std::path::Path,
@@ -463,21 +454,27 @@ impl Job {
                 .strip_prefix(base)
                 .map(PathBuf::from)
                 .map_err(|_| format!("{} is outside the export base", path.display()))?;
-            if !portable_relative(&relative, allow_root) {
-                return Err(format!(
-                    "{} is not a portable relative path",
-                    path.display()
-                ));
-            }
             if path.exists() && !source_is_confined(path, &[base.to_path_buf()]) {
                 return Err(format!(
                     "{} resolves outside the export base",
                     path.display()
                 ));
             }
-            Ok(relative)
+            portable_export_relative(&relative, allow_root)
+                .map_err(|error| format!("{}: {error}", path.display()))
         }
         use std::path::PathBuf;
+        let targets = self
+            .targets
+            .iter()
+            .map(|target| {
+                let mut portable = target.clone();
+                portable.out = portable_export_relative(&target.out, false).map_err(|error| {
+                    format!("target {:?} output is not portable: {error}", target.id)
+                })?;
+                Ok(portable)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(PortableJob {
             schema: self.schema,
             id: self.id.clone(),
@@ -492,7 +489,7 @@ impl Job {
                 .map(|root| relative(base, root, true))
                 .collect::<Result<_, _>>()?,
             target_recipe: self.target_recipe.clone(),
-            targets: self.targets.clone(),
+            targets,
             products: self
                 .products
                 .iter()
@@ -541,29 +538,24 @@ impl Job {
         if !root.is_absolute() {
             return Err(format!("job root {} is not absolute", root.display()));
         }
-        for target in &portable.targets {
-            if !portable_relative(&target.out, false) {
-                return Err(format!(
-                    "target {:?} output is not portable: {}",
-                    target.id,
-                    target.out.display()
-                ));
-            }
-        }
+        let targets = portable
+            .targets
+            .iter()
+            .map(|target| {
+                let mut local = target.clone();
+                local.out = portable_import_relative(&target.out, false).map_err(|error| {
+                    format!("target {:?} output is not portable: {error}", target.id)
+                })?;
+                Ok(local)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let join = |relative: &std::path::Path, allow_root: bool| {
-            // `has_root` catches what `is_absolute` misses: on Windows a path
-            // like `/abs.png` has a root but no prefix, and joining it would
-            // rebase the mapping onto the drive root instead of the root its
-            // new owner chose. A parent component escapes the root on every
-            // platform, including from a nested `sub/../../escape`. Portable
-            // paths are never either; refuse them.
-            if !portable_relative(relative, allow_root) {
-                return Err(format!(
-                    "portable path {} is not relative",
-                    relative.display()
-                ));
-            }
-            Ok(root.join(relative))
+            // Legacy exports may use Windows separators even when imported on
+            // Unix. Normalize those separators only after checking the whole
+            // path, so a rooted, drive-relative, or escaping name cannot be
+            // retargeted by a platform-specific join operation.
+            let normalized = portable_import_relative(relative, allow_root)?;
+            Ok(root.join(normalized))
         };
         let job = Self {
             schema: portable.schema,
@@ -576,7 +568,7 @@ impl Job {
                 .map(|path| join(path, true))
                 .collect::<Result<Vec<PathBuf>, String>>()?,
             target_recipe: portable.target_recipe.clone(),
-            targets: portable.targets.clone(),
+            targets,
             products: portable
                 .products
                 .iter()
@@ -647,30 +639,77 @@ fn check_hint(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn portable_relative(path: &std::path::Path, allow_root: bool) -> bool {
+fn portable_export_relative(
+    path: &std::path::Path,
+    allow_root: bool,
+) -> Result<std::path::PathBuf, String> {
+    use std::path::Component;
+
+    if path.as_os_str().is_empty() {
+        return if allow_root {
+            Ok(std::path::PathBuf::new())
+        } else {
+            Err("an empty path is only valid for a source root".into())
+        };
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let Component::Normal(part) = component else {
+            return Err(format!("{} is rooted or escapes its base", path.display()));
+        };
+        let part = part
+            .to_str()
+            .ok_or_else(|| format!("{} is not valid UTF-8", path.display()))?;
+        // On Unix a backslash is a literal filename character. Windows will
+        // treat it as a separator, so exporting it would change the mapping.
+        if part.contains(['/', '\\']) || !portable_component(part) {
+            return Err(format!(
+                "{} contains an unsafe portable component",
+                path.display()
+            ));
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return if allow_root {
+            Ok(std::path::PathBuf::new())
+        } else {
+            Err(format!("{} is empty", path.display()))
+        };
+    }
+    Ok(std::path::PathBuf::from(parts.join("/")))
+}
+
+fn portable_import_relative(
+    path: &std::path::Path,
+    allow_root: bool,
+) -> Result<std::path::PathBuf, String> {
     let text = path.to_string_lossy();
     if text.is_empty() {
-        return allow_root;
+        return if allow_root {
+            Ok(std::path::PathBuf::new())
+        } else {
+            Err("an empty path is only valid for a source root".into())
+        };
     }
     if allow_root && text == "." {
-        return true;
+        return Ok(std::path::PathBuf::from("."));
     }
-    let starts_with_root = text
-        .bytes()
-        .next()
-        .is_some_and(|byte| byte == b'/' || byte == 92);
-    if path.is_absolute()
-        || path.has_root()
-        || starts_with_root
-        || (text.len() >= 2
-            && text.as_bytes()[1] == b':'
-            && text.as_bytes()[0].is_ascii_alphabetic())
+    // Backslashes are accepted as a legacy separator and normalized before
+    // validation. This gives imported jobs one portable spelling on disk.
+    let normalized = text.replace('\\', "/");
+    if normalized.starts_with('/')
+        || (normalized.len() >= 2
+            && normalized.as_bytes()[1] == b':'
+            && normalized.as_bytes()[0].is_ascii_alphabetic())
+        || normalized.split('/').any(|part| !portable_component(part))
     {
-        return false;
+        return Err(format!(
+            "{} is rooted or contains an unsafe portable component",
+            path.display()
+        ));
     }
-    !text
-        .split(|cell| cell == '/' || cell as u32 == 92)
-        .any(|part| !portable_component(part))
+    Ok(std::path::PathBuf::from(normalized))
 }
 
 fn portable_component(part: &str) -> bool {
@@ -842,10 +881,7 @@ pub fn suggest_id(dir: &std::path::Path, name: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    // Leave room for the smallest deduplication suffix. The library cap
-    // means a free suffix appears quickly, so this also cannot loop forever
-    // when the display name already fills the id budget.
-    stem.truncate(MAX_ID_LEN.saturating_sub(4));
+    stem.truncate(MAX_ID_LEN);
     if stem.is_empty() {
         stem = "job".into();
     }
@@ -855,10 +891,13 @@ pub fn suggest_id(dir: &std::path::Path, name: &str) -> String {
         return stem;
     }
     for counter in 2.. {
-        let candidate = format!("{stem}-{counter}");
-        if candidate.len() > MAX_ID_LEN {
-            continue;
+        let suffix = format!("-{counter}");
+        if suffix.len() >= MAX_ID_LEN {
+            break;
         }
+        let mut prefix = stem.clone();
+        prefix.truncate(MAX_ID_LEN - suffix.len());
+        let candidate = format!("{prefix}{suffix}");
         if !taken.contains(candidate.as_str()) && !file_for(dir, &candidate).exists() {
             return candidate;
         }
@@ -1500,17 +1539,32 @@ mod tests {
         let dir = store("long-id");
         let name = "x".repeat(MAX_ID_LEN);
         let first = suggest_id(&dir, &name);
-        assert_eq!(first.len(), MAX_ID_LEN.saturating_sub(4));
+        assert_eq!(first.len(), MAX_ID_LEN);
         save(
             &dir,
-            &Job::new(first.clone(), "First".into(), vec![dir.clone()]).unwrap(),
+            &Job::new(first, "First".into(), vec![dir.clone()]).unwrap(),
         )
         .unwrap();
+        let mut expected = name.clone();
+        expected.truncate(MAX_ID_LEN - 2);
+        expected.push_str("-2");
         assert_eq!(
             suggest_id(&dir, &name),
-            format!("{first}-2"),
+            expected,
             "a maximum-length display name leaves suffix room"
         );
+        // Invalid JSON files still occupy names on disk. Hundreds of those
+        // names must not exhaust a fixed four-byte suffix reservation.
+        for counter in 2..=1_001 {
+            let suffix = format!("-{counter}");
+            let mut prefix = name.clone();
+            prefix.truncate(MAX_ID_LEN - suffix.len());
+            std::fs::write(dir.join(format!("{}{suffix}.json", prefix)), b"broken").unwrap();
+        }
+        let mut expected = name;
+        expected.truncate(MAX_ID_LEN - 5);
+        expected.push_str("-1002");
+        assert_eq!(suggest_id(&dir, &"x".repeat(MAX_ID_LEN)), expected);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1597,6 +1651,12 @@ mod tests {
             nested_job.export_draft(&root).unwrap().preview.products[0].files,
             vec!["folder/hero.png"]
         );
+        assert_eq!(
+            nested_job.to_portable(&root).unwrap().products[0].mappings[0]
+                .source
+                .path,
+            PathBuf::from("folder/hero.png")
+        );
         // A connected binding does not survive the export boundary either:
         // the new owner rebinds rather than inheriting server identity.
         let mut bound = job.clone();
@@ -1665,6 +1725,55 @@ mod tests {
         two.products.push(sibling);
         let portable = two.to_portable(&root).unwrap();
         assert_eq!(portable.products.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_export_rejects_unix_backslash_names() {
+        let dir = store("portable-backslash");
+        let root = dir.join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let literal = root.join(r"a\b.png");
+        std::fs::write(&literal, b"pixels").unwrap();
+        let mut job = job();
+        job.source_roots = vec![root.clone()];
+        job.products[0].mappings[0].source.path = literal;
+        assert!(job.to_portable(&root).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn portable_import_normalizes_legacy_backslash_separators() {
+        let dir = store("portable-legacy-separators");
+        let root = dir.join("photos");
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        let file = root.join("folder/hero.png");
+        std::fs::write(&file, b"pixels").unwrap();
+        let mut local = job();
+        local.source_roots = vec![root.clone()];
+        local.products[0].mappings[0].source.path = file;
+        let mut portable = local.to_portable(&root).unwrap();
+        portable.source_roots = vec![PathBuf::new()];
+        portable.products[0].mappings[0].source.path = PathBuf::from(r"folder\hero.png");
+        let imported = Job::from_portable(&portable, &root).unwrap();
+        assert_eq!(
+            imported.products[0].mappings[0].source.path,
+            root.join("folder/hero.png")
+        );
+
+        let mut targeted = local;
+        targeted.targets = vec![JobTarget {
+            id: "web".into(),
+            name: "Web".into(),
+            recipe: None,
+            out: PathBuf::from("nested/out"),
+        }];
+        let mut portable = targeted.to_portable(&root).unwrap();
+        assert_eq!(portable.targets[0].out, PathBuf::from("nested/out"));
+        portable.targets[0].out = PathBuf::from(r"nested\out");
+        let imported = Job::from_portable(&portable, &root).unwrap();
+        assert_eq!(imported.targets[0].out, PathBuf::from("nested/out"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
