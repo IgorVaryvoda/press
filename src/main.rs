@@ -11,6 +11,7 @@ mod avif;
 mod compare;
 mod convert;
 mod crash;
+mod handoff;
 mod job;
 mod jxl;
 mod local_ai;
@@ -89,12 +90,14 @@ const HELP: &str = concat!(
     "  press audit <PATH> [--json]\n",
     "  press convert <PATH> [OPTIONS]\n",
     "  press restore <PATH>\n",
+    "  press handoff <FILE>\n",
     "  press skill\n",
     "  press update\n\n",
     "Commands:\n",
     "  audit      Read image headers without opening a window or writing files\n",
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
     "  restore    Put back the originals a --replace run moved aside\n",
+    "  handoff    Validate an ImageGuide report into a pending local task\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
     "  update     Install the latest signed Press release\n",
     "  help       Print this help\n",
@@ -152,6 +155,7 @@ enum Command {
     Window,
     Audit,
     Convert,
+    Handoff,
     Restore,
     Skill,
     Update,
@@ -240,6 +244,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
             "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
+            "handoff" if root.is_none() && command == Command::Window => command = Command::Handoff,
             "skill" if root.is_none() && command == Command::Window => command = Command::Skill,
             "update" if root.is_none() && command == Command::Window => command = Command::Update,
             "help" if root.is_none() && command == Command::Window => command = Command::Help,
@@ -424,6 +429,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Restore && (conversion_option || grid) {
         return Err("restore takes only a folder".into());
     }
+    if command == Command::Handoff && (conversion_option || grid) {
+        return Err("handoff takes only a report file".into());
+    }
+    if command == Command::Handoff && !subfolders {
+        return Err("--no-subfolders needs audit or convert".into());
+    }
     if matches!(command, Command::Skill | Command::Update)
         && (root.is_some()
             || conversion_option
@@ -450,8 +461,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Convert && grid {
         return Err("--grid is available only for the window".into());
     }
-    if json && !matches!(command, Command::Audit | Command::Convert) {
-        return Err("--json needs audit or convert".into());
+    if json
+        && !matches!(
+            command,
+            Command::Audit | Command::Convert | Command::Handoff
+        )
+    {
+        return Err("--json needs audit, convert or handoff".into());
     }
     if command == Command::Window && !subfolders {
         return Err(
@@ -1295,6 +1311,44 @@ fn convert_headless(
     totals
 }
 
+#[derive(Serialize)]
+struct HandoffReport {
+    schema_version: u32,
+    command: &'static str,
+    file: String,
+    task: String,
+    resources: usize,
+    warnings: Vec<String>,
+    pending: handoff::PendingHandoff,
+}
+
+fn handoff_report(target: &Path, pending: &handoff::PendingHandoff) -> HandoffReport {
+    HandoffReport {
+        schema_version: 1,
+        command: "handoff",
+        file: path_text(target),
+        task: pending.handoff.task.clone(),
+        resources: pending.handoff.resources.len(),
+        warnings: pending.warnings.clone(),
+        pending: pending.clone(),
+    }
+}
+
+/// The validated task, briefly: warnings are diagnostics, so they go to
+/// stderr beside the summary rather than into the task listing.
+fn print_handoff(target: &Path, pending: &handoff::PendingHandoff) {
+    outln!(
+        "{}: task {} from {}: {} resources",
+        target.display(),
+        pending.handoff.task,
+        pending.handoff.producer,
+        pending.handoff.resources.len()
+    );
+    for warning in &pending.warnings {
+        eprintln!("press: handoff warning: {warning}");
+    }
+}
+
 /// One failed row per scanned target, sharing the single reason the destination
 /// never established. A refusal is a run-level failure, so the report still
 /// names every target instead of failing the folder silently.
@@ -1429,7 +1483,11 @@ fn main() {
             update_headless();
             return;
         }
-        Command::Window | Command::Audit | Command::Convert | Command::Restore => {}
+        Command::Window
+        | Command::Audit
+        | Command::Convert
+        | Command::Restore
+        | Command::Handoff => {}
     }
 
     if args.command == Command::Window {
@@ -1471,6 +1529,7 @@ fn main() {
                 match args.command {
                     Command::Audit => "audit",
                     Command::Restore => "restore",
+                    Command::Handoff => "handoff",
                     _ => "convert",
                 }
             );
@@ -1510,6 +1569,50 @@ fn main() {
             std::process::exit(2);
         }
         std::process::exit(restore_headless(&target));
+    }
+    // A report import reads one file and validates it: no scan, no window,
+    // no writes. Mapping its resources to a local folder is later work that
+    // consumes the pending task printed here.
+    if args.command == Command::Handoff {
+        if !target.is_file() {
+            eprintln!("press: {} is not a report file", target.display());
+            std::process::exit(2);
+        }
+        // Bound the read before parsing allocates: the schema check repeats
+        // the cap for library callers that skip the CLI.
+        let oversized = std::fs::metadata(&target)
+            .is_ok_and(|metadata| metadata.len() > handoff::MAX_FILE_BYTES);
+        if oversized {
+            eprintln!(
+                "press: {} is larger than any handoff report",
+                target.display()
+            );
+            std::process::exit(2);
+        }
+        let bytes = match std::fs::read(&target) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("press: {} cannot be read: {error}", target.display());
+                std::process::exit(2);
+            }
+        };
+        match handoff::parse_bytes(&bytes) {
+            Ok(pending) => {
+                if args.json {
+                    if write_json(&handoff_report(&target, &pending)).is_err() {
+                        eprintln!("press: could not write JSON");
+                        std::process::exit(1);
+                    }
+                } else {
+                    print_handoff(&target, &pending);
+                }
+                std::process::exit(0);
+            }
+            Err(message) => {
+                eprintln!("press: {}: {message}", target.display());
+                std::process::exit(2);
+            }
+        }
     }
 
     // A single file opens straight into the comparison. A folder opens the audit.
@@ -3412,6 +3515,19 @@ mod tests {
         );
         assert!(parse(&["restore", "/photos", "--json"]).is_err());
         assert!(parse(&["restore", "/photos", "--avif"]).is_err());
+    }
+
+    #[test]
+    fn handoff_takes_only_a_report_file() {
+        let handoff = parse(&["handoff", "report.json"]).unwrap();
+        assert_eq!(handoff.command, Command::Handoff);
+        assert!(parse(&["handoff", "report.json", "--json"]).unwrap().json);
+        assert!(parse(&["handoff", "report.json", "--quality", "80"]).is_err());
+        assert!(parse(&["handoff", "report.json", "--grid"]).is_err());
+        assert!(parse(&["handoff", "report.json", "--no-subfolders"]).is_err());
+        assert!(parse(&["handoff", "report.json", "--output", "out"]).is_err());
+        assert!(parse(&["handoff", "report.json", "--dry-run"]).is_err());
+        assert!(parse(&["handoff", "report.json", "--skip-existing"]).is_err());
     }
 
     #[test]

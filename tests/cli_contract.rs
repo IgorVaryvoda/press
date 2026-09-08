@@ -246,3 +246,75 @@ fn replace_and_restore_round_trip_through_the_cli() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn handoff_fixture(dir: &Path) -> PathBuf {
+    let report = serde_json::json!({
+        "schema": 1,
+        "producer": "imageguide-extension",
+        "producer_revision": "report-schema-4",
+        "task": "task-1",
+        "observed": "2026-09-08T12:00:00Z",
+        "resources": [{
+            "id": "hero",
+            "urls": ["https://example.com/hero.jpg?w=1600"],
+            "path_hints": ["images/hero.jpg"],
+            "width": 1600,
+            "height": 1200,
+            "bytes": 240000,
+            "bytes_measured": true,
+            "findings": ["excess-dimensions"],
+            "max_edge": 1600,
+            "formats": ["avif"],
+        }],
+        "redactions": ["query values dropped"],
+    });
+    let path = dir.join("report.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&report).unwrap())
+        .expect("the handoff fixture is written");
+    path
+}
+
+#[test]
+fn handoff_json_validates_a_report_without_writing() {
+    let dir = workdir("handoff");
+    let report = handoff_fixture(&dir);
+    let output = run(&["handoff", &report.to_string_lossy(), "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let doc = stdout_json(&output);
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["command"], "handoff");
+    assert_eq!(doc["task"], "task-1");
+    assert_eq!(doc["resources"], 1);
+    assert!(stderr(&output).is_empty(), "a clean import stays quiet");
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("the dir lists").count(),
+        1,
+        "import stages nothing beside the report"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_text_names_the_task_and_warns_on_stderr() {
+    let dir = workdir("handoff-text");
+    let report = handoff_fixture(&dir);
+    let output = run(&["handoff", &report.to_string_lossy()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("task-1"),
+        "the task is named"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_refuses_garbage_with_exit_two() {
+    let dir = workdir("handoff-garbage");
+    let report = dir.join("report.json");
+    std::fs::write(&report, b"{\"schema\":99}").expect("the bad fixture is written");
+    let output = run(&["handoff", &report.to_string_lossy(), "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "no document on refusal");
+    assert!(stderr(&output).contains("press: "), "{}", stderr(&output));
+    let _ = std::fs::remove_dir_all(&dir);
+}
