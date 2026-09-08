@@ -2760,8 +2760,22 @@ fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
             }],
         )
     } else if target.is_dir() {
+        let target = match std::fs::canonicalize(target) {
+            Ok(target) => target,
+            Err(error) => {
+                eprintln!("press: could not resolve {}: {error}", target.display());
+                return 1;
+            }
+        };
+        let requirements_path = match std::fs::canonicalize(requirements_path) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("press: could not resolve requirements file: {error}");
+                return 2;
+            }
+        };
         let mut refs = Vec::new();
-        for item in walkdir::WalkDir::new(target).follow_links(false) {
+        for item in walkdir::WalkDir::new(&target).follow_links(false) {
             let item = match item {
                 Ok(item) => item,
                 Err(error) => {
@@ -2776,7 +2790,14 @@ fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
             {
                 continue;
             }
-            let Some(relative) = path.strip_prefix(target).ok() else {
+            if refs.len() == requirements::MAX_OUTPUTS {
+                eprintln!(
+                    "press: check found more than {} outputs",
+                    requirements::MAX_OUTPUTS
+                );
+                return 1;
+            }
+            let Some(relative) = path.strip_prefix(&target).ok() else {
                 continue;
             };
             refs.push(requirements::OutputRef {
@@ -2786,7 +2807,7 @@ fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
             });
         }
         refs.sort_by(|left, right| left.output.cmp(&right.output));
-        (target.to_path_buf(), refs)
+        (target, refs)
     } else {
         eprintln!("press: {} is not a file or folder", target.display());
         return 2;

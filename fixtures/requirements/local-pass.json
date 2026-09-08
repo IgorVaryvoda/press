@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "id": "local-pass",
+  "name": "Local pass fixture",
+  "revision": 1,
+  "provenance": { "local_author": { "author": "test" } },
+  "target": "test",
+  "role": "fixture",
+  "category": null,
+  "region": null,
+  "last_verified": "2026-09-08",
+  "effective_from": null,
+  "effective_until": null,
+  "engine": "press",
+  "engine_version": 1,
+  "checker_version": 1,
+  "rules": [
+    {
+      "id": "format",
+      "label": "PNG output",
+      "required": true,
+      "constraint": { "kind": "format", "allowed": ["png"] }
+    },
+    {
+      "id": "dimensions",
+      "label": "Small fixture",
+      "required": true,
+      "constraint": {
+        "kind": "dimensions",
+        "min_width": 8,
+        "max_width": 8,
+        "min_height": 8,
+        "max_height": 8
+      }
+    },
+    {
+      "id": "bytes",
+      "label": "Non-empty output",
+      "required": true,
+      "constraint": { "kind": "bytes", "min": 1, "max": null }
+    },
+    {
+      "id": "name",
+      "label": "PNG suffix",
+      "required": true,
+      "constraint": { "kind": "name", "allowed_extensions": ["png"] }
+    }
+  ]
+}

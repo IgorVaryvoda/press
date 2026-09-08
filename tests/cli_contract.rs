@@ -155,6 +155,89 @@ fn check_json_reports_actual_output_against_a_local_snapshot() {
 }
 
 #[test]
+fn check_process_passes_and_excludes_a_canonical_requirements_file_without_writes() {
+    let dir = workdir("requirements-pass");
+    photo(&dir, "shot.png");
+    let requirements = dir.join("requirements.json");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/requirements/local-pass.json"),
+        &requirements,
+    )
+    .expect("the local fixture is copied into the target folder");
+    let target = dir.to_string_lossy().into_owned();
+    let requirements = requirements.to_string_lossy().into_owned();
+    let output = run(&[
+        "check",
+        &target,
+        "--requirements-file",
+        &requirements,
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report = stdout_json(&output);
+    assert_eq!(report["requirements"]["id"], "local-pass");
+    assert_eq!(report["outputs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(report["outputs"][0]["output"], "shot.png");
+    assert_eq!(report["all_required_pass"], true);
+    assert!(
+        !dir.join("optimized").exists(),
+        "checking never writes outputs"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn malformed_requirements_exit_two_without_a_document_or_write() {
+    let dir = workdir("requirements-malformed");
+    photo(&dir, "shot.png");
+    let requirements = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/requirements/malformed.json")
+        .to_string_lossy()
+        .into_owned();
+    let target = dir.to_string_lossy().into_owned();
+    let output = run(&["check", &target, "--requirements-file", &requirements]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "malformed input has no receipt");
+    assert!(
+        stderr(&output).contains("requirements"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !dir.join("optimized").exists(),
+        "checking never writes outputs"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_oversized_check_folder_is_refused_before_inspection_or_writes() {
+    let dir = workdir("requirements-too-many");
+    for index in 0..=1_024 {
+        std::fs::write(dir.join(format!("item-{index}.bin")), [])
+            .expect("the bounded folder fixture is written");
+    }
+    let requirements = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/requirements/local-pass.json")
+        .to_string_lossy()
+        .into_owned();
+    let target = dir.to_string_lossy().into_owned();
+    let output = run(&["check", &target, "--requirements-file", &requirements]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "refusal has no receipt");
+    assert!(
+        stderr(&output).contains("more than 1024"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !dir.join("optimized").exists(),
+        "checking never writes outputs"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_invalid_invocation_exits_two_with_stderr_only() {
     let dir = workdir("invalid");
     photo(&dir, "shot.png");
