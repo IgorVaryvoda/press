@@ -1,6 +1,7 @@
 //! Media actions: opening the comparison and driving the thumbnail cache.
 
 use super::*;
+use crate::manifest;
 
 /// Reopen the view with a fresh key when its file changed mid-job. The stale
 /// task's own landing then misses, so old pixels never show. Callers have
@@ -203,6 +204,29 @@ impl Audit {
         self.open_written(index, written, None, cx);
     }
 
+    /// The file a finished conversion compares against. A replace run moves the
+    /// audited original into the backup mirror before the output takes its name,
+    /// so the entries path is gone — or, with Keep format, holds the output
+    /// itself. The backup is the before side; anywhere else the audited file
+    /// still is. Anything that is not a conversion compares against the file
+    /// the audit listed.
+    fn comparison_source(&self, index: usize, converted: bool) -> Option<PathBuf> {
+        let entry = self.entries.get(index)?;
+        if !converted {
+            return Some(entry.path.clone());
+        }
+        let Some((Output::Replace, out_dir)) = self.conversion_destination.as_ref() else {
+            return Some(entry.path.clone());
+        };
+        let relative = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path);
+        let backup = manifest::backup_root(out_dir).join(relative);
+        if backup.symlink_metadata().is_ok() {
+            Some(backup)
+        } else {
+            Some(entry.path.clone())
+        }
+    }
+
     /// The same view for any file this app has written next to a source —
     /// a conversion, a cutout, an upscale. Whatever produced it, the thing to
     /// do next is look at it.
@@ -213,7 +237,10 @@ impl Audit {
         produced_by: Option<ProducedBy>,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) = self.entries.get(index).map(|entry| entry.path.clone()) else {
+        // A replace run moves the audited file away before the output takes its
+        // name; the backup mirror holds the before side. Anything else still
+        // compares against the file the audit listed.
+        let Some(source) = self.comparison_source(index, produced_by.is_none()) else {
             return;
         };
         self.clear_error("media", cx);
@@ -674,7 +701,9 @@ impl Audit {
             self.prefetch_key = None;
             return;
         }
-        let path = entry.path.clone();
+        let path = self
+            .comparison_source(target, written.is_some())
+            .unwrap_or_else(|| entry.path.clone());
         let key = compare::Key::new(
             written.as_deref().unwrap_or(&path),
             &path,

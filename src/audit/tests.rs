@@ -641,6 +641,71 @@ fn comparison_navigation_stops_at_visible_edges(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn replace_results_compare_against_the_backup_original(cx: &mut TestAppContext) {
+    let folder = std::env::temp_dir().join(format!("press-replace-compare-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).expect("the fixture folder is created");
+    crate::convert::tests::photo(64, 64)
+        .save(folder.join("shot.png"))
+        .expect("the fixture image is written");
+
+    cx.update(init_theme);
+    let scanned = scan::scan(&folder, &folder.join(scan::OUTPUT_DIR));
+    let launch = Launch {
+        root: folder.clone(),
+        entries: scanned.entries,
+        skipped_raw: 0,
+        skipped_heic: 0,
+        skipped_packages: 0,
+        unreadable: Vec::new(),
+        walk_errors: Vec::new(),
+        existing_output: 0,
+        open_single: false,
+        format: Format::WebP,
+        quality: Quality::lossy(80.),
+        max_edge: MaxEdge::FULL,
+        grid: false,
+        recent_folders: Vec::new(),
+        columns: ColumnPrefs::default(),
+        output: crate::settings::Output::default(),
+        include_subfolders: false,
+        sidebar_open: true,
+        rail_width: None,
+    };
+    let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
+        audit: build_audit(launch, window, cx),
+    });
+    let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
+
+    // A replace run in miniature: the output lands beside the source and the
+    // original moves into the backup mirror first.
+    let written = folder.join("shot.webp");
+    let backups = folder.join(scan::BACKUP_DIR);
+    std::fs::create_dir_all(&backups).expect("the backup mirror is created");
+    std::fs::copy(folder.join("shot.png"), &written).expect("the replace output is written");
+    std::fs::rename(folder.join("shot.png"), backups.join("shot.png"))
+        .expect("the original moves to the backup");
+
+    let index = audit.read_with(cx, |audit, _| audit.visible[0]);
+    audit.update(cx, |audit, _| {
+        audit.result_paths.insert(index, written);
+        audit.conversion_destination = Some((crate::settings::Output::Replace, folder.clone()));
+    });
+    audit.update(cx, |audit, cx| audit.open_result(index, cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the result opens");
+        assert!(
+            !comparison.failed,
+            "the backup original stands in for the moved source"
+        );
+        assert!(comparison.pair.is_some());
+    });
+
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[gpui_kit::test]
 fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext) {
     let folder =
         std::env::temp_dir().join(format!("press-compare-prefetch-{}", std::process::id()));
