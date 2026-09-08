@@ -409,6 +409,12 @@ fn prepare_upload_using(
             "this animated JPEG XL is too large for Studio without dropping its animation"
                 .to_string()
         }
+        scan::ConversionDecodeError::TooLarge => {
+            "this source image is too large for Studio to prepare".to_string()
+        }
+        scan::ConversionDecodeError::SourceChanged => {
+            "the source image changed while it was being read".to_string()
+        }
         scan::ConversionDecodeError::Failed => {
             "Press could not decode this image to prepare it for Studio".to_string()
         }

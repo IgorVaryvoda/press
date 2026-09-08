@@ -193,12 +193,6 @@ pub fn build(
     // The same decode and the same profile the writer uses, so the size shown beside
     // the comparison is the size the file would actually be.
     let format = format.resolve(path).ok()?;
-    if preview.is_none()
-        && let Some(header) = crate::scan::probe(path)
-    {
-        convert::check_budget_bytes(convert::decode_budget_estimate(header.width, header.height))
-            .ok()?;
-    }
     let (decoded, profile) = preview
         .filter(|preview| preview.decoded && max_edge == MaxEdge::FULL)
         .and_then(|preview| {
@@ -209,7 +203,11 @@ pub fn build(
         })
         // A frame that will not read back is a reason to decode the file, not a reason
         // to fail the comparison.
-        .or_else(|| crate::scan::decode_for_conversion(path, max_edge).ok())?;
+        .or_else(|| {
+            crate::scan::decode_for_conversion_with_identity(path, max_edge)
+                .ok()
+                .map(|decoded| (decoded.image, decoded.profile))
+        })?;
     let original = max_edge.apply(decoded);
     convert::check_image_budget(&original).ok()?;
     // The one lossless-depth verdict, shared with the disk writer: a refused
