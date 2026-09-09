@@ -6386,6 +6386,214 @@ fn job_export_import_survives_restart(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A whole key press. `simulate_keystrokes` only sends the key down, and
+/// GPUI turns Enter and Space into a button's click on the key up, so a test
+/// that means to activate a focused button has to release the key too.
+fn press_key(cx: &mut gpui_kit::VisualTestContext, key: &str) {
+    let keystroke = gpui_kit::Keystroke::parse(key).expect("the keystroke parses");
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui_kit::PlatformInput::KeyDown(gpui_kit::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui_kit::PlatformInput::KeyUp(gpui_kit::KeyUpEvent { keystroke }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+}
+
+/// Open the export review the way a user does: the job name is the job menu,
+/// and "Export job…" is its last item. Returns with the review drawn and the
+/// frame that carries its tab stops delivered.
+fn export_review_from_the_job_menu(
+    audit: &gpui_kit::Entity<Audit>,
+    cx: &mut gpui_kit::VisualTestContext,
+) {
+    audit.update(cx, |audit, cx| {
+        audit.sets_open = true;
+        audit.open_rail(Rail::Convert, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let menu = cx
+        .debug_bounds("sets-job-name")
+        .expect("the rail shows the job menu");
+    // The label runs past the rail, so its centre is off the window; press the
+    // trigger where it is actually drawn.
+    cx.simulate_click(
+        gpui_kit::point(menu.left() + px(8.), menu.center().y),
+        gpui_kit::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+/// Opening Export from the job menu leaves the keyboard on the review's own
+/// Export button — a real button with its focus ring and its native Enter and
+/// Space — not on the wrapper that owns the handle.
+#[gpui_kit::test]
+fn the_job_menu_opens_the_export_review_on_its_export_button(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    export_review_from_the_job_menu(&audit, cx);
+
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.job_export_preview.is_some(),
+            "the menu's last item opens the review"
+        );
+    });
+    let confirm = cx
+        .debug_bounds("sets-export-confirm")
+        .expect("the review draws its Export button");
+    let cancel = cx
+        .debug_bounds("sets-export-cancel")
+        .expect("the review draws its Cancel button");
+    assert!(
+        confirm.left() < cancel.left(),
+        "Export is the review's first action, so it is the first tab stop"
+    );
+
+    let first = cx.update(|window, cx| {
+        let review = audit.read(cx).job_export_preview_focus.clone();
+        assert!(
+            review.contains_focused(window, cx),
+            "the keyboard is inside the review"
+        );
+        assert!(
+            !review.is_focused(window),
+            "focus sits on a button inside the review, not on its wrapper"
+        );
+        window
+            .focused(cx)
+            .expect("something inside holds the focus")
+    });
+    press_key(cx, "tab");
+    cx.update(|window, cx| {
+        let review = audit.read(cx).job_export_preview_focus.clone();
+        let second = window.focused(cx).expect("Tab lands on the other action");
+        assert!(
+            review.contains_focused(window, cx),
+            "Tab stays in the review"
+        );
+        assert_ne!(second, first, "Tab moved off the button it started on");
+    });
+}
+
+/// Tab reaches Cancel and Enter there closes the review without reaching the
+/// picker, and without the list underneath opening a comparison on the same
+/// key.
+#[gpui_kit::test]
+fn tab_from_export_reaches_cancel_and_enter_there_closes_the_review(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    export_review_from_the_job_menu(&audit, cx);
+    audit.read_with(cx, |audit, _| assert!(audit.job_export_preview.is_some()));
+
+    press_key(cx, "tab");
+    press_key(cx, "enter");
+
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.job_export_preview.is_none(),
+            "Enter on Cancel closes the review"
+        );
+        assert!(
+            audit.compare.is_none(),
+            "the same Enter must not reach the list and open a comparison"
+        );
+    });
+    cx.update(|window, cx| {
+        assert!(
+            audit.read(cx).focus.is_focused(window),
+            "the list takes the keyboard back"
+        );
+    });
+}
+
+/// Escape closes the review from either of its buttons, hands the keyboard
+/// back to the list, and stops there: the list's own Escape would have cleared
+/// the selection.
+#[gpui_kit::test]
+fn escape_closes_the_export_review_from_either_button(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    audit.update(cx, |audit, cx| {
+        audit.selected.clear();
+        audit.selected.insert(0);
+        cx.notify();
+    });
+
+    for tabs in [0, 1] {
+        export_review_from_the_job_menu(&audit, cx);
+        audit.read_with(cx, |audit, _| assert!(audit.job_export_preview.is_some()));
+        for _ in 0..tabs {
+            press_key(cx, "tab");
+        }
+        press_key(cx, "escape");
+
+        audit.read_with(cx, |audit, _| {
+            assert!(
+                audit.job_export_preview.is_none(),
+                "Escape after {tabs} tabs closes the review"
+            );
+            assert_eq!(
+                audit.selected,
+                HashSet::from([0]),
+                "the review owns that Escape; the list keeps its selection"
+            );
+        });
+        cx.update(|window, cx| {
+            assert!(
+                audit.read(cx).focus.is_focused(window),
+                "the list takes the keyboard back"
+            );
+        });
+    }
+}
+
+/// Clicking Cancel closes the review and hands the keyboard back too, and
+/// nothing on the review's way in or out writes a file.
+#[gpui_kit::test]
+fn clicking_cancel_closes_the_export_review_and_restores_list_focus(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let before = std::fs::read_dir(&root)
+        .expect("the fixture folder is readable")
+        .count();
+    export_review_from_the_job_menu(&audit, cx);
+    audit.read_with(cx, |audit, _| assert!(audit.job_export_preview.is_some()));
+
+    let cancel = cx
+        .debug_bounds("sets-export-cancel")
+        .expect("the review draws its Cancel button");
+    cx.simulate_click(cancel.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.job_export_preview.is_none(), "the review closes");
+    });
+    cx.update(|window, cx| {
+        assert!(
+            audit.read(cx).focus.is_focused(window),
+            "the list takes the keyboard back"
+        );
+    });
+    assert_eq!(
+        std::fs::read_dir(&root)
+            .expect("the fixture folder is readable")
+            .count(),
+        before,
+        "reviewing and cancelling writes nothing beside the sources"
+    );
+}
+
 /// Binding the selected recipe records the job's target and persists it;
 /// with nothing selected the job keeps no target instead of inventing one.
 #[gpui_kit::test]

@@ -194,7 +194,7 @@ D3 preparation experiment was stopped and is not part of this tree.
 | Slice | Landed evidence | Boundary at closeout |
 | --- | --- | --- |
 | F1 | Exact source/output identity, bounded consumed bytes, recipe processing revision and content-verified reuse in `b6570f6` | GUI preparation parity remains open under D3 |
-| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated | Keyboard action focus still needs follow-up; no complete UI or all-platform claim |
+| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated, and the export review's keyboard lifecycle followed on `codex/workbench-export-focus` | The review's focus ring and the real Save picker still need a native-window proof; no complete UI or all-platform claim |
 | D2 | Strict local requirements snapshots and actual-output reports in `b6570f6`; use `press check <file-or-folder> --requirements-file <spec> [--json]` | Requirements are local and user-authored; required unsupported checks stay `not_checked`, so a report is not approval |
 | Muse Spark fakehost | The fixture-only supplier and interrupted Studio rehearsal review was completed through `698e990` (supplier base `e447f41`) with explicit fake scripts and durable local attempts | No native auth, retailer service, hosted inference, billing or live pilot was performed |
 | A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
@@ -221,8 +221,23 @@ JSON evidence remain under `ux/`; they are review artifacts, not release proof.
 The F3 real-window proof uses local review artifacts under `ux/` (untracked in
 this integration worktree): `ux/workbench-ui/f3-corrected-reveal-004.png` and
 `ux/workbench-ui/exported-alpha.press-job.json`. Those artifacts prove the
-reviewed Linux visibility/export path. Keyboard action focus remains unresolved,
-and no macOS/Windows or complete UI claim follows.
+reviewed Linux visibility/export path, and no macOS/Windows or complete UI claim
+follows.
+
+The keyboard follow-up on `codex/workbench-export-focus` puts the export review
+in charge of its own keys. Opening Export from the job menu anchors the review's
+focus handle on a wrapper that is a tab group but not itself a tab stop, then
+steps to the next tab stop on a frame callback, so the keyboard lands on the
+real Export button with its own focus ring and its native Enter and Space —
+gpui-component's `Button` renders its own keyed focus handle and discards a
+caller's, so `track_focus` on the button alone does nothing. Tab reaches Cancel,
+unmodified Escape from either button closes the review, and Enter, Space and
+Escape stop at the review instead of reaching the list behind it. Cancel, Escape
+and a completed save all hand the keyboard back to the list. Four GPUI tests
+drive the real dropdown, the delivered frame and whole key presses, because
+`simulate_keystrokes` sends only the key down while a button activates on the
+key up. The focus ring and the real Save picker at 800x600 remain a
+native-window proof this host has not recorded.
 
 ### Isolated checkpoints for tomorrow
 

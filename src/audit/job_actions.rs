@@ -6,6 +6,10 @@
 use super::*;
 use crate::job::{self, Job};
 
+/// How many frames the review waits for a laid-out tab map before it gives up
+/// on moving the keyboard onto its Export button.
+const FOCUS_REVIEW_FRAMES: u8 = 4;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct JobSelection {
     pub job: Job,
@@ -298,8 +302,13 @@ impl Audit {
                 // so opening Export always gives the user a visible decision.
                 let item = 2 + usize::from(!self.recipes_skipped.is_empty());
                 self.rail_scroll.scroll_to_top_of_item(item);
-                cx.defer_in(window, |audit, window, cx| {
-                    window.focus(&audit.job_export_preview_focus, cx);
+                // A frame callback, not a defer: `focus_next` reads the tab
+                // stops of a frame that has been laid out, and a defer still
+                // runs while the review is unrendered. Waiting for the frame
+                // also outlasts the dropdown handing focus back to its trigger
+                // as it dismisses.
+                cx.on_next_frame(window, |audit, window, cx| {
+                    audit.focus_job_export_review(FOCUS_REVIEW_FRAMES, window, cx);
                 });
                 cx.notify();
             }
@@ -309,9 +318,47 @@ impl Audit {
         }
     }
 
-    pub(super) fn cancel_job_export_preview(&mut self, cx: &mut Context<Self>) {
+    /// Put the keyboard on the review's own Export button. The wrapper is a
+    /// tab group that is not itself a stop, so anchoring there and stepping
+    /// once lands on the real button, which keeps its focus ring and its
+    /// native Enter and Space rather than an unstyled div's.
+    ///
+    /// The step only works off a frame whose tab stops already carry the
+    /// review. A window that has not painted it yet steps somewhere else
+    /// entirely, so the anchor goes back and the attempt repeats on the next
+    /// frame — a bounded number of times, because a review the rail is no
+    /// longer showing would otherwise ask for frames forever.
+    fn focus_job_export_review(
+        &mut self,
+        attempts: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.job_export_preview.is_none() {
+            return;
+        }
+        window.focus(&self.job_export_preview_focus, cx);
+        window.focus_next(cx);
+        let landed = !self.job_export_preview_focus.is_focused(window)
+            && self.job_export_preview_focus.contains_focused(window, cx);
+        if landed {
+            return;
+        }
+        window.focus(&self.job_export_preview_focus, cx);
+        if let Some(left) = attempts.checked_sub(1).filter(|left| *left > 0) {
+            cx.on_next_frame(window, move |audit, window, cx| {
+                audit.focus_job_export_review(left, window, cx);
+            });
+        }
+    }
+
+    pub(super) fn cancel_job_export_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.job_export_preview = None;
-        cx.notify();
+        Self::restore_audit_focus(window, cx);
     }
 
     /// Add a product with `main` and `detail` roles. Names come from the
@@ -810,7 +857,7 @@ impl Audit {
                 })
                 .await;
             let Some(path) = picked else { return };
-            let _ = this.update(cx, |audit, cx| {
+            let _ = this.update_in(cx, |audit, window, cx| {
                 if !audit.owns_job_request(dataset, &job_id, revision, request_generation) {
                     return;
                 }
@@ -822,8 +869,11 @@ impl Audit {
                         cx,
                     );
                 } else {
+                    // The review is gone, so the keyboard has nowhere to sit.
+                    // The list takes it back the same way Cancel and Escape
+                    // hand it back.
                     audit.job_export_preview = None;
-                    cx.notify();
+                    Self::restore_audit_focus(window, cx);
                 }
             });
         })
