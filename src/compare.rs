@@ -278,7 +278,10 @@ mod tests {
             std::env::temp_dir().join(format!("imageguide-compare-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // macOS hands out `/var/folders/...`, and `/var` is a symlink to
+        // `/private/var`. `Context` canonicalizes its roots, so a fixture that
+        // starts from the aliased spelling compares two different names.
+        dir.canonicalize().unwrap()
     }
 
     #[test]
