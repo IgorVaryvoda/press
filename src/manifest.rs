@@ -300,8 +300,18 @@ impl Stamp {
         let (root, out_dir) = roots;
         let relative_source = source.strip_prefix(root).ok()?;
         let relative_output = output.strip_prefix(out_dir).ok()?;
+        // The mirror hangs off the established output boundary, which is where
+        // the caller built the backup path from. Stripping the audited root
+        // instead would agree only by accident: a canonicalised output root and
+        // the walk's own spelling of the same folder differ on Windows, where
+        // one wears a verbatim prefix, and on macOS across `/var`.
         let backup = match backup {
-            Some(backup) => Some(backup.strip_prefix(backup_root(root)).ok()?.to_path_buf()),
+            Some(backup) => Some(
+                backup
+                    .strip_prefix(backup_root(out_dir))
+                    .ok()?
+                    .to_path_buf(),
+            ),
             None => None,
         };
         let original = std::fs::metadata(source).ok();
@@ -338,8 +348,12 @@ impl Stamp {
 
 /// Replace mode moves every original into one mirror of the audited tree, so a
 /// record stores the path under it and stays portable.
-pub fn backup_root(root: &Path) -> PathBuf {
-    root.join(crate::scan::BACKUP_DIR)
+///
+/// The argument is the established output root, not whatever spelling the walk
+/// used: every caller that names, records or restores a backup has to arrive at
+/// the same directory, and only one of the two spellings is canonical.
+pub fn backup_root(output_root: &Path) -> PathBuf {
+    output_root.join(crate::scan::BACKUP_DIR)
 }
 
 pub fn path(output_root: &Path) -> PathBuf {

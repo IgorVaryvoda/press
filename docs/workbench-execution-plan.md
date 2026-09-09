@@ -545,3 +545,60 @@ No build or test gate was run for this metadata change. The local checks were
 lockfile still matches the manifest at the new version, `cargo fmt --check` and
 `git diff --check`. The full integration gates are root's, after the CI repair
 joins.
+### September 9 replace-mode alias repair (branch `codex/workbench-ci-followup`)
+
+The Windows job for PR 6 (`102368993181`) still failed `cli_contract::replace_and_restore_round_trip_through_the_cli`
+with exit 1 and no message, after every native unit test passed. The cause was
+one folder carrying two spellings through the run: the recursive walk kept the
+path as typed (`C:\...`) while `output::Context` canonicalised it
+(`\\?\C:\...`), and every boundary derived from one was compared against the
+other. On Linux the two agree unless the folder is reached through a symlink,
+which is why local runs never saw it.
+
+| Site | Source | Fix |
+| --- | --- | --- |
+| Record | `src/manifest.rs` | `record_inner` stripped the canonical backup path against `backup_root(root)`. The mirror hangs off the output boundary the caller built the path from, so it now strips `backup_root(out_dir)`. |
+| Backup move | `src/convert.rs` | `write_inner` passed `backup_root(recording.root)` to `move_to_backup`, whose confinement check then refused its own mirror. It now passes `backup_root(recording.out_dir)`. |
+| Audited root | `src/main.rs` | The two spellings are settled once, before the walk: `audited_path` resolves the folder through the existing `scan::canonical_boundary`, so the root, every `Entry.path`, the output context, the planner's collision keys and each `Recording` share one namespace. A single file resolves only its parent and keeps the name that was typed, so replace mode still moves the chosen file rather than a final symlink's referent. A path that cannot be resolved is named and exits 2; there is no lexical fallback for a run that writes. |
+
+The first two fixes alone are not enough, and shipping them alone would have
+been worse than the original bug. With only those, a folder holding `a.png` and
+`a.webp` converts `a.png` into the name of the audited `a.webp`: the planner
+compares audited names in one spelling against planned outputs in the other, so
+the collision it exists to catch disappears. The original `a.webp` is
+overwritten, never backed up, and restore has nothing to hand back — the run
+reports the loss as a saving. The root normalization is what restores the single
+namespace those keys assume.
+
+`tests/cli_contract.rs` covers the process boundary this failed at. `assert_exit`
+prints the child's exit code, stdout and stderr, so a native-only failure names
+itself instead of being an exit code. Four cases run through a second spelling of
+the folder — a unix symlink locally, the ordinary non-verbatim path on Windows:
+the PNG round trip, one file under an aliased parent, `--format same` taking its
+own name back, and the `a.png`/`a.webp` sibling case, which asserts what the
+folder holds before what the report says. All four fail at base `4da3bcc`; the
+sibling and same-name cases still fail with the two backup fixes applied on their
+own.
+
+Local verification on Linux with `CARGO_TARGET_DIR` inside this worktree, own
+crate compiled, all exit code 0: `cargo test --locked` (625 passed, 2 ignored,
+plus 36/2/3 integration tests), `cargo test --locked --features updater` (641
+passed, 3 ignored), `cargo clippy --locked --all-targets --all-features -- -D
+warnings`, `cargo fmt --check` and `git diff --check`. Logs are under
+`ux/resume-ci-replace-finish-*.log`.
+
+Only Linux was executed. The Windows and macOS behaviour is argued from the
+remote log and from the locally reproduced equivalent, not observed: native proof
+stays pending on the next remote CI run, which has to be pushed before any
+all-platform claim.
+
+No window change was needed. Every production entry into the audit normalizes
+first: `request_path` resolves a single opened path through `navigation_path`,
+and `request_paths` maps the same resolver over every dropped or picked path
+before `batch_root` derives a root from them, so the multi-item drop reaches
+`request_folders`/`request_files` with its root and its paths already in one
+canonical spelling. `build_audit` resolves its launch root the same way, and the
+window's own launch carries no entries.
+
+The browser producer H1 has landed on the extension's `main` at `2e56550` and
+PR 3 passes all checks. Nothing about H2 or H3 follows from that.

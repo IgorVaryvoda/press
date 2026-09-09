@@ -1181,6 +1181,38 @@ fn walk_output(target: &Path, chosen: Option<&Path>) -> PathBuf {
     }
 }
 
+/// The audited path in the one spelling every later boundary uses.
+///
+/// A folder resolves outright. A single file resolves only its parent and keeps
+/// the name that was typed: following a final symlink would point the run at the
+/// referent instead of the file that was chosen, and in replace mode that moves
+/// somebody else's file, possibly from outside the folder. The parent is all the
+/// root and the source have to agree on, because the root is what a record
+/// spells its source relative to.
+///
+/// The kernel does the resolving, not a lexical walk. `link/../photo.png` names
+/// the parent of what the link points at, and dropping the `..` against the
+/// typed spelling first names a different folder: the run would then audit and
+/// replace files under `link`'s own parent, which is not the folder that was
+/// asked for. The target is already known to exist here, so this only ever
+/// resolves a path the caller can reach.
+fn audited_path(target: &Path, open_single: bool) -> std::io::Result<PathBuf> {
+    if !open_single {
+        return std::fs::canonicalize(target);
+    }
+    let name = target.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path does not name a file",
+        )
+    })?;
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Ok(std::fs::canonicalize(parent)?.join(name))
+}
+
 /// The counts a run only mentions when they happened. Zero skipped and zero failed
 /// is the ordinary case and does not need saying.
 fn run_tail(skipped: usize, failed: usize) -> String {
@@ -2633,9 +2665,24 @@ fn main() {
         );
     }
 
+    // Everything downstream of the walk derives its boundary from the canonical
+    // spelling: the output context, the collision keys that protect audited
+    // originals, the run record and the backup mirror. Resolving the audited path
+    // once, before the walk, is what makes those one namespace. An alias left in
+    // place is a second one, and the two never meet: `a.png` stops colliding with
+    // the audited `a.webp` beside it, a WebP replaced by a WebP stops recognising
+    // its own name, and a replace run overwrites an original it never backed up.
+    // The typed path stays the one every report names.
+    let audited = match audited_path(&target, open_single) {
+        Ok(audited) => audited,
+        Err(error) => {
+            eprintln!("press: could not resolve {}: {error}", target.display());
+            std::process::exit(2);
+        }
+    };
     let (scanned, root) = if open_single {
-        let parent = target.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let Some(entry) = scan::probe(&target) else {
+        let parent = audited.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let Some(entry) = scan::probe(&audited) else {
             eprintln!("press: {} is not an image", target.display());
             std::process::exit(2);
         };
@@ -2652,17 +2699,14 @@ fn main() {
             parent,
         )
     } else if args.subfolders {
-        let output = walk_output(&target, args.output.as_deref());
-        (scan::scan(&target, &output), target.clone())
+        let output = walk_output(&audited, args.output.as_deref());
+        (scan::scan(&audited, &output), audited.clone())
     } else {
-        // The one-level read names files by their canonical root, so the root
-        // follows it or the listing would lose its relative spelling.
-        let output = walk_output(&target, args.output.as_deref());
-        match scan::browse(&target, &output) {
-            Ok(browsed) => (
-                browsed.scan,
-                scan::canonical_boundary(&target).unwrap_or_else(|_| target.clone()),
-            ),
+        // The one-level read names files by their canonical root, which the walk
+        // already starts from, or the listing would lose its relative spelling.
+        let output = walk_output(&audited, args.output.as_deref());
+        match scan::browse(&audited, &output) {
+            Ok(browsed) => (browsed.scan, audited.clone()),
             Err(error) => {
                 eprintln!("press: {}: {error}", target.display());
                 std::process::exit(2);

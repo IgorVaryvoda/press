@@ -1340,7 +1340,7 @@ fn write_inner_with_hook(
             && let Err(failure) = move_to_backup(
                 source,
                 &backup.path,
-                &crate::manifest::backup_root(recording.root),
+                &crate::manifest::backup_root(recording.out_dir),
             )
         {
             let _ = std::fs::remove_file(&partial);

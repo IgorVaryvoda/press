@@ -37,13 +37,19 @@ fn chunk(kind: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {
 /// Deterministic 8x8 RGB noise: flat colours compress to nothing and would
 /// let a conversion report zero bytes without proving anything moved.
 fn photo_png() -> Vec<u8> {
+    photo_png_seeded(0)
+}
+
+/// The same noise shifted, so two fixtures that share a name still differ byte
+/// for byte and a test can say which of them a run actually read.
+fn photo_png_seeded(seed: u32) -> Vec<u8> {
     let mut raw = Vec::new();
     for y in 0..8u32 {
         raw.push(0u8);
         for x in 0..8u32 {
-            raw.push(((x * 37 + y * 91) % 251) as u8);
-            raw.push(((x * 11 + y * 53) % 251) as u8);
-            raw.push(((x * 7 + y * 13) % 251) as u8);
+            raw.push(((x * 37 + y * 91 + seed) % 251) as u8);
+            raw.push(((x * 11 + y * 53 + seed) % 251) as u8);
+            raw.push(((x * 7 + y * 13 + seed) % 251) as u8);
         }
     }
     assert!(raw.len() <= 0xFFFF, "one stored block holds the fixture");
@@ -94,6 +100,20 @@ fn stdout_json(output: &Output) -> serde_json::Value {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A child process that refuses has already said why on stdout or stderr.
+/// Asserting the code alone throws that sentence away, which is the whole
+/// diagnosis when the failure only happens on a runner nobody can attach to.
+fn assert_exit(output: &Output, code: i32, what: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "{what} exited {:?}\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        stderr(output)
+    );
 }
 
 #[test]
@@ -337,27 +357,364 @@ fn skip_existing_skips_a_managed_output_and_a_legacy_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A second spelling of the same folder, which is what a replace run is really
+/// handed: the audited root keeps whatever was typed while the output boundary
+/// is canonical, and the two disagree without either being wrong. A unix
+/// symlink splits them here; on Windows the ordinary path below is already the
+/// split, because canonicalising it adds the `\\?\` prefix it never had.
+#[cfg(unix)]
+fn aliased(dir: &Path) -> PathBuf {
+    let alias = dir.with_file_name(format!(
+        "{}-alias",
+        dir.file_name()
+            .expect("the fixture dir is named")
+            .to_string_lossy()
+    ));
+    let _ = std::fs::remove_file(&alias);
+    std::os::unix::fs::symlink(dir, &alias).expect("the alias points at the fixture");
+    alias
+}
+
+#[cfg(not(unix))]
+fn aliased(dir: &Path) -> PathBuf {
+    dir.to_path_buf()
+}
+
+fn clean_up(dir: &Path, alias: &Path) {
+    if alias != dir {
+        let _ = std::fs::remove_file(alias);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A real encoded WebP, made by the tool itself in a folder of its own. The
+/// fixtures here are hand-rolled PNGs, and a source that already carries the
+/// output format is the only way to reach the case where a converted file takes
+/// its own name back.
+fn seeded_webp(dir: &Path, name: &str) -> PathBuf {
+    let seed = workdir(&format!("seed-{}", name.replace('.', "-")));
+    photo(&seed, "seed.png");
+    assert_exit(&run(&["convert", &seed.to_string_lossy()]), 0, "seeding");
+    let path = dir.join(name);
+    std::fs::copy(seed.join("optimized").join("seed.webp"), &path)
+        .expect("the encoded fixture is copied");
+    let _ = std::fs::remove_dir_all(&seed);
+    path
+}
+
+/// The whole replace contract through one spelling of the folder: every audited
+/// original ends up in the mirror untouched, every output the run names is
+/// installed, and the restore puts each original back byte for byte and takes
+/// the outputs away again. Which name an output takes is read out of the run's
+/// own report, because it differs when the format stays the same.
+fn replace_and_restore_round_trip(
+    dir: &Path,
+    names: &[&str],
+    target: &str,
+    extra: &[&str],
+    restore_target: &str,
+) -> serde_json::Value {
+    let originals: Vec<Vec<u8>> = names
+        .iter()
+        .map(|name| std::fs::read(dir.join(name)).expect("the fixture reads back"))
+        .collect();
+    let mut args = vec!["convert", target, "--replace", "--json"];
+    args.extend_from_slice(extra);
+    let converted = run(&args);
+    assert_exit(&converted, 0, "replace");
+    let report = stdout_json(&converted);
+    let files = report["files"].as_array().expect("files list").clone();
+    assert_eq!(files.len(), names.len());
+    let installed: Vec<PathBuf> = files
+        .iter()
+        .map(|file| {
+            assert_eq!(file["status"], "converted", "{}", stderr(&converted));
+            let output = PathBuf::from(
+                file["output"]
+                    .as_str()
+                    .expect("a converted file names its output"),
+            );
+            assert!(output.is_file(), "{} is installed", output.display());
+            output
+        })
+        .collect();
+    for (name, original) in names.iter().zip(&originals) {
+        assert_eq!(
+            &std::fs::read(dir.join("press-originals").join(name))
+                .unwrap_or_else(|error| panic!("{name} is parked in the mirror: {error}")),
+            original,
+            "the backup holds {name} untouched"
+        );
+    }
+    assert_exit(&run(&["restore", restore_target]), 0, "restore");
+    for (name, original) in names.iter().zip(&originals) {
+        assert_eq!(
+            &std::fs::read(dir.join(name))
+                .unwrap_or_else(|error| panic!("{name} comes back out of the mirror: {error}")),
+            original,
+            "the restored {name} is the original, not an intermediate"
+        );
+    }
+    // Which restored names to expect back is worked out against the canonical
+    // fixture root, because that is the spelling the report writes its outputs
+    // in: Windows adds a `\\?\` prefix the fixture path never had, and an
+    // original restored over its own name would read as an extra generated
+    // output this run had to take away.
+    let restored = dir.canonicalize().expect("the fixture folder resolves");
+    for output in installed {
+        if !names.iter().any(|name| restored.join(name) == output) {
+            assert!(
+                !output.exists(),
+                "{} is taken away with the original back",
+                output.display()
+            );
+        }
+    }
+    report
+}
+
 #[test]
 fn replace_and_restore_round_trip_through_the_cli() {
     let dir = workdir("replace");
     photo(&dir, "shot.png");
     let target = dir.to_string_lossy().into_owned();
-    assert_eq!(
-        run(&["convert", &target, "--replace"]).status.code(),
-        Some(0)
-    );
-    assert!(
-        !dir.join("shot.png").exists(),
-        "replace takes the original's name"
-    );
-    assert!(dir.join("shot.webp").is_file());
-    assert!(dir.join("press-originals").join("shot.png").is_file());
-    assert_eq!(run(&["restore", &target]).status.code(), Some(0));
-    assert!(
-        dir.join("shot.png").is_file(),
-        "restore hands the original back"
-    );
+    replace_and_restore_round_trip(&dir, &["shot.png"], &target, &[], &target);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same round trip through the other spelling. The audited root, the output
+/// context, the collision keys and the backup mirror have to be one namespace,
+/// or the run refuses every file as outside the output folder.
+#[test]
+fn replace_and_restore_round_trip_through_a_second_spelling_of_the_root() {
+    let dir = workdir("replace-alias");
+    photo(&dir, "shot.png");
+    let alias = aliased(&dir);
+    let target = alias.to_string_lossy().into_owned();
+    replace_and_restore_round_trip(&dir, &["shot.png"], &target, &[], &target);
+    clean_up(&dir, &alias);
+}
+
+/// One file named through an aliased parent. Only the parent is resolved: the
+/// file keeps the name that was typed, so replace mode still moves the file that
+/// was chosen rather than whatever a final symlink points at.
+#[test]
+fn replace_and_restore_round_trip_for_one_file_under_a_second_spelling() {
+    let dir = workdir("replace-file");
+    photo(&dir, "shot.png");
+    let alias = aliased(&dir);
+    replace_and_restore_round_trip(
+        &dir,
+        &["shot.png"],
+        &alias.join("shot.png").to_string_lossy(),
+        &[],
+        &alias.to_string_lossy(),
+    );
+    clean_up(&dir, &alias);
+}
+
+/// `typed/link` points one level down a real tree, so `typed/link/..` names
+/// `actual` to the kernel and `typed` to a lexical walk that drops the link and
+/// its `..` together. Both folders exist and hold a file of the same name, so
+/// which one a run resolved is visible in what it converted.
+#[cfg(unix)]
+fn linked_parent_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let base = workdir(tag);
+    let actual = base.join("actual");
+    std::fs::create_dir_all(actual.join("sub")).expect("the linked-to folder is created");
+    let typed = base.join("typed");
+    std::fs::create_dir_all(&typed).expect("the folder holding the link is created");
+    std::os::unix::fs::symlink(actual.join("sub"), typed.join("link"))
+        .expect("the link points one level down the real tree");
+    (base, actual, typed)
+}
+
+/// The decoy the lexical spelling would have picked: same name, different
+/// bytes, and it must come out of the run exactly as it went in.
+#[cfg(unix)]
+fn decoy(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, photo_png_seeded(97)).expect("the decoy image is written");
+    path
+}
+
+/// Nothing was converted, replaced or backed up in the folder the run never
+/// audited, and the decoy is the same file it was.
+#[cfg(unix)]
+fn decoy_untouched(typed: &Path, decoy: &Path, before: &[u8]) {
+    assert_eq!(
+        std::fs::read(decoy).expect("the decoy is still there"),
+        before,
+        "the folder the kernel never named keeps its file untouched"
+    );
+    assert!(
+        !typed.join("press-originals").exists(),
+        "no original was parked in the folder the run never audited"
+    );
+    assert!(
+        !typed.join("photo.webp").exists(),
+        "no output was installed in the folder the run never audited"
+    );
+    assert!(
+        !typed.join("optimized").exists(),
+        "no output folder was made in the folder the run never audited"
+    );
+}
+
+/// A folder named through a link's parent. `..` is the kernel's to resolve:
+/// removing it from the typed spelling first names the link's own parent, and
+/// the run then audits and replaces files in a folder nobody asked for.
+#[cfg(unix)]
+#[test]
+fn a_folder_named_through_a_linked_parent_is_the_one_the_kernel_names() {
+    let (base, actual, typed) = linked_parent_fixture("replace-linked-parent");
+    photo(&actual, "photo.png");
+    let decoy_path = decoy(&typed, "photo.png");
+    let before = std::fs::read(&decoy_path).expect("the decoy reads back");
+    let target = typed.join("link").join("..").to_string_lossy().into_owned();
+    let report = replace_and_restore_round_trip(&actual, &["photo.png"], &target, &[], &target);
+    let source = report["files"][0]["source"]
+        .as_str()
+        .expect("the converted file names its source")
+        .to_owned();
+    let resolved = actual.canonicalize().expect("the audited folder resolves");
+    assert_eq!(
+        PathBuf::from(source),
+        resolved.join("photo.png"),
+        "the run names the file the kernel reaches, not the lexical one"
+    );
+    decoy_untouched(&typed, &decoy_path, &before);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The same resolution for one file: only the parent is resolved, but it is
+/// resolved by the kernel, so the file that is opened is the one the typed path
+/// actually reaches.
+#[cfg(unix)]
+#[test]
+fn one_file_named_through_a_linked_parent_is_the_one_the_kernel_names() {
+    let (base, actual, typed) = linked_parent_fixture("replace-linked-parent-file");
+    photo(&actual, "photo.png");
+    let decoy_path = decoy(&typed, "photo.png");
+    let before = std::fs::read(&decoy_path).expect("the decoy reads back");
+    let parent = typed.join("link").join("..");
+    let report = replace_and_restore_round_trip(
+        &actual,
+        &["photo.png"],
+        &parent.join("photo.png").to_string_lossy(),
+        &[],
+        &parent.to_string_lossy(),
+    );
+    let source = report["files"][0]["source"]
+        .as_str()
+        .expect("the converted file names its source")
+        .to_owned();
+    let resolved = actual.canonicalize().expect("the audited folder resolves");
+    assert_eq!(
+        PathBuf::from(source),
+        resolved.join("photo.png"),
+        "the file opened is the one the parent link reaches"
+    );
+    decoy_untouched(&typed, &decoy_path, &before);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A WebP replaced by a WebP writes its own name back, which is only safe
+/// because the original is in the mirror first. Recognising that name means
+/// comparing the source with the planned output, and across two spellings of
+/// one folder they never look equal: the write then treats its own installed
+/// output as somebody else's file and refuses it as changed after planning.
+#[test]
+fn replace_keeps_its_own_name_through_a_second_spelling_of_the_root() {
+    let dir = workdir("replace-same");
+    seeded_webp(&dir, "shot.webp");
+    let alias = aliased(&dir);
+    let target = alias.to_string_lossy().into_owned();
+    let report = replace_and_restore_round_trip(
+        &dir,
+        &["shot.webp"],
+        &target,
+        &["--format", "same"],
+        &target,
+    );
+    let output = report["files"][0]["output"]
+        .as_str()
+        .expect("the converted file names its output");
+    assert!(
+        output.ends_with("shot.webp"),
+        "the output takes its own name back: {output}"
+    );
+    clean_up(&dir, &alias);
+}
+
+/// `a.png` converting to WebP asks for the name of the audited `a.webp` beside
+/// it. That file is an original nobody selected, so the planner refuses `a.png`
+/// and converts the sibling on its own terms: the folder keeps both originals,
+/// one untouched on disk and one in the mirror.
+///
+/// Reading the audited names in one spelling and the planned outputs in another
+/// loses the collision outright. The run then writes `a.png`'s output over
+/// `a.webp`, never backs that file up, and restore has nothing to hand back —
+/// the run reports a saving for a file it destroyed.
+#[test]
+fn a_replace_run_never_overwrites_an_audited_sibling_through_a_second_spelling() {
+    let dir = workdir("replace-sibling");
+    photo(&dir, "a.png");
+    seeded_webp(&dir, "a.webp");
+    let png = std::fs::read(dir.join("a.png")).expect("the png reads back");
+    let webp = std::fs::read(dir.join("a.webp")).expect("the webp reads back");
+    let alias = aliased(&dir);
+    let target = alias.to_string_lossy().into_owned();
+    let output = run(&["convert", &target, "--replace", "--json"]);
+    // A refused file is work left, and the run says so in its status.
+    assert_exit(&output, 1, "replace");
+    let report = stdout_json(&output);
+    let files = report["files"].as_array().expect("files list");
+    assert_eq!(files.len(), 2);
+    let listed = |name: &str| {
+        files
+            .iter()
+            .find(|file| {
+                file["source"]
+                    .as_str()
+                    .is_some_and(|source| source.ends_with(name))
+            })
+            .unwrap_or_else(|| panic!("{name} is listed: {report}"))
+    };
+    // What the folder holds is asserted before what the report says: a lost
+    // original is the failure worth naming first.
+    assert_eq!(
+        std::fs::read(dir.join("a.png")).expect("the refused original is still there"),
+        png,
+        "a file the planner refused is left exactly as it was"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("press-originals").join("a.webp"))
+            .expect("the converted sibling's original is in the mirror"),
+        webp
+    );
+    assert_eq!(listed("a.png")["status"], "failed");
+    assert_eq!(
+        listed("a.png")["error"],
+        "the output would overwrite a source image",
+        "the refusal names the reason it refused"
+    );
+    assert_eq!(
+        listed("a.webp")["status"],
+        "converted",
+        "{}",
+        stderr(&output)
+    );
+    assert_exit(&run(&["restore", &target]), 0, "restore");
+    assert_eq!(
+        std::fs::read(dir.join("a.webp")).expect("the original webp comes back"),
+        webp
+    );
+    assert_eq!(
+        std::fs::read(dir.join("a.png")).expect("the png never moved"),
+        png
+    );
+    clean_up(&dir, &alias);
 }
 
 fn handoff_fixture(dir: &Path) -> PathBuf {
