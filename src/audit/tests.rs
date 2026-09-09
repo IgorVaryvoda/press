@@ -801,8 +801,13 @@ fn a_replace_result_finds_the_backup_through_a_symlinked_root(cx: &mut TestAppCo
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A comparison is a claim about what a run would write, so every one of them is
+/// built from the file it names. There is no pair built ahead and none reused:
+/// arrowing through a folder re-encodes at each step, which for AVIF is seconds per
+/// image, because the alternative is handing over pixels on the strength of a size
+/// and a timestamp that a replaced file of the same length still matches.
 #[gpui_kit::test]
-fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext) {
+fn every_comparison_is_built_from_its_own_source(cx: &mut TestAppContext) {
     let folder =
         std::env::temp_dir().join(format!("press-compare-prefetch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&folder);
@@ -862,21 +867,34 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
                 .as_ref()
                 .is_some_and(|comparison| comparison.pair.is_some())
         );
-        assert_eq!(
-            audit.ahead.as_ref().map(|(key, _)| key.path.clone()),
-            Some(next_path.clone())
+        assert!(
+            audit.ahead.is_none() && audit.prefetch_key.is_none(),
+            "no comparison is speculated ahead of the cursor"
         );
     });
 
+    // Stepping shows the loading frame first: the next pair has to be built.
     audit.update(cx, |audit, cx| audit.step_compare(1, cx));
     audit.read_with(cx, |audit, _| {
         let comparison = audit.compare.as_ref().expect("the comparison stays open");
         assert_eq!(comparison.index, second);
-        assert!(comparison.pair.is_some());
+        assert!(comparison.pair.is_none() && !comparison.failed);
+        assert_eq!(comparison.key.path, next_path);
+    });
+    cx.executor()
+        .advance_clock(COMPARE_DELAY + Duration::from_millis(50));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        let comparison = audit.compare.as_ref().expect("the comparison stays open");
+        let pair = comparison.pair.as_ref().expect("the next pair is built");
+        // Built from the file the view names, and it says which bytes those were.
         assert_eq!(
-            audit.cached.as_ref().map(|(key, _)| key.path.clone()),
-            Some(next_path.clone())
+            pair.source,
+            crate::manifest::SourceIdentity::from_bytes(
+                &std::fs::read(&next_path).expect("the fixture is readable")
+            )
         );
+        assert!(audit.cached.is_none(), "no pair is kept for reuse");
     });
 
     let optimized = folder.join(scan::OUTPUT_DIR);
@@ -898,16 +916,25 @@ fn the_next_pair_is_built_before_navigation_asks_for_it(cx: &mut TestAppContext)
         cx.run_until_parked();
     }
     audit.read_with(cx, |audit, _| {
-        assert_eq!(
-            audit.ahead.as_ref().map(|(key, _)| key.path.clone()),
-            Some(next_output)
-        );
+        assert!(audit.ahead.is_none(), "no result pair is speculated either");
     });
     audit.update(cx, |audit, cx| audit.step_compare(1, cx));
+    cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
         let comparison = audit.compare.as_ref().expect("the results view stays open");
         assert_eq!(comparison.index, second);
-        assert!(comparison.pair.is_some());
+        let pair = comparison
+            .pair
+            .as_ref()
+            .expect("the next result is read back");
+        // The installed output, read off disk and named by its own bytes — never
+        // an encode standing in for it.
+        assert_eq!(
+            pair.written,
+            Some(crate::manifest::SourceIdentity::from_bytes(
+                &std::fs::read(&next_output).expect("the output is readable")
+            ))
+        );
     });
 
     let _ = std::fs::remove_dir_all(&folder);
@@ -972,9 +999,10 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
         let comparison = audit.compare.as_ref().expect("the preview stays open");
         assert_eq!(comparison.index, second);
         assert!(
-            audit.prefetch_key.as_ref().is_some_and(|(key, mode)| {
-                key.path == second_path && *mode == MediaMode::Preview
-            })
+            audit
+                .prefetch_key
+                .as_ref()
+                .is_some_and(|key| key.path == second_path)
         );
     });
 
@@ -984,16 +1012,19 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| {
         let comparison = audit.compare.as_ref().expect("the preview stays open");
         assert!(comparison.preview.is_some());
-        assert!(audit.cached.as_ref().is_some_and(|(key, media)| {
-            key.path == second_path && matches!(media, CachedMedia::Preview(_))
-        }));
+        assert!(
+            audit
+                .cached
+                .as_ref()
+                .is_some_and(|(key, _)| key.path == second_path)
+        );
     });
 
     cx.executor()
         .advance_clock(PREVIEW_DELAY + Duration::from_millis(50));
     cx.run_until_parked();
     let prefetched = audit.read_with(cx, |audit, _| match audit.ahead.as_ref() {
-        Some((key, CachedMedia::Preview(preview))) if key.path == third_path => preview.clone(),
+        Some((key, preview)) if key.path == third_path => preview.clone(),
         _ => panic!("the next full-resolution preview is ready"),
     });
 
@@ -3017,8 +3048,6 @@ fn a_running_ai_job_overlays_only_its_own_preview(cx: &mut TestAppContext) {
                 image,
                 width: 1000,
                 height: 1000,
-                profile: None,
-                decoded: false,
             })),
             pair: None,
             failed: false,
@@ -6716,6 +6745,142 @@ fn settle_estimate(cx: &mut gpui_kit::VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// The estimate holds prepared pixels so a slider stop re-encodes instead of
+/// reading and decoding the same file again. Pixels carry no timestamp: the file
+/// behind them can be replaced by one of the same length inside a single filesystem
+/// tick, and the projection would then describe an image nobody has. The hold is
+/// checked against the bytes on disk, not against a stat.
+#[gpui_kit::test]
+fn a_replaced_source_of_the_same_length_is_not_estimated_from_the_held_decode(
+    cx: &mut TestAppContext,
+) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let path = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
+
+    // Two real 8x8 PNGs of the same length. Nothing reads past IEND, so the shorter
+    // is padded rather than tuned into a coincidence.
+    let png = |shift: u8| {
+        let mut bytes = Vec::new();
+        let source = crate::convert::tests::photo(8, 8).to_rgb8();
+        image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(8, 8, |x, y| {
+            let pixel = source.get_pixel(x, y);
+            image::Rgb([pixel[0].wrapping_add(shift), pixel[1], pixel[2]])
+        }))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+        .expect("the fixture encodes");
+        bytes
+    };
+    let (mut before, mut after) = (png(0), png(101));
+    let length = before.len().max(after.len());
+    before.resize(length, 0);
+    after.resize(length, 0);
+    assert_ne!(before, after);
+    std::fs::write(&path, &before).expect("the fixture is written");
+    let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+    audit.update(cx, |audit, cx| audit.schedule_estimate(cx));
+    settle_estimate(cx);
+    let (_, held) = audit.read_with(cx, |audit, _| sampled_decode(audit));
+    assert_eq!(
+        held.identity,
+        crate::manifest::SourceIdentity::from_bytes(&before)
+    );
+
+    // A quality-only change is the case the hold exists for: the same bytes, so the
+    // same pixels, not a second decode.
+    audit.update(cx, |audit, cx| {
+        audit.quality = Quality::lossy(40.);
+        audit.schedule_estimate(cx);
+    });
+    settle_estimate(cx);
+    let (_, reused) = audit.read_with(cx, |audit, _| sampled_decode(audit));
+    assert!(
+        Arc::ptr_eq(&held, &reused),
+        "an unchanged source re-encodes the pixels it already decoded"
+    );
+
+    std::fs::write(&path, &after).expect("the same name carries new pixels");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(stamp)
+        .expect("the old timestamp is put back");
+    assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, length);
+
+    audit.update(cx, |audit, cx| audit.schedule_estimate(cx));
+    settle_estimate(cx);
+    let (_, fresh) = audit.read_with(cx, |audit, _| sampled_decode(audit));
+    assert!(
+        !Arc::ptr_eq(&held, &fresh),
+        "the estimate reused pixels from a file that is no longer there"
+    );
+    assert_eq!(
+        fresh.identity,
+        crate::manifest::SourceIdentity::from_bytes(&after)
+    );
+    // And the number it projects is the number the writer produces. One file is one
+    // slice, so the projection is that slice's own encoded length rather than an
+    // average borrowed from anything: the oracle is a real conversion of the file on
+    // disk now, written and measured off disk, at the recipe the estimate captured.
+    let (format, quality, max_edge, projected, counted) = audit.read_with(cx, |audit, _| {
+        let (projected, counted, refused) =
+            audit.estimate.expect("the replaced source still projects");
+        assert_eq!(refused, 0);
+        (
+            audit.format,
+            audit.quality,
+            audit.max_edge,
+            projected,
+            counted,
+        )
+    });
+    assert_eq!(counted, 1);
+    let out_dir = path
+        .parent()
+        .expect("the fixture sits in the audited root")
+        .join(scan::OUTPUT_DIR);
+    let written = out_dir.join("oracle.webp");
+    let run = convert::convert_to(&out_dir, &path, &written, None, format, quality, max_edge)
+        .expect("the writer converts the replaced source");
+    assert_eq!(
+        run.bytes,
+        std::fs::metadata(&written)
+            .expect("the oracle output is on disk")
+            .len()
+    );
+    assert!(
+        projected.abs_diff(run.bytes) <= 1,
+        "the estimate projected {projected} bytes for a file the writer makes {} bytes",
+        run.bytes
+    );
+
+    // The oracle only means something if the two versions of the file encode to
+    // different sizes. Convert the bytes that were replaced, from a scratch copy, and
+    // check the projection could not have satisfied both.
+    let stale_source = out_dir.join("stale-source.png");
+    std::fs::create_dir_all(&out_dir).expect("the oracle folder exists");
+    std::fs::write(&stale_source, &before).expect("the replaced bytes are kept for the oracle");
+    let stale = convert::convert_to(
+        &out_dir,
+        &stale_source,
+        &out_dir.join("stale.webp"),
+        None,
+        format,
+        quality,
+        max_edge,
+    )
+    .expect("the writer converts the replaced bytes too");
+    assert_ne!(
+        run.bytes, stale.bytes,
+        "the fixture's two versions encode to the same size, so this proves nothing"
+    );
+    assert!(
+        projected.abs_diff(stale.bytes) > 1,
+        "the estimate projected the size of the file that is no longer there"
+    );
+}
+
 #[gpui_kit::test]
 fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_them(
     cx: &mut TestAppContext,
@@ -6725,7 +6890,7 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
     audit.update(cx, |audit, cx| audit.schedule_estimate(cx));
     settle_estimate(cx);
     let (key, decoded) = audit.read_with(cx, |audit, _| sampled_decode(audit));
-    assert_eq!(decoded.0.width(), 8);
+    assert_eq!(decoded.image.width(), 8);
     audit.read_with(cx, |audit, _| {
         assert!(
             audit
@@ -6758,7 +6923,7 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
         !Arc::ptr_eq(&decoded, &redecoded),
         "a max edge change is a different image and has to be decoded again"
     );
-    assert_eq!(redecoded.0.width(), 4);
+    assert_eq!(redecoded.image.width(), 4);
     audit.read_with(cx, |audit, _| {
         assert!(
             audit
@@ -7916,6 +8081,8 @@ fn comparison_grip_and_canvas_own_pointer_and_keyboard_input(cx: &mut TestAppCon
                 converted_bytes: 12,
                 width: 800,
                 height: 1600,
+                source: crate::manifest::SourceIdentity::from_bytes(b"source"),
+                written: None,
             })),
             failed: false,
             split: 0.5,

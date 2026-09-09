@@ -510,6 +510,9 @@ impl Audit {
         }
 
         let (format, quality, max_edge) = (self.format, self.quality, self.max_edge);
+        // Frozen with the rest of the recipe. A projection quoted at one speed and a
+        // run written at another are two answers to one question.
+        let avif_speed = crate::avif::speed();
         let slices = sample_size(format).min(targets.len());
         let weights: Vec<u64> = targets
             .iter()
@@ -589,48 +592,51 @@ impl Audit {
                     inflight.push(cx.background_executor().spawn(async move {
                         // Only the encode depends on quality, so a slider stop
                         // re-encodes the pixels the last one decoded rather than
-                        // reading and decoding the same file again. The profile
-                        // travels with them: estimating without it under-reports
-                        // every output by the size the writer will attach.
+                        // reading and decoding the same file again — but only after
+                        // proving the file behind them is still the file they came
+                        // from. A held decode is pixels with no timestamp; the
+                        // identity it was read with is the only thing that can say
+                        // so, and a mismatch prepares the bytes on disk now.
                         let key = (dataset_generation, path.clone(), max_edge);
-                        let cached = decodes.lock().get(&key).cloned();
-                        let decoded = match cached {
-                            Some(sample) => Some(sample),
-                            None => scan::decode_for_conversion(&path, max_edge).ok().map(
-                                |(image, profile)| {
-                                    let sample = Arc::new((max_edge.apply(image), profile));
-                                    let mut cache = decodes.lock();
-                                    let held: u64 = cache.values().map(decoded_bytes).sum();
-                                    if held + decoded_bytes(&sample) <= ESTIMATE_DECODE_BYTES {
-                                        cache.insert(key, sample.clone());
-                                    }
-                                    sample
-                                },
-                            ),
+                        // The lock is held for the clone and nothing else. Hashing
+                        // the file is a bounded disk read, and the window prunes
+                        // this map on the main thread: holding the guard across the
+                        // read would let a slider drag wait on the filesystem.
+                        let held: Option<SampledDecode> = {
+                            let cache = decodes.lock();
+                            cache.get(&key).cloned()
+                        };
+                        let cached = held.filter(|sample| sample.identity.matches_path(&path));
+                        let prepared = match cached {
+                            Some(sample) => Ok(sample),
+                            None => convert::prepare(&path, max_edge).map(|prepared| {
+                                let sample = Arc::new(prepared);
+                                let mut cache = decodes.lock();
+                                let resident: u64 = cache
+                                    .iter()
+                                    .filter(|(entry, _)| **entry != key)
+                                    .map(|(_, sample)| decoded_bytes(sample))
+                                    .sum();
+                                if resident + decoded_bytes(&sample) <= ESTIMATE_DECODE_BYTES {
+                                    cache.insert(key, sample.clone());
+                                } else {
+                                    // A stale hold for this key must not survive its
+                                    // replacement just because the budget is full.
+                                    cache.remove(&key);
+                                }
+                                sample
+                            }),
                         };
                         // The same verdict the run would give, so the total never
                         // projects success across a file the recipe refuses. A
                         // backend failure is not a verdict — that sample stays
                         // unknown and borrows the average, as before.
-                        let outcome = match decoded.zip(format.resolve(&path).ok()) {
-                            Some((sample, format)) => {
-                                match convert::check_lossless_depth(&sample.0, format, quality)
-                                    .and_then(|()| convert::check_image_budget(&sample.0))
-                                    .and_then(|()| {
-                                        convert::encode(
-                                            &sample.0,
-                                            format,
-                                            quality,
-                                            sample.1.as_deref(),
-                                        )
-                                        .map(|encoded| encoded.len() as u64)
-                                    }) {
-                                    Ok(encoded) => SampleOutcome::Encoded(bytes, encoded),
-                                    Err(convert::Failure::Failed) => SampleOutcome::Unknown,
-                                    Err(_) => SampleOutcome::Refused,
-                                }
-                            }
-                            None => SampleOutcome::Unknown,
+                        let outcome = match prepared.and_then(|sample| {
+                            convert::encode_prepared(&sample, &path, format, quality, avif_speed)
+                        }) {
+                            Ok((_, encoded)) => SampleOutcome::Encoded(bytes, encoded.len() as u64),
+                            Err(convert::Failure::Failed) => SampleOutcome::Unknown,
+                            Err(_) => SampleOutcome::Refused,
                         };
                         (slice_bytes, outcome)
                     }));

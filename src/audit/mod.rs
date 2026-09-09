@@ -75,7 +75,6 @@ use gpui_kit::{
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
     uniform_list,
 };
-use image::DynamicImage;
 
 struct ErrorToast;
 
@@ -147,11 +146,15 @@ pub(crate) fn sample_size(format: Format) -> usize {
     }
 }
 
-/// The decoded pixels behind the estimate's sample, keyed by the dataset, the source
-/// path and the max edge: the three things that change what a decode produces.
+/// The prepared pixels behind the estimate's sample, keyed by the dataset, the
+/// source path and the max edge: the three things that change what a decode
+/// produces.
 type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), SampledDecode>>>;
-/// One decoded sample: its pixels and the colour profile the writer will attach.
-type SampledDecode = Arc<(DynamicImage, Option<Vec<u8>>)>;
+/// One prepared sample: the same preparation the writer performs, so the estimate
+/// keeps the profile, the depth, the container the decoder identified, and the
+/// identity of the bytes it read. That last one is what lets a reuse be checked
+/// rather than assumed.
+type SampledDecode = Arc<crate::scan::DecodedSource>;
 
 /// The most decoded sample the estimate may hold on to. A sample is at most 32
 /// images, and re-decoding one costs a fraction of a second, so past this the cache
@@ -160,7 +163,7 @@ const ESTIMATE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Resident cost of one decoded sample.
 fn decoded_bytes(sample: &SampledDecode) -> u64 {
-    let image = &sample.0;
+    let image = &sample.image;
     u64::from(image.width())
         * u64::from(image.height())
         * u64::from(image.color().bytes_per_pixel())
@@ -680,22 +683,27 @@ pub(crate) struct Audit {
     /// newer revision and replaces this, so a whole resize drag needs one task
     /// and one write, and an older task can never land after a flush.
     pending_settings: Option<(u64, settings::Settings)>,
-    /// The last full-resolution preview or pair, kept so reopening it is instant.
-    // ponytail: one entry. A pair holds two full-size RGBA buffers — 165 MB for a
-    // 5568x3712 photo — so a bigger cache would need a byte budget, not a count.
-    cached: Option<(compare::Key, CachedMedia)>,
-    /// The media for the file the arrow key is about to ask for, built while you
-    /// look at the current one. `PREFETCH_BUDGET` bounds this second slot.
-    ahead: Option<(compare::Key, CachedMedia)>,
+    /// The last full-resolution preview, kept so reopening it is instant.
+    //
+    // Previews only. A completed pair used to live here too, and a stat-based key
+    // cannot prove the file behind it is still the file it was built from, so
+    // reopening an AVIF comparison now re-encodes rather than risking old pixels
+    // under a new name. One entry: a preview holds a full-size RGBA buffer — 83 MB
+    // for a 5568x3712 photo — so a bigger cache would need a byte budget, not a
+    // count.
+    cached: Option<(compare::Key, Arc<Preview>)>,
+    /// The preview for the file the arrow key is about to ask for, decoded while
+    /// you look at the current one. `PREFETCH_BUDGET` bounds this second slot.
+    ahead: Option<(compare::Key, Arc<Preview>)>,
     /// Which way the arrows last stepped, so the media built ahead is the one the
     /// sweep wants rather than the one behind it.
     compare_step: isize,
     /// The build running ahead of the cursor. Holding the task lets a replacement
     /// cancel it during its settle before it reaches the encoder.
     prefetch: Option<gpui_kit::Task<()>>,
-    /// Identity of that build. Navigation can adopt an in-flight decode instead of
+    /// Identity of that decode. Navigation can adopt an in-flight decode instead of
     /// cancelling it and starting the same file again.
-    prefetch_key: Option<(compare::Key, MediaMode)>,
+    prefetch_key: Option<compare::Key>,
     /// Bytes of the heaviest visible file, so every row's weight bar is drawn
     /// against the same scale. Cached because the alternative is a scan of the
     /// whole list once per row.
@@ -892,21 +900,6 @@ fn credentials_complete(client_id: &str, client_secret: &str) -> bool {
 enum MediaMode {
     Preview,
     Compare,
-}
-
-#[derive(Clone)]
-enum CachedMedia {
-    Preview(Arc<Preview>),
-    Pair(Arc<Pair>),
-}
-
-impl CachedMedia {
-    fn mode(&self) -> MediaMode {
-        match self {
-            Self::Preview(_) => MediaMode::Preview,
-            Self::Pair(_) => MediaMode::Compare,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]

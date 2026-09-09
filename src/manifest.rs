@@ -236,6 +236,14 @@ impl Stamp {
         }
     }
 
+    /// The AVIF speed this stamp claims, as the encoder wants it. `Stamp::new`
+    /// reads the process-wide dial once at the start of a run; every file that run
+    /// writes then encodes at this value rather than reading the dial again, so the
+    /// bytes and the line describing them always agree.
+    pub fn avif_speed(&self) -> u8 {
+        self.avif_speed.unwrap_or(crate::avif::DEFAULT_SPEED)
+    }
+
     /// One output as a record, or `None` when its paths do not sit under the roots
     /// they were planned against — which would make the record a lie.
     ///

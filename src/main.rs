@@ -1367,6 +1367,9 @@ fn project_run(
     // before it estimates; so does this, rather than trusting the caller's order.
     let mut entries: Vec<&Entry> = entries.to_vec();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
+    // One read of the speed dial for the whole projection, so every sample answers
+    // for the same recipe the run would stamp.
+    let avif_speed = crate::avif::speed();
     let weights: Vec<u64> = entries.iter().map(|entry| entry.bytes).collect();
     let slices = audit::sample_size(format).min(weights.len());
     let jobs = audit::strata(&weights, slices);
@@ -1392,23 +1395,22 @@ fn project_run(
                     // projection never spends savings a refused file will not
                     // deliver. A backend failure is not a verdict — that sample
                     // stays unknown and borrows the average, as before.
-                    let outcome = scan::decode_for_conversion(&entry.path, max_edge)
-                        .ok()
-                        .zip(format.resolve(&entry.path).ok())
-                        .map(|((image, profile), format)| {
-                            let image = max_edge.apply(image);
-                            match convert::check_lossless_depth(&image, format, quality)
-                                .and_then(|()| convert::check_image_budget(&image))
-                                .and_then(|()| {
-                                    convert::encode(&image, format, quality, profile.as_deref())
-                                        .map(|encoded| encoded.len() as u64)
-                                }) {
-                                Ok(encoded) => audit::SampleOutcome::Encoded(entry.bytes, encoded),
-                                Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
-                                Err(_) => audit::SampleOutcome::Refused,
+                    let outcome =
+                        match convert::prepare(&entry.path, max_edge).and_then(|prepared| {
+                            convert::encode_prepared(
+                                &prepared,
+                                &entry.path,
+                                format,
+                                quality,
+                                avif_speed,
+                            )
+                        }) {
+                            Ok((_, encoded)) => {
+                                audit::SampleOutcome::Encoded(entry.bytes, encoded.len() as u64)
                             }
-                        })
-                        .unwrap_or(audit::SampleOutcome::Unknown);
+                            Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
+                            Err(_) => audit::SampleOutcome::Refused,
+                        };
                     sampled.lock()[job] = Some((slice_bytes, outcome));
                 }
             });

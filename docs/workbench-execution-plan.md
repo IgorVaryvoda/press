@@ -200,7 +200,7 @@ D3 preparation experiment was stopped and is not part of this tree.
 | A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
 | D1 | Not landed; isolated checkpoint `codex/workbench-job-safety` at `fc9ad974` | The existing CLI target subset is not independent GUI target delivery |
 | H1 | Not landed; extension checkpoint `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
-| D3 | Not landed; preparation/parity work was stopped before integration | No maintained Google/eBay packs, policy catalog or pack approval is included |
+| D3 | Not landed at that checkpoint; the first bounded preparation-parity increment followed on `codex/workbench-preparation-parity` (see the September 9 section below) | No maintained Google/eBay packs, policy catalog or pack approval is included |
 | HEIF | Not landed; investigation only | No decoder, packaging or platform proof is included |
 
 The D2 CLI check is bounded to local bytes and reports relative names, actual
@@ -293,3 +293,56 @@ are under `ux/resume-ci-*.log`.
 Only Linux was executed here. The macOS and Windows behaviour is argued from the
 remote logs and from a locally reproduced equivalent, not observed: native OS
 proof stays pending on the next remote CI run.
+
+### September 9 D3 preparation parity, first bounded increment (branch `codex/workbench-preparation-parity`)
+
+Base `1bb9f65`. This increment is shared-source preparation, comparison, estimate
+and writer parity only. No maintained pack, policy catalog, new recipe transform
+or field, GUI target delivery, H2/H3 or HEIF work is included, and none of it is
+implied. Full D3 packs and transforms remain pending.
+
+| Flaw at base | Change |
+| --- | --- |
+| `compare::build` could re-encode a cached BGRA8 `Preview` and read the source ICC profile on a separate path, so a `Keep`, grayscale, deep or tagged source could be quoted at a size the writer never produces | `Preview` is display-only: its `profile`/`decoded` fields, the BGRA read-back and the preview-to-encode argument are gone. Every comparison prepares the source itself and converts to RGBA/BGRA only after the encode. `scan::icc_profile`, which existed for that shortcut, is deleted |
+| Four copies of decode → resize → budget → resolve `Same` → depth check → encode, in the writer, the comparison, the window estimate and the CLI dry run | One `convert::prepare`/`convert::encode_prepared` pair. `prepare` returns the existing `scan::DecodedSource` after one `MaxEdge::apply` and the shared budget check; `encode_prepared` resolves `Same` from the container those same bytes were identified as, applies the shared lossless-depth verdict, and encodes at an explicit speed. No raw snapshot is retained beside the decoded pixels |
+| A completed `Pair` was cached and built ahead on a size-and-mtime key, which a same-length rewrite inside one filesystem tick does not move | `CachedMedia::Pair` and `take_cached_pair` are removed and compare-mode lookahead is disabled. `Pair` now carries the `SourceIdentity` it consumed, plus the installed output's identity for a written comparison, and `Pair::confirm` re-reads both on the background executor before the result lands. `Key` stays a cheap miss; a stale build takes the existing reopen path, not a fake decode failure. The preview cache and preview lookahead are unchanged |
+| `compare::Key` captured an AVIF speed the encoder then re-read from the process dial | Speed is captured once per request, per estimate and per run, and passed to `encode_with_speed`. A recorded write takes it from its own `Stamp` via `Stamp::avif_speed()`, so the bytes and the manifest line describing them cannot come from two reads of a setting that moved in between |
+| The estimate held decoded pixels keyed on path and max edge alone | It holds `Arc<scan::DecodedSource>` and checks the held identity against the bytes on disk before reuse; a mismatch prepares the current bytes and replaces the entry. The cache mutex is released before that hash, because the window prunes the same map on the main thread |
+
+Regressions added, each against actual writer output rather than the shared
+helper compared with itself: grayscale JPEG, deep tagged PNG and transparency all
+`Keep`/convert through `convert::convert_to` and must match the comparison's
+quoted size and geometry; an AVIF run must write the bytes of the speed its own
+`Stamp` claims while the process dial says otherwise, and its manifest line must
+record that speed; a same-length rewrite under the original mtime must leave
+`Key::fresh` true while `Pair::confirm` refuses, and the GUI estimate must reject
+the held decode and project the length of a real `convert_to` output of the bytes
+now on disk, which is proved to differ from the replaced bytes' output. The
+existing compare lookahead test was rewritten to state the contract that now
+holds — every comparison is built from its own source — rather than deleted.
+
+Cost of the disabled completed-pair cache, measured on this host with the debug
+binary over eight copies of `docs/audit.webp` (1170x768), process and scan
+overhead subtracted with `--dry-run`: AVIF about 0.16 s per image wall clock at
+speed 6, WebP about 0.014 s. Arrowing through comparisons now pays that per step
+instead of adopting a prebuilt pair, and a comparison also decodes the result
+back; the cost scales with pixels, so a large photo is far worse than this
+fixture. That is the price of not handing over pixels on the strength of a size
+and a timestamp, and it is stated rather than hidden. Log: `ux/d3-preparation/avif-cost.log`.
+
+Normal-run written bytes are unchanged, so no recipe fingerprint or processing
+revision is bumped: the encoder inputs are identical, and for an unconfigured or
+unchanged setting `Stamp::avif_speed()` is the same value `avif::speed()` returned
+at the same point. Only the ordering of `Same` resolution against the pixel-budget
+check moved, which changes which name a doubly-invalid file fails under, not any
+output.
+
+Local Linux gates, `CARGO_TARGET_DIR` inside this worktree, `TMPDIR` under
+`ux/test-tmp-d3`, all exit code 0: `cargo test --locked` (634 passed, 2 ignored,
+plus 32/2/3 integration), `cargo test --locked --features updater` (650 passed,
+3 ignored, plus 32/2/3), `cargo clippy --locked --all-targets --all-features --
+-D warnings`, `cargo fmt --check`, `git diff --check`. Logs are under
+`ux/d3-preparation/`. No flake was seen in these runs.
+
+Only Linux was executed. No native macOS or Windows result is claimed, and the
+native UI proof for this increment is root's after review.
