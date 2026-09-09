@@ -934,8 +934,10 @@ mod tests {
     }
 
     /// A name that is not UTF-8 is still a file. It keeps its identity as a
-    /// path; only its label is lossy.
-    #[cfg(unix)]
+    /// path; only its label is lossy. macOS is excluded because APFS and HFS+
+    /// refuse such a name outright (EILSEQ), so the fixture cannot exist
+    /// there; the label-versus-path rule is checked in memory below instead.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_non_utf8_name_keeps_its_identity() {
         use std::os::unix::ffi::OsStrExt;
@@ -971,6 +973,77 @@ mod tests {
         assert!(
             confirm_source(&root, std::path::Path::new(label)).is_err(),
             "a path rebuilt from a label opens nothing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same rule with no filesystem in it, so every Unix keeps the
+    /// coverage the fixture above can only have where such a name can be
+    /// written: the resolution carries the bytes of the name, and the printed
+    /// label is a lossy rendering nothing can open its way back through.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_outlives_its_lossy_label() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/root/hero-\xff.png"));
+        let resolution = Resolution {
+            id: "r1".into(),
+            verdict: Verdict::Candidate,
+            paths: vec![raw.clone()],
+            hidden: 0,
+            notes: Vec::new(),
+        };
+        assert_eq!(
+            resolution.paths[0].as_os_str().as_bytes(),
+            b"/root/hero-\xff.png",
+            "the choice a confirmation reads is the name byte for byte"
+        );
+
+        let label = &displayed(&resolution).paths[0];
+        assert!(label.contains('\u{fffd}'), "the label is lossy: {label}");
+        assert_ne!(
+            std::path::Path::new(label),
+            raw.as_path(),
+            "and a path rebuilt from that label is a different name"
+        );
+    }
+
+    /// A Unicode name is not the lossy case: it is a real name on every
+    /// platform, and it must scan, resolve and confirm as itself. The
+    /// characters are ideographs, which no filesystem normalisation
+    /// decomposes, so the name read back is the name written.
+    #[test]
+    fn a_unicode_filename_resolves_and_confirms_by_its_real_path() {
+        let root = scratch("unicode");
+        let hero = root.join("hero-日本語.png");
+        image(&hero, [10, 20, 30]);
+        let entries = scanned(&root);
+        assert_eq!(
+            entries.len(),
+            1,
+            "the scan sees the file under its own name"
+        );
+
+        let handoff = report(vec![hinted("r1", &["hero-日本語.png"])]);
+        let resolved = resolve_to_root(&handoff, &root, &entries);
+        assert_eq!(resolved[0].verdict, Verdict::PathMatch);
+        assert_eq!(resolved[0].paths, vec![hero.clone()]);
+
+        let confirmed =
+            confirm_source(&root, &resolved[0].paths[0]).expect("the named file confirms");
+        assert_eq!(confirmed.source.path, hero);
+        assert_eq!(
+            confirmed.identity,
+            crate::manifest::SourceIdentity::from_bytes(&std::fs::read(&hero).unwrap())
+        );
+
+        // Nothing here is lossy, so the printed label names the same file the
+        // confirmation read.
+        let label = &displayed(&resolved[0]).paths[0];
+        assert_eq!(std::path::Path::new(label), hero.as_path());
+        assert!(
+            confirm_source(&root, std::path::Path::new(label)).is_ok(),
+            "a path rebuilt from this label opens the same file"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
