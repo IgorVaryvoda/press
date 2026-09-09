@@ -1687,7 +1687,7 @@ fn convert_headless(
 
 #[derive(Serialize)]
 struct HandoffMappingSummary {
-    confirmed: usize,
+    path_match: usize,
     candidate: usize,
     ambiguous: usize,
     unmatched: usize,
@@ -1733,7 +1733,7 @@ fn handoff_report(
         None => (None, None, None),
         Some((root, mappings)) => {
             let mut summary = HandoffMappingSummary {
-                confirmed: 0,
+                path_match: 0,
                 candidate: 0,
                 ambiguous: 0,
                 unmatched: 0,
@@ -1741,7 +1741,7 @@ fn handoff_report(
             };
             for mapping in mappings {
                 match mapping.verdict {
-                    handoff::Verdict::Confirmed => summary.confirmed += 1,
+                    handoff::Verdict::PathMatch => summary.path_match += 1,
                     handoff::Verdict::Candidate => summary.candidate += 1,
                     handoff::Verdict::Ambiguous => summary.ambiguous += 1,
                     handoff::Verdict::Unmatched => summary.unmatched += 1,
@@ -1812,7 +1812,7 @@ fn print_handoff(
             let detail = mapping.paths.first().map(String::as_str).unwrap_or("-");
             outln!(
                 "{} {}: {}",
-                verdict_word(mapping.verdict),
+                handoff::verdict_word(mapping.verdict),
                 mapping.id,
                 detail
             );
@@ -1845,16 +1845,6 @@ fn print_handoff(
     }
     for warning in &pending.warnings {
         eprintln!("press: handoff warning: {warning}");
-    }
-}
-
-fn verdict_word(verdict: handoff::Verdict) -> &'static str {
-    match verdict {
-        handoff::Verdict::Confirmed => "confirmed",
-        handoff::Verdict::Candidate => "candidate",
-        handoff::Verdict::Ambiguous => "ambiguous",
-        handoff::Verdict::Unmatched => "unmatched",
-        handoff::Verdict::OutOfScope => "out of scope",
     }
 }
 

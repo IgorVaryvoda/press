@@ -199,7 +199,7 @@ D3 preparation experiment was stopped and is not part of this tree.
 | Muse Spark fakehost | The fixture-only supplier and interrupted Studio rehearsal review was completed through `698e990` (supplier base `e447f41`) with explicit fake scripts and durable local attempts | No native auth, retailer service, hosted inference, billing or live pilot was performed |
 | A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
 | D1 | Not landed; isolated checkpoint `codex/workbench-job-safety` at `fc9ad974` | The existing CLI target subset is not independent GUI target delivery |
-| H1 | Not landed; extension checkpoint `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
+| H1 | Producer landed on the extension's `main` at `2e56550`; the consumer-side checkpoint noted here was `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
 | D3 | Not landed; preparation/parity work was stopped before integration | No maintained Google/eBay packs, policy catalog or pack approval is included |
 | HEIF | Not landed; investigation only | No decoder, packaging or platform proof is included |
 
@@ -223,6 +223,34 @@ this integration worktree): `ux/workbench-ui/f3-corrected-reveal-004.png` and
 `ux/workbench-ui/exported-alpha.press-job.json`. Those artifacts prove the
 reviewed Linux visibility/export path. Keyboard action focus remains unresolved,
 and no macOS/Windows or complete UI claim follows.
+
+### September 9 handoff review increment
+
+The extension landed its Press export on `main` at `2e56550`. Its fixture
+`test/fixtures/press-handoff.json` is copied byte for byte into
+`tests/fixtures/` here, pinned to LF, and checked against the SHA-256 it landed
+as, so a producer change that moves the shared contract fails on this side too.
+
+On top of that, this branch adds the **session review** half of H2 and nothing
+else. The window imports a report through the same bounded read and parser the
+CLI uses, the user selects one folder, matching runs off the update thread, and
+each resource is confirmed individually against the bytes on disk, with a
+recheck that revokes a confirmation when those bytes change. The review writes
+no job, recipe, setting or output, replaces no dataset, and starts no
+conversion; it lives only as long as the session.
+
+The CLI verdict `confirmed` is renamed to `path_match` (and the JSON summary
+key with it) because it only ever meant "one exact supplied hint named one
+existing file". No release tag contains the `handoff` command — `git tag
+--contains 9f2031a` is empty — so this corrects an unreleased draft rather than
+breaking a shipped contract, and `HandoffReport.schema_version` stays `1`. The
+producer's own envelope schema is unaffected. `press skill` guidance is updated
+to the labels the binary actually prints.
+
+This is one increment, not H2. Preparing confirmed sources, durable task state
+across a restart, deployment and re-audit — the rest of the
+[H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
+— all remain open, as does any native Windows or macOS proof.
 
 ### Isolated checkpoints for tomorrow
 

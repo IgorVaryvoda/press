@@ -496,14 +496,19 @@ fn handoff_root_maps_hints_to_verdicts() {
         .iter()
         .map(|mapping| mapping["verdict"].as_str().expect("a verdict"))
         .collect();
-    // An exact hint confirms, a basename match stays a candidate, a foreign
-    // absolute hint is out of scope, and nothing is unmatched. Nothing
-    // converted: mapping only reports.
+    // An exact hint is a path match, a basename match stays a candidate, a
+    // foreign absolute hint is out of scope, and nothing is unmatched. No
+    // verdict says a human confirmed anything, and nothing converted: mapping
+    // only reports.
     assert_eq!(
         verdicts,
-        vec!["confirmed", "candidate", "out_of_scope", "unmatched"]
+        vec!["path_match", "candidate", "out_of_scope", "unmatched"]
     );
-    assert_eq!(doc["summary"]["confirmed"], 1);
+    assert!(
+        !verdicts.contains(&"confirmed"),
+        "no automatic verdict advertises itself as a confirmation"
+    );
+    assert_eq!(doc["summary"]["path_match"], 1);
     assert_eq!(doc["summary"]["candidate"], 1);
     assert!(!root.join("optimized").exists(), "mapping writes nothing");
     let _ = std::fs::remove_dir_all(&dir);

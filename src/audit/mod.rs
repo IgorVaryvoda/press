@@ -5,6 +5,8 @@ mod browser;
 mod compare_view;
 mod convert_job;
 mod gallery;
+mod handoff_actions;
+mod handoff_view;
 mod header;
 mod job_actions;
 mod local_ai_actions;
@@ -464,6 +466,17 @@ pub(crate) struct Audit {
     job_export_preview: Option<crate::job::ExportDraft>,
     /// The first export action owns focus while its review card is open.
     job_export_preview_focus: FocusHandle,
+    /// An imported ImageGuide report under review. Session state: it replaces
+    /// no dataset, writes no job or recipe, and starts no conversion.
+    handoff_review: Option<handoff_actions::HandoffReview>,
+    /// Invalidates a review's detached work. Bumped by every import, root
+    /// choice, cancel and dataset replacement, so a picker, scan or read that
+    /// finishes afterwards cannot revive a review that is gone.
+    handoff_generation: u64,
+    /// The review card owns the keyboard while it is open.
+    handoff_review_focus: FocusHandle,
+    /// The card scrolls inside its own bound rather than growing the rail.
+    handoff_scroll: ScrollHandle,
     /// Distinguishes identity replacements that happen to reuse an id and
     /// revision, so an older detached job task cannot land in the new job.
     job_request_generation: u64,
@@ -1267,6 +1280,11 @@ impl Audit {
         self.work_job = job;
         self.job_choices = choices;
         self.job_export_preview = None;
+        // A review resolves one report against one folder. Replacing the
+        // dataset replaces that folder, so the review and everything detached
+        // for it retire rather than describing rows nobody is looking at.
+        self.bump_handoff_generation();
+        self.handoff_review = None;
         self.work_states.clear();
         self.work_stale.clear();
         self.refresh_job_states(cx);
@@ -2206,6 +2224,7 @@ pub(crate) fn build_audit(
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let job_export_preview_focus = cx.focus_handle();
+        let handoff_review_focus = cx.focus_handle();
 
         let filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name (Ctrl+K)"));
@@ -2420,6 +2439,10 @@ pub(crate) fn build_audit(
             job_choices,
             job_export_preview: None,
             job_export_preview_focus,
+            handoff_review: None,
+            handoff_generation: 0,
+            handoff_review_focus,
+            handoff_scroll: ScrollHandle::new(),
             job_request_generation: 0,
             work_states: Vec::new(),
             work_stale: Vec::new(),
