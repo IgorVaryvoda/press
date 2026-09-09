@@ -2099,6 +2099,36 @@ pub(crate) enum SampleOutcome {
     Unknown,
 }
 
+/// Encode one prepared sample and say what it is worth to a projection.
+///
+/// The shared verdict for both samplers, the window's estimate and the CLI dry
+/// run, so a folder is never quoted two different sizes.
+///
+/// The identity is checked again after the encode, against the file on disk. An
+/// encode is not instant — AVIF is seconds — and a source rewritten while one ran
+/// leaves a size measured from pixels the file no longer holds. That sample is
+/// unknown rather than refused: the recipe rejected nothing, so its slice borrows
+/// the average instead of contributing a number, and a projection with nothing but
+/// such samples behind it is no projection at all. Reads the source, so this belongs
+/// on the worker that did the encoding, never on the main thread.
+pub(crate) fn sample_encode(
+    prepared: &crate::scan::DecodedSource,
+    source: &Path,
+    source_bytes: u64,
+    format: Format,
+    quality: Quality,
+    avif_speed: u8,
+) -> SampleOutcome {
+    match convert::encode_prepared(prepared, source, format, quality, avif_speed) {
+        Ok((_, encoded)) if prepared.identity.matches_path(source) => {
+            SampleOutcome::Encoded(source_bytes, encoded.len() as u64)
+        }
+        Ok(_) => SampleOutcome::Unknown,
+        Err(convert::Failure::Failed) => SampleOutcome::Unknown,
+        Err(_) => SampleOutcome::Refused,
+    }
+}
+
 /// Project the encoded size of a whole list from a few real encodes.
 ///
 /// Each entry is one slice's bytes and what its sample proved. A slice is

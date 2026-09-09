@@ -630,11 +630,12 @@ impl Audit {
                         // The same verdict the run would give, so the total never
                         // projects success across a file the recipe refuses. A
                         // backend failure is not a verdict — that sample stays
-                        // unknown and borrows the average, as before.
-                        let outcome = match prepared.and_then(|sample| {
-                            convert::encode_prepared(&sample, &path, format, quality, avif_speed)
-                        }) {
-                            Ok((_, encoded)) => SampleOutcome::Encoded(bytes, encoded.len() as u64),
+                        // unknown and borrows the average, as before, and so does a
+                        // source that was rewritten while its sample encoded.
+                        let outcome = match prepared {
+                            Ok(sample) => {
+                                sample_encode(&sample, &path, bytes, format, quality, avif_speed)
+                            }
                             Err(convert::Failure::Failed) => SampleOutcome::Unknown,
                             Err(_) => SampleOutcome::Refused,
                         };

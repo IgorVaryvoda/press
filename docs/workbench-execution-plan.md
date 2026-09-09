@@ -321,14 +321,16 @@ now on disk, which is proved to differ from the replaced bytes' output. The
 existing compare lookahead test was rewritten to state the contract that now
 holds — every comparison is built from its own source — rather than deleted.
 
-Cost of the disabled completed-pair cache, measured on this host with the debug
-binary over eight copies of `docs/audit.webp` (1170x768), process and scan
-overhead subtracted with `--dry-run`: AVIF about 0.16 s per image wall clock at
-speed 6, WebP about 0.014 s. Arrowing through comparisons now pays that per step
-instead of adopting a prebuilt pair, and a comparison also decodes the result
-back; the cost scales with pixels, so a large photo is far worse than this
-fixture. That is the price of not handing over pixels on the strength of a size
-and a timestamp, and it is stated rather than hidden. Log: `ux/d3-preparation/avif-cost.log`.
+Cost of the disabled completed-pair cache, stated as work rather than as a
+number. Before this change, stepping to a comparison that had been built ahead,
+or reopening one at unchanged settings, showed it with no encoding at all. Now
+every comparison runs a full decode, encode and decode of the output, once per
+open and once per arrow step, and the same file opened twice is encoded twice.
+Nothing else regressed: previews are still cached and still decoded ahead, and
+conversion runs are untouched. The work is worst where the encoder is slowest,
+which is AVIF, and grows with the pixel count. That is the price of not handing
+over pixels on the strength of a size and a timestamp, and it is stated rather
+than hidden.
 
 Normal-run written bytes are unchanged, so no recipe fingerprint or processing
 revision is bumped: the encoder inputs are identical, and for an unconfigured or
@@ -346,3 +348,59 @@ plus 32/2/3 integration), `cargo test --locked --features updater` (650 passed,
 
 Only Linux was executed. No native macOS or Windows result is claimed, and the
 native UI proof for this increment is root's after review.
+
+#### Round 2 corrections
+
+Formal round 1 blocked `e6fedd0` on two findings; both are addressed here.
+
+The estimate and the CLI projection checked the identity of the pixels they
+sampled only *before* encoding. An encode is not instant — AVIF is seconds — so a
+source rewritten while its own sample ran could contribute a size measured from
+pixels the file no longer held, and a freshly prepared sample had the same gap
+because preparation is its only check. Both samplers now answer through one
+shared `audit::sample_encode`, which re-reads the source and compares the exact
+consumed `SourceIdentity` *after* the encoder returns, on the worker that did the
+encoding. A mismatch is `Unknown`, not `Refused`: nothing about the recipe was
+rejected, so the slice borrows the average instead of being taken out of the
+total as a file the run would write nothing for. A projection standing on nothing
+but such samples returns `None`, so the window publishes no estimate rather than a
+stale one. Generation and dataset guards are untouched, the cache mutex is still
+released before any disk read, and no cache framework or second representation
+was added — the check is the `SourceIdentity::matches_path` already used
+elsewhere. The comparison view already confirmed after encoding through
+`Pair::confirm`, and the writer already re-checks at install, so neither changed.
+
+The regression proves both arms against the actual disk writer: the same prepared
+source left alone yields exactly the bytes `convert::convert_to` puts on disk,
+and the same prepared source with the file rewritten underneath it — same length,
+original mtime, so no stat can see it — yields `Unknown` and projects nothing,
+while a genuine lossless-depth refusal still yields `Refused`. Removing the
+post-encode check makes it fail. It is a direct call of the shared sampler with
+the rewrite landing between preparation and the verdict, which is the whole window
+that check exists for; the test executor runs a sample task to completion without
+an interleaving point, so a mutation timed inside the encoder itself would have
+needed either a sleep or a production seam that exists only for tests, and neither
+was added. The earlier same-length/same-mtime-before-scheduling regression and its
+writer oracle are unchanged.
+
+The round 1 cost figures were withdrawn. The paragraph above previously quoted
+about 0.16 s per AVIF image, obtained by subtracting a `--dry-run` invocation as
+process and scan overhead. That subtraction is wrong: a dry run samples and
+encodes as part of its own work, so what was subtracted was not overhead, and the
+whole-folder conversion timings it was taken from do not measure the comparison
+view at all. `ux/d3-preparation/avif-cost.log` is left in place as a record of
+that run but is not evidence for any comparison-cost claim; the same figures in
+the `e6fedd0` commit message stand as published history and are corrected here and
+in this round's commit message rather than rewritten. The tradeoff is now stated
+as the work that is actually repeated.
+
+Gates for this round, `CARGO_TARGET_DIR` inside this worktree, `TMPDIR` under
+`ux/test-tmp-d3`, run one at a time, logs under `ux/d3-preparation-r2/`, all exit
+code 0: `cargo test --locked` (635 passed, 2 ignored, plus 32/2/3 integration),
+`cargo test --locked --features updater` (651 passed, 3 ignored, plus 32/2/3),
+`cargo clippy --locked --all-targets --all-features -- -D warnings`,
+`cargo fmt --check`, `git diff --check`. No flake was seen.
+
+Still Linux only. Round 1's native Linux comparison proof and CLI parity figures
+are root's, recorded under `ux/resume-d3-root-proof`; nothing here claims a macOS
+or Windows result, parent CI repair is still pending, and this has not landed.

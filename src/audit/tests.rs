@@ -6745,6 +6745,138 @@ fn settle_estimate(cx: &mut gpui_kit::VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// An encode is not instant — AVIF is seconds — so a source can be rewritten while
+/// its own sample is still encoding. The pixels in hand then describe a file nobody
+/// has, and a size measured from them would be a claim about the wrong image.
+///
+/// Both samplers, the window's estimate and the CLI dry run, answer through
+/// `sample_encode`, which checks the bytes it consumed against the file *after* the
+/// encoder returns. The rewrite below lands between preparation and the verdict,
+/// which is the entire window that check exists for; whether it lands at the start
+/// of that window or in the middle of the encoder's work is not something the code
+/// can tell apart, and neither can a slow writer.
+#[test]
+fn a_source_rewritten_while_its_sample_encodes_is_unknown_rather_than_a_size() {
+    let root = scan_fixture("sample-rewrite");
+    let path = root.join("shot.png");
+    // Two real PNGs of the same length. Nothing reads past IEND, so the shorter is
+    // padded rather than tuned into a coincidence.
+    let png = |shift: u8| {
+        let mut bytes = Vec::new();
+        let source = crate::convert::tests::photo(24, 24).to_rgb8();
+        image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(24, 24, |x, y| {
+            let pixel = source.get_pixel(x, y);
+            image::Rgb([pixel[0].wrapping_add(shift), pixel[1], pixel[2]])
+        }))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+        .expect("the fixture encodes");
+        bytes
+    };
+    let (mut before, mut after) = (png(0), png(101));
+    let length = before.len().max(after.len());
+    before.resize(length, 0);
+    after.resize(length, 0);
+    assert_ne!(before, after);
+
+    std::fs::write(&path, &before).expect("the fixture is written");
+    let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let source_bytes = std::fs::metadata(&path).unwrap().len();
+    let (format, quality, max_edge) = (Format::WebP, Quality::lossy(80.), MaxEdge::FULL);
+    // Prepared from the bytes that are there now, exactly as a sample does.
+    let prepared = convert::prepare(&path, max_edge).expect("the source prepares");
+
+    // Left alone, the sample is a real size — the size the writer puts on disk.
+    let out_dir = root.join(scan::OUTPUT_DIR);
+    let run = convert::convert_to(
+        &out_dir,
+        &path,
+        &out_dir.join("oracle.webp"),
+        None,
+        format,
+        quality,
+        max_edge,
+    )
+    .expect("the writer converts the source");
+    assert_eq!(
+        run.bytes,
+        std::fs::metadata(out_dir.join("oracle.webp"))
+            .expect("the oracle output is on disk")
+            .len()
+    );
+    assert_eq!(
+        sample_encode(
+            &prepared,
+            &path,
+            source_bytes,
+            format,
+            quality,
+            crate::avif::DEFAULT_SPEED
+        ),
+        SampleOutcome::Encoded(source_bytes, run.bytes)
+    );
+
+    // Rewritten under the same length and the original timestamp — what a stat key
+    // cannot see — the same prepared pixels are no longer anybody's source.
+    std::fs::write(&path, &after).expect("the same name carries new pixels");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(stamp)
+        .expect("the old timestamp is put back");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), source_bytes);
+    let stale = sample_encode(
+        &prepared,
+        &path,
+        source_bytes,
+        format,
+        quality,
+        crate::avif::DEFAULT_SPEED,
+    );
+    assert_eq!(
+        stale,
+        SampleOutcome::Unknown,
+        "a size measured from pixels the file no longer holds was accepted"
+    );
+    // Unknown, not refused. A refusal says the run would write nothing for this
+    // file and takes its slice out of the total; nothing about the recipe was
+    // rejected here. And a projection standing on nothing but this sample is not a
+    // projection, so the window publishes no estimate rather than a stale one.
+    assert!(project_total(&[(source_bytes, stale)]).is_none());
+
+    // A real recipe refusal is still a refusal, so the two stay distinguishable.
+    let deep = root.join("deep.png");
+    std::fs::write(
+        &deep,
+        convert::encode(
+            &image::DynamicImage::ImageRgb16(image::ImageBuffer::from_pixel(
+                8,
+                6,
+                image::Rgb([1025u16, 32001, 65001]),
+            )),
+            Format::Png,
+            Quality::LOSSLESS,
+            None,
+        )
+        .expect("the sixteen-bit fixture encodes"),
+    )
+    .expect("the sixteen-bit fixture is written");
+    let deep_prepared = convert::prepare(&deep, max_edge).expect("the deep source prepares");
+    assert_eq!(
+        sample_encode(
+            &deep_prepared,
+            &deep,
+            std::fs::metadata(&deep).unwrap().len(),
+            Format::WebP,
+            Quality::LOSSLESS,
+            crate::avif::DEFAULT_SPEED
+        ),
+        SampleOutcome::Refused
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The estimate holds prepared pixels so a slider stop re-encodes instead of
 /// reading and decoding the same file again. Pixels carry no timestamp: the file
 /// behind them can be replaced by one of the same length inside a single filesystem

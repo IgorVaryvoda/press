@@ -1395,22 +1395,18 @@ fn project_run(
                     // projection never spends savings a refused file will not
                     // deliver. A backend failure is not a verdict — that sample
                     // stays unknown and borrows the average, as before.
-                    let outcome =
-                        match convert::prepare(&entry.path, max_edge).and_then(|prepared| {
-                            convert::encode_prepared(
-                                &prepared,
-                                &entry.path,
-                                format,
-                                quality,
-                                avif_speed,
-                            )
-                        }) {
-                            Ok((_, encoded)) => {
-                                audit::SampleOutcome::Encoded(entry.bytes, encoded.len() as u64)
-                            }
-                            Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
-                            Err(_) => audit::SampleOutcome::Refused,
-                        };
+                    let outcome = match convert::prepare(&entry.path, max_edge) {
+                        Ok(prepared) => audit::sample_encode(
+                            &prepared,
+                            &entry.path,
+                            entry.bytes,
+                            format,
+                            quality,
+                            avif_speed,
+                        ),
+                        Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
+                        Err(_) => audit::SampleOutcome::Refused,
+                    };
                     sampled.lock()[job] = Some((slice_bytes, outcome));
                 }
             });
