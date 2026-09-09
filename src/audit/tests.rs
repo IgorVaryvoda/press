@@ -655,21 +655,26 @@ fn replace_source(folder: &Path) -> PathBuf {
 fn finish_replace_run(folder: &Path) -> PathBuf {
     let source = folder.join("shot.png");
     let written = folder.join("shot.webp");
+    // The writer refuses an output root reached through a symlink, and the
+    // system temp dir is one on macOS, where `/var` points at `/private/var`.
+    // The encode runs against the folder's own name; the audit keeps the
+    // spelling it was given, which is the split these tests are about.
+    let resolved = folder.canonicalize().expect("the fixture folder resolves");
     // A copy of the PNG under a `.webp` name would decode to the source's own
     // geometry and prove nothing about which file the view opened. This is the
     // encoder's output, downscaled, so the pair can only measure 32 square if
     // the after side really is this file.
     convert::convert_to(
-        folder,
-        &source,
-        &written,
+        &resolved,
+        &resolved.join("shot.png"),
+        &resolved.join("shot.webp"),
         None,
         Format::WebP,
         Quality::lossy(80.),
         MaxEdge(Some(32)),
     )
     .expect("the replace output encodes");
-    let backups = folder.join(scan::BACKUP_DIR);
+    let backups = resolved.join(scan::BACKUP_DIR);
     std::fs::create_dir_all(&backups).expect("the backup mirror is created");
     std::fs::rename(&source, backups.join("shot.png")).expect("the original moves to the backup");
     assert!(
