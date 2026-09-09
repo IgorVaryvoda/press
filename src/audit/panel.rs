@@ -514,7 +514,8 @@ impl Audit {
                                 self.recipes_skipped.len()
                             ))
                     }))
-                    .child(self.sets_section(cx)),
+                    .child(self.sets_section(cx))
+                    .child(self.handoff_section(cx)),
             )
             .child(
                 div()
@@ -1247,6 +1248,30 @@ impl Audit {
             ));
         div()
             .debug_selector(|| "sets-export-preview".into())
+            // The review owns the keyboard while it is up. Its own handle sits
+            // on the wrapper rather than on Export, because gpui-component's
+            // Button always renders its own keyed focus handle and discards a
+            // caller's; a tab group lets `focus_next` hand the real button the
+            // focus, so it keeps its ring and its native Enter and Space.
+            .track_focus(&self.job_export_preview_focus)
+            .tab_group()
+            .tab_index(0)
+            .tab_stop(false)
+            .on_key_down(
+                cx.listener(|audit, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape"
+                        && event.keystroke.modifiers == gpui_kit::Modifiers::none()
+                    {
+                        audit.cancel_job_export_preview(window, cx);
+                        cx.stop_propagation();
+                    } else if is_checkbox_activation_key(event) {
+                        // Export and Cancel activate themselves on Enter and
+                        // Space. The list underneath must not also open a
+                        // comparison or tick the row under its cursor.
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .flex()
             .flex_col()
             .min_h_0()
@@ -1270,7 +1295,7 @@ impl Audit {
                         Button::new("sets-export-confirm")
                             .small()
                             .outline()
-                            .track_focus(&self.job_export_preview_focus)
+                            .debug_selector(|| "sets-export-confirm".into())
                             .label("Export…")
                             .on_click(move |_, _, cx| {
                                 if let Some(audit) = export.upgrade() {
@@ -1282,11 +1307,12 @@ impl Audit {
                         Button::new("sets-export-cancel")
                             .small()
                             .ghost()
+                            .debug_selector(|| "sets-export-cancel".into())
                             .label("Cancel")
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 if let Some(audit) = cancel.upgrade() {
                                     audit.update(cx, |audit, cx| {
-                                        audit.cancel_job_export_preview(cx);
+                                        audit.cancel_job_export_preview(window, cx);
                                     });
                                 }
                             }),
@@ -1357,6 +1383,7 @@ impl Audit {
                                 let delete = job.clone();
                                 let csv = job.clone();
                                 let import = job.clone();
+                                let report = job.clone();
                                 let export = job.clone();
                                 let act = |audit: &gpui_kit::WeakEntity<Audit>,
                                        cx: &mut App,
@@ -1406,6 +1433,18 @@ impl Audit {
                                 ))
                                 .item(PopupMenuItem::new("Import job…").on_click(
                                     move |_, _, cx| act(&import, cx, Audit::import_job_file),
+                                ))
+                                // Reviewing a report is not editing this job,
+                                // so it stays available while the folder's
+                                // saved jobs are still an open choice.
+                                .item(PopupMenuItem::new("Import ImageGuide report…").on_click(
+                                    move |_, window, cx| {
+                                        if let Some(audit) = report.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.import_handoff_file(window, cx);
+                                            });
+                                        }
+                                    },
                                 ))
                                 .item(
                                     PopupMenuItem::new("Export job…").on_click(

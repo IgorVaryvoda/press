@@ -58,8 +58,12 @@ A content hash can prove identical bytes only when both sides actually measured
 the same bytes. A resized CDN derivative is not its local master, and perceptual
 similarity is not proof of product identity.
 
-Show **confirmed**, **candidate**, **ambiguous**, **unmatched** and **out of scope**.
-Require explicit confirmation of candidate mappings before conversion. Duplicate
+Show **path match**, **candidate**, **ambiguous**, **unmatched** and **out of
+scope**. Every one of those is automatic evidence about names and layout, so
+none of them is a confirmation and none is labelled as one: a path match is an
+exact supplied hint that named one existing file, and a person still has to say
+that file is the reported image. Require that explicit confirmation of the
+mapping before conversion, per resource. Duplicate
 basenames, hashed build names, transformed CDN URLs and multiple usage sizes must
 not collapse into a guessed source. Do not fetch arbitrary report URLs on import.
 Remote download would need a separately designed, consented and bounded network
@@ -93,6 +97,15 @@ valid before/after comparison; report that rather than inventing measured saving
 | H1: schema and file adapter | Sanitized producer fixture imports to a pending task | Round-trip schema checks, redaction, future-schema/oversize refusal, no network or writes on import |
 | H2: source mapping and preparation | One real page's selected findings map to a user-selected folder | Duplicate/hashed names, CDN variants, ambiguous matches, root escape attempts and changed sources; no unconfirmed conversion |
 | H3: deployment and re-audit | Files, output mapping and checklist reconnect to the original observations | Local-export versus deployed distinction, changed viewport/model, unresolved markup, unmatched resources and cancelled work |
+
+**Landed so far.** The producer half of H1 is in the extension at
+`2e56550`, and its exported fixture is checked in beside the consumer tests
+with the SHA-256 it landed as. On this side, a first H2 increment covers the
+session review only: importing that report file in the window, selecting one
+local root, reading the automatic match evidence, confirming one resource at a
+time against the bytes on disk, rechecking a confirmation, and cancelling.
+That increment is not H2's acceptance: it prepares no files, keeps no state
+across a restart, and the remaining H2 evidence and all of H3 stay open.
 
 Name accountable people in those PRs. H1/H2 depend on safe parsing, path confinement
 and source identity, not on Supplier Portal, paid AI or a template catalog. Use

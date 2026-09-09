@@ -37,13 +37,19 @@ fn chunk(kind: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {
 /// Deterministic 8x8 RGB noise: flat colours compress to nothing and would
 /// let a conversion report zero bytes without proving anything moved.
 fn photo_png() -> Vec<u8> {
+    photo_png_seeded(0)
+}
+
+/// The same noise shifted, so two fixtures that share a name still differ byte
+/// for byte and a test can say which of them a run actually read.
+fn photo_png_seeded(seed: u32) -> Vec<u8> {
     let mut raw = Vec::new();
     for y in 0..8u32 {
         raw.push(0u8);
         for x in 0..8u32 {
-            raw.push(((x * 37 + y * 91) % 251) as u8);
-            raw.push(((x * 11 + y * 53) % 251) as u8);
-            raw.push(((x * 7 + y * 13) % 251) as u8);
+            raw.push(((x * 37 + y * 91 + seed) % 251) as u8);
+            raw.push(((x * 11 + y * 53 + seed) % 251) as u8);
+            raw.push(((x * 7 + y * 13 + seed) % 251) as u8);
         }
     }
     assert!(raw.len() <= 0xFFFF, "one stored block holds the fixture");
@@ -94,6 +100,20 @@ fn stdout_json(output: &Output) -> serde_json::Value {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A child process that refuses has already said why on stdout or stderr.
+/// Asserting the code alone throws that sentence away, which is the whole
+/// diagnosis when the failure only happens on a runner nobody can attach to.
+fn assert_exit(output: &Output, code: i32, what: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "{what} exited {:?}\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        stderr(output)
+    );
 }
 
 #[test]
@@ -337,27 +357,364 @@ fn skip_existing_skips_a_managed_output_and_a_legacy_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A second spelling of the same folder, which is what a replace run is really
+/// handed: the audited root keeps whatever was typed while the output boundary
+/// is canonical, and the two disagree without either being wrong. A unix
+/// symlink splits them here; on Windows the ordinary path below is already the
+/// split, because canonicalising it adds the `\\?\` prefix it never had.
+#[cfg(unix)]
+fn aliased(dir: &Path) -> PathBuf {
+    let alias = dir.with_file_name(format!(
+        "{}-alias",
+        dir.file_name()
+            .expect("the fixture dir is named")
+            .to_string_lossy()
+    ));
+    let _ = std::fs::remove_file(&alias);
+    std::os::unix::fs::symlink(dir, &alias).expect("the alias points at the fixture");
+    alias
+}
+
+#[cfg(not(unix))]
+fn aliased(dir: &Path) -> PathBuf {
+    dir.to_path_buf()
+}
+
+fn clean_up(dir: &Path, alias: &Path) {
+    if alias != dir {
+        let _ = std::fs::remove_file(alias);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A real encoded WebP, made by the tool itself in a folder of its own. The
+/// fixtures here are hand-rolled PNGs, and a source that already carries the
+/// output format is the only way to reach the case where a converted file takes
+/// its own name back.
+fn seeded_webp(dir: &Path, name: &str) -> PathBuf {
+    let seed = workdir(&format!("seed-{}", name.replace('.', "-")));
+    photo(&seed, "seed.png");
+    assert_exit(&run(&["convert", &seed.to_string_lossy()]), 0, "seeding");
+    let path = dir.join(name);
+    std::fs::copy(seed.join("optimized").join("seed.webp"), &path)
+        .expect("the encoded fixture is copied");
+    let _ = std::fs::remove_dir_all(&seed);
+    path
+}
+
+/// The whole replace contract through one spelling of the folder: every audited
+/// original ends up in the mirror untouched, every output the run names is
+/// installed, and the restore puts each original back byte for byte and takes
+/// the outputs away again. Which name an output takes is read out of the run's
+/// own report, because it differs when the format stays the same.
+fn replace_and_restore_round_trip(
+    dir: &Path,
+    names: &[&str],
+    target: &str,
+    extra: &[&str],
+    restore_target: &str,
+) -> serde_json::Value {
+    let originals: Vec<Vec<u8>> = names
+        .iter()
+        .map(|name| std::fs::read(dir.join(name)).expect("the fixture reads back"))
+        .collect();
+    let mut args = vec!["convert", target, "--replace", "--json"];
+    args.extend_from_slice(extra);
+    let converted = run(&args);
+    assert_exit(&converted, 0, "replace");
+    let report = stdout_json(&converted);
+    let files = report["files"].as_array().expect("files list").clone();
+    assert_eq!(files.len(), names.len());
+    let installed: Vec<PathBuf> = files
+        .iter()
+        .map(|file| {
+            assert_eq!(file["status"], "converted", "{}", stderr(&converted));
+            let output = PathBuf::from(
+                file["output"]
+                    .as_str()
+                    .expect("a converted file names its output"),
+            );
+            assert!(output.is_file(), "{} is installed", output.display());
+            output
+        })
+        .collect();
+    for (name, original) in names.iter().zip(&originals) {
+        assert_eq!(
+            &std::fs::read(dir.join("press-originals").join(name))
+                .unwrap_or_else(|error| panic!("{name} is parked in the mirror: {error}")),
+            original,
+            "the backup holds {name} untouched"
+        );
+    }
+    assert_exit(&run(&["restore", restore_target]), 0, "restore");
+    for (name, original) in names.iter().zip(&originals) {
+        assert_eq!(
+            &std::fs::read(dir.join(name))
+                .unwrap_or_else(|error| panic!("{name} comes back out of the mirror: {error}")),
+            original,
+            "the restored {name} is the original, not an intermediate"
+        );
+    }
+    // Which restored names to expect back is worked out against the canonical
+    // fixture root, because that is the spelling the report writes its outputs
+    // in: Windows adds a `\\?\` prefix the fixture path never had, and an
+    // original restored over its own name would read as an extra generated
+    // output this run had to take away.
+    let restored = dir.canonicalize().expect("the fixture folder resolves");
+    for output in installed {
+        if !names.iter().any(|name| restored.join(name) == output) {
+            assert!(
+                !output.exists(),
+                "{} is taken away with the original back",
+                output.display()
+            );
+        }
+    }
+    report
+}
+
 #[test]
 fn replace_and_restore_round_trip_through_the_cli() {
     let dir = workdir("replace");
     photo(&dir, "shot.png");
     let target = dir.to_string_lossy().into_owned();
-    assert_eq!(
-        run(&["convert", &target, "--replace"]).status.code(),
-        Some(0)
-    );
-    assert!(
-        !dir.join("shot.png").exists(),
-        "replace takes the original's name"
-    );
-    assert!(dir.join("shot.webp").is_file());
-    assert!(dir.join("press-originals").join("shot.png").is_file());
-    assert_eq!(run(&["restore", &target]).status.code(), Some(0));
-    assert!(
-        dir.join("shot.png").is_file(),
-        "restore hands the original back"
-    );
+    replace_and_restore_round_trip(&dir, &["shot.png"], &target, &[], &target);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same round trip through the other spelling. The audited root, the output
+/// context, the collision keys and the backup mirror have to be one namespace,
+/// or the run refuses every file as outside the output folder.
+#[test]
+fn replace_and_restore_round_trip_through_a_second_spelling_of_the_root() {
+    let dir = workdir("replace-alias");
+    photo(&dir, "shot.png");
+    let alias = aliased(&dir);
+    let target = alias.to_string_lossy().into_owned();
+    replace_and_restore_round_trip(&dir, &["shot.png"], &target, &[], &target);
+    clean_up(&dir, &alias);
+}
+
+/// One file named through an aliased parent. Only the parent is resolved: the
+/// file keeps the name that was typed, so replace mode still moves the file that
+/// was chosen rather than whatever a final symlink points at.
+#[test]
+fn replace_and_restore_round_trip_for_one_file_under_a_second_spelling() {
+    let dir = workdir("replace-file");
+    photo(&dir, "shot.png");
+    let alias = aliased(&dir);
+    replace_and_restore_round_trip(
+        &dir,
+        &["shot.png"],
+        &alias.join("shot.png").to_string_lossy(),
+        &[],
+        &alias.to_string_lossy(),
+    );
+    clean_up(&dir, &alias);
+}
+
+/// `typed/link` points one level down a real tree, so `typed/link/..` names
+/// `actual` to the kernel and `typed` to a lexical walk that drops the link and
+/// its `..` together. Both folders exist and hold a file of the same name, so
+/// which one a run resolved is visible in what it converted.
+#[cfg(unix)]
+fn linked_parent_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let base = workdir(tag);
+    let actual = base.join("actual");
+    std::fs::create_dir_all(actual.join("sub")).expect("the linked-to folder is created");
+    let typed = base.join("typed");
+    std::fs::create_dir_all(&typed).expect("the folder holding the link is created");
+    std::os::unix::fs::symlink(actual.join("sub"), typed.join("link"))
+        .expect("the link points one level down the real tree");
+    (base, actual, typed)
+}
+
+/// The decoy the lexical spelling would have picked: same name, different
+/// bytes, and it must come out of the run exactly as it went in.
+#[cfg(unix)]
+fn decoy(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, photo_png_seeded(97)).expect("the decoy image is written");
+    path
+}
+
+/// Nothing was converted, replaced or backed up in the folder the run never
+/// audited, and the decoy is the same file it was.
+#[cfg(unix)]
+fn decoy_untouched(typed: &Path, decoy: &Path, before: &[u8]) {
+    assert_eq!(
+        std::fs::read(decoy).expect("the decoy is still there"),
+        before,
+        "the folder the kernel never named keeps its file untouched"
+    );
+    assert!(
+        !typed.join("press-originals").exists(),
+        "no original was parked in the folder the run never audited"
+    );
+    assert!(
+        !typed.join("photo.webp").exists(),
+        "no output was installed in the folder the run never audited"
+    );
+    assert!(
+        !typed.join("optimized").exists(),
+        "no output folder was made in the folder the run never audited"
+    );
+}
+
+/// A folder named through a link's parent. `..` is the kernel's to resolve:
+/// removing it from the typed spelling first names the link's own parent, and
+/// the run then audits and replaces files in a folder nobody asked for.
+#[cfg(unix)]
+#[test]
+fn a_folder_named_through_a_linked_parent_is_the_one_the_kernel_names() {
+    let (base, actual, typed) = linked_parent_fixture("replace-linked-parent");
+    photo(&actual, "photo.png");
+    let decoy_path = decoy(&typed, "photo.png");
+    let before = std::fs::read(&decoy_path).expect("the decoy reads back");
+    let target = typed.join("link").join("..").to_string_lossy().into_owned();
+    let report = replace_and_restore_round_trip(&actual, &["photo.png"], &target, &[], &target);
+    let source = report["files"][0]["source"]
+        .as_str()
+        .expect("the converted file names its source")
+        .to_owned();
+    let resolved = actual.canonicalize().expect("the audited folder resolves");
+    assert_eq!(
+        PathBuf::from(source),
+        resolved.join("photo.png"),
+        "the run names the file the kernel reaches, not the lexical one"
+    );
+    decoy_untouched(&typed, &decoy_path, &before);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The same resolution for one file: only the parent is resolved, but it is
+/// resolved by the kernel, so the file that is opened is the one the typed path
+/// actually reaches.
+#[cfg(unix)]
+#[test]
+fn one_file_named_through_a_linked_parent_is_the_one_the_kernel_names() {
+    let (base, actual, typed) = linked_parent_fixture("replace-linked-parent-file");
+    photo(&actual, "photo.png");
+    let decoy_path = decoy(&typed, "photo.png");
+    let before = std::fs::read(&decoy_path).expect("the decoy reads back");
+    let parent = typed.join("link").join("..");
+    let report = replace_and_restore_round_trip(
+        &actual,
+        &["photo.png"],
+        &parent.join("photo.png").to_string_lossy(),
+        &[],
+        &parent.to_string_lossy(),
+    );
+    let source = report["files"][0]["source"]
+        .as_str()
+        .expect("the converted file names its source")
+        .to_owned();
+    let resolved = actual.canonicalize().expect("the audited folder resolves");
+    assert_eq!(
+        PathBuf::from(source),
+        resolved.join("photo.png"),
+        "the file opened is the one the parent link reaches"
+    );
+    decoy_untouched(&typed, &decoy_path, &before);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A WebP replaced by a WebP writes its own name back, which is only safe
+/// because the original is in the mirror first. Recognising that name means
+/// comparing the source with the planned output, and across two spellings of
+/// one folder they never look equal: the write then treats its own installed
+/// output as somebody else's file and refuses it as changed after planning.
+#[test]
+fn replace_keeps_its_own_name_through_a_second_spelling_of_the_root() {
+    let dir = workdir("replace-same");
+    seeded_webp(&dir, "shot.webp");
+    let alias = aliased(&dir);
+    let target = alias.to_string_lossy().into_owned();
+    let report = replace_and_restore_round_trip(
+        &dir,
+        &["shot.webp"],
+        &target,
+        &["--format", "same"],
+        &target,
+    );
+    let output = report["files"][0]["output"]
+        .as_str()
+        .expect("the converted file names its output");
+    assert!(
+        output.ends_with("shot.webp"),
+        "the output takes its own name back: {output}"
+    );
+    clean_up(&dir, &alias);
+}
+
+/// `a.png` converting to WebP asks for the name of the audited `a.webp` beside
+/// it. That file is an original nobody selected, so the planner refuses `a.png`
+/// and converts the sibling on its own terms: the folder keeps both originals,
+/// one untouched on disk and one in the mirror.
+///
+/// Reading the audited names in one spelling and the planned outputs in another
+/// loses the collision outright. The run then writes `a.png`'s output over
+/// `a.webp`, never backs that file up, and restore has nothing to hand back —
+/// the run reports a saving for a file it destroyed.
+#[test]
+fn a_replace_run_never_overwrites_an_audited_sibling_through_a_second_spelling() {
+    let dir = workdir("replace-sibling");
+    photo(&dir, "a.png");
+    seeded_webp(&dir, "a.webp");
+    let png = std::fs::read(dir.join("a.png")).expect("the png reads back");
+    let webp = std::fs::read(dir.join("a.webp")).expect("the webp reads back");
+    let alias = aliased(&dir);
+    let target = alias.to_string_lossy().into_owned();
+    let output = run(&["convert", &target, "--replace", "--json"]);
+    // A refused file is work left, and the run says so in its status.
+    assert_exit(&output, 1, "replace");
+    let report = stdout_json(&output);
+    let files = report["files"].as_array().expect("files list");
+    assert_eq!(files.len(), 2);
+    let listed = |name: &str| {
+        files
+            .iter()
+            .find(|file| {
+                file["source"]
+                    .as_str()
+                    .is_some_and(|source| source.ends_with(name))
+            })
+            .unwrap_or_else(|| panic!("{name} is listed: {report}"))
+    };
+    // What the folder holds is asserted before what the report says: a lost
+    // original is the failure worth naming first.
+    assert_eq!(
+        std::fs::read(dir.join("a.png")).expect("the refused original is still there"),
+        png,
+        "a file the planner refused is left exactly as it was"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("press-originals").join("a.webp"))
+            .expect("the converted sibling's original is in the mirror"),
+        webp
+    );
+    assert_eq!(listed("a.png")["status"], "failed");
+    assert_eq!(
+        listed("a.png")["error"],
+        "the output would overwrite a source image",
+        "the refusal names the reason it refused"
+    );
+    assert_eq!(
+        listed("a.webp")["status"],
+        "converted",
+        "{}",
+        stderr(&output)
+    );
+    assert_exit(&run(&["restore", &target]), 0, "restore");
+    assert_eq!(
+        std::fs::read(dir.join("a.webp")).expect("the original webp comes back"),
+        webp
+    );
+    assert_eq!(
+        std::fs::read(dir.join("a.png")).expect("the png never moved"),
+        png
+    );
+    clean_up(&dir, &alias);
 }
 
 fn handoff_fixture(dir: &Path) -> PathBuf {
@@ -496,14 +853,19 @@ fn handoff_root_maps_hints_to_verdicts() {
         .iter()
         .map(|mapping| mapping["verdict"].as_str().expect("a verdict"))
         .collect();
-    // An exact hint confirms, a basename match stays a candidate, a foreign
-    // absolute hint is out of scope, and nothing is unmatched. Nothing
-    // converted: mapping only reports.
+    // An exact hint is a path match, a basename match stays a candidate, a
+    // foreign absolute hint is out of scope, and nothing is unmatched. No
+    // verdict says a human confirmed anything, and nothing converted: mapping
+    // only reports.
     assert_eq!(
         verdicts,
-        vec!["confirmed", "candidate", "out_of_scope", "unmatched"]
+        vec!["path_match", "candidate", "out_of_scope", "unmatched"]
     );
-    assert_eq!(doc["summary"]["confirmed"], 1);
+    assert!(
+        !verdicts.contains(&"confirmed"),
+        "no automatic verdict advertises itself as a confirmation"
+    );
+    assert_eq!(doc["summary"]["path_match"], 1);
     assert_eq!(doc["summary"]["candidate"], 1);
     assert!(!root.join("optimized").exists(), "mapping writes nothing");
     let _ = std::fs::remove_dir_all(&dir);
@@ -532,43 +894,47 @@ fn handoff_refuses_a_missing_root() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn deployed_tree(dir: &Path) -> (PathBuf, PathBuf) {
+/// A source root plus a second local folder holding a real converted
+/// derivative of it. The second folder is what `--deployed` reads: a
+/// directory on this machine, never a website.
+fn local_check_tree(dir: &Path) -> (PathBuf, PathBuf) {
     let root = dir.join("photos");
     std::fs::create_dir_all(&root).expect("the root is created");
     std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
-    let deployed = dir.join("live");
-    std::fs::create_dir_all(&deployed).expect("the deployed dir is created");
-    // A real conversion produces the deployed derivative: same stem, AVIF.
+    let checked = dir.join("live");
+    std::fs::create_dir_all(&checked).expect("the checked dir is created");
+    // A real conversion produces the derivative: same stem, AVIF.
     let output = run(&[
         "convert",
         &root.to_string_lossy(),
         "--output",
-        &deployed.to_string_lossy(),
+        &checked.to_string_lossy(),
         "--format",
         "avif",
     ]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(deployed.join("hero.avif").is_file());
-    (root, deployed)
+    assert!(checked.join("hero.avif").is_file());
+    (root, checked)
 }
 
-fn deployed_resource(id: &str, formats: &[&str]) -> serde_json::Value {
+fn constrained_resource(id: &str, formats: &[&str]) -> serde_json::Value {
     let mut resource = minimal_resource(id, &["hero.jpg"]);
     resource["formats"] = serde_json::json!(formats);
     resource["max_edge"] = serde_json::json!(1600);
+    resource["findings"] = serde_json::json!(["excess-dimensions", "missing-alt"]);
     resource
 }
 
 #[test]
-fn handoff_deployed_verifies_constraints_and_names_gaps() {
-    let dir = workdir("deployed");
-    let (root, deployed) = deployed_tree(&dir);
+fn handoff_local_check_reports_local_matches_and_names_gaps() {
+    let dir = workdir("local-check");
+    let (root, checked) = local_check_tree(&dir);
     let report = mapping_report(
         &dir,
         "report.json",
         serde_json::json!([
-            deployed_resource("r1", &["avif"]),
-            deployed_resource("r2", &["jpeg"]),
+            constrained_resource("r1", &["avif"]),
+            constrained_resource("r2", &["jpeg"]),
         ]),
     );
     let output = run(&[
@@ -577,33 +943,62 @@ fn handoff_deployed_verifies_constraints_and_names_gaps() {
         "--root",
         &root.to_string_lossy(),
         "--deployed",
-        &deployed.to_string_lossy(),
+        &checked.to_string_lossy(),
         "--json",
     ]);
-    // One derivative arrived meeting its constraints, the other answers to
+    // One derivative sits there meeting its constraints, the other answers to
     // the name in the wrong format: gaps exit 1, like a partial run.
     assert_eq!(output.status.code(), Some(1));
     let doc = stdout_json(&output);
-    let statuses: Vec<&str> = doc["deployed"]
+    let statuses: Vec<&str> = doc["local_checks"]
         .as_array()
         .expect("checks list")
         .iter()
         .map(|check| check["status"].as_str().expect("a status"))
         .collect();
-    assert_eq!(statuses, vec!["deployed", "differs"]);
-    assert_eq!(doc["deploy_summary"]["deployed"], 1);
-    assert_eq!(doc["deploy_summary"]["differs"], 1);
+    assert_eq!(statuses, vec!["local_match", "differs"]);
+    assert_eq!(doc["local_summary"]["local_match"], 1);
+    assert_eq!(doc["local_summary"]["differs"], 1);
+    assert_eq!(doc["local_root"], checked.to_string_lossy().as_ref());
+    // The scope rides along, so no reader has to infer how far a match reaches.
+    let scope = doc["local_evidence_scope"]
+        .as_str()
+        .expect("the scope is stated");
+    for boundary in ["local folder", "not a live site", "markup", "re-audit"] {
+        assert!(scope.contains(boundary), "{scope}");
+    }
+    // The finding a person still has to fix stays listed against the match.
+    let findings: Vec<&str> = doc["local_checks"][0]["findings"]
+        .as_array()
+        .expect("findings list")
+        .iter()
+        .map(|finding| finding.as_str().expect("a finding"))
+        .collect();
+    assert_eq!(findings, vec!["excess-dimensions", "missing-alt"]);
+    assert!(
+        doc["local_checks"][0]["paths"][0]
+            .as_str()
+            .expect("the matched file")
+            .ends_with("hero.avif")
+    );
+    // Nothing in the document claims a deployment, in a status, a summary
+    // key or anywhere else.
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !raw.contains("deploy"),
+        "a local directory check must not report deployment: {raw}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn handoff_deployed_clean_tree_exits_zero() {
-    let dir = workdir("deployed-clean");
-    let (root, deployed) = deployed_tree(&dir);
+fn handoff_local_check_text_states_a_local_only_scope() {
+    let dir = workdir("local-check-clean");
+    let (root, checked) = local_check_tree(&dir);
     let report = mapping_report(
         &dir,
         "report.json",
-        serde_json::json!([deployed_resource("r1", &["avif"])]),
+        serde_json::json!([constrained_resource("r1", &["avif"])]),
     );
     let output = run(&[
         "handoff",
@@ -611,19 +1006,37 @@ fn handoff_deployed_clean_tree_exits_zero() {
         "--root",
         &root.to_string_lossy(),
         "--deployed",
-        &deployed.to_string_lossy(),
+        &checked.to_string_lossy(),
     ]);
     assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("deployed r1"),
-        "the checklist names the verified file"
+        text.contains("local file check under"),
+        "the heading says what was read: {text}"
+    );
+    assert!(
+        text.contains("scope: filenames, formats and pixel dimensions")
+            && text.contains("not a live site"),
+        "the heading is followed by its boundary: {text}"
+    );
+    assert!(
+        text.contains("local_match r1"),
+        "the checklist names the matched file: {text}"
+    );
+    assert!(
+        text.contains("open findings") && text.contains("missing-alt"),
+        "page work stays open beside a match: {text}"
+    );
+    assert!(
+        !text.contains("deploy") && !text.contains("verified against"),
+        "no line claims a verified deployment: {text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn handoff_deployed_missing_tree_reports_missing() {
-    let dir = workdir("deployed-missing");
+fn handoff_local_check_empty_tree_reports_missing() {
+    let dir = workdir("local-check-missing");
     let root = dir.join("photos");
     std::fs::create_dir_all(&root).expect("the root is created");
     std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
@@ -632,7 +1045,7 @@ fn handoff_deployed_missing_tree_reports_missing() {
     let report = mapping_report(
         &dir,
         "report.json",
-        serde_json::json!([deployed_resource("r1", &["avif"])]),
+        serde_json::json!([constrained_resource("r1", &["avif"])]),
     );
     let output = run(&[
         "handoff",
@@ -645,7 +1058,233 @@ fn handoff_deployed_missing_tree_reports_missing() {
     ]);
     assert_eq!(output.status.code(), Some(1));
     let doc = stdout_json(&output);
-    assert_eq!(doc["deployed"][0]["status"], "missing");
+    assert_eq!(doc["local_checks"][0]["status"], "missing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_local_check_covers_every_resource_and_never_passes_a_hole() {
+    let dir = workdir("local-check-unmatched");
+    let (root, checked) = local_check_tree(&dir);
+    // Neither resource is under the source root, so nothing is looked for.
+    let mut resources = vec![
+        constrained_resource("absent-one", &["avif"]),
+        constrained_resource("absent-two", &["avif"]),
+    ];
+    resources[0]["path_hints"] = serde_json::json!(["nowhere-one.jpg"]);
+    resources[1]["path_hints"] = serde_json::json!(["nowhere-two.jpg"]);
+    let report = mapping_report(&dir, "report.json", serde_json::json!(resources));
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+        "--json",
+    ]);
+    // Nothing checked is a short checklist, not a clean one.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    let checks = doc["local_checks"].as_array().expect("checks list");
+    assert_eq!(checks.len(), 2, "one row per reported resource");
+    for check in checks {
+        assert_eq!(check["status"], "not_checked");
+        assert!(
+            check["notes"][0]
+                .as_str()
+                .expect("a reason")
+                .contains("unmatched"),
+            "the hole names the verdict that caused it: {check}"
+        );
+        // The page work an unmatched image still owes stays on its row.
+        assert_eq!(
+            check["findings"],
+            serde_json::json!(["excess-dimensions", "missing-alt"])
+        );
+    }
+    assert_eq!(doc["local_summary"]["not_checked"], 2);
+    assert_eq!(doc["local_summary"]["local_match"], 0);
+    // The text listing keeps those findings open too.
+    let text = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+    ]);
+    assert_eq!(text.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(
+        text.contains("not_checked absent-one") && text.contains("not_checked absent-two"),
+        "every resource is listed: {text}"
+    );
+    assert!(
+        text.contains("open findings") && text.contains("missing-alt"),
+        "findings survive a resource nothing looked for: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_local_check_mixes_matches_and_holes_without_losing_either() {
+    let dir = workdir("local-check-mixed");
+    let (root, checked) = local_check_tree(&dir);
+    let mut resources = vec![
+        constrained_resource("hero", &["avif"]),
+        constrained_resource("absent", &["avif"]),
+    ];
+    resources[1]["path_hints"] = serde_json::json!(["nowhere.jpg"]);
+    let report = mapping_report(&dir, "report.json", serde_json::json!(resources));
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+        "--json",
+    ]);
+    // One real match does not carry the resource beside it.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    let statuses: Vec<&str> = doc["local_checks"]
+        .as_array()
+        .expect("checks list")
+        .iter()
+        .map(|check| check["status"].as_str().expect("a status"))
+        .collect();
+    assert_eq!(statuses, vec!["local_match", "not_checked"]);
+    assert_eq!(doc["local_summary"]["local_match"], 1);
+    assert_eq!(doc["local_summary"]["not_checked"], 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_reports_what_each_scan_could_not_read_and_fails() {
+    let dir = workdir("local-check-unreadable");
+    let (root, checked) = local_check_tree(&dir);
+    // A file that claims an image extension and would not decode, in each
+    // walked root. Neither is the mapped file, so the match still succeeds
+    // and only the short walk stands between it and a clean exit.
+    std::fs::write(root.join("broken-source.png"), b"not a png at all")
+        .expect("the source fixture is written");
+    std::fs::write(checked.join("broken-local.png"), b"not a png at all")
+        .expect("the local fixture is written");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([constrained_resource("hero", &["avif"])]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+        "--json",
+    ]);
+    // The resource still matches, and the run still fails: an unread file may
+    // be the competing match nobody saw.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    assert_eq!(doc["local_checks"][0]["status"], "local_match");
+    let scans = doc["scans"].as_array().expect("one entry per walked root");
+    assert_eq!(scans.len(), 2);
+    for (scope, expected_root, broken) in [
+        ("source_root", &root, "broken-source.png"),
+        ("local_check_root", &checked, "broken-local.png"),
+    ] {
+        let scan = scans
+            .iter()
+            .find(|scan| scan["scope"] == scope)
+            .unwrap_or_else(|| panic!("{scope} is reported"));
+        assert_eq!(scan["root"], expected_root.to_string_lossy().as_ref());
+        assert_eq!(scan["complete"], false);
+        assert_eq!(scan["unreadable_total"], 1);
+        assert_eq!(scan["unreadable_omitted"], 0);
+        assert_eq!(scan["walk_errors_total"], 0);
+        assert!(
+            scan["unreadable"][0]
+                .as_str()
+                .expect("the named file")
+                .ends_with(broken),
+            "the diagnostic names the file, not a count: {scan}"
+        );
+    }
+    // The producer's own report never acquires this run's filesystem trouble.
+    assert!(
+        !serde_json::to_string(&doc["pending"])
+            .expect("pending serializes")
+            .contains("broken-source.png"),
+        "pending stays what the producer sent"
+    );
+    let text = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+    ]);
+    assert_eq!(text.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert_eq!(
+        text.matches("scan incomplete").count(),
+        2,
+        "each root reports its own short walk: {text}"
+    );
+    assert!(
+        text.contains("would not decode: ") && text.contains("broken-local.png"),
+        "the human text names the unread files: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_mapping_alone_still_passes_but_not_with_a_short_walk() {
+    let dir = workdir("mapping-scan");
+    let root = dir.join("photos");
+    std::fs::create_dir_all(&root).expect("the root is created");
+    std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([minimal_resource("r1", &["hero.jpg"])]),
+    );
+    // Mapping on its own is a listing, not a checklist: unmatched resources
+    // do not fail it and a clean walk exits 0.
+    let clean = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(clean.status.code(), Some(0));
+    let doc = stdout_json(&clean);
+    assert_eq!(doc["scans"].as_array().map(Vec::len), Some(1));
+    assert_eq!(doc["scans"][0]["scope"], "source_root");
+    assert_eq!(doc["scans"][0]["complete"], true);
+    assert!(
+        doc["local_checks"].is_null(),
+        "no local check was asked for"
+    );
+    // The same run over a folder the walk could not fully read does fail.
+    std::fs::write(root.join("broken.png"), b"not a png at all").expect("the fixture is written");
+    let short = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(short.status.code(), Some(1));
+    let doc = stdout_json(&short);
+    assert_eq!(doc["scans"][0]["complete"], false);
+    assert_eq!(doc["scans"][0]["unreadable_total"], 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

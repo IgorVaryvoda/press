@@ -93,6 +93,26 @@ pub(super) fn image_context_menu(
         )
 }
 
+/// Where a replace run parked the original of `path`, or nothing when the
+/// audited file cannot be placed inside the root it was listed under.
+///
+/// `build_audit` resolves the root through `navigation_path`, so it is the
+/// canonical spelling, while an entry carries whatever spelling the walk used:
+/// macOS disagrees over `/var` and `/private/var`, and a canonical Windows root
+/// wears a verbatim prefix its input never had. Canonicalising the entry too
+/// settles that. Joining the leftover onto the backup root never happens: an
+/// absolute leftover replaces the root outright, so the before side would
+/// silently become the moved-away original.
+fn backup_of(root: &Path, path: &Path, out_dir: &Path) -> Option<PathBuf> {
+    let backup_root = manifest::backup_root(out_dir);
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(backup_root.join(relative));
+    }
+    let canonical = crate::scan::canonical_boundary(path).ok()?;
+    let relative = canonical.strip_prefix(root).ok()?;
+    Some(backup_root.join(relative))
+}
+
 impl Audit {
     fn notify_media_error(
         &self,
@@ -218,13 +238,9 @@ impl Audit {
         let Some((Output::Replace, out_dir)) = self.conversion_destination.as_ref() else {
             return Some(entry.path.clone());
         };
-        let relative = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path);
-        let backup = manifest::backup_root(out_dir).join(relative);
-        if backup.symlink_metadata().is_ok() {
-            Some(backup)
-        } else {
-            Some(entry.path.clone())
-        }
+        let backup = backup_of(&self.root, &entry.path, out_dir)
+            .filter(|backup| backup.symlink_metadata().is_ok());
+        Some(backup.unwrap_or_else(|| entry.path.clone()))
     }
 
     /// The same view for any file this app has written next to a source —
@@ -267,24 +283,17 @@ impl Audit {
         for row in self.strip_rows(index) {
             self.request_thumb(row, cx);
         }
-        if let Some(pair) = self.take_cached_pair(&key) {
-            if let Some(comparison) = self.compare.as_mut() {
-                comparison.pair = Some(pair);
-            }
-            self.prefetch_media(cx);
-            cx.notify();
-            return;
-        }
-        if self.is_prefetching(&key, MediaMode::Compare) {
-            cx.notify();
-            return;
-        }
         cx.notify();
 
         cx.spawn(async move |this, cx| {
+            // Both files are read and decoded here, and both identities are
+            // confirmed here, before anything lands on the main thread.
             let built = cx
                 .background_executor()
-                .spawn(async move { compare::build_written(&source, &written) })
+                .spawn(async move {
+                    compare::build_written(&source, &written)
+                        .and_then(|pair| pair.confirm(&source, Some(&written)))
+                })
                 .await
                 .map(Arc::new);
             let _ = this.update(cx, |audit, cx| {
@@ -297,15 +306,17 @@ impl Audit {
                 ) {
                     return;
                 }
-                if !key.fresh() {
+                // The stat key is a cheap miss, not the authority: a build that
+                // consumed bytes since replaced says so itself.
+                if !key.fresh() || built.as_ref().err() == Some(&convert::Failure::SourceChanged) {
                     reopen_stale_media(audit, cx);
                     return;
                 }
                 let Some(comparison) = audit.compare.as_mut() else {
                     return;
                 };
-                comparison.failed = built.is_none();
-                comparison.pair = built;
+                comparison.failed = built.is_err();
+                comparison.pair = built.ok();
                 if comparison.failed {
                     audit.notify_media_error(
                         index,
@@ -342,10 +353,6 @@ impl Audit {
                     image,
                     width,
                     height,
-                    profile: None,
-                    // A thumbnail standing in until the decode lands. It came out of
-                    // the cache's lossy WebP, so it is a picture, not a source.
-                    decoded: false,
                 })
             })
         });
@@ -365,7 +372,7 @@ impl Audit {
             written: None,
             produced_by: None,
         });
-        let awaiting_prefetch = !full_resolution && self.is_prefetching(&key, MediaMode::Preview);
+        let awaiting_prefetch = !full_resolution && self.is_prefetching(&key);
         if !awaiting_prefetch {
             self.prefetch_media(cx);
         }
@@ -424,7 +431,7 @@ impl Audit {
                     return;
                 }
                 if let Some(preview) = built.as_ref() {
-                    audit.cached = Some((key.clone(), CachedMedia::Preview(preview.clone())));
+                    audit.cached = Some((key.clone(), preview.clone()));
                 }
                 if !key.fresh() {
                     reopen_stale_media(audit, cx);
@@ -474,9 +481,6 @@ impl Audit {
         self.clear_error("media", cx);
         let dataset_generation = self.dataset_generation;
         let key = compare::Key::new(&path, &path, self.format, self.quality, self.max_edge);
-        // Read before the comparison replaces it: the preview of this same file, at
-        // these same settings, has already decoded it.
-        let previewed = self.previewed_source(&key);
         self.compare = Some(Comparison {
             index,
             dataset_generation,
@@ -499,21 +503,9 @@ impl Audit {
         let quality = self.quality;
         let format = self.format;
         let max_edge = self.max_edge;
-        // Same image, same settings: skip the encoder entirely. Arrowing through a
-        // folder lands here every step, on the pair built while you looked at the
-        // one before it.
-        if let Some(pair) = self.take_cached_pair(&key) {
-            if let Some(comparison) = self.compare.as_mut() {
-                comparison.pair = Some(pair);
-            }
-            self.prefetch_media(cx);
-            cx.notify();
-            return;
-        }
-        if self.is_prefetching(&key, MediaMode::Compare) {
-            cx.notify();
-            return;
-        }
+        // The speed the request was made at, frozen here and carried to the encoder,
+        // so the bytes quoted are the bytes this key describes.
+        let avif_speed = key.avif_speed;
 
         cx.spawn(async move |this, cx| {
             // Building a pair is a full decode, encode and second decode. Arrowing
@@ -549,10 +541,13 @@ impl Audit {
                 return;
             }
 
+            // The source is read, decoded, resized and confirmed here: the view
+            // never hands its own pixels to an encoder.
             let built = cx
                 .background_executor()
                 .spawn(async move {
-                    compare::build(&path, format, quality, max_edge, previewed.as_deref())
+                    compare::build(&path, format, quality, max_edge, avif_speed)
+                        .and_then(|pair| pair.confirm(&path, None))
                 })
                 .await
                 .map(Arc::new);
@@ -566,19 +561,23 @@ impl Audit {
                     MediaMode::Compare,
                     &key,
                 );
-                if applies && !key.fresh() {
+                // A same-length edit written back within one filesystem tick leaves
+                // the key looking fresh, so the build's own identity check has the
+                // last word; either way this reopens rather than reporting a decode
+                // that never failed.
+                if applies
+                    && (!key.fresh()
+                        || built.as_ref().err() == Some(&convert::Failure::SourceChanged))
+                {
                     reopen_stale_media(audit, cx);
                     return;
                 }
                 if applies {
-                    if let Some(pair) = built.as_ref() {
-                        audit.cached = Some((key.clone(), CachedMedia::Pair(pair.clone())));
-                    }
                     let Some(comparison) = audit.compare.as_mut() else {
                         return;
                     };
-                    comparison.failed = built.is_none();
-                    comparison.pair = built;
+                    comparison.failed = built.is_err();
+                    comparison.pair = built.ok();
                     if comparison.failed {
                         audit.notify_media_error(
                             index,
@@ -597,61 +596,37 @@ impl Audit {
         .detach();
     }
 
-    /// Return the current or prebuilt media for `key`. Media built ahead becomes
-    /// the current cache entry when navigation reaches it.
-    fn take_cached_media(&mut self, key: &compare::Key, mode: MediaMode) -> Option<CachedMedia> {
-        if let Some((cached, media)) = self.cached.as_ref()
+    /// Return the current or prebuilt preview for `key`. A preview decoded ahead
+    /// becomes the current cache entry when navigation reaches it.
+    fn take_cached_preview(&mut self, key: &compare::Key) -> Option<Arc<Preview>> {
+        if let Some((cached, preview)) = self.cached.as_ref()
             && cached == key
-            && media.mode() == mode
         {
-            return Some(media.clone());
+            return Some(preview.clone());
         }
         match self.ahead.take() {
-            Some((ahead, media)) if ahead == *key && media.mode() == mode => {
-                self.cached = Some((ahead, media.clone()));
-                Some(media)
+            Some((ahead, preview)) if ahead == *key => {
+                self.cached = Some((ahead, preview.clone()));
+                Some(preview)
             }
             _ => None,
         }
     }
 
-    /// The preview of `key` that is on screen or held in the media cache, when it
-    /// holds the file's own decoded pixels. A comparison built from it reads nothing.
-    fn previewed_source(&self, key: &compare::Key) -> Option<Arc<Preview>> {
-        let on_screen = self
-            .compare
-            .as_ref()
-            .filter(|comparison| comparison.key == *key)
-            .and_then(|comparison| comparison.preview.clone());
-        let held = match self.cached.as_ref() {
-            Some((cached, CachedMedia::Preview(preview))) if cached == key => Some(preview.clone()),
-            _ => None,
-        };
-        on_screen.or(held).filter(|preview| preview.decoded)
+    fn is_prefetching(&self, key: &compare::Key) -> bool {
+        self.prefetch_key.as_ref() == Some(key)
     }
 
-    fn take_cached_preview(&mut self, key: &compare::Key) -> Option<Arc<Preview>> {
-        match self.take_cached_media(key, MediaMode::Preview) {
-            Some(CachedMedia::Preview(preview)) => Some(preview),
-            Some(CachedMedia::Pair(_)) | None => None,
-        }
-    }
-
-    fn take_cached_pair(&mut self, key: &compare::Key) -> Option<Arc<Pair>> {
-        match self.take_cached_media(key, MediaMode::Compare) {
-            Some(CachedMedia::Pair(pair)) => Some(pair),
-            Some(CachedMedia::Preview(_)) | None => None,
-        }
-    }
-
-    fn is_prefetching(&self, key: &compare::Key, mode: MediaMode) -> bool {
-        self.prefetch_key
-            .as_ref()
-            .is_some_and(|(loading, loading_mode)| loading == key && *loading_mode == mode)
-    }
-
-    /// Build the media the next arrow step will request while the current one is on
-    /// screen. Only one speculative build exists and large images stay demand-driven.
+    /// Decode the preview the next arrow step will ask for while the current one is
+    /// on screen. Only one speculative decode exists and large images stay
+    /// demand-driven.
+    ///
+    /// Previews only. A comparison built ahead would have to be handed over on the
+    /// strength of a size and an mtime, which cannot tell a replaced file of the
+    /// same length from the one that was encoded; so arrowing through comparisons
+    /// re-encodes each step, and an AVIF sweep is slower than it was. A preview is a
+    /// decode of the file for the screen and claims nothing about what a run would
+    /// write, so it can be adopted on the same key without lying about anything.
     fn prefetch_media(&mut self, cx: &mut Context<Self>) {
         if self.converting || self.local_ai_busy() || self.studio_busy() {
             return;
@@ -659,22 +634,11 @@ impl Audit {
         let Some(comparison) = self.compare.as_ref() else {
             return;
         };
-        let mode = comparison.mode;
-        let looking_at_results = comparison.written.is_some();
-        if looking_at_results && comparison.produced_by.is_some() {
+        if comparison.mode != MediaMode::Preview {
             return;
         }
-        let target = if looking_at_results {
-            let rows = self.result_rows();
-            rows.iter()
-                .position(|row| *row == comparison.index)
-                .and_then(|at| at.checked_add_signed(self.compare_step))
-                .and_then(|next| rows.get(next).copied())
-        } else {
-            self.compare_target_from(comparison.index, self.compare_step)
-                .map(|(_, target)| target)
-        };
-        let Some(target) = target else {
+        let Some((_, target)) = self.compare_target_from(comparison.index, self.compare_step)
+        else {
             self.prefetch = None;
             self.prefetch_key = None;
             return;
@@ -682,79 +646,33 @@ impl Audit {
         let Some(entry) = self.entries.get(target) else {
             return;
         };
-        let Some(written) = (if looking_at_results {
-            self.result_paths.get(&target).cloned().map(Some)
-        } else {
-            Some(None)
-        }) else {
-            return;
-        };
-        let (edge, bytes_per_pixel) = match mode {
-            MediaMode::Preview => (u32::MAX, 4),
-            MediaMode::Compare if written.is_some() => (u32::MAX, 8),
-            MediaMode::Compare => (self.max_edge.0.unwrap_or(u32::MAX), 8),
-        };
-        let (width, height) = thumbs::fit(entry.width, entry.height, edge);
-        if u64::from(width) * u64::from(height) * bytes_per_pixel > PREFETCH_BUDGET {
+        let (width, height) = thumbs::fit(entry.width, entry.height, u32::MAX);
+        if u64::from(width) * u64::from(height) * 4 > PREFETCH_BUDGET {
             self.ahead = None;
             self.prefetch = None;
             self.prefetch_key = None;
             return;
         }
-        let path = self
-            .comparison_source(target, written.is_some())
-            .unwrap_or_else(|| entry.path.clone());
-        let key = compare::Key::new(
-            written.as_deref().unwrap_or(&path),
-            &path,
-            self.format,
-            self.quality,
-            self.max_edge,
-        );
-        if self
-            .cached
-            .as_ref()
-            .is_some_and(|(held, media)| *held == key && media.mode() == mode)
-            || self
-                .ahead
-                .as_ref()
-                .is_some_and(|(held, media)| *held == key && media.mode() == mode)
-            || self.is_prefetching(&key, mode)
+        let path = entry.path.clone();
+        let key = compare::Key::new(&path, &path, self.format, self.quality, self.max_edge);
+        if self.cached.as_ref().is_some_and(|(held, _)| *held == key)
+            || self.ahead.as_ref().is_some_and(|(held, _)| *held == key)
+            || self.is_prefetching(&key)
         {
             return;
         }
 
         let dataset_generation = self.dataset_generation;
-        let (format, quality, max_edge) = (self.format, self.quality, self.max_edge);
         self.ahead = None;
-        self.prefetch_key = Some((key.clone(), mode));
+        self.prefetch_key = Some(key.clone());
         self.prefetch = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(match mode {
-                    MediaMode::Preview => PREVIEW_DELAY,
-                    MediaMode::Compare => COMPARE_DELAY,
-                })
-                .await;
+            cx.background_executor().timer(PREVIEW_DELAY).await;
             let built = cx
                 .background_executor()
-                .spawn(async move {
-                    match mode {
-                        MediaMode::Preview => compare::preview(&path)
-                            .map(Arc::new)
-                            .map(CachedMedia::Preview),
-                        MediaMode::Compare => match written {
-                            Some(written) => compare::build_written(&path, &written),
-                            None => compare::build(&path, format, quality, max_edge, None),
-                        }
-                        .map(Arc::new)
-                        .map(CachedMedia::Pair),
-                    }
-                })
+                .spawn(async move { compare::preview(&path).map(Arc::new) })
                 .await;
             let _ = this.update(cx, |audit, cx| {
-                if audit.dataset_generation != dataset_generation
-                    || !audit.is_prefetching(&key, mode)
-                {
+                if audit.dataset_generation != dataset_generation || !audit.is_prefetching(&key) {
                     return;
                 }
                 audit.prefetch_key = None;
@@ -766,37 +684,24 @@ impl Audit {
                         audit.compare.as_ref(),
                         target,
                         dataset_generation,
-                        mode,
+                        MediaMode::Preview,
                         &key,
                     )
                 {
                     let failed = built.is_none();
-                    if let Some(media) = built.as_ref() {
-                        audit.cached = Some((key.clone(), media.clone()));
+                    if let Some(preview) = built.as_ref() {
+                        audit.cached = Some((key.clone(), preview.clone()));
                     }
                     let Some(comparison) = audit.compare.as_mut() else {
                         return;
                     };
-                    comparison.failed = built.is_none();
-                    match built {
-                        Some(CachedMedia::Preview(preview)) => {
-                            comparison.preview = Some(preview);
-                        }
-                        Some(CachedMedia::Pair(pair)) => comparison.pair = Some(pair),
-                        None => match mode {
-                            MediaMode::Preview => comparison.preview = None,
-                            MediaMode::Compare => comparison.pair = None,
-                        },
-                    }
+                    comparison.failed = failed;
+                    comparison.preview = built;
                     if failed {
                         audit.notify_media_error(
                             target,
-                            if mode == MediaMode::Preview {
-                                "Couldn’t open preview"
-                            } else {
-                                "Couldn’t build comparison"
-                            },
-                            "is damaged, unsupported, or could not be encoded.",
+                            "Couldn’t open preview",
+                            "is damaged, unsupported, or could not be decoded.",
                             cx,
                         );
                     } else {
@@ -805,9 +710,9 @@ impl Audit {
                     audit.prefetch_media(cx);
                     cx.notify();
                 } else if key.fresh()
-                    && let Some(media) = built
+                    && let Some(preview) = built
                 {
-                    audit.ahead = Some((key, media));
+                    audit.ahead = Some((key, preview));
                 }
             });
         }));

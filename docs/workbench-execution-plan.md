@@ -194,13 +194,13 @@ D3 preparation experiment was stopped and is not part of this tree.
 | Slice | Landed evidence | Boundary at closeout |
 | --- | --- | --- |
 | F1 | Exact source/output identity, bounded consumed bytes, recipe processing revision and content-verified reuse in `b6570f6` | GUI preparation parity remains open under D3 |
-| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated | Keyboard action focus still needs follow-up; no complete UI or all-platform claim |
+| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated, and the export review's keyboard lifecycle followed on `codex/workbench-export-focus` at `1b520fe`, proved in a native Linux window | Linux only; macOS and Windows stay with native CI, and no complete UI claim follows |
 | D2 | Strict local requirements snapshots and actual-output reports in `b6570f6`; use `press check <file-or-folder> --requirements-file <spec> [--json]` | Requirements are local and user-authored; required unsupported checks stay `not_checked`, so a report is not approval |
 | Muse Spark fakehost | The fixture-only supplier and interrupted Studio rehearsal review was completed through `698e990` (supplier base `e447f41`) with explicit fake scripts and durable local attempts | No native auth, retailer service, hosted inference, billing or live pilot was performed |
 | A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
 | D1 | Not landed; isolated checkpoint `codex/workbench-job-safety` at `fc9ad974` | The existing CLI target subset is not independent GUI target delivery |
 | H1 | Not landed; extension checkpoint `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
-| D3 | Not landed; preparation/parity work was stopped before integration | No maintained Google/eBay packs, policy catalog or pack approval is included |
+| D3 | Not landed at that checkpoint; the first bounded preparation-parity increment followed on `codex/workbench-preparation-parity` (see the September 9 section below) | No maintained Google/eBay packs, policy catalog or pack approval is included |
 | HEIF | Not landed; investigation only | No decoder, packaging or platform proof is included |
 
 The D2 CLI check is bounded to local bytes and reports relative names, actual
@@ -221,8 +221,128 @@ JSON evidence remain under `ux/`; they are review artifacts, not release proof.
 The F3 real-window proof uses local review artifacts under `ux/` (untracked in
 this integration worktree): `ux/workbench-ui/f3-corrected-reveal-004.png` and
 `ux/workbench-ui/exported-alpha.press-job.json`. Those artifacts prove the
-reviewed Linux visibility/export path. Keyboard action focus remains unresolved,
-and no macOS/Windows or complete UI claim follows.
+reviewed Linux visibility/export path, and no macOS/Windows or complete UI claim
+follows.
+
+The keyboard follow-up on `codex/workbench-export-focus` puts the export review
+in charge of its own keys. Opening Export from the job menu anchors the review's
+focus handle on a wrapper that is a tab group but not itself a tab stop, then
+steps to the next tab stop on a frame callback, so the keyboard lands on the
+real Export button with its own focus ring and its native Enter and Space —
+gpui-component's `Button` renders its own keyed focus handle and discards a
+caller's, so `track_focus` on the button alone does nothing. Tab reaches Cancel,
+unmodified Escape from either button closes the review, and Enter, Space and
+Escape stop at the review instead of reaching the list behind it. Cancel, Escape
+and a completed save all hand the keyboard back to the list. Four GPUI tests
+drive the real dropdown, the delivered frame and whole key presses, because
+`simulate_keystrokes` sends only the key down while a button activates on the
+key up.
+
+Root independently re-ran the gates on that commit — 666 passed by default and
+682 with the updater feature, plus all-targets/all-features clippy and
+`cargo fmt --check` — and reviewed the code before it was proved in a native
+window rather than argued from tests. Root ran the normal `cargo build --locked`
+debug app, not a release build, from source `1b520fe`, binary SHA-256
+`6223460b66958e1b3377359c3652791c417c5a3804941bb5d7517a7634c33eb5`, at 800x600
+under an isolated Gamescope session with a private X11 display and DBus.
+Choosing the Alpha job explicitly and pressing Up then Enter in the job dropdown
+opened the review with a visible focus ring on Export. Return opened the real
+native Save dialog; cancelling that dialog left the review up and Export still
+usable. Tab visibly reached Cancel, Enter there closed the review, and Escape
+closed it too. An explicit Save wrote the 647-byte Alpha catalog portable job,
+SHA-256 `c2750313dc9a46d0742546be824a8bd13854d4b4b75c1e28ae18d58a89aa23e9`, and
+closed the review, after which Down moved the audit cursor again. Root reviewed
+the screenshots; they and `proof.json` stay under `ux/` in the workbench
+worktree as review artifacts, untracked here and not release proof. The proof is
+Linux only: macOS and Windows remain the separate native CI gate.
+
+### September 9 handoff review increment
+
+The extension landed its Press export on `main` at `2e56550`. Its fixture
+`test/fixtures/press-handoff.json` is copied byte for byte into
+`tests/fixtures/` here, pinned to LF, and checked against the SHA-256 it landed
+as, so a producer change that moves the shared contract fails on this side too.
+
+On top of that, this branch adds the **session review** half of H2 and nothing
+else. The window imports a report through the same bounded read and parser the
+CLI uses, the user selects one folder, matching runs off the update thread, and
+each resource is confirmed individually against the bytes on disk, with a
+recheck that revokes a confirmation when those bytes change. The review writes
+no job, recipe, setting or output, replaces no dataset, and starts no
+conversion; it lives only as long as the session.
+
+The CLI verdict `confirmed` is renamed to `path_match` (and the JSON summary
+key with it) because it only ever meant "one exact supplied hint named one
+existing file". No release tag contains the `handoff` command — `git tag
+--contains 9f2031a` is empty — so this corrects an unreleased draft rather than
+breaking a shipped contract, and `HandoffReport.schema_version` stays `1`. The
+producer's own envelope schema is unaffected. `press skill` guidance is updated
+to the labels the binary actually prints.
+
+A valid report can be a mebibyte of preserved advisory fields with a warning for
+each, so the card draws a bounded head of every list, previews each value with a
+visible ellipsis, and discloses the counts it is not drawing; the pending report
+keeps all of it. Source reads take one review-wide slot, so five hundred rows
+cannot put five hundred bounded reads in flight, and the slot is released by the
+read that finishes rather than by the review that started it. The card also
+carries the folder walk's own diagnostics: a folder Press could not read
+completely cannot show a resource to be absent, and every row that matched
+nothing says so.
+
+This is one increment, not H2. Preparing confirmed sources, durable task state
+across a restart, deployment and re-audit — the rest of the
+[H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
+— all remain open, as does any native Windows or macOS proof.
+
+### September 9 local-check label repair
+
+`press handoff --root <dir> --deployed <dir>` reads a second folder on this
+machine. It scanned that folder for files whose stem matched a mapping and whose
+format and longest edge met the resource's constraints, then reported the result
+as `deployed`, `deploy_summary.deployed` and a "verified against" heading. A
+local directory listing cannot show that a website serves those bytes, that the
+file is the reported image, that markup, viewport or saving model changed, or
+that anything was re-audited, so those labels claimed more than the code does.
+
+This corrects the labels, not the behaviour. The successful status is
+`local_match`; the JSON report carries `local_root`, `local_checks` with the
+matched `paths`, `local_summary` and a `local_evidence_scope` string stating the
+boundary inside the document; the text heading reads `local file check under
+<dir>` and repeats that scope on the next line. `--deployed` still parses and
+still needs `--root`, and `--help` now calls it a local folder check with no
+live site verification. `differs`, `missing`, `ambiguous`, the open findings
+listing and the exit-1-on-gaps semantics are unchanged, and the check still runs
+on automatic `path_match`/`candidate` mappings, which are name evidence and not
+a person's confirmation. As with the `confirmed` → `path_match` rename this
+corrects an unreleased draft — `git tag --contains 9f2031a` is still empty — so
+`HandoffReport.schema_version` stays `1` and the producer's envelope schema is
+untouched.
+
+Review of that first attempt found two ways the corrected labels could still
+read as more than they were, and both are fixed here. The check now returns one
+row per reported resource: a resource whose mapping pinned down no single local
+file comes back `not_checked` with the verdict that caused it, counted in
+`local_summary.not_checked`, so a report of nothing but unmatched resources no
+longer produces an empty checklist, an all-zero summary and exit 0. A pass now
+needs one row per resource and every one of them matching. The human text takes
+its open findings from every pending resource rather than from the rows that
+found a file, so an unmatched image's page work stays listed.
+
+Both walks also carry their own shortfalls into the report. Each folder actually
+scanned appears under `scans` with its root and a `source_root` or
+`local_check_root` scope, naming what would not decode and what could not be
+entered — bounded at `MAX_SHOWN_CHOICES` names with explicit totals and omission
+counts — and an incomplete walk exits 1 whether or not a local check was asked
+for, because an unread file may be the competing match nobody saw. Raw, HEIC and
+package files stay excluded by design and are counted apart from failures; no
+decoder is claimed for them. The producer's `pending` report is untouched by any
+of this: filesystem trouble belongs to the run, not to what the producer sent.
+
+This is a truthfulness repair to one label set, not H3. Deployment, re-audit,
+the local-export versus deployed distinction, changed viewport/model evidence
+and the rest of
+[H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
+all remain open.
 
 ### Isolated checkpoints for tomorrow
 
@@ -236,3 +356,249 @@ and no macOS/Windows or complete UI claim follows.
 
 The closeout docs do not land those isolated checkpoints. No additional release,
 marketplace, browser or cross-platform result is inferred.
+
+### September 9 CI repair (branch `codex/workbench-ci-resume`)
+
+Three tests that pass on Linux failed on the remote runners at base `8131e2c`:
+`audit::tests::replace_results_compare_against_the_backup_original` on both
+macOS and Windows, and `crash::tests::crash_prompt_is_modal_and_uses_exact_visible_copy`
+plus `requirements::tests::receipt_report_contains_relative_names_and_actual_hashes_only`
+on Windows only.
+
+| Failure | Source | Fix |
+| --- | --- | --- |
+| Receipt names | `src/requirements.rs` | `relative_name` rejected every native Windows separator as a literal backslash. Validated components are now joined with `/`; a backslash inside a unix component, a non-UTF-8 name and traversal stay refused. |
+| Replace comparison | `src/audit/media.rs` | `comparison_source` stripped a canonical root off an entry that carries the walk's spelling and, on failure, joined the absolute leftover onto the backup root — which silently returned the moved-away original. It now falls back to the entry's canonical spelling and never joins an absolute leftover. `src/audit/tests.rs` gained an actual encoded output with distinct geometry and a unix symlinked-root case that reproduces the macOS/Windows split locally. |
+| Crash prompt | `src/crash.rs` | The dialog's entrance animation runs on the wall clock, which the test executor does not advance, so `debug_bounds` handed back geometry the next frame had already invalidated. The prompt tests now render animations settled; the explicit Not now close, Escape staying modal and the absence of handoff on dismissal are unchanged. |
+
+Local verification on Linux with `CARGO_TARGET_DIR` inside this worktree, all
+exit code 0: focused tests for all three failures, `cargo test --locked`
+(625 passed, 2 ignored, plus 32/2/3 integration tests), `cargo test --locked
+--features updater` (641 passed, 3 ignored), `cargo clippy --locked --all-targets
+--all-features -- -D warnings`, `cargo fmt --check` and `git diff --check`. Logs
+are under `ux/resume-ci-*.log`.
+
+Only Linux was executed here. The macOS and Windows behaviour is argued from the
+remote logs and from a locally reproduced equivalent, not observed: native OS
+proof stays pending on the next remote CI run.
+
+### September 9 D3 preparation parity, first bounded increment (branch `codex/workbench-preparation-parity`)
+
+Base `1bb9f65`. This increment is shared-source preparation, comparison, estimate
+and writer parity only. No maintained pack, policy catalog, new recipe transform
+or field, GUI target delivery, H2/H3 or HEIF work is included, and none of it is
+implied. Full D3 packs and transforms remain pending.
+
+| Flaw at base | Change |
+| --- | --- |
+| `compare::build` could re-encode a cached BGRA8 `Preview` and read the source ICC profile on a separate path, so a `Keep`, grayscale, deep or tagged source could be quoted at a size the writer never produces | `Preview` is display-only: its `profile`/`decoded` fields, the BGRA read-back and the preview-to-encode argument are gone. Every comparison prepares the source itself and converts to RGBA/BGRA only after the encode. `scan::icc_profile`, which existed for that shortcut, is deleted |
+| Four copies of decode → resize → budget → resolve `Same` → depth check → encode, in the writer, the comparison, the window estimate and the CLI dry run | One `convert::prepare`/`convert::encode_prepared` pair. `prepare` returns the existing `scan::DecodedSource` after one `MaxEdge::apply` and the shared budget check; `encode_prepared` resolves `Same` from the container those same bytes were identified as, applies the shared lossless-depth verdict, and encodes at an explicit speed. No raw snapshot is retained beside the decoded pixels |
+| A completed `Pair` was cached and built ahead on a size-and-mtime key, which a same-length rewrite inside one filesystem tick does not move | `CachedMedia::Pair` and `take_cached_pair` are removed and compare-mode lookahead is disabled. `Pair` now carries the `SourceIdentity` it consumed, plus the installed output's identity for a written comparison, and `Pair::confirm` re-reads both on the background executor before the result lands. `Key` stays a cheap miss; a stale build takes the existing reopen path, not a fake decode failure. The preview cache and preview lookahead are unchanged |
+| `compare::Key` captured an AVIF speed the encoder then re-read from the process dial | Speed is captured once per request, per estimate and per run, and passed to `encode_with_speed`. A recorded write takes it from its own `Stamp` via `Stamp::avif_speed()`, so the bytes and the manifest line describing them cannot come from two reads of a setting that moved in between |
+| The estimate held decoded pixels keyed on path and max edge alone | It holds `Arc<scan::DecodedSource>` and checks the held identity against the bytes on disk before reuse; a mismatch prepares the current bytes and replaces the entry. The cache mutex is released before that hash, because the window prunes the same map on the main thread |
+
+Regressions added, each against actual writer output rather than the shared
+helper compared with itself: grayscale JPEG, deep tagged PNG and transparency all
+`Keep`/convert through `convert::convert_to` and must match the comparison's
+quoted size and geometry; an AVIF run must write the bytes of the speed its own
+`Stamp` claims while the process dial says otherwise, and its manifest line must
+record that speed; a same-length rewrite under the original mtime must leave
+`Key::fresh` true while `Pair::confirm` refuses, and the GUI estimate must reject
+the held decode and project the length of a real `convert_to` output of the bytes
+now on disk, which is proved to differ from the replaced bytes' output. The
+existing compare lookahead test was rewritten to state the contract that now
+holds — every comparison is built from its own source — rather than deleted.
+
+Cost of the disabled completed-pair cache, stated as work rather than as a
+number. Before this change, stepping to a comparison that had been built ahead,
+or reopening one at unchanged settings, showed it with no encoding at all. Now
+every comparison runs a full decode, encode and decode of the output, once per
+open and once per arrow step, and the same file opened twice is encoded twice.
+Nothing else regressed: previews are still cached and still decoded ahead, and
+conversion runs are untouched. The work is worst where the encoder is slowest,
+which is AVIF, and grows with the pixel count. That is the price of not handing
+over pixels on the strength of a size and a timestamp, and it is stated rather
+than hidden.
+
+Normal-run written bytes are unchanged, so no recipe fingerprint or processing
+revision is bumped: the encoder inputs are identical, and for an unconfigured or
+unchanged setting `Stamp::avif_speed()` is the same value `avif::speed()` returned
+at the same point. Only the ordering of `Same` resolution against the pixel-budget
+check moved, which changes which name a doubly-invalid file fails under, not any
+output.
+
+Local Linux gates, `CARGO_TARGET_DIR` inside this worktree, `TMPDIR` under
+`ux/test-tmp-d3`, all exit code 0: `cargo test --locked` (634 passed, 2 ignored,
+plus 32/2/3 integration), `cargo test --locked --features updater` (650 passed,
+3 ignored, plus 32/2/3), `cargo clippy --locked --all-targets --all-features --
+-D warnings`, `cargo fmt --check`, `git diff --check`. Logs are under
+`ux/d3-preparation/`. No flake was seen in these runs.
+
+Only Linux was executed. No native macOS or Windows result is claimed, and the
+native UI proof for this increment is root's after review.
+
+#### Round 2 corrections
+
+Formal round 1 blocked `e6fedd0` on two findings; both are addressed here.
+
+The estimate and the CLI projection checked the identity of the pixels they
+sampled only *before* encoding. An encode is not instant — AVIF is seconds — so a
+source rewritten while its own sample ran could contribute a size measured from
+pixels the file no longer held, and a freshly prepared sample had the same gap
+because preparation is its only check. Both samplers now answer through one
+shared `audit::sample_encode`, which re-reads the source and compares the exact
+consumed `SourceIdentity` *after* the encoder returns, on the worker that did the
+encoding. A mismatch is `Unknown`, not `Refused`: nothing about the recipe was
+rejected, so the slice borrows the average instead of being taken out of the
+total as a file the run would write nothing for. A projection standing on nothing
+but such samples returns `None`, so the window publishes no estimate rather than a
+stale one. Generation and dataset guards are untouched, the cache mutex is still
+released before any disk read, and no cache framework or second representation
+was added — the check is the `SourceIdentity::matches_path` already used
+elsewhere. The comparison view already confirmed after encoding through
+`Pair::confirm`, and the writer already re-checks at install, so neither changed.
+
+The regression proves both arms against the actual disk writer: the same prepared
+source left alone yields exactly the bytes `convert::convert_to` puts on disk,
+and the same prepared source with the file rewritten underneath it — same length,
+original mtime, so no stat can see it — yields `Unknown` and projects nothing,
+while a genuine lossless-depth refusal still yields `Refused`. Removing the
+post-encode check makes it fail. It is a direct call of the shared sampler with
+the rewrite landing between preparation and the verdict, which is the whole window
+that check exists for; the test executor runs a sample task to completion without
+an interleaving point, so a mutation timed inside the encoder itself would have
+needed either a sleep or a production seam that exists only for tests, and neither
+was added. The earlier same-length/same-mtime-before-scheduling regression and its
+writer oracle are unchanged.
+
+The round 1 cost figures were withdrawn. The paragraph above previously quoted
+about 0.16 s per AVIF image, obtained by subtracting a `--dry-run` invocation as
+process and scan overhead. That subtraction is wrong: a dry run samples and
+encodes as part of its own work, so what was subtracted was not overhead, and the
+whole-folder conversion timings it was taken from do not measure the comparison
+view at all. `ux/d3-preparation/avif-cost.log` is left in place as a record of
+that run but is not evidence for any comparison-cost claim; the same figures in
+the `e6fedd0` commit message stand as published history and are corrected here and
+in this round's commit message rather than rewritten. The tradeoff is now stated
+as the work that is actually repeated.
+
+#### Final minor correction
+
+The post-encode identity check first landed on the encoder's successful arm alone,
+so a sample whose file had been rewritten underneath it could still be classified
+from pixels nobody has when the encoder refused or failed. Root reviewed that as
+minor — no stale size, no stale output and no stale authority can come of it — but
+a refusal is not free either: it takes its slice out of the total as a file the run
+would write nothing for. The check now runs on every result `encode_prepared`
+returns, before the classification, so any mismatch is `Unknown` whatever the
+encoder said; when the bytes still match, `Ok`, `Failed` and a refusal are
+classified exactly as before. One ordering change, no new helper or type.
+
+The existing regression grew one arm and kept the rest: the same prepared
+sixteen-bit source, with its file replaced by an eight-bit PNG the same recipe
+encodes without complaint, now yields `Unknown` and projects nothing, and those
+replaced bytes prepared afresh encode, so the refusal could only have come from
+pixels the sample no longer speaks for. The writer oracle, the stale-success arm
+and the genuine lossless-depth refusal are unchanged. The test is now named for
+what it does — a rewrite landing before the verdict — rather than a mutation timed
+inside the codec; there is still no sleep and no test-only production seam.
+
+Gates for this round, `CARGO_TARGET_DIR` inside this worktree, `TMPDIR` under
+`ux/test-tmp-d3`, run one at a time, logs under `ux/d3-preparation-r2/`, all exit
+code 0: `cargo test --locked` (635 passed, 2 ignored, plus 32/2/3 integration),
+`cargo test --locked --features updater` (651 passed, 3 ignored, plus 32/2/3),
+`cargo clippy --locked --all-targets --all-features -- -D warnings`,
+`cargo fmt --check`, `git diff --check`. No flake was seen.
+
+Still Linux only. Round 1's native Linux comparison proof and CLI parity figures
+are root's, recorded under `ux/resume-d3-root-proof`; nothing here claims a macOS
+or Windows result, parent CI repair is still pending, and this has not landed.
+
+## September 9 release checkpoint (v0.6.7)
+
+This checkpoint records the release metadata for v0.6.7 on the integration tree
+at `c9b52d1`, which mechanically carries the reviewed export-focus, preparation-
+parity and handoff work described in the September 9 sections above. Only the
+package version moved here: `Cargo.toml` and the root `press` entry in
+`Cargo.lock` go from 0.6.6 to 0.6.7, no dependency was updated, and no product
+source was touched. The 0.6.6 references in the README, roadmap, follow-up and
+screenshot provenance are baselines and capture records, not the package
+version, so they stay as written.
+
+| Reviewed work in this tree | Boundary carried into the release |
+| --- | --- |
+| Job export review keyboard ownership (`1b520fe`, native Linux proof at `1bb9f65`) | Linux only; macOS and Windows stay with native CI, and no complete UI claim follows |
+| Shared preparation parity for writer, comparison, estimate and CLI projection (`e6fedd0` through `246d8fa`) | Shared-source parity only; no maintained pack, policy catalog, new recipe transform or GUI target delivery |
+| Session-only review of an imported ImageGuide report (`109f68b`, `9a354b5`) | The review writes no job, recipe, setting or output and lives only as long as the session |
+| Truthful local-only CLI labels for `press handoff` (`8ee91e3`, `5ad5e40`, `b539f21`) | `local_match` and its scope string describe a local folder check; no deployment, live site verification or re-audit is claimed |
+
+Not in this release: A2/A3 and D1 remain WIP on their isolated checkpoints
+(`codex/workbench-identity` at `ea018b9`, `codex/workbench-job-safety` at
+`fc9ad974`) and are not landed here; full H2 and H3 acceptance, maintained
+D3 packs and the policy catalog, and HEIF support are all still open. Nothing
+above is a claim that these bytes are released. Root merges the pending CI
+repair, runs the integration gates and publishes; until that publication there
+is no released v0.6.7.
+
+No build or test gate was run for this metadata change. The local checks were
+`cargo metadata --locked --no-deps --format-version 1`, which confirms the
+lockfile still matches the manifest at the new version, `cargo fmt --check` and
+`git diff --check`. The full integration gates are root's, after the CI repair
+joins.
+### September 9 replace-mode alias repair (branch `codex/workbench-ci-followup`)
+
+The Windows job for PR 6 (`102368993181`) still failed `cli_contract::replace_and_restore_round_trip_through_the_cli`
+with exit 1 and no message, after every native unit test passed. The cause was
+one folder carrying two spellings through the run: the recursive walk kept the
+path as typed (`C:\...`) while `output::Context` canonicalised it
+(`\\?\C:\...`), and every boundary derived from one was compared against the
+other. On Linux the two agree unless the folder is reached through a symlink,
+which is why local runs never saw it.
+
+| Site | Source | Fix |
+| --- | --- | --- |
+| Record | `src/manifest.rs` | `record_inner` stripped the canonical backup path against `backup_root(root)`. The mirror hangs off the output boundary the caller built the path from, so it now strips `backup_root(out_dir)`. |
+| Backup move | `src/convert.rs` | `write_inner` passed `backup_root(recording.root)` to `move_to_backup`, whose confinement check then refused its own mirror. It now passes `backup_root(recording.out_dir)`. |
+| Audited root | `src/main.rs` | The two spellings are settled once, before the walk: `audited_path` resolves the folder through the existing `scan::canonical_boundary`, so the root, every `Entry.path`, the output context, the planner's collision keys and each `Recording` share one namespace. A single file resolves only its parent and keeps the name that was typed, so replace mode still moves the chosen file rather than a final symlink's referent. A path that cannot be resolved is named and exits 2; there is no lexical fallback for a run that writes. |
+
+The first two fixes alone are not enough, and shipping them alone would have
+been worse than the original bug. With only those, a folder holding `a.png` and
+`a.webp` converts `a.png` into the name of the audited `a.webp`: the planner
+compares audited names in one spelling against planned outputs in the other, so
+the collision it exists to catch disappears. The original `a.webp` is
+overwritten, never backed up, and restore has nothing to hand back — the run
+reports the loss as a saving. The root normalization is what restores the single
+namespace those keys assume.
+
+`tests/cli_contract.rs` covers the process boundary this failed at. `assert_exit`
+prints the child's exit code, stdout and stderr, so a native-only failure names
+itself instead of being an exit code. Four cases run through a second spelling of
+the folder — a unix symlink locally, the ordinary non-verbatim path on Windows:
+the PNG round trip, one file under an aliased parent, `--format same` taking its
+own name back, and the `a.png`/`a.webp` sibling case, which asserts what the
+folder holds before what the report says. All four fail at base `4da3bcc`; the
+sibling and same-name cases still fail with the two backup fixes applied on their
+own.
+
+Local verification on Linux with `CARGO_TARGET_DIR` inside this worktree, own
+crate compiled, all exit code 0: `cargo test --locked` (625 passed, 2 ignored,
+plus 36/2/3 integration tests), `cargo test --locked --features updater` (641
+passed, 3 ignored), `cargo clippy --locked --all-targets --all-features -- -D
+warnings`, `cargo fmt --check` and `git diff --check`. Logs are under
+`ux/resume-ci-replace-finish-*.log`.
+
+Only Linux was executed. The Windows and macOS behaviour is argued from the
+remote log and from the locally reproduced equivalent, not observed: native proof
+stays pending on the next remote CI run, which has to be pushed before any
+all-platform claim.
+
+No window change was needed. Every production entry into the audit normalizes
+first: `request_path` resolves a single opened path through `navigation_path`,
+and `request_paths` maps the same resolver over every dropped or picked path
+before `batch_root` derives a root from them, so the multi-item drop reaches
+`request_folders`/`request_files` with its root and its paths already in one
+canonical spelling. `build_audit` resolves its launch root the same way, and the
+window's own launch carries no entries.
+
+The browser producer H1 has landed on the extension's `main` at `2e56550` and
+PR 3 passes all checks. Nothing about H2 or H3 follows from that.

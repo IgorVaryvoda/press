@@ -5,6 +5,8 @@ mod browser;
 mod compare_view;
 mod convert_job;
 mod gallery;
+mod handoff_actions;
+mod handoff_view;
 mod header;
 mod job_actions;
 mod local_ai_actions;
@@ -75,7 +77,6 @@ use gpui_kit::{
     ScrollStrategy, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, rgba,
     uniform_list,
 };
-use image::DynamicImage;
 
 struct ErrorToast;
 
@@ -147,11 +148,15 @@ pub(crate) fn sample_size(format: Format) -> usize {
     }
 }
 
-/// The decoded pixels behind the estimate's sample, keyed by the dataset, the source
-/// path and the max edge: the three things that change what a decode produces.
+/// The prepared pixels behind the estimate's sample, keyed by the dataset, the
+/// source path and the max edge: the three things that change what a decode
+/// produces.
 type SampledDecodes = Arc<parking_lot::Mutex<HashMap<(u64, PathBuf, MaxEdge), SampledDecode>>>;
-/// One decoded sample: its pixels and the colour profile the writer will attach.
-type SampledDecode = Arc<(DynamicImage, Option<Vec<u8>>)>;
+/// One prepared sample: the same preparation the writer performs, so the estimate
+/// keeps the profile, the depth, the container the decoder identified, and the
+/// identity of the bytes it read. That last one is what lets a reuse be checked
+/// rather than assumed.
+type SampledDecode = Arc<crate::scan::DecodedSource>;
 
 /// The most decoded sample the estimate may hold on to. A sample is at most 32
 /// images, and re-decoding one costs a fraction of a second, so past this the cache
@@ -160,7 +165,7 @@ const ESTIMATE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Resident cost of one decoded sample.
 fn decoded_bytes(sample: &SampledDecode) -> u64 {
-    let image = &sample.0;
+    let image = &sample.image;
     u64::from(image.width())
         * u64::from(image.height())
         * u64::from(image.color().bytes_per_pixel())
@@ -464,6 +469,22 @@ pub(crate) struct Audit {
     job_export_preview: Option<crate::job::ExportDraft>,
     /// The first export action owns focus while its review card is open.
     job_export_preview_focus: FocusHandle,
+    /// An imported ImageGuide report under review. Session state: it replaces
+    /// no dataset, writes no job or recipe, and starts no conversion.
+    handoff_review: Option<handoff_actions::HandoffReview>,
+    /// Invalidates a review's detached work. Bumped by every import, root
+    /// choice, cancel and dataset replacement, so a picker, scan or read that
+    /// finishes afterwards cannot revive a review that is gone.
+    handoff_generation: u64,
+    /// The one source read a review may have out at a time. Each read is
+    /// bounded by the conversion source limit, so a report's five hundred
+    /// rows must not be five hundred of them; the slot outlives the review
+    /// that started the read, because the read itself does.
+    handoff_reading: bool,
+    /// The review card owns the keyboard while it is open.
+    handoff_review_focus: FocusHandle,
+    /// The card scrolls inside its own bound rather than growing the rail.
+    handoff_scroll: ScrollHandle,
     /// Distinguishes identity replacements that happen to reuse an id and
     /// revision, so an older detached job task cannot land in the new job.
     job_request_generation: u64,
@@ -680,22 +701,27 @@ pub(crate) struct Audit {
     /// newer revision and replaces this, so a whole resize drag needs one task
     /// and one write, and an older task can never land after a flush.
     pending_settings: Option<(u64, settings::Settings)>,
-    /// The last full-resolution preview or pair, kept so reopening it is instant.
-    // ponytail: one entry. A pair holds two full-size RGBA buffers — 165 MB for a
-    // 5568x3712 photo — so a bigger cache would need a byte budget, not a count.
-    cached: Option<(compare::Key, CachedMedia)>,
-    /// The media for the file the arrow key is about to ask for, built while you
-    /// look at the current one. `PREFETCH_BUDGET` bounds this second slot.
-    ahead: Option<(compare::Key, CachedMedia)>,
+    /// The last full-resolution preview, kept so reopening it is instant.
+    //
+    // Previews only. A completed pair used to live here too, and a stat-based key
+    // cannot prove the file behind it is still the file it was built from, so
+    // reopening an AVIF comparison now re-encodes rather than risking old pixels
+    // under a new name. One entry: a preview holds a full-size RGBA buffer — 83 MB
+    // for a 5568x3712 photo — so a bigger cache would need a byte budget, not a
+    // count.
+    cached: Option<(compare::Key, Arc<Preview>)>,
+    /// The preview for the file the arrow key is about to ask for, decoded while
+    /// you look at the current one. `PREFETCH_BUDGET` bounds this second slot.
+    ahead: Option<(compare::Key, Arc<Preview>)>,
     /// Which way the arrows last stepped, so the media built ahead is the one the
     /// sweep wants rather than the one behind it.
     compare_step: isize,
     /// The build running ahead of the cursor. Holding the task lets a replacement
     /// cancel it during its settle before it reaches the encoder.
     prefetch: Option<gpui_kit::Task<()>>,
-    /// Identity of that build. Navigation can adopt an in-flight decode instead of
+    /// Identity of that decode. Navigation can adopt an in-flight decode instead of
     /// cancelling it and starting the same file again.
-    prefetch_key: Option<(compare::Key, MediaMode)>,
+    prefetch_key: Option<compare::Key>,
     /// Bytes of the heaviest visible file, so every row's weight bar is drawn
     /// against the same scale. Cached because the alternative is a scan of the
     /// whole list once per row.
@@ -892,21 +918,6 @@ fn credentials_complete(client_id: &str, client_secret: &str) -> bool {
 enum MediaMode {
     Preview,
     Compare,
-}
-
-#[derive(Clone)]
-enum CachedMedia {
-    Preview(Arc<Preview>),
-    Pair(Arc<Pair>),
-}
-
-impl CachedMedia {
-    fn mode(&self) -> MediaMode {
-        match self {
-            Self::Preview(_) => MediaMode::Preview,
-            Self::Pair(_) => MediaMode::Compare,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1267,6 +1278,11 @@ impl Audit {
         self.work_job = job;
         self.job_choices = choices;
         self.job_export_preview = None;
+        // A review resolves one report against one folder. Replacing the
+        // dataset replaces that folder, so the review and everything detached
+        // for it retire rather than describing rows nobody is looking at.
+        self.bump_handoff_generation();
+        self.handoff_review = None;
         self.work_states.clear();
         self.work_stale.clear();
         self.refresh_job_states(cx);
@@ -2106,6 +2122,41 @@ pub(crate) enum SampleOutcome {
     Unknown,
 }
 
+/// Encode one prepared sample and say what it is worth to a projection.
+///
+/// The shared verdict for both samplers, the window's estimate and the CLI dry
+/// run, so a folder is never quoted two different sizes.
+///
+/// The identity is checked again after the encode, against the file on disk, and
+/// for every result the encoder returns rather than only for a successful one. An
+/// encode is not instant — AVIF is seconds — and a source rewritten while one ran
+/// leaves a size measured from pixels the file no longer holds; a refusal read off
+/// those same pixels is a verdict on an image nobody has, and it would take a slice
+/// out of the total on the strength of it. Either way the sample is unknown rather
+/// than refused: the recipe rejected nothing about the file that is there, so its
+/// slice borrows the average instead of contributing a number or a refusal, and a
+/// projection with nothing but such samples behind it is no projection at all.
+/// Reads the source, so this belongs on the worker that did the encoding, never on
+/// the main thread.
+pub(crate) fn sample_encode(
+    prepared: &crate::scan::DecodedSource,
+    source: &Path,
+    source_bytes: u64,
+    format: Format,
+    quality: Quality,
+    avif_speed: u8,
+) -> SampleOutcome {
+    let result = convert::encode_prepared(prepared, source, format, quality, avif_speed);
+    if !prepared.identity.matches_path(source) {
+        return SampleOutcome::Unknown;
+    }
+    match result {
+        Ok((_, encoded)) => SampleOutcome::Encoded(source_bytes, encoded.len() as u64),
+        Err(convert::Failure::Failed) => SampleOutcome::Unknown,
+        Err(_) => SampleOutcome::Refused,
+    }
+}
+
 /// Project the encoded size of a whole list from a few real encodes.
 ///
 /// Each entry is one slice's bytes and what its sample proved. A slice is
@@ -2206,6 +2257,7 @@ pub(crate) fn build_audit(
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let job_export_preview_focus = cx.focus_handle();
+        let handoff_review_focus = cx.focus_handle();
 
         let filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name (Ctrl+K)"));
@@ -2420,6 +2472,11 @@ pub(crate) fn build_audit(
             job_choices,
             job_export_preview: None,
             job_export_preview_focus,
+            handoff_review: None,
+            handoff_generation: 0,
+            handoff_reading: false,
+            handoff_review_focus,
+            handoff_scroll: ScrollHandle::new(),
             job_request_generation: 0,
             work_states: Vec::new(),
             work_stale: Vec::new(),

@@ -334,16 +334,38 @@ pub struct Converted {
     pub height: u32,
 }
 
-/// Encode `image` in `format`. Returns the encoded bytes.
+/// Encode `image` in `format` at whatever AVIF speed the process is currently set
+/// to. For callers with no run or request to freeze — the thumbnail cache, a
+/// Studio candidate, a test — the global dial is the only answer there is.
+///
+/// Anything that also records or caches what it encoded uses `encode_with_speed`
+/// instead, so the bytes and the record cannot come from two different reads of a
+/// setting the user can change mid-run.
 ///
 /// `profile` is the source's ICC profile, which every output format here can carry.
-/// Previews pass `None`; a file being written to disk passes what it was decoded
-/// with, or the colours it was tagged with are lost on the way out.
+/// A file being written to disk passes what it was decoded with, or the colours it
+/// was tagged with are lost on the way out.
 pub fn encode(
     image: &DynamicImage,
     format: Format,
     quality: Quality,
     profile: Option<&[u8]>,
+) -> Result<Vec<u8>, Failure> {
+    encode_with_speed(image, format, quality, profile, crate::avif::speed())
+}
+
+/// The same encode at an explicitly frozen AVIF speed.
+///
+/// Speed changes the bytes libaom writes, so the run that stamps a manifest, the
+/// comparison that keys a cache on it and the estimate that quotes a size all have
+/// to encode at the speed they captured, not at the speed the settings file happens
+/// to hold when the encoder is finally reached.
+pub fn encode_with_speed(
+    image: &DynamicImage,
+    format: Format,
+    quality: Quality,
+    profile: Option<&[u8]>,
+    avif_speed: u8,
 ) -> Result<Vec<u8>, Failure> {
     let profile = profile.filter(|profile| !profile.is_empty());
     match format {
@@ -356,7 +378,7 @@ pub fn encode(
                 None => Ok(encoded),
             }
         }
-        Format::Avif => encode_avif(image, quality, profile).ok_or(Failure::Failed),
+        Format::Avif => encode_avif(image, quality, profile, avif_speed).ok_or(Failure::Failed),
         Format::JpegXl => encode_jpeg_xl(image, quality, profile).ok_or(Failure::Failed),
         Format::Jpeg => {
             let encoded = encode_jpeg(image, quality)?;
@@ -650,12 +672,14 @@ fn encode_webp_pixels(
 /// AVIF keeps alpha in a separate plane, so transparency needs no special case here.
 /// libaom and rav1e calibrate their 1-100 scales differently; 75% matches the former
 /// rav1e output size and measured PSNR on the real corpus.
-fn encode_avif(image: &DynamicImage, quality: Quality, profile: Option<&[u8]>) -> Option<Vec<u8>> {
+fn encode_avif(
+    image: &DynamicImage,
+    quality: Quality,
+    profile: Option<&[u8]>,
+    speed: u8,
+) -> Option<Vec<u8>> {
     let has_alpha = has_transparency(image);
     let quality = aom_quality(quality);
-    // The one read of the process-wide speed. Everything below this takes it as an
-    // argument, so a test can ask for a speed without writing anything shared.
-    let speed = crate::avif::speed();
     let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
     let threads = (cores / workers(Format::Avif)).clamp(1, 8);
 
@@ -1316,7 +1340,7 @@ fn write_inner_with_hook(
             && let Err(failure) = move_to_backup(
                 source,
                 &backup.path,
-                &crate::manifest::backup_root(recording.root),
+                &crate::manifest::backup_root(recording.out_dir),
             )
         {
             let _ = std::fs::remove_file(&partial);
@@ -1663,6 +1687,98 @@ pub fn check_lossless_depth(
     Ok(())
 }
 
+/// Decode `source` from one bounded byte snapshot and bring it to the delivered
+/// size: the pixels every encoder in this app must start from.
+///
+/// The result is `scan::DecodedSource`, unchanged — the image, the profile a wide
+/// gamut file loses without, the identity of the bytes the decoder consumed, and
+/// the container those same bytes were identified as. Preparation adds the one
+/// resize and the memory budget; it does not add another representation of the
+/// same four facts.
+pub fn prepare(source: &Path, max_edge: MaxEdge) -> Result<crate::scan::DecodedSource, Failure> {
+    prepare_inner(
+        crate::scan::decode_for_conversion_with_identity(source, max_edge),
+        max_edge,
+    )
+}
+
+/// The same preparation, refused unless the bytes on disk are still the ones a
+/// caller already recorded.
+pub fn prepare_expected(
+    source: &Path,
+    max_edge: MaxEdge,
+    expected: &crate::manifest::SourceIdentity,
+) -> Result<crate::scan::DecodedSource, Failure> {
+    prepare_inner(
+        crate::scan::decode_for_conversion_checked(source, max_edge, expected),
+        max_edge,
+    )
+}
+
+fn prepare_inner(
+    decoded: Result<crate::scan::DecodedSource, crate::scan::ConversionDecodeError>,
+    max_edge: MaxEdge,
+) -> Result<crate::scan::DecodedSource, Failure> {
+    let mut prepared = decoded.map_err(decode_failure)?;
+    // Exactly once. A second `apply` over already-scaled pixels is a second
+    // resample, and the file it describes would not be the file the run writes.
+    prepared.image = max_edge.apply(prepared.image);
+    check_image_budget(&prepared.image)?;
+    Ok(prepared)
+}
+
+/// The encoder a request means for a prepared source, resolved from the container
+/// the decode identified. `Same` never re-probes the path here: that probe could
+/// answer for one file while these pixels came from another.
+pub fn resolve_prepared(
+    prepared: &crate::scan::DecodedSource,
+    source: &Path,
+    format: Format,
+) -> Result<Format, Failure> {
+    format.resolve_content(source, prepared.format)
+}
+
+/// Encode prepared pixels at a frozen recipe, giving the resolved format beside the
+/// bytes.
+///
+/// The writer, the comparison, the estimate and the dry run all answer through
+/// here, so a `Same` request, a lossless request over a depth the format cannot
+/// keep, and the speed the bytes were written at are one verdict everywhere
+/// instead of four copies of the rule that drift apart.
+pub fn encode_prepared(
+    prepared: &crate::scan::DecodedSource,
+    source: &Path,
+    format: Format,
+    quality: Quality,
+    avif_speed: u8,
+) -> Result<(Format, Vec<u8>), Failure> {
+    let format = resolve_prepared(prepared, source, format)?;
+    check_lossless_depth(&prepared.image, format, quality)?;
+    let encoded = encode_with_speed(
+        &prepared.image,
+        format,
+        quality,
+        prepared.profile.as_deref(),
+        avif_speed,
+    )?;
+    Ok((format, encoded))
+}
+
+fn decode_failure(error: crate::scan::ConversionDecodeError) -> Failure {
+    match error {
+        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
+        crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
+        crate::scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            Failure::UnsupportedAvifTransform
+        }
+        crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
+        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+        crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
+        crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
+        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
+    }
+}
+
 /// Read, encode, and write one file to the path `plan_outputs` chose for it.
 ///
 /// `recording` is what the run owes the folder before the new file takes the name:
@@ -1727,34 +1843,17 @@ fn convert_to_inner(
     max_edge: MaxEdge,
     expected: Option<&crate::manifest::SourceIdentity>,
 ) -> Result<Converted, Failure> {
-    let decoded = match expected {
-        Some(expected) => crate::scan::decode_for_conversion_checked(source, max_edge, expected),
-        None => crate::scan::decode_for_conversion_with_identity(source, max_edge),
-    }
-    .map_err(|error| match error {
-        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
-        crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
-        crate::scan::ConversionDecodeError::UnsupportedAvifTransform => {
-            Failure::UnsupportedAvifTransform
-        }
-        crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
-        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
-        crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
-        crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
-        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
-    })?;
-    let crate::scan::DecodedSource {
-        image,
-        profile,
-        identity: source_identity,
-        format: source_format,
-    } = decoded;
-    let format = format.resolve_content(source, source_format)?;
-    let decoded = max_edge.apply(image);
-    check_image_budget(&decoded)?;
-    check_lossless_depth(&decoded, format, quality)?;
-    let (width, height) = (decoded.width(), decoded.height());
-    let encoded = encode(&decoded, format, quality, profile.as_deref())?;
+    let prepared = match expected {
+        Some(expected) => prepare_expected(source, max_edge, expected),
+        None => prepare(source, max_edge),
+    }?;
+    // The speed the record will claim is the speed the encoder is handed. A run
+    // stamps once; a settings change while it writes cannot make the manifest
+    // describe bytes nobody produced.
+    let avif_speed =
+        recording.map_or_else(crate::avif::speed, |recording| recording.stamp.avif_speed());
+    let (width, height) = (prepared.image.width(), prepared.image.height());
+    let (_, encoded) = encode_prepared(&prepared, source, format, quality, avif_speed)?;
     match recording {
         Some(recording) => write_recorded(
             output_root,
@@ -1762,7 +1861,7 @@ fn convert_to_inner(
             written,
             &encoded,
             recording,
-            &source_identity,
+            &prepared.identity,
         )?,
         None => write_output(output_root, written, &encoded)?,
     }
@@ -1865,7 +1964,7 @@ pub(crate) mod tests {
         profile
     }
 
-    fn write_tagged_png(path: &Path, image: &DynamicImage, profile: &[u8]) {
+    pub(crate) fn write_tagged_png(path: &Path, image: &DynamicImage, profile: &[u8]) {
         let file = std::fs::File::create(path).unwrap();
         let mut encoder = image::codecs::png::PngEncoder::new(file);
         image::ImageEncoder::set_icc_profile(&mut encoder, profile.to_vec()).unwrap();
@@ -2711,6 +2810,80 @@ pub(crate) mod tests {
         // existing run byte for byte what it was.
         assert_eq!(crate::avif::speed(), crate::avif::DEFAULT_SPEED);
         assert_eq!(crate::avif::configured_speed(), None);
+    }
+
+    /// Speed changes the bytes libaom writes, so the run that records a speed has to
+    /// encode at that speed. The process dial stays where it is: a run's stamp is the
+    /// recipe, and this proves the writer reads it rather than the dial, which
+    /// another thread or a settings change could move underneath a half-finished run.
+    #[test]
+    fn an_avif_run_encodes_at_the_speed_its_record_claims() {
+        let dir = temp_dir("stamped-speed");
+        let out_dir = dir.join("optimized");
+        let source = dir.join("shot.png");
+        let written = out_dir.join("shot.avif");
+        photo(64, 64).save(&source).unwrap();
+
+        let stamp = crate::manifest::Stamp::with_speed(
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            Some(10),
+        );
+        assert_eq!(stamp.avif_speed(), 10);
+        assert_ne!(
+            crate::avif::speed(),
+            10,
+            "the dial must disagree or this proves nothing"
+        );
+        let recording = Recording::for_source(&dir, &out_dir, &stamp, None);
+        super::convert_to(
+            &out_dir,
+            &source,
+            &written,
+            Some(&recording),
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+        )
+        .expect("the AVIF is written");
+
+        let installed = std::fs::read(&written).unwrap();
+        let prepared = prepare(&source, MaxEdge::FULL).expect("the source prepares");
+        assert_eq!(
+            installed,
+            encode_with_speed(&prepared.image, Format::Avif, Quality::lossy(60.), None, 10)
+                .unwrap(),
+            "the run wrote bytes its record does not describe"
+        );
+        assert_ne!(
+            installed,
+            encode_with_speed(
+                &prepared.image,
+                Format::Avif,
+                Quality::lossy(60.),
+                None,
+                crate::avif::speed(),
+            )
+            .unwrap(),
+            "the run fell back to the process dial"
+        );
+
+        let manifest = crate::manifest::load(&out_dir);
+        assert_eq!(manifest.outputs.len(), 1);
+        assert_eq!(manifest.outputs[0].avif_speed, Some(10));
+
+        // And the comparison view, asked for that same frozen speed, quotes the size
+        // of the file that was actually installed.
+        let pair = crate::compare::build(
+            &source,
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            10,
+        )
+        .expect("the comparison builds");
+        assert_eq!(pair.converted_bytes, installed.len() as u64);
     }
 
     /// The scaled decode changes what conversion holds in memory, not what it writes:
