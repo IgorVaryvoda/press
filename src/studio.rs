@@ -412,6 +412,9 @@ fn prepare_upload_using(
         scan::ConversionDecodeError::TooLarge => {
             "this source image is too large for Studio to prepare".to_string()
         }
+        scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            "AVIF orientation transforms are not supported by Studio".to_string()
+        }
         scan::ConversionDecodeError::SourceChanged => {
             "the source image changed while it was being read".to_string()
         }

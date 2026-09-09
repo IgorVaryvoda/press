@@ -17,7 +17,7 @@ use std::{
 };
 
 use image::{
-    AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader,
+    AnimationDecoder, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, ImageReader, Rgba,
     codecs::{gif::GifDecoder, png::PngDecoder, webp::WebPDecoder},
     metadata::Orientation,
 };
@@ -280,20 +280,40 @@ pub fn probe(path: &Path) -> Option<Entry> {
     let bytes = std::fs::metadata(path).ok()?.len();
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
         && let Some(format) = reader.format()
-        && let Ok(mut decoder) = reader.into_decoder()
     {
-        let (mut width, mut height) = decoder.dimensions();
-        if orientation_swaps_dimensions(decoder.orientation().unwrap_or(Orientation::NoTransforms))
-        {
-            std::mem::swap(&mut width, &mut height);
+        if format == ImageFormat::Avif {
+            let info = crate::avif::probe_file(path)?;
+            if info.unsupported_transform {
+                return None;
+            }
+            crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(
+                info.width,
+                info.height,
+            ))
+            .ok()?;
+            return Some(Entry {
+                path: path.to_path_buf(),
+                format: FileFormat::Image(ImageFormat::Avif),
+                width: info.width,
+                height: info.height,
+                bytes,
+            });
         }
-        return Some(Entry {
-            path: path.to_path_buf(),
-            format: format.into(),
-            width,
-            height,
-            bytes,
-        });
+        if let Ok(mut decoder) = reader.into_decoder() {
+            let (mut width, mut height) = decoder.dimensions();
+            if orientation_swaps_dimensions(
+                decoder.orientation().unwrap_or(Orientation::NoTransforms),
+            ) {
+                std::mem::swap(&mut width, &mut height);
+            }
+            return Some(Entry {
+                path: path.to_path_buf(),
+                format: format.into(),
+                width,
+                height,
+                bytes,
+            });
+        }
     }
 
     let info = crate::jxl::probe(path)?;
@@ -316,18 +336,57 @@ pub fn probe(path: &Path) -> Option<Entry> {
 /// with no error beyond a missing row.
 pub fn decode(path: &Path) -> Option<DynamicImage> {
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
-        && let Ok(mut decoder) = reader.into_decoder()
+        && let Some(format) = reader.format()
     {
-        let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-        if let Ok(mut image) = DynamicImage::from_decoder(decoder) {
-            image.apply_orientation(orientation);
-            return Some(image);
+        if format == ImageFormat::Avif {
+            let bytes = read_source_bytes(path).ok()?;
+            let info = crate::avif::probe_bytes(&bytes)?;
+            if info.unsupported_transform {
+                return None;
+            }
+            crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(
+                info.width,
+                info.height,
+            ))
+            .ok()?;
+            return avif_image(crate::avif::decode_bytes_with_limits(
+                &bytes,
+                crate::convert::MAX_DECODE_PIXELS,
+                crate::convert::MAX_DECODE_PIXELS,
+            )?)
+            .ok()
+            .map(|(image, _)| image);
+        }
+        if let Ok(mut decoder) = reader.into_decoder() {
+            let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+            if let Ok(mut image) = DynamicImage::from_decoder(decoder) {
+                image.apply_orientation(orientation);
+                return Some(image);
+            }
         }
     }
     crate::jxl::decode_path(path).map(|(image, _)| image)
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
+    if image::guess_format(bytes).ok() == Some(ImageFormat::Avif) {
+        let info = crate::avif::probe_bytes(bytes)?;
+        if info.unsupported_transform {
+            return None;
+        }
+        crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(
+            info.width,
+            info.height,
+        ))
+        .ok()?;
+        return avif_image(crate::avif::decode_bytes_with_limits(
+            bytes,
+            crate::convert::MAX_DECODE_PIXELS,
+            crate::convert::MAX_DECODE_PIXELS,
+        )?)
+        .ok()
+        .map(|(image, _)| image);
+    }
     image::load_from_memory(bytes)
         .ok()
         .or_else(|| crate::jxl::decode_bytes(bytes))
@@ -337,6 +396,7 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
 pub enum ConversionDecodeError {
     Failed,
     TooLarge,
+    UnsupportedAvifTransform,
     SourceChanged,
     AnimatedGif,
     AnimatedPng,
@@ -399,6 +459,29 @@ pub(crate) fn decode_for_conversion_from_bytes(
     let reader = ImageReader::new(std::io::Cursor::new(&bytes))
         .with_guessed_format()
         .ok();
+    if reader
+        .as_ref()
+        .is_some_and(|reader| reader.format() == Some(ImageFormat::Avif))
+    {
+        let info = crate::avif::probe_bytes(bytes).ok_or(ConversionDecodeError::Failed)?;
+        if info.unsupported_transform {
+            return Err(ConversionDecodeError::UnsupportedAvifTransform);
+        }
+        check_budget_dimensions(info.width, info.height)?;
+        let decoded = crate::avif::decode_bytes_with_limits(
+            bytes,
+            crate::convert::MAX_DECODE_PIXELS,
+            crate::convert::MAX_DECODE_PIXELS,
+        )
+        .ok_or(ConversionDecodeError::Failed)?;
+        let (image, profile) = avif_image(decoded)?;
+        return Ok(DecodedSource {
+            image,
+            profile,
+            identity,
+            format: FileFormat::Image(ImageFormat::Avif),
+        });
+    }
     if reader
         .as_ref()
         .is_some_and(|reader| reader.format() == Some(ImageFormat::Gif))
@@ -545,6 +628,31 @@ fn check_decoder_budget<D: ImageDecoder>(decoder: &D) -> Result<(), ConversionDe
 fn check_budget_dimensions(width: u32, height: u32) -> Result<(), ConversionDecodeError> {
     crate::convert::check_budget_bytes(crate::convert::decode_budget_estimate(width, height))
         .map_err(|_| ConversionDecodeError::TooLarge)
+}
+
+fn avif_image(
+    decoded: crate::avif::Decoded,
+) -> Result<(DynamicImage, Option<Vec<u8>>), ConversionDecodeError> {
+    let crate::avif::Decoded {
+        pixels,
+        width,
+        height,
+        depth,
+        profile,
+    } = decoded;
+    let image = match (depth, pixels) {
+        (8, crate::avif::DecodedPixels::U8(pixels)) => DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(width, height, pixels)
+                .ok_or(ConversionDecodeError::Failed)?,
+        ),
+        (10 | 12 | 16, crate::avif::DecodedPixels::U16(pixels)) => DynamicImage::ImageRgba16(
+            ImageBuffer::<Rgba<u16>, _>::from_raw(width, height, pixels)
+                .ok_or(ConversionDecodeError::Failed)?,
+        ),
+        _ => return Err(ConversionDecodeError::Failed),
+    };
+    crate::convert::check_image_budget(&image).map_err(|_| ConversionDecodeError::TooLarge)?;
+    Ok((image, rgb_profile(profile)))
 }
 
 fn jpeg_header(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -1509,6 +1617,85 @@ mod tests {
         assert_eq!(entry.format, FileFormat::Image(ImageFormat::Png));
         assert_eq!((entry.width, entry.height), (40, 25));
         assert_eq!(entry.bytes, std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn a_lying_avif_header_is_refused_before_the_image_decoder() {
+        let bytes = include_bytes!("../fixtures/avif/lying-header.avif");
+
+        let header = crate::avif::probe_bytes(bytes).expect("the native header parser reads it");
+        assert_eq!((header.width, header.height), (12_000, 12_000));
+        assert!(matches!(
+            decode_for_conversion_from_bytes(bytes, crate::convert::MaxEdge::FULL),
+            Err(ConversionDecodeError::TooLarge)
+        ));
+
+        let dir = temp_dir("lying-avif-header");
+        let path = dir.join("lying.avif");
+        std::fs::write(&path, bytes).unwrap();
+        assert!(probe(&path).is_none(), "scan refuses before AV1 allocation");
+    }
+
+    #[test]
+    fn avif_conversion_uses_the_bounded_native_decoder() {
+        let pixels = (0..18).map(|value| value * 11).collect::<Vec<_>>();
+        let bytes = crate::avif::encode(&pixels, 3, 2, false, 80, 6, 1, None)
+            .expect("the small AVIF fixture encodes");
+        let decoded = decode_for_conversion_from_bytes(&bytes, crate::convert::MaxEdge::FULL)
+            .expect("the bounded native decoder reads the AVIF");
+        assert_eq!((decoded.image.width(), decoded.image.height()), (3, 2));
+        assert_eq!(decoded.image.color(), image::ColorType::Rgba8);
+    }
+
+    #[test]
+    fn bounded_native_avif_decoder_keeps_alpha_metadata() {
+        let pixels = vec![
+            10, 20, 30, 0, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 0,
+        ];
+        let bytes = crate::avif::encode(&pixels, 2, 2, true, 80, 6, 1, None)
+            .expect("the alpha AVIF fixture encodes");
+        let header = crate::avif::probe_bytes(&bytes).expect("the native parser reads it");
+        assert!(header.alpha, "the header reports the encoded alpha plane");
+        let decoded = decode_for_conversion_from_bytes(&bytes, crate::convert::MaxEdge::FULL)
+            .expect("the bounded native decoder reads alpha AVIF");
+        assert!(decoded.image.has_alpha(), "decoded pixels retain a channel");
+    }
+
+    #[test]
+    fn a_native_avif_parse_refusal_never_reaches_the_rust_decoder() {
+        let bytes = include_bytes!("../fixtures/avif/native-refused.avif");
+        assert_eq!(image::guess_format(bytes).ok(), Some(ImageFormat::Avif));
+        assert!(crate::avif::probe_bytes(bytes).is_none());
+        assert!(matches!(
+            decode_for_conversion_from_bytes(bytes, crate::convert::MaxEdge::FULL),
+            Err(ConversionDecodeError::Failed)
+        ));
+        assert!(decode_bytes(bytes).is_none());
+    }
+
+    #[test]
+    fn rotated_nonsquare_avif_is_named_unsupported_until_transforms_are_applied() {
+        let bytes = include_bytes!("../fixtures/avif/rotated-nonsquare.avif");
+        let header = crate::avif::probe_bytes(bytes).expect("the native parser reads the AVIF");
+        assert!(header.unsupported_transform);
+        assert_eq!((header.width, header.height), (3, 2));
+        assert!(matches!(
+            decode_for_conversion_from_bytes(bytes, crate::convert::MaxEdge::FULL),
+            Err(ConversionDecodeError::UnsupportedAvifTransform)
+        ));
+        assert!(decode_bytes(bytes).is_none());
+    }
+
+    #[test]
+    fn native_avif_decoder_caps_coded_dimensions_when_ispe_is_smaller() {
+        let bytes = include_bytes!("../fixtures/avif/coded-mismatch.avif");
+
+        let header = crate::avif::probe_bytes(bytes).expect("the native parser reads ispe");
+        assert_eq!((header.width, header.height), (1, 1));
+        assert!(
+            crate::avif::decode_bytes_with_limits(bytes, 1, 1).is_none(),
+            "the native decoder refuses the larger coded frame before allocating it"
+        );
     }
 
     #[test]

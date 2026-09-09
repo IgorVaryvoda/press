@@ -55,6 +55,8 @@ pub enum Failure {
     LosslessNeedsIntegerSamples,
     /// The image would need more decoded memory than one file may hold.
     TooLarge,
+    /// AVIF orientation or crop metadata is outside the supported preparation subset.
+    UnsupportedAvifTransform,
     ProfileNotAttached,
     JpegNeedsOpaque,
     KeepFormatUnavailable(String),
@@ -87,6 +89,9 @@ impl Failure {
                 Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
             }
             Self::TooLarge => Some("this image is too large to convert".into()),
+            Self::UnsupportedAvifTransform => {
+                Some("AVIF orientation transforms are not supported".into())
+            }
             Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
             Self::JpegNeedsOpaque => Some("JPEG cannot keep transparency".into()),
             Self::KeepFormatUnavailable(name) => {
@@ -1584,6 +1589,11 @@ fn reject_windows_reparse(path: &Path) -> Result<(), Failure> {
 /// why the cap sits an order of magnitude below physical RAM rather than at it.
 pub const MAX_DECODE_BYTES: u64 = 1 << 30;
 
+/// The native AVIF decoder accepts a pixel limit in addition to its byte limit.
+/// At eight bytes per pixel this is the largest frame that fits the shared
+/// decoded-memory budget, including sixteen-bit RGBA output.
+pub const MAX_DECODE_PIXELS: u32 = (MAX_DECODE_BYTES / 8) as u32;
+
 /// The compressed snapshot is retained beside decoded pixels until the write
 /// boundary. Keep that second allocation bounded too, so a highly compressed
 /// source cannot consume the entire process budget before its dimensions are
@@ -1724,6 +1734,9 @@ fn convert_to_inner(
     .map_err(|error| match error {
         crate::scan::ConversionDecodeError::Failed => Failure::Failed,
         crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
+        crate::scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            Failure::UnsupportedAvifTransform
+        }
         crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
         crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
         crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
