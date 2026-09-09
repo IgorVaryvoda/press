@@ -513,3 +513,35 @@ code 0: `cargo test --locked` (635 passed, 2 ignored, plus 32/2/3 integration),
 Still Linux only. Round 1's native Linux comparison proof and CLI parity figures
 are root's, recorded under `ux/resume-d3-root-proof`; nothing here claims a macOS
 or Windows result, parent CI repair is still pending, and this has not landed.
+
+## September 9 release checkpoint (v0.6.7)
+
+This checkpoint records the release metadata for v0.6.7 on the integration tree
+at `c9b52d1`, which mechanically carries the reviewed export-focus, preparation-
+parity and handoff work described in the September 9 sections above. Only the
+package version moved here: `Cargo.toml` and the root `press` entry in
+`Cargo.lock` go from 0.6.6 to 0.6.7, no dependency was updated, and no product
+source was touched. The 0.6.6 references in the README, roadmap, follow-up and
+screenshot provenance are baselines and capture records, not the package
+version, so they stay as written.
+
+| Reviewed work in this tree | Boundary carried into the release |
+| --- | --- |
+| Job export review keyboard ownership (`1b520fe`, native Linux proof at `1bb9f65`) | Linux only; macOS and Windows stay with native CI, and no complete UI claim follows |
+| Shared preparation parity for writer, comparison, estimate and CLI projection (`e6fedd0` through `246d8fa`) | Shared-source parity only; no maintained pack, policy catalog, new recipe transform or GUI target delivery |
+| Session-only review of an imported ImageGuide report (`109f68b`, `9a354b5`) | The review writes no job, recipe, setting or output and lives only as long as the session |
+| Truthful local-only CLI labels for `press handoff` (`8ee91e3`, `5ad5e40`, `b539f21`) | `local_match` and its scope string describe a local folder check; no deployment, live site verification or re-audit is claimed |
+
+Not in this release: A2/A3 and D1 remain WIP on their isolated checkpoints
+(`codex/workbench-identity` at `d62dfd0`, `codex/workbench-job-safety` at
+`fc9ad974`) and are not landed here; full H2 and H3 acceptance, maintained
+D3 packs and the policy catalog, and HEIF support are all still open. Nothing
+above is a claim that these bytes are released. Root merges the pending CI
+repair, runs the integration gates and publishes; until that publication there
+is no released v0.6.7.
+
+No build or test gate was run for this metadata change. The local checks were
+`cargo metadata --locked --no-deps --format-version 1`, which confirms the
+lockfile still matches the manifest at the new version, `cargo fmt --check` and
+`git diff --check`. The full integration gates are root's, after the CI repair
+joins.
