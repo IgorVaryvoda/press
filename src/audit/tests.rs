@@ -640,20 +640,49 @@ fn comparison_navigation_stops_at_visible_edges(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui_kit::test]
-fn replace_results_compare_against_the_backup_original(cx: &mut TestAppContext) {
-    let folder = std::env::temp_dir().join(format!("press-replace-compare-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&folder);
-    std::fs::create_dir_all(&folder).expect("the fixture folder is created");
+/// The file the audit lists before a replace run touches anything.
+fn replace_source(folder: &Path) -> PathBuf {
+    let source = folder.join("shot.png");
     crate::convert::tests::photo(64, 64)
-        .save(folder.join("shot.png"))
+        .save(&source)
         .expect("the fixture image is written");
+    source
+}
 
-    cx.update(init_theme);
-    let scanned = scan::scan(&folder, &folder.join(scan::OUTPUT_DIR));
-    let launch = Launch {
-        root: folder.clone(),
-        entries: scanned.entries,
+/// A replace run in miniature: a real encode lands beside the source and the
+/// original moves into the backup mirror, so the audited path is gone and only
+/// the mirror can supply the before side.
+fn finish_replace_run(folder: &Path) -> PathBuf {
+    let source = folder.join("shot.png");
+    let written = folder.join("shot.webp");
+    // A copy of the PNG under a `.webp` name would decode to the source's own
+    // geometry and prove nothing about which file the view opened. This is the
+    // encoder's output, downscaled, so the pair can only measure 32 square if
+    // the after side really is this file.
+    convert::convert_to(
+        folder,
+        &source,
+        &written,
+        None,
+        Format::WebP,
+        Quality::lossy(80.),
+        MaxEdge(Some(32)),
+    )
+    .expect("the replace output encodes");
+    let backups = folder.join(scan::BACKUP_DIR);
+    std::fs::create_dir_all(&backups).expect("the backup mirror is created");
+    std::fs::rename(&source, backups.join("shot.png")).expect("the original moves to the backup");
+    assert!(
+        !source.exists(),
+        "the audited path must be empty, or the backup is not the only before side"
+    );
+    written
+}
+
+fn replace_launch(root: PathBuf, entries: Vec<Entry>) -> Launch {
+    Launch {
+        root,
+        entries,
         skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
@@ -671,38 +700,105 @@ fn replace_results_compare_against_the_backup_original(cx: &mut TestAppContext) 
         include_subfolders: false,
         sidebar_open: true,
         rail_width: None,
-    };
+    }
+}
+
+/// Open the replace result and report whether the comparison failed and what
+/// geometry the pair settled on.
+fn opened_replace_result(
+    cx: &mut TestAppContext,
+    root: PathBuf,
+    entries: Vec<Entry>,
+    written: PathBuf,
+) -> (bool, Option<(u32, u32)>) {
+    cx.update(init_theme);
+    let launch = replace_launch(root.clone(), entries);
     let (harness, cx) = cx.add_window_view(move |window, cx| AuditHarness {
         audit: build_audit(launch, window, cx),
     });
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
-
-    // A replace run in miniature: the output lands beside the source and the
-    // original moves into the backup mirror first.
-    let written = folder.join("shot.webp");
-    let backups = folder.join(scan::BACKUP_DIR);
-    std::fs::create_dir_all(&backups).expect("the backup mirror is created");
-    std::fs::copy(folder.join("shot.png"), &written).expect("the replace output is written");
-    std::fs::rename(folder.join("shot.png"), backups.join("shot.png"))
-        .expect("the original moves to the backup");
-
     let index = audit.read_with(cx, |audit, _| audit.visible[0]);
     audit.update(cx, |audit, _| {
         audit.result_paths.insert(index, written);
-        audit.conversion_destination = Some((crate::settings::Output::Replace, folder.clone()));
+        audit.conversion_destination = Some((crate::settings::Output::Replace, root));
     });
     audit.update(cx, |audit, cx| audit.open_result(index, cx));
     cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
         let comparison = audit.compare.as_ref().expect("the result opens");
-        assert!(
-            !comparison.failed,
-            "the backup original stands in for the moved source"
-        );
-        assert!(comparison.pair.is_some());
-    });
+        (
+            comparison.failed,
+            comparison
+                .pair
+                .as_ref()
+                .map(|pair| (pair.width, pair.height)),
+        )
+    })
+}
+
+#[gpui_kit::test]
+fn replace_results_compare_against_the_backup_original(cx: &mut TestAppContext) {
+    let folder = std::env::temp_dir().join(format!("press-replace-compare-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).expect("the fixture folder is created");
+    replace_source(&folder);
+    let scanned = scan::scan(&folder, &folder.join(scan::OUTPUT_DIR));
+    assert_eq!(scanned.entries.len(), 1, "the audit lists the source alone");
+    let written = finish_replace_run(&folder);
+
+    let (failed, geometry) = opened_replace_result(cx, folder.clone(), scanned.entries, written);
+    assert!(
+        !failed,
+        "the backup original stands in for the moved source"
+    );
+    assert_eq!(
+        geometry,
+        Some((32, 32)),
+        "both sides line up on the encoded output's geometry, not the source's"
+    );
 
     let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// The audit lists files by the spelling the walk used while `build_audit`
+/// resolves the root to its canonical one. A symlinked folder splits the two
+/// here the way `/var` against `/private/var` does on macOS and a verbatim
+/// prefix does on Windows; the mirror lookup has to survive that, because the
+/// alternative — joining the audited absolute path onto the backup root — hands
+/// back the file the run just moved away and reports the comparison as failed.
+#[cfg(unix)]
+#[gpui_kit::test]
+fn a_replace_result_finds_the_backup_through_a_symlinked_root(cx: &mut TestAppContext) {
+    let base = std::env::temp_dir().join(format!("press-replace-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let real = base.join("real");
+    std::fs::create_dir_all(&real).expect("the fixture folder is created");
+    let linked = base.join("linked");
+    std::os::unix::fs::symlink(&real, &linked).expect("the fixture link is made");
+
+    replace_source(&real);
+    let scanned = scan::scan(&linked, &linked.join(scan::OUTPUT_DIR));
+    assert!(
+        scanned.entries[0].path.starts_with(&linked),
+        "the walk keeps the spelling it was given, which is the whole point here"
+    );
+    // The run itself writes through the folder's own name: an output root
+    // reached by a link is refused, and that refusal is not what this covers.
+    finish_replace_run(&real);
+
+    let (failed, geometry) = opened_replace_result(
+        cx,
+        linked.clone(),
+        scanned.entries,
+        linked.join("shot.webp"),
+    );
+    assert!(
+        !failed,
+        "a root spelled through a link still names the backup mirror"
+    );
+    assert_eq!(geometry, Some((32, 32)));
+
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[gpui_kit::test]

@@ -236,3 +236,28 @@ and no macOS/Windows or complete UI claim follows.
 
 The closeout docs do not land those isolated checkpoints. No additional release,
 marketplace, browser or cross-platform result is inferred.
+
+### September 9 CI repair (branch `codex/workbench-ci-resume`)
+
+Three tests that pass on Linux failed on the remote runners at base `8131e2c`:
+`audit::tests::replace_results_compare_against_the_backup_original` on both
+macOS and Windows, and `crash::tests::crash_prompt_is_modal_and_uses_exact_visible_copy`
+plus `requirements::tests::receipt_report_contains_relative_names_and_actual_hashes_only`
+on Windows only.
+
+| Failure | Source | Fix |
+| --- | --- | --- |
+| Receipt names | `src/requirements.rs` | `relative_name` rejected every native Windows separator as a literal backslash. Validated components are now joined with `/`; a backslash inside a unix component, a non-UTF-8 name and traversal stay refused. |
+| Replace comparison | `src/audit/media.rs` | `comparison_source` stripped a canonical root off an entry that carries the walk's spelling and, on failure, joined the absolute leftover onto the backup root — which silently returned the moved-away original. It now falls back to the entry's canonical spelling and never joins an absolute leftover. `src/audit/tests.rs` gained an actual encoded output with distinct geometry and a unix symlinked-root case that reproduces the macOS/Windows split locally. |
+| Crash prompt | `src/crash.rs` | The dialog's entrance animation runs on the wall clock, which the test executor does not advance, so `debug_bounds` handed back geometry the next frame had already invalidated. The prompt tests now render animations settled; the explicit Not now close, Escape staying modal and the absence of handoff on dismissal are unchanged. |
+
+Local verification on Linux with `CARGO_TARGET_DIR` inside this worktree, all
+exit code 0: focused tests for all three failures, `cargo test --locked`
+(625 passed, 2 ignored, plus 32/2/3 integration tests), `cargo test --locked
+--features updater` (641 passed, 3 ignored), `cargo clippy --locked --all-targets
+--all-features -- -D warnings`, `cargo fmt --check` and `git diff --check`. Logs
+are under `ux/resume-ci-*.log`.
+
+Only Linux was executed here. The macOS and Windows behaviour is argued from the
+remote logs and from a locally reproduced equivalent, not observed: native OS
+proof stays pending on the next remote CI run.

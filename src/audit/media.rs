@@ -93,6 +93,26 @@ pub(super) fn image_context_menu(
         )
 }
 
+/// Where a replace run parked the original of `path`, or nothing when the
+/// audited file cannot be placed inside the root it was listed under.
+///
+/// `build_audit` resolves the root through `navigation_path`, so it is the
+/// canonical spelling, while an entry carries whatever spelling the walk used:
+/// macOS disagrees over `/var` and `/private/var`, and a canonical Windows root
+/// wears a verbatim prefix its input never had. Canonicalising the entry too
+/// settles that. Joining the leftover onto the backup root never happens: an
+/// absolute leftover replaces the root outright, so the before side would
+/// silently become the moved-away original.
+fn backup_of(root: &Path, path: &Path, out_dir: &Path) -> Option<PathBuf> {
+    let backup_root = manifest::backup_root(out_dir);
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(backup_root.join(relative));
+    }
+    let canonical = crate::scan::canonical_boundary(path).ok()?;
+    let relative = canonical.strip_prefix(root).ok()?;
+    Some(backup_root.join(relative))
+}
+
 impl Audit {
     fn notify_media_error(
         &self,
@@ -218,13 +238,9 @@ impl Audit {
         let Some((Output::Replace, out_dir)) = self.conversion_destination.as_ref() else {
             return Some(entry.path.clone());
         };
-        let relative = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path);
-        let backup = manifest::backup_root(out_dir).join(relative);
-        if backup.symlink_metadata().is_ok() {
-            Some(backup)
-        } else {
-            Some(entry.path.clone())
-        }
+        let backup = backup_of(&self.root, &entry.path, out_dir)
+            .filter(|backup| backup.symlink_metadata().is_ok());
+        Some(backup.unwrap_or_else(|| entry.path.clone()))
     }
 
     /// The same view for any file this app has written next to a source —
