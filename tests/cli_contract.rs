@@ -37,13 +37,19 @@ fn chunk(kind: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {
 /// Deterministic 8x8 RGB noise: flat colours compress to nothing and would
 /// let a conversion report zero bytes without proving anything moved.
 fn photo_png() -> Vec<u8> {
+    photo_png_seeded(0)
+}
+
+/// The same noise shifted, so two fixtures that share a name still differ byte
+/// for byte and a test can say which of them a run actually read.
+fn photo_png_seeded(seed: u32) -> Vec<u8> {
     let mut raw = Vec::new();
     for y in 0..8u32 {
         raw.push(0u8);
         for x in 0..8u32 {
-            raw.push(((x * 37 + y * 91) % 251) as u8);
-            raw.push(((x * 11 + y * 53) % 251) as u8);
-            raw.push(((x * 7 + y * 13) % 251) as u8);
+            raw.push(((x * 37 + y * 91 + seed) % 251) as u8);
+            raw.push(((x * 11 + y * 53 + seed) % 251) as u8);
+            raw.push(((x * 7 + y * 13 + seed) % 251) as u8);
         }
     }
     assert!(raw.len() <= 0xFFFF, "one stored block holds the fixture");
@@ -505,6 +511,112 @@ fn replace_and_restore_round_trip_for_one_file_under_a_second_spelling() {
         &alias.to_string_lossy(),
     );
     clean_up(&dir, &alias);
+}
+
+/// `typed/link` points one level down a real tree, so `typed/link/..` names
+/// `actual` to the kernel and `typed` to a lexical walk that drops the link and
+/// its `..` together. Both folders exist and hold a file of the same name, so
+/// which one a run resolved is visible in what it converted.
+#[cfg(unix)]
+fn linked_parent_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let base = workdir(tag);
+    let actual = base.join("actual");
+    std::fs::create_dir_all(actual.join("sub")).expect("the linked-to folder is created");
+    let typed = base.join("typed");
+    std::fs::create_dir_all(&typed).expect("the folder holding the link is created");
+    std::os::unix::fs::symlink(actual.join("sub"), typed.join("link"))
+        .expect("the link points one level down the real tree");
+    (base, actual, typed)
+}
+
+/// The decoy the lexical spelling would have picked: same name, different
+/// bytes, and it must come out of the run exactly as it went in.
+#[cfg(unix)]
+fn decoy(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, photo_png_seeded(97)).expect("the decoy image is written");
+    path
+}
+
+/// Nothing was converted, replaced or backed up in the folder the run never
+/// audited, and the decoy is the same file it was.
+#[cfg(unix)]
+fn decoy_untouched(typed: &Path, decoy: &Path, before: &[u8]) {
+    assert_eq!(
+        std::fs::read(decoy).expect("the decoy is still there"),
+        before,
+        "the folder the kernel never named keeps its file untouched"
+    );
+    assert!(
+        !typed.join("press-originals").exists(),
+        "no original was parked in the folder the run never audited"
+    );
+    assert!(
+        !typed.join("photo.webp").exists(),
+        "no output was installed in the folder the run never audited"
+    );
+    assert!(
+        !typed.join("optimized").exists(),
+        "no output folder was made in the folder the run never audited"
+    );
+}
+
+/// A folder named through a link's parent. `..` is the kernel's to resolve:
+/// removing it from the typed spelling first names the link's own parent, and
+/// the run then audits and replaces files in a folder nobody asked for.
+#[cfg(unix)]
+#[test]
+fn a_folder_named_through_a_linked_parent_is_the_one_the_kernel_names() {
+    let (base, actual, typed) = linked_parent_fixture("replace-linked-parent");
+    photo(&actual, "photo.png");
+    let decoy_path = decoy(&typed, "photo.png");
+    let before = std::fs::read(&decoy_path).expect("the decoy reads back");
+    let target = typed.join("link").join("..").to_string_lossy().into_owned();
+    let report = replace_and_restore_round_trip(&actual, &["photo.png"], &target, &[], &target);
+    let source = report["files"][0]["source"]
+        .as_str()
+        .expect("the converted file names its source")
+        .to_owned();
+    let resolved = actual.canonicalize().expect("the audited folder resolves");
+    assert_eq!(
+        PathBuf::from(source),
+        resolved.join("photo.png"),
+        "the run names the file the kernel reaches, not the lexical one"
+    );
+    decoy_untouched(&typed, &decoy_path, &before);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The same resolution for one file: only the parent is resolved, but it is
+/// resolved by the kernel, so the file that is opened is the one the typed path
+/// actually reaches.
+#[cfg(unix)]
+#[test]
+fn one_file_named_through_a_linked_parent_is_the_one_the_kernel_names() {
+    let (base, actual, typed) = linked_parent_fixture("replace-linked-parent-file");
+    photo(&actual, "photo.png");
+    let decoy_path = decoy(&typed, "photo.png");
+    let before = std::fs::read(&decoy_path).expect("the decoy reads back");
+    let parent = typed.join("link").join("..");
+    let report = replace_and_restore_round_trip(
+        &actual,
+        &["photo.png"],
+        &parent.join("photo.png").to_string_lossy(),
+        &[],
+        &parent.to_string_lossy(),
+    );
+    let source = report["files"][0]["source"]
+        .as_str()
+        .expect("the converted file names its source")
+        .to_owned();
+    let resolved = actual.canonicalize().expect("the audited folder resolves");
+    assert_eq!(
+        PathBuf::from(source),
+        resolved.join("photo.png"),
+        "the file opened is the one the parent link reaches"
+    );
+    decoy_untouched(&typed, &decoy_path, &before);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A WebP replaced by a WebP writes its own name back, which is only safe

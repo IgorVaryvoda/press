@@ -1185,9 +1185,16 @@ fn walk_output(target: &Path, chosen: Option<&Path>) -> PathBuf {
 /// somebody else's file, possibly from outside the folder. The parent is all the
 /// root and the source have to agree on, because the root is what a record
 /// spells its source relative to.
+///
+/// The kernel does the resolving, not a lexical walk. `link/../photo.png` names
+/// the parent of what the link points at, and dropping the `..` against the
+/// typed spelling first names a different folder: the run would then audit and
+/// replace files under `link`'s own parent, which is not the folder that was
+/// asked for. The target is already known to exist here, so this only ever
+/// resolves a path the caller can reach.
 fn audited_path(target: &Path, open_single: bool) -> std::io::Result<PathBuf> {
     if !open_single {
-        return scan::canonical_boundary(target);
+        return std::fs::canonicalize(target);
     }
     let name = target.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -1199,7 +1206,7 @@ fn audited_path(target: &Path, open_single: bool) -> std::io::Result<PathBuf> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    Ok(scan::canonical_boundary(parent)?.join(name))
+    Ok(std::fs::canonicalize(parent)?.join(name))
 }
 
 /// The counts a run only mentions when they happened. Zero skipped and zero failed
