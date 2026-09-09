@@ -533,7 +533,7 @@ version, so they stay as written.
 | Truthful local-only CLI labels for `press handoff` (`8ee91e3`, `5ad5e40`, `b539f21`) | `local_match` and its scope string describe a local folder check; no deployment, live site verification or re-audit is claimed |
 
 Not in this release: A2/A3 and D1 remain WIP on their isolated checkpoints
-(`codex/workbench-identity` at `d62dfd0`, `codex/workbench-job-safety` at
+(`codex/workbench-identity` at `ea018b9`, `codex/workbench-job-safety` at
 `fc9ad974`) and are not landed here; full H2 and H3 acceptance, maintained
 D3 packs and the policy catalog, and HEIF support are all still open. Nothing
 above is a claim that these bytes are released. Root merges the pending CI
