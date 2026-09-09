@@ -35,15 +35,21 @@ fn chunk(kind: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {
 }
 
 /// Deterministic 8x8 RGB noise: flat colours compress to nothing and would
-/// let a conversion report zero bytes without proving anything moved.
+/// let a conversion report zero bytes without proving anything moved. The seed
+/// picks one image; two seeds are two different photographs, with different
+/// source hashes and different converted bytes.
 fn photo_png() -> Vec<u8> {
+    seeded_png(0)
+}
+
+fn seeded_png(seed: u32) -> Vec<u8> {
     let mut raw = Vec::new();
     for y in 0..8u32 {
         raw.push(0u8);
         for x in 0..8u32 {
-            raw.push(((x * 37 + y * 91) % 251) as u8);
-            raw.push(((x * 11 + y * 53) % 251) as u8);
-            raw.push(((x * 7 + y * 13) % 251) as u8);
+            raw.push(((x * 37 + y * 91 + seed * 17) % 251) as u8);
+            raw.push(((x * 11 + y * 53 + seed * 29) % 251) as u8);
+            raw.push(((x * 7 + y * 13 + seed * 41) % 251) as u8);
         }
     }
     assert!(raw.len() <= 0xFFFF, "one stored block holds the fixture");
@@ -78,6 +84,13 @@ fn workdir(tag: &str) -> PathBuf {
 fn photo(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, photo_png()).expect("the fixture image is written");
+    path
+}
+
+/// A different photograph under whatever name is wanted.
+fn other_photo(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, seeded_png(97)).expect("the second fixture image is written");
     path
 }
 
@@ -840,7 +853,11 @@ fn saved_plan_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf, String, String, 
 }
 
 fn create_saved_plan(source: &str, output: &str, plan: &str) -> Output {
-    run_owned(&[
+    create_saved_plan_with(source, output, plan, &[])
+}
+
+fn create_saved_plan_with(source: &str, output: &str, plan: &str, extra: &[&str]) -> Output {
+    let mut args: Vec<String> = vec![
         "plan".into(),
         "--root".into(),
         source.into(),
@@ -849,7 +866,9 @@ fn create_saved_plan(source: &str, output: &str, plan: &str) -> Output {
         "--plan".into(),
         plan.into(),
         "--json".into(),
-    ])
+    ];
+    args.extend(extra.iter().map(|argument| (*argument).to_string()));
+    run_owned(&args)
 }
 
 fn execute_saved_plan(plan: &str, source: &str, output: &str, mode: &str) -> Output {
@@ -1007,6 +1026,129 @@ fn saved_plan_preserves_an_edited_unrecorded_output_at_the_writer_boundary() {
             .is_some_and(|error| error.contains("output"))
     );
     assert_eq!(std::fs::read(&expected_path).unwrap(), edited);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The last line the folder's manifest holds for one destination.
+fn latest_record(output: &Path, name: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(output.join(".press-manifest.jsonl"))
+        .expect("the output folder has a manifest");
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rfind(|record| record["output"] == name)
+        .unwrap_or_else(|| panic!("the manifest records {name}"))
+}
+
+/// A plan reviewed over this source's own existing output replaces it, even
+/// though the person chose different settings after seeing it.
+///
+/// The reviewed destination is pinned by hash when the plan is created, so the
+/// consent is to those bytes rather than to the recipe that made them. Refusing
+/// the new settings would make "convert this again, better" unexecutable.
+#[test]
+fn saved_plan_replaces_the_reviewed_output_it_owns_under_new_settings() {
+    let (dir, _source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-owned-resettings");
+
+    // An ordinary conversion first: this source's own output, recorded.
+    let converted = run(&[
+        "convert",
+        &source,
+        "--output",
+        &output_root,
+        "--quality",
+        "80",
+        "--json",
+    ]);
+    assert_eq!(converted.status.code(), Some(0), "{}", stderr(&converted));
+    let installed = output.join("shot.webp");
+    let reviewed_bytes = std::fs::read(&installed).expect("the first output is written");
+    assert_eq!(latest_record(&output, "shot.webp")["quality"], "q80");
+
+    let planned = create_saved_plan_with(&source, &output_root, &plan, &["--quality", "40"]);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let document = stdout_json(&planned);
+    let mapping = &document["plan"]["targets"][0]["mappings"][0];
+    assert_eq!(mapping["output"], "shot.webp");
+    assert_eq!(
+        mapping["destination"]["state"], "own",
+        "the plan pins the output it reviewed as this source's own"
+    );
+    assert!(mapping["destination"]["sha256"].is_string());
+    let recipe = document["plan"]["targets"][0]["recipe"]["fingerprint"]
+        .as_str()
+        .expect("the plan names its recipe")
+        .to_string();
+
+    let executed = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    let report = stdout_json(&executed);
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["items"][0]["status"], "written");
+    let record = latest_record(&output, "shot.webp");
+    assert_eq!(
+        record["quality"], "q40",
+        "the chosen settings wrote the file"
+    );
+    assert_eq!(record["recipe"], recipe.as_str());
+    assert_eq!(
+        record["output_hash"], report["items"][0]["output_hash"],
+        "the receipt describes the file the record claims"
+    );
+    assert_ne!(
+        std::fs::read(&installed).expect("the output is still there"),
+        reviewed_bytes,
+        "the reviewed output was replaced, not left alone"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A newer output that another image produced after the plan was reviewed is
+/// not this plan's to overwrite, even under the same recipe and the same name,
+/// and even once the source it displaced is restored byte for byte.
+#[test]
+fn saved_plan_refuses_a_newer_output_written_from_another_source_after_review() {
+    let (dir, source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-newer-output");
+    let reviewed_source = std::fs::read(source_root.join("shot.png")).expect("the fixture reads");
+
+    // Reviewed against a free name: nothing stood at the destination.
+    let planned = create_saved_plan(&source, &output_root, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    assert_eq!(
+        stdout_json(&planned)["plan"]["targets"][0]["mappings"][0]["destination"]["state"],
+        "absent"
+    );
+
+    // Somebody converts a different photograph into that name afterwards, with
+    // the settings this plan also uses.
+    other_photo(&source_root, "shot.png");
+    let converted = run(&["convert", &source, "--output", &output_root, "--json"]);
+    assert_eq!(converted.status.code(), Some(0), "{}", stderr(&converted));
+    let installed = output.join("shot.webp");
+    let newer = std::fs::read(&installed).expect("the newer output is written");
+
+    // The reviewed source comes back exactly as the plan hashed it, so only the
+    // destination is in question.
+    std::fs::write(source_root.join("shot.png"), &reviewed_source)
+        .expect("the reviewed source is restored");
+
+    let executed = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(1), "{}", stderr(&executed));
+    let report = stdout_json(&executed);
+    assert_eq!(report["items"][0]["status"], "failed");
+    assert!(
+        report["items"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("output")),
+        "{}",
+        report["items"][0]["error"]
+    );
+    assert_eq!(
+        std::fs::read(&installed).expect("the newer output is still there"),
+        newer,
+        "somebody else's newer result is preserved"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1395,6 +1537,224 @@ fn execute_saved_plan_in(
             "--json".into(),
         ],
     )
+}
+
+/// A source root reached through a link and its parent is the folder the kernel
+/// opens, not the one whose name precedes the link in the text.
+///
+/// `typed/link` points at `actual/sub`, so `typed/link/..` is `actual`. Both
+/// `actual` and `typed` hold a `photo.png`, and they are different photographs,
+/// so a plan that folded the `..` against the text instead would hash, convert
+/// and report the decoy while claiming to describe what the person named.
+#[cfg(unix)]
+#[test]
+fn saved_plan_binds_a_source_root_reached_through_a_link_and_its_parent() {
+    let dir = workdir("saved-link-parent");
+    let actual = dir.join("actual");
+    let typed = dir.join("typed");
+    let output_dir = dir.join("out");
+    for folder in [&actual, &actual.join("sub"), &typed, &output_dir] {
+        std::fs::create_dir_all(folder).expect("the fixture folder is created");
+    }
+    other_photo(&actual, "photo.png");
+    let decoy = photo(&typed, "photo.png");
+    let decoy_bytes = std::fs::read(&decoy).expect("the decoy is readable");
+    std::os::unix::fs::symlink(actual.join("sub"), typed.join("link"))
+        .expect("the link is created");
+
+    let through_link = typed.join("link").join("..").to_string_lossy().into_owned();
+    let output = output_dir.to_string_lossy().into_owned();
+    let plan = dir.join("through-link.json").to_string_lossy().into_owned();
+    let planned = create_saved_plan(&through_link, &output, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let bound = stdout_json(&planned)["plan"]["sources"][0]["sha256"]
+        .as_str()
+        .expect("the plan hashes its source")
+        .to_string();
+
+    // The same question asked of each folder directly, so the fixture proves
+    // which of the two the binding actually opened.
+    let direct = dir.join("direct.json").to_string_lossy().into_owned();
+    let direct = create_saved_plan(
+        &actual.to_string_lossy(),
+        &output_dir.join("direct").to_string_lossy(),
+        &direct,
+    );
+    assert_eq!(direct.status.code(), Some(0), "{}", stderr(&direct));
+    let named = dir.join("named.json").to_string_lossy().into_owned();
+    let named = create_saved_plan(
+        &typed.to_string_lossy(),
+        &output_dir.join("named").to_string_lossy(),
+        &named,
+    );
+    assert_eq!(named.status.code(), Some(0), "{}", stderr(&named));
+    assert_eq!(
+        bound,
+        stdout_json(&direct)["plan"]["sources"][0]["sha256"]
+            .as_str()
+            .expect("the direct plan hashes its source"),
+        "the link's parent is the folder it points into"
+    );
+    assert_ne!(
+        bound,
+        stdout_json(&named)["plan"]["sources"][0]["sha256"]
+            .as_str()
+            .expect("the named plan hashes its source"),
+        "the fixture's two photographs are different files"
+    );
+
+    let executed = execute_saved_plan(&plan, &through_link, &output, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    let report = stdout_json(&executed);
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["items"][0]["status"], "written");
+    assert!(output_dir.join("photo.webp").is_file());
+    assert_eq!(
+        std::fs::read(&decoy).expect("the decoy is still there"),
+        decoy_bytes,
+        "the folder the person did not bind is untouched"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The run state a binding leaves behind, once it exists.
+fn run_state_path(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("the plan folder is readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            let name = path.to_string_lossy();
+            name.contains(".run-") && name.ends_with(".json")
+        })
+}
+
+fn run_state(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).expect("the run state is readable"))
+        .expect("the run state is JSON")
+}
+
+/// Every state a retry passes through has to load again, including the one a
+/// killed process leaves on disk.
+///
+/// A written item that loses its output becomes a named failure, and the retry
+/// after it becomes running work. Neither still describes an installed file, so
+/// neither may keep the receipt that did — a state that kept it was refused by
+/// the next command, and the plan could not be resumed at all.
+///
+/// The interruption is real and deterministic: the source is a FIFO, so the
+/// process blocks in its bounded source read after it has recorded the item as
+/// running, and the test kills it there.
+#[cfg(unix)]
+#[test]
+fn saved_plan_reloads_the_state_a_killed_retry_left_behind() {
+    use std::io::Read as _;
+
+    let (dir, source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-killed-retry");
+    let planned = create_saved_plan(&source, &output_root, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let executed = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    let installed = output.join("shot.webp");
+    assert!(installed.is_file());
+
+    // The output goes away, so the receipt that vouched for it is not true any
+    // more and the item is a named failure.
+    std::fs::remove_file(&installed).expect("the installed output is taken away");
+    let reconciled = reconcile_saved_plan(&plan, &source, &output_root);
+    assert_eq!(reconciled.status.code(), Some(1), "{}", stderr(&reconciled));
+    assert_eq!(stdout_json(&reconciled)["items"][0]["status"], "failed");
+    let state_path = run_state_path(&dir).expect("execution leaves a state file");
+    let failed = run_state(&state_path);
+    assert!(
+        failed["items"][0]["output_hash"].is_null() && failed["items"][0]["output_bytes"].is_null(),
+        "a failure keeps no receipt for a file that is gone: {}",
+        failed["items"][0]
+    );
+    assert!(
+        failed["items"][0]["error"].is_string(),
+        "the failure is still named"
+    );
+
+    let bytes = std::fs::read(source_root.join("shot.png")).expect("the fixture is readable");
+    std::fs::remove_file(source_root.join("shot.png")).expect("the source is replaced");
+    let made = Command::new("mkfifo")
+        .arg(source_root.join("shot.png"))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "the blocking source is a fifo");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_press"))
+        .args([
+            "execute",
+            &plan,
+            "--root",
+            &source,
+            "--output",
+            &output_root,
+            "--retry-failed",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the retry starts");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut running = None;
+    while std::time::Instant::now() < deadline {
+        let state = run_state(&state_path);
+        if state["items"][0]["status"] == "running" {
+            running = Some(state);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let running = running.unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = std::fs::remove_file(source_root.join("shot.png"));
+        panic!("the retry never reached the blocking source");
+    });
+    assert!(
+        running["items"][0]["output_hash"].is_null()
+            && running["items"][0]["output_bytes"].is_null()
+            && running["items"][0]["width"].is_null()
+            && running["items"][0]["height"].is_null(),
+        "work in progress carries no receipt: {}",
+        running["items"][0]
+    );
+
+    child.kill().expect("the blocked retry is killed");
+    let mut ignored = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_end(&mut ignored);
+    }
+    let status = child.wait().expect("the killed retry is reaped");
+    assert!(status.code().is_none(), "the run died rather than exited");
+
+    std::fs::remove_file(source_root.join("shot.png")).expect("the fifo is removed");
+    std::fs::write(source_root.join("shot.png"), &bytes).expect("the source comes back unchanged");
+
+    // The plan is still usable: the state loads, says what is true, and the
+    // work finishes.
+    let reconciled = reconcile_saved_plan(&plan, &source, &output_root);
+    assert_eq!(reconciled.status.code(), Some(1), "{}", stderr(&reconciled));
+    let report = stdout_json(&reconciled);
+    assert!(
+        report["error"].is_null(),
+        "the killed retry left a state this command reads: {}",
+        report["error"]
+    );
+    assert_eq!(report["items"][0]["status"], "unstarted");
+    assert_eq!(report["counts"]["unstarted"], 1);
+
+    let finished = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(finished.status.code(), Some(0), "{}", stderr(&finished));
+    let finished = stdout_json(&finished);
+    assert_eq!(finished["status"], "complete");
+    assert_eq!(finished["items"][0]["status"], "written");
+    assert!(installed.is_file());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A run killed part-way through leaves its finished work identifiable, its

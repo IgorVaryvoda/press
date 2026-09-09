@@ -128,6 +128,44 @@ successful_submit_acknowledges_after_generic_handoff` was observed failing once
 under a loaded parallel run and passed in isolation and on rerun; it is an
 unrelated simulated-click flake, not a change in this slice.
 
+## September 9 A2 third round
+
+A third review round found three defects in the previous round's saved-plan work
+and one source-binding defect beside it. All four are closed on top of `1e395ee`
+in this branch's working tree; the slice is still local tooling, not a confirmed
+external contract.
+
+| Finding | What changed |
+| --- | --- |
+| Reviewed destination consent | Each planned mapping now pins what stood at its destination when the plan was reviewed — absent, this source's own recorded output by SHA-256 and size, or foreign — inside the sealed digest. The writer boundary permits exactly that pinned output, whatever settings were chosen since, or a file this folder's manifest still credits to these source bytes under this recipe, which is this run's own result after an interruption. A newer output another image produced after review is refused under the same recipe, the same name and a restored source. A pinned snapshot must be a real SHA-256 over a file with bytes |
+| Interrupted retry state | A receipt is dropped by one shared step at every transition away from written — failed, unstarted, running and cancelled — so a killed retry leaves a state later commands still load. Named failures are kept; hash-verified same-plan recovery through `reconcile` is unchanged |
+| Windows test compilation | The three `std::os::unix` fixtures in `saved_plan.rs` are `#[cfg(unix)]`. The portable halves — that the run lock is an ordinary file, and the whole run-state loading and receipt-shape suite — still compile and run everywhere |
+| Source root binding | `saved_plan_context` resolves the source folder with `std::fs::canonicalize`. `scan::canonical_boundary` folds `..` lexically so it can also name destinations that do not exist yet; a source folder is here now, and `link/..` is the parent of what the link points at. A plan bound through such a path hashed and converted a different folder's file while reporting the one the person named. Output and missing-path semantics are untouched |
+
+Regressions are real processes in `tests/cli_contract.rs`: the reviewed own
+output replaced under new settings, the newer other-source output preserved with
+the run failing, a retry killed on a FIFO source whose state reloads and whose
+work then finishes, and a source root reached through `link/..` proved against
+plans of both candidate folders. Each was confirmed to fail against the
+unrepaired code before the fix.
+
+Verified on Linux x86_64 with Rust 1.97.1 against this working tree:
+
+- `cargo test --locked --quiet`: 638 + 51 + 2 + 3 passed, 2 ignored, 0 failed.
+- `cargo test --locked --features updater --quiet`: 654 + 51 + 2 + 3 passed, 3 ignored.
+- `cargo test --locked --bin press saved_plan::`: 16 passed, 0 failed.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo fmt --check`
+  and `git diff --check`: passed.
+
+An earlier updater run in this session hit `crash::tests::not_now_leaves_the_
+report_pending`, a known baseline GPUI modal animation flake outside this slice;
+it passed alone and in two later full updater runs, and no crash code was
+touched. Saved plans written by the previous commit no longer parse, because a
+mapping now carries its reviewed destination; the format has never been
+released. The killed-retry and link-parent fixtures are Unix-only. No macOS or
+Windows run was performed, no GUI saved-plan surface exists, and no release,
+push or CI merge was made.
+
 ## Work selection and dependencies
 
 Start with a concrete job, not all rows at once. The recommended local path is

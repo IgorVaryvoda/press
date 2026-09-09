@@ -2427,16 +2427,30 @@ fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, Strin
         .collect()
 }
 
+/// The two roots a saved-plan command binds, each resolved as what it really is.
+///
+/// The source folder is asked of the filesystem rather than of the path string.
+/// `scan::canonical_boundary` folds `..` lexically because it also has to name
+/// destinations that do not exist yet; a source folder is not one of those. It
+/// is here now, and `link/..` is the parent of what the link points at, which
+/// is the folder the kernel opens and the only one whose files a plan may go on
+/// to hash, name relatively and convert.
 fn saved_plan_context(source: &Path, output: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let source = scan::canonical_boundary(source).map_err(|error| {
+    let resolved = std::fs::canonicalize(source).map_err(|error| {
         format!(
             "saved plan source {} cannot be established: {error}",
             source.display()
         )
     })?;
+    if !resolved.is_dir() {
+        return Err(format!(
+            "saved plan source {} is not a folder",
+            source.display()
+        ));
+    }
     let destination = settings::Output::Folder(output.to_path_buf());
-    let context = destination.context(&source)?;
-    Ok((source, context.output_root().to_path_buf()))
+    let context = destination.context(&resolved)?;
+    Ok((resolved, context.output_root().to_path_buf()))
 }
 
 fn saved_plan_scan(source: &Path, output: &Path, subfolders: bool) -> Result<scan::Scan, String> {

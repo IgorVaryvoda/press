@@ -936,17 +936,38 @@ pub struct Backup {
     pub moved: bool,
 }
 
+/// What stood at a planned destination when a person reviewed the plan.
+///
+/// A plan carries this and nothing else about the folder it will write into, so
+/// the writer can ask whether the destination is still the one that was
+/// consented to rather than infer permission from a recipe or a timestamp.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewedDestination {
+    /// The name was free. What was reviewed was creating a file here, not
+    /// replacing one that has arrived since.
+    Absent,
+    /// This plan's own source had already written exactly these bytes here, and
+    /// the folder's manifest still credited them to the source bytes the plan
+    /// hashed. Replacing them is the rerun that was reviewed, under whatever
+    /// settings were chosen for it.
+    Own { sha256: String, bytes: u64 },
+    /// Something else stood here: a file no manifest credits to this source, a
+    /// folder, or a link. A plan never carries consent to replace it.
+    Foreign,
+}
+
 /// Who may own a destination that already exists when the run reaches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ownership {
+pub enum Ownership<'a> {
     /// Ordinary conversion. An unrecorded file at the destination is still
     /// overwritten when it is older than its source, which is the rule headless
     /// runs had before manifests existed and consumers still rely on.
     Legacy,
-    /// A saved plan pinned this destination when it was reviewed. Anything this
-    /// folder's own manifest does not account for belongs to somebody else,
-    /// whatever its timestamp claims, and a backdated file is not permission.
-    Planned,
+    /// A saved plan pinned this destination when it was reviewed, and this is
+    /// what it pinned. Anything else standing here now belongs to somebody
+    /// else, whatever its timestamp or recipe claims.
+    Planned(&'a ReviewedDestination),
 }
 
 /// What one file adds to the folder's record before its output takes the name.
@@ -957,7 +978,7 @@ pub struct Recording<'a> {
     pub backup: Option<&'a Backup>,
     /// Checked at the writer boundary, not only in a caller's preflight: the
     /// destination can change between the two.
-    pub ownership: Ownership,
+    pub ownership: Ownership<'a>,
 }
 
 impl<'a> Recording<'a> {
@@ -980,18 +1001,20 @@ impl<'a> Recording<'a> {
         }
     }
 
-    /// The same record, for a destination a reviewed plan already claimed.
+    /// The same record, for a destination a reviewed plan already claimed, with
+    /// the state that review pinned there.
     pub fn for_planned(
         root: &'a Path,
         out_dir: &'a Path,
         stamp: &'a crate::manifest::Stamp,
+        reviewed: &'a ReviewedDestination,
     ) -> Self {
         Self {
             root,
             out_dir,
             stamp,
             backup: None,
-            ownership: Ownership::Planned,
+            ownership: Ownership::Planned(reviewed),
         }
     }
 }
@@ -1255,7 +1278,9 @@ fn write_inner_with_hook(
     // old walk from the output root never looked that high.
     ensure_absolute_parents(final_parent)?;
     let (same_name, expected_output) = match recorded {
-        Some((source, recording, _)) => output_guard(written, source, recording)?,
+        Some((source, recording, source_identity)) => {
+            output_guard(written, source, source_identity, recording)?
+        }
         None => (false, None),
     };
     before_final_validation();
@@ -1399,6 +1424,7 @@ fn write_inner_with_hook(
 fn output_guard(
     written: &Path,
     source: &Path,
+    source_identity: &crate::manifest::SourceIdentity,
     recording: &Recording,
 ) -> Result<(bool, Option<crate::manifest::FileIdentity>), Failure> {
     let same_name = recording.backup.is_some() && path_key(source) == path_key(written);
@@ -1409,13 +1435,16 @@ fn output_guard(
     // cannot be renamed over, and allowing the final rename to report that
     // failure lets replace mode put its original back without touching the
     // directory.
-    let planned = recording.ownership == Ownership::Planned;
+    let reviewed = match recording.ownership {
+        Ownership::Legacy => None,
+        Ownership::Planned(reviewed) => Some(reviewed),
+    };
     if let Ok(metadata) = written.symlink_metadata() {
         // A plan pinned one ordinary file here. A directory cannot be renamed
         // over and a symlink would install the bytes wherever it points, so
         // both are refused before anything is staged rather than left to the
         // rename.
-        if planned && (metadata.is_dir() || metadata.file_type().is_symlink()) {
+        if reviewed.is_some() && (metadata.is_dir() || metadata.file_type().is_symlink()) {
             return Err(Failure::OutputChanged);
         }
         if metadata.is_dir() {
@@ -1423,6 +1452,9 @@ fn output_guard(
         }
     }
     let Some(snapshot) = output_snapshot(written)? else {
+        // Nothing stands here. An absence is nobody's file: a plan that pinned
+        // one writes, and so does a plan whose own reviewed output has been
+        // taken away since, which is the file the person asked for either way.
         return Ok((false, None));
     };
     let relative_source = source
@@ -1434,12 +1466,21 @@ fn output_guard(
     // Ponytail ceiling: this fallback reloads one manifest for one existing
     // destination; batch planning already loaded the manifest once.
     let manifest = crate::manifest::load(recording.out_dir);
-    let Some(record) = manifest.latest(relative_source, relative_output) else {
+    let record = manifest.latest(relative_source, relative_output);
+    if let Some(reviewed) = reviewed {
+        return planned_guard(
+            written,
+            reviewed,
+            record,
+            snapshot,
+            source_identity,
+            recording,
+        )
+        .map(|snapshot| (false, Some(snapshot)));
+    }
+    let Some(record) = record else {
         // Planning proved this name was free or this run's own. An unrecorded
         // file arrived since, so the plan no longer describes the folder.
-        if planned {
-            return Err(Failure::OutputChanged);
-        }
         if crate::manifest::path(recording.out_dir)
             .symlink_metadata()
             .is_ok()
@@ -1458,16 +1499,46 @@ fn output_guard(
     if !record.installed(written) {
         return Err(Failure::OutputChanged);
     }
-    // A record is not enough for a planned destination. Planning pinned an
-    // absence or this source's own earlier output; a run since then could have
-    // written this name from the same source under different settings, and that
-    // is a newer result somebody chose, not the file the plan expected. Equal
-    // settings would have produced these very bytes, so only a differing recipe
-    // is refused.
-    if planned && record.recipe.as_deref() != Some(recording.stamp.recipe()) {
-        return Err(Failure::OutputChanged);
-    }
     Ok((false, Some(snapshot)))
+}
+
+/// What a saved plan may take back at a destination it already found occupied.
+///
+/// Two things and nothing else: the exact bytes the person reviewed as this
+/// source's own output, whatever settings they have chosen since, and a file
+/// this folder's manifest still credits to these very source bytes under this
+/// very recipe, which is this plan's own installed result after an interruption.
+///
+/// A newer output written from another source after the plan was reviewed fails
+/// both, even when it shares this recipe and this name and even when the source
+/// it displaced has since been restored byte for byte. Somebody chose that file;
+/// a plan reviewed against an absence never carried permission to replace it.
+fn planned_guard(
+    written: &Path,
+    reviewed: &ReviewedDestination,
+    record: Option<&crate::manifest::Record>,
+    snapshot: crate::manifest::FileIdentity,
+    source_identity: &crate::manifest::SourceIdentity,
+    recording: &Recording,
+) -> Result<crate::manifest::FileIdentity, Failure> {
+    if let ReviewedDestination::Own { sha256, bytes } = reviewed
+        && *sha256 == snapshot.hash
+        && *bytes == snapshot.bytes
+    {
+        return Ok(snapshot);
+    }
+    let mine = record.is_some_and(|record| {
+        record.source_hash.as_deref() == Some(source_identity.hash.as_str())
+            && record.source_bytes == source_identity.bytes
+            && record.recipe.as_deref() == Some(recording.stamp.recipe())
+            && record.output_hash.as_deref() == Some(snapshot.hash.as_str())
+            && record.installed(written)
+    });
+    if mine {
+        Ok(snapshot)
+    } else {
+        Err(Failure::OutputChanged)
+    }
 }
 
 fn output_snapshot(path: &Path) -> Result<Option<crate::manifest::FileIdentity>, Failure> {

@@ -147,6 +147,10 @@ pub struct PlanMapping {
     pub item_id: String,
     /// Relative to the explicitly rebound output root, including `target.out`.
     pub output: Option<String>,
+    /// What stood at that destination when this plan was reviewed. It is part
+    /// of the sealed digest, so the state a person consented to travels with
+    /// the plan and the writer can refuse anything else that has arrived since.
+    pub destination: Option<crate::convert::ReviewedDestination>,
     pub status: MappingStatus,
     pub error: Option<String>,
 }
@@ -341,9 +345,24 @@ impl Plan {
                     mapping.status,
                     mapping.output.as_deref(),
                     mapping.error.as_deref(),
+                    mapping.destination.as_ref(),
                 ) {
-                    (MappingStatus::Planned, Some(output), None) => {
+                    (MappingStatus::Planned, Some(output), None, Some(destination)) => {
                         portable_path(output, "planned output")?;
+                        // A pinned snapshot is held to the same shape as a
+                        // source identity: a real SHA-256 over a file that has
+                        // bytes. Consent to replace somebody's file is not a
+                        // place to start accepting data that cannot be true.
+                        if let crate::convert::ReviewedDestination::Own { sha256, bytes } =
+                            destination
+                            && (!is_hex(sha256, 64) || *bytes == 0)
+                        {
+                            return Err(format!(
+                                "target {:?} pins {output:?} to an invalid reviewed output \
+                                 snapshot",
+                                target.target_id
+                            ));
+                        }
                         // A target's namespace is its own. A mapping that names
                         // a file outside it would let one target write through
                         // another's folder.
@@ -358,10 +377,11 @@ impl Plan {
                             ));
                         }
                     }
-                    (MappingStatus::Refused, None, Some(error)) if !error.is_empty() => {}
+                    (MappingStatus::Refused, None, Some(error), None) if !error.is_empty() => {}
                     _ => {
                         return Err(format!(
-                            "target {:?} has an invalid mapping status",
+                            "target {:?} has an invalid mapping status, output or reviewed \
+                             destination",
                             target.target_id
                         ));
                     }
@@ -567,12 +587,14 @@ pub fn build(
                 Ok(path) => Ok(PlanMapping {
                     item_id: source.item_id.clone(),
                     output: Some(relative_text(output_root, &path)?),
+                    destination: Some(reviewed_destination(&recorded, &target_root, source, &path)),
                     status: MappingStatus::Planned,
                     error: None,
                 }),
                 Err(error) => Ok(PlanMapping {
                     item_id: source.item_id.clone(),
                     output: None,
+                    destination: None,
                     status: MappingStatus::Refused,
                     error: Some(failure_text(error)),
                 }),
@@ -633,6 +655,50 @@ pub fn build(
     plan.plan_id = format!("plan-{}", &plan.digest[..16]);
     plan.validate()?;
     Ok(plan)
+}
+
+/// What the destination held when this plan was reviewed.
+///
+/// Two states are consent and no others: a free name, and exactly this source's
+/// own earlier output, still the bytes this folder's manifest credits to the
+/// source bytes the plan just hashed. Another source's output, a file no
+/// manifest accounts for, a folder and a link are all somebody else's, and the
+/// plan records that rather than leave the writer to infer permission from a
+/// timestamp or a matching recipe.
+fn reviewed_destination(
+    manifest: &crate::manifest::Manifest,
+    target_root: &Path,
+    source: &PlanSource,
+    output: &Path,
+) -> crate::convert::ReviewedDestination {
+    use crate::convert::ReviewedDestination;
+    match output.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ReviewedDestination::Absent,
+        Err(_) => ReviewedDestination::Foreign,
+        Ok(metadata) if !metadata.is_file() => ReviewedDestination::Foreign,
+        Ok(_) => {
+            let (Some(identity), Ok(relative)) = (
+                crate::manifest::file_identity(output),
+                output.strip_prefix(target_root),
+            ) else {
+                return ReviewedDestination::Foreign;
+            };
+            match manifest.latest(Path::new(&source.source), relative) {
+                Some(record)
+                    if record.source_hash.as_deref() == Some(source.sha256.as_str())
+                        && record.source_bytes == source.bytes
+                        && record.output_hash.as_deref() == Some(identity.hash.as_str())
+                        && record.output_bytes == identity.bytes =>
+                {
+                    ReviewedDestination::Own {
+                        sha256: identity.hash,
+                        bytes: identity.bytes,
+                    }
+                }
+                _ => ReviewedDestination::Foreign,
+            }
+        }
+    }
 }
 
 pub fn save_new(path: &Path, plan: &Plan) -> Result<(), String> {
@@ -988,7 +1054,7 @@ pub fn execute(
             if mode == ExecutionMode::Cancel {
                 state.items[index].status = ItemStatus::Cancelled;
                 state.items[index].error = None;
-                state.items[index].requirements = None;
+                clear_receipt(&mut state.items[index]);
                 save_state(&state_path, &state)?;
                 continue;
             }
@@ -1002,11 +1068,15 @@ pub fn execute(
             if mapping.status != MappingStatus::Planned {
                 state.items[index].status = ItemStatus::Failed;
                 state.items[index].error = mapping.error.clone();
+                clear_receipt(&mut state.items[index]);
                 save_state(&state_path, &state)?;
                 continue;
             }
+            // This is the state a killed run leaves behind, so it is written as
+            // what is true at that moment: work in progress, and no receipt.
             state.items[index].status = ItemStatus::Running;
             state.items[index].error = None;
+            clear_receipt(&mut state.items[index]);
             save_state(&state_path, &state)?;
             match execute_item(
                 &plan,
@@ -1021,6 +1091,7 @@ pub fn execute(
                 Err(error) => {
                     state.items[index].status = ItemStatus::Failed;
                     state.items[index].error = Some(error);
+                    clear_receipt(&mut state.items[index]);
                 }
             }
             save_state(&state_path, &state)?;
@@ -1268,6 +1339,23 @@ fn new_state(plan: &Plan, source_root: &Path, output_root: &Path) -> RunState {
     }
 }
 
+/// Drop a receipt that no longer describes an installed output.
+///
+/// A hash, a size, dimensions, the checks that measured them and the
+/// requirement outcome are all statements about a file this state can no longer
+/// vouch for. Carrying them into an unstarted, running, cancelled or failed
+/// item leaves a state that describes two different things at once — and one
+/// that `load_state` refuses, so an interrupted retry could never be resumed.
+/// The named failure is the item's own field and stays.
+fn clear_receipt(item: &mut RunItem) {
+    item.output_hash = None;
+    item.output_bytes = None;
+    item.width = None;
+    item.height = None;
+    item.checks = Vec::new();
+    item.requirements = None;
+}
+
 fn run_id(source_root: &Path, output_root: &Path) -> String {
     format!(
         "run-{}",
@@ -1304,7 +1392,11 @@ fn execute_item(
     // pinned this destination when it was reviewed, so it does not inherit
     // ordinary conversion's permission to overwrite an unrecorded file merely
     // because that file is older than the source.
-    let recording = crate::convert::Recording::for_planned(source_root, &target_root, &stamp);
+    let Some(reviewed) = mapping.destination.as_ref() else {
+        return Err("saved plan mapping pins no reviewed destination".into());
+    };
+    let recording =
+        crate::convert::Recording::for_planned(source_root, &target_root, &stamp, reviewed);
     let expected = crate::manifest::SourceIdentity {
         bytes: source.bytes,
         hash: source.sha256.clone(),
@@ -1385,12 +1477,12 @@ fn reconcile_items(
                         state.items[index].status = ItemStatus::Unstarted;
                         state.items[index].error = None;
                     }
-                    state.items[index].requirements = None;
+                    clear_receipt(&mut state.items[index]);
                 }
                 Err(error) if state.items[index].status == ItemStatus::Written => {
                     state.items[index].status = ItemStatus::Failed;
                     state.items[index].error = Some(error);
-                    state.items[index].requirements = None;
+                    clear_receipt(&mut state.items[index]);
                 }
                 Err(_) => {}
             }
@@ -1592,12 +1684,18 @@ fn validate_mappings(plan: &Plan, source_root: &Path, output_root: &Path) -> Res
                 Ok(path) => PlanMapping {
                     item_id: source.item_id.clone(),
                     output: Some(relative_text(output_root, &path)?),
+                    // The pinned destination is the plan's own reviewed fact and
+                    // is rechecked at the writer boundary against the folder as
+                    // it is when the bytes are about to move. Recomputing it
+                    // here would only compare this moment with itself.
+                    destination: expected.destination.clone(),
                     status: MappingStatus::Planned,
                     error: None,
                 },
                 Err(error) => PlanMapping {
                     item_id: source.item_id.clone(),
                     output: None,
+                    destination: None,
                     status: MappingStatus::Refused,
                     error: Some(failure_text(error)),
                 },
@@ -1952,6 +2050,7 @@ mod tests {
         PlanMapping {
             item_id: item_id(name),
             output: Some(output.into()),
+            destination: Some(crate::convert::ReviewedDestination::Absent),
             status: MappingStatus::Planned,
             error: None,
         }
@@ -2285,6 +2384,102 @@ mod tests {
     }
 
     #[test]
+    fn a_planned_mapping_carries_the_destination_it_was_reviewed_against() {
+        let mut plan = one_source_plan();
+        plan.targets[0].mappings[0].destination = None;
+        plan.digest = plan.compute_digest().expect("the digest computes");
+        plan.plan_id = format!("plan-{}", &plan.digest[..16]);
+        let error = plan
+            .validate()
+            .expect_err("a mapping without a pinned destination is not a reviewed plan");
+        assert!(error.contains("reviewed destination"), "{error}");
+
+        // The pin is sealed with everything else, so swapping consent for an
+        // absence into consent for somebody else's file breaks the digest.
+        let mut plan = one_source_plan();
+        plan.targets[0].mappings[0].destination = Some(crate::convert::ReviewedDestination::Own {
+            sha256: hex_digest(b"another output"),
+            bytes: 12,
+        });
+        let error = plan
+            .validate()
+            .expect_err("the reviewed destination is part of the seal");
+        assert!(error.contains("digest does not match"), "{error}");
+
+        // Sealed or not, a hash that is not a hash is not a snapshot of
+        // anything, so it never becomes consent to replace a file.
+        let mut plan = one_source_plan();
+        plan.targets[0].mappings[0].destination = Some(crate::convert::ReviewedDestination::Own {
+            sha256: "not a sha".into(),
+            bytes: 12,
+        });
+        plan.digest = plan.compute_digest().expect("the digest computes");
+        plan.plan_id = format!("plan-{}", &plan.digest[..16]);
+        let error = plan
+            .validate()
+            .expect_err("a malformed reviewed hash is refused");
+        assert!(
+            error.contains("invalid reviewed output snapshot"),
+            "{error}"
+        );
+
+        let mut plan = one_source_plan();
+        plan.targets[0].mappings[0].destination = Some(crate::convert::ReviewedDestination::Own {
+            sha256: hex_digest(b"an output"),
+            bytes: 0,
+        });
+        plan.digest = plan.compute_digest().expect("the digest computes");
+        plan.plan_id = format!("plan-{}", &plan.digest[..16]);
+        let error = plan
+            .validate()
+            .expect_err("a file with no bytes is not an installed output");
+        assert!(
+            error.contains("invalid reviewed output snapshot"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_receipt_does_not_outlive_the_output_it_described() {
+        let dir = state_dir("state-cleared");
+        let plan = one_source_plan();
+        let (source_root, output_root) = roots();
+        let mut state = new_state(&plan, &source_root, &output_root);
+        state.items[0].status = ItemStatus::Written;
+        state.items[0].output_hash = Some(hex_digest(b"installed"));
+        state.items[0].output_bytes = Some(64);
+        state.items[0].width = Some(8);
+        state.items[0].height = Some(8);
+        state.items[0].checks = vec![Check {
+            name: "output_hash".into(),
+            status: CheckStatus::Completed,
+            reason: None,
+        }];
+        loaded(&dir, &plan, &state).expect("a complete receipt loads");
+
+        // What a reconcile records when the output it vouched for is gone.
+        state.items[0].status = ItemStatus::Failed;
+        state.items[0].error = Some("installed output is missing or unreadable".into());
+        clear_receipt(&mut state.items[0]);
+        let failed = loaded(&dir, &plan, &state).expect("a named failure loads");
+        assert_eq!(failed.items[0].output_hash, None);
+        assert_eq!(failed.items[0].output_bytes, None);
+        assert!(failed.items[0].checks.is_empty());
+        assert_eq!(
+            failed.items[0].error.as_deref(),
+            Some("installed output is missing or unreadable"),
+            "the failure is still named"
+        );
+
+        // And what the retry after it leaves on disk if it is killed mid-encode.
+        state.items[0].status = ItemStatus::Running;
+        state.items[0].error = None;
+        clear_receipt(&mut state.items[0]);
+        loaded(&dir, &plan, &state).expect("an interrupted retry state loads again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_refused_mapping_cannot_be_recorded_as_progress() {
         let dir = state_dir("state-refused");
         let plan = sealed(
@@ -2296,6 +2491,7 @@ mod tests {
                 mappings: vec![PlanMapping {
                     item_id: item_id("shot.png"),
                     output: None,
+                    destination: None,
                     status: MappingStatus::Refused,
                     error: Some("the plan refused this source".into()),
                 }],
@@ -2323,17 +2519,26 @@ mod tests {
         let lock_path = dir.join("plan.json.run-abc.json.lock");
         assert!(lock_path.is_file(), "the lock is a plain file");
         drop(held);
-        std::fs::remove_file(&lock_path).expect("the lock file is removed");
-        std::os::unix::fs::symlink(dir.join("elsewhere"), &lock_path)
-            .expect("the impersonating link is created");
-        let error = match RunLock::acquire(&path) {
-            Ok(_) => unreachable!("a link is not this run's lock"),
-            Err(error) => error,
-        };
-        assert!(error.contains("not a regular file"), "{error}");
+        // Impersonating the lock needs a link, which is a Unix fixture here.
+        // The plain-file half above is the part every platform runs.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&lock_path).expect("the lock file is removed");
+            std::os::unix::fs::symlink(dir.join("elsewhere"), &lock_path)
+                .expect("the impersonating link is created");
+            let error = match RunLock::acquire(&path) {
+                Ok(_) => unreachable!("a link is not this run's lock"),
+                Err(error) => error,
+            };
+            assert!(error.contains("not a regular file"), "{error}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A folder that refuses a new file is a Unix mode here. The portable half
+    /// of saving — staging, installing and refusing an impersonated path — is
+    /// covered by the tests around this one on every platform.
+    #[cfg(unix)]
     #[test]
     fn a_failed_save_returns_its_error_and_keeps_the_previous_state() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2363,6 +2568,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_run_state_is_never_written_through_an_impersonated_name() {
         let dir = state_dir("state-impersonated");
