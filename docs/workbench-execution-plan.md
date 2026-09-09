@@ -84,6 +84,50 @@ demonstration, macOS/Windows run or live supplier/hosted pilot was performed.
 The next connected step remains a confirmed Studio contract and authorized pilot;
 the incomplete local foundation/GUI obligations in the table are still open.
 
+## September 9 A2/A3 correction
+
+A second review round on `src/saved_plan.rs` and its narrow CLI integration
+closed the standing findings below. Source evidence is this branch's working
+tree on top of `8131e2c`; the slice is still local tooling, not a confirmed
+external contract.
+
+| Finding | What changed |
+| --- | --- |
+| Namespace and destination conflicts | Plans refuse shared, nested and case-aliased target namespaces and two sources planned onto one file; execution additionally refuses link-aliased target folders, a target that resolves outside the output root, and a destination that resolves onto a plan source. All before any effect |
+| Portable path components | Sources, target namespaces and mappings pass `job::portable_component`, which now rejects separators itself; a literal backslash, drive or ADS marker, Windows device, control character, trailing dot or space and non-UTF-8 component are refused rather than retargeted. Native root bindings stay separate |
+| One lock per command | `execute`, `reconcile` and `--cancel` hold one `File::try_lock` covering load, validation, effects and persistence. Run-state staging uses `create_new`, never a predictable truncating `.PID.part`, refuses a non-regular state or lock path, and returns every persistence error with the previous complete state intact |
+| Run-state validation | Loading proves the exact plan item/target set with no duplicate, extra or missing identity, immutable source/output/recipe fields, and a receipt shape that cannot claim a success it does not carry. `reconcile` still re-establishes every written item from manifest and hash evidence |
+| Process-level restart proof | `tests/cli_contract.rs` covers failed-sibling retry with the successful sibling untouched, a real killed process resuming unstarted work, multi-target execution, and cancellation that is not revived |
+| Source confinement | A source that resolves outside the explicitly rebound root is refused before its bytes are consumed, whatever its hash; the consumed-identity check is unchanged |
+| Planned destination ownership | `convert::Ownership::Planned` refuses a new, unmanaged, symlinked, directory-occupied or differently produced destination at the writer boundary, including a backdated unrecorded file. Ordinary conversion keeps its legacy older-mtime compatibility |
+| One source snapshot | Plan dimensions, container and encoded depth come from `scan::probe_bytes` over the same bytes the SHA-256 covers, and drift against the walk is refused. Receipts measure one bounded snapshot of the installed output and refuse evidence that describes different bytes |
+
+The optional requirements snapshot is delivered on top of landed D2: `plan`,
+`execute` and `reconcile` accept `--requirements-file`, the plan records only the
+snapshot's identity, provenance, effective interval and digest, and execution
+refuses a missing or substituted document. Written outputs are checked against
+their actual bytes through `requirements::inspect_outputs`; `counts.requirements_failed`
+makes a written-but-non-conforming output a partial run with exit `1`, and an
+inapplicable snapshot or unsupported constraint stays NotApplicable/NotChecked
+and cannot pass.
+
+Verified on Linux x86_64 with Rust 1.97.1 against this working tree:
+
+- `cargo test --locked --quiet`: 636 + 47 + 2 + 3 passed, 2 ignored, 0 failed.
+- `cargo test --locked --features updater --quiet`: 652 + 47 + 2 + 3 passed, 3 ignored.
+- `cargo test --locked --test cli_contract saved_plan`: 15 passed, 0 failed.
+- `cargo test --locked --bin press saved_plan::`: 14 passed, 0 failed.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo fmt --check`
+  and `git diff --check`: passed.
+- The built binary's `press skill` output matches its source document byte for byte.
+
+The killed-process fixture is Unix-only: it blocks the third source on a FIFO,
+waits for the recorded running state, and kills the real process. No macOS or
+Windows run was performed, and no GUI saved-plan surface exists. `crash::tests::
+successful_submit_acknowledges_after_generic_handoff` was observed failing once
+under a loaded parallel run and passed in isolation and on rerun; it is an
+unrelated simulated-click flake, not a change in this slice.
+
 ## Work selection and dependencies
 
 Start with a concrete job, not all rows at once. The recommended local path is

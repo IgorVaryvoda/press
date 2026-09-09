@@ -139,11 +139,14 @@ const HELP: &str = concat!(
     "  --retry-failed            Execute only failed saved-plan items\n",
     "  --cancel                  Mark unstarted saved-plan items cancelled\n",
     "  --target <recipe>=<dir>    Convert once more with a saved recipe into\n",
-    "                            its own folder; repeatable, convert only\n",
+    "                            its own folder; repeatable, convert or plan\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
     "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
     "                            explicit flags override it field by field\n",
+    "  --requirements-file <file>\n",
+    "                            Local requirements snapshot for check, plan,\n",
+    "                            execute or reconcile\n",
     "  --root <dir>              Map handoff resources against this folder\n",
     "  --deployed <dir>          Verify the mapping against deployed files\n",
     "                            (needs handoff --root)\n",
@@ -681,8 +684,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if map_deployed.is_some() && (command != Command::Handoff || map_root.is_none()) {
         return Err("--deployed needs handoff --root".into());
     }
-    if requirements_file.is_some() && command != Command::Check {
-        return Err("--requirements-file needs check".into());
+    if requirements_file.is_some()
+        && !matches!(
+            command,
+            Command::Check | Command::Plan | Command::Execute | Command::Reconcile
+        )
+    {
+        return Err("--requirements-file needs check, plan, execute or reconcile".into());
     }
     if command == Command::Check
         && (conversion_option
@@ -2446,6 +2454,18 @@ fn saved_plan_scan(source: &Path, output: &Path, subfolders: bool) -> Result<sca
     }
 }
 
+/// The rules a saved-plan command was given, parsed through the shared bounded
+/// reader. A plan records only which snapshot it was reviewed against, so the
+/// document itself has to arrive again with every command that uses it.
+fn saved_plan_requirements(
+    args: &Args,
+) -> Result<Option<requirements::RequirementsSnapshot>, String> {
+    args.requirements_file
+        .as_deref()
+        .map(requirements::parse_file)
+        .transpose()
+}
+
 fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32) -> ! {
     if json {
         let report = serde_json::json!({
@@ -2488,12 +2508,17 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 Ok(targets) => targets,
                 Err(error) => saved_plan_error("plan", error, args.json, 2),
             };
+            let requirements = match saved_plan_requirements(args) {
+                Ok(requirements) => requirements,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
             let plan = match saved_plan::build(
                 &source,
                 &output,
                 &scanned.entries,
                 scanned.unreadable.len() + scanned.walk_errors.len(),
                 targets,
+                requirements.as_ref(),
             ) {
                 Ok(plan) => plan,
                 Err(error) => saved_plan_error("plan", error, args.json, 2),
@@ -2534,6 +2559,11 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 Ok(binding) => binding,
                 Err(error) => saved_plan_error(command, error, args.json, 2),
             };
+            let requirements = match saved_plan_requirements(args) {
+                Ok(requirements) => requirements,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            let requirements = requirements.as_ref();
             let result = if args.command == Command::Execute {
                 let mode = if args.continue_unstarted {
                     saved_plan::ExecutionMode::ContinueUnstarted
@@ -2544,9 +2574,9 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 } else {
                     unreachable!("parser requires an execution mode")
                 };
-                saved_plan::execute(plan_path, &source, &output, mode)
+                saved_plan::execute(plan_path, &source, &output, mode, requirements)
             } else {
-                saved_plan::reconcile(plan_path, &source, &output)
+                saved_plan::reconcile(plan_path, &source, &output, requirements)
             };
             let result = match result {
                 Ok(result) => result,
@@ -2559,13 +2589,14 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 }
             } else {
                 outln!(
-                    "{} {}: {} written, {} failed, {} unstarted, {} cancelled",
+                    "{} {}: {} written, {} failed, {} unstarted, {} cancelled, {} requirements not met",
                     command,
                     result.report.plan_id,
                     result.report.counts.written,
                     result.report.counts.failed,
                     result.report.counts.unstarted,
-                    result.report.counts.cancelled
+                    result.report.counts.cancelled,
+                    result.report.counts.requirements_failed
                 );
                 for item in &result.report.items {
                     if let Some(error) = &item.error {

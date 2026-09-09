@@ -54,6 +54,14 @@ press execute ./plan.json --root ./source --output ./output --continue-unstarted
 press reconcile ./plan.json --root ./source --output ./output --json
 ```
 
+All three also accept `--requirements-file <local-spec>`, the bounded snapshot
+`press check` reads. The plan records only the snapshot's identity, provenance,
+effective interval and digest; execution must supply the same document again,
+and a different one under the same id and revision is refused. Written outputs
+whose required checks do not pass are `counts.requirements_failed`, a partial
+run with exit `1`, never an approval; an inapplicable snapshot or an
+`unsupported` constraint stays NotApplicable/NotChecked and cannot pass.
+
 Creation records relative paths, bounded source identities, collision mappings,
 effective settings and the engine revision. Execution binds both roots explicitly
 again. It does not replace originals, execute plan text, upload or inherit
@@ -80,9 +88,19 @@ that lifecycle; policy and external authority remain outside the plan.
 Keep portable task data separate from machine-local execution bindings. A plan
 copied to another machine must be rebound and revalidated, not treated as permission
 to access its original absolute paths. No shell snippets or automatic downloads.
+Every relative name in a plan passes the same portable-component rule saved jobs
+export by, refusing a literal backslash, a drive or alternate-stream marker, a
+reserved Windows device, a control character and a trailing dot or space rather
+than retargeting them. A target's `out` is a namespace, never authority: shared,
+nested or link-aliased namespaces, and two sources planned onto one destination,
+are refused before any effect.
 
 Before execution revalidate sources, output ownership, destination confinement,
-policy applicability and engine compatibility. A changed input or different
+policy applicability and engine compatibility. A source that resolves outside the
+explicitly rebound source root is refused before its bytes are consumed, whatever
+its hash. Saved-plan destinations do not inherit ordinary conversion's permission
+to overwrite an unrecorded output because it is older than its source; that
+compatibility stays with `press convert`. A changed input or different
 collision outcome invalidates the affected plan; explain it and require a new
 review rather than silently executing a different job. Snapshot/hash handling must
 cover the actual bytes processed, not only a stat performed before the read.

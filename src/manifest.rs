@@ -236,6 +236,12 @@ impl Stamp {
         }
     }
 
+    /// The effective-settings fingerprint this stamp writes with each record.
+    /// One authority: callers compare against it rather than recomputing it.
+    pub(crate) fn recipe(&self) -> &str {
+        &self.recipe
+    }
+
     /// One output as a record, or `None` when its paths do not sit under the roots
     /// they were planned against — which would make the record a lie.
     ///

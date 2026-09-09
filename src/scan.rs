@@ -275,6 +275,78 @@ impl Entry {
     }
 }
 
+/// Header facts measured from a byte snapshot the caller already holds.
+///
+/// A plan records identity and metadata for the same source. Reading the file
+/// once for a hash and again for its dimensions lets a file change in between
+/// and describe itself as two different images, so callers that must agree
+/// measure the snapshot they hashed.
+pub struct Probed {
+    pub format: FileFormat,
+    pub width: u32,
+    pub height: u32,
+    /// The encoded sample depth where the container states it before any pixels
+    /// are decoded. `None` where the shared header API does not report one; it
+    /// is never guessed.
+    pub depth_bits: Option<u8>,
+}
+
+/// Why a snapshot could not be measured, named rather than counted so a caller
+/// can refuse a preparation Press cannot apply instead of reporting a generic
+/// read failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeRefusal {
+    Unreadable,
+    TooLarge,
+    UnsupportedPreparation,
+}
+
+/// The bytes-in twin of `probe`. Same decoders, same orientation rule, same
+/// budget, so the two never disagree about one file.
+pub fn probe_bytes(bytes: &[u8]) -> Result<Probed, ProbeRefusal> {
+    if bytes.len() as u64 > crate::convert::MAX_SOURCE_BYTES {
+        return Err(ProbeRefusal::TooLarge);
+    }
+    if let Ok(reader) = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+        && let Some(format) = reader.format()
+    {
+        if format == ImageFormat::Avif {
+            let info = crate::avif::probe_bytes(bytes).ok_or(ProbeRefusal::Unreadable)?;
+            if info.unsupported_transform {
+                return Err(ProbeRefusal::UnsupportedPreparation);
+            }
+            check_budget_dimensions(info.width, info.height).map_err(|_| ProbeRefusal::TooLarge)?;
+            return Ok(Probed {
+                format: FileFormat::Image(ImageFormat::Avif),
+                width: info.width,
+                height: info.height,
+                depth_bits: Some(info.depth),
+            });
+        }
+        if let Ok(mut decoder) = reader.into_decoder() {
+            let (mut width, mut height) = decoder.dimensions();
+            if orientation_swaps_dimensions(
+                decoder.orientation().unwrap_or(Orientation::NoTransforms),
+            ) {
+                std::mem::swap(&mut width, &mut height);
+            }
+            return Ok(Probed {
+                format: format.into(),
+                width,
+                height,
+                depth_bits: None,
+            });
+        }
+    }
+    let info = crate::jxl::probe_bytes(bytes).ok_or(ProbeRefusal::Unreadable)?;
+    Ok(Probed {
+        format: FileFormat::JpegXl,
+        width: info.width,
+        height: info.height,
+        depth_bits: None,
+    })
+}
+
 /// Read one file's header. `None` when it is not an image we can read.
 pub fn probe(path: &Path) -> Option<Entry> {
     let bytes = std::fs::metadata(path).ok()?.len();

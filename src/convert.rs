@@ -936,12 +936,28 @@ pub struct Backup {
     pub moved: bool,
 }
 
+/// Who may own a destination that already exists when the run reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ownership {
+    /// Ordinary conversion. An unrecorded file at the destination is still
+    /// overwritten when it is older than its source, which is the rule headless
+    /// runs had before manifests existed and consumers still rely on.
+    Legacy,
+    /// A saved plan pinned this destination when it was reviewed. Anything this
+    /// folder's own manifest does not account for belongs to somebody else,
+    /// whatever its timestamp claims, and a backdated file is not permission.
+    Planned,
+}
+
 /// What one file adds to the folder's record before its output takes the name.
 pub struct Recording<'a> {
     pub root: &'a Path,
     pub out_dir: &'a Path,
     pub stamp: &'a crate::manifest::Stamp,
     pub backup: Option<&'a Backup>,
+    /// Checked at the writer boundary, not only in a caller's preflight: the
+    /// destination can change between the two.
+    pub ownership: Ownership,
 }
 
 impl<'a> Recording<'a> {
@@ -960,6 +976,22 @@ impl<'a> Recording<'a> {
             out_dir,
             stamp,
             backup,
+            ownership: Ownership::Legacy,
+        }
+    }
+
+    /// The same record, for a destination a reviewed plan already claimed.
+    pub fn for_planned(
+        root: &'a Path,
+        out_dir: &'a Path,
+        stamp: &'a crate::manifest::Stamp,
+    ) -> Self {
+        Self {
+            root,
+            out_dir,
+            stamp,
+            backup: None,
+            ownership: Ownership::Planned,
         }
     }
 }
@@ -1377,11 +1409,18 @@ fn output_guard(
     // cannot be renamed over, and allowing the final rename to report that
     // failure lets replace mode put its original back without touching the
     // directory.
-    if written
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.is_dir())
-    {
-        return Ok((false, None));
+    let planned = recording.ownership == Ownership::Planned;
+    if let Ok(metadata) = written.symlink_metadata() {
+        // A plan pinned one ordinary file here. A directory cannot be renamed
+        // over and a symlink would install the bytes wherever it points, so
+        // both are refused before anything is staged rather than left to the
+        // rename.
+        if planned && (metadata.is_dir() || metadata.file_type().is_symlink()) {
+            return Err(Failure::OutputChanged);
+        }
+        if metadata.is_dir() {
+            return Ok((false, None));
+        }
     }
     let Some(snapshot) = output_snapshot(written)? else {
         return Ok((false, None));
@@ -1396,6 +1435,11 @@ fn output_guard(
     // destination; batch planning already loaded the manifest once.
     let manifest = crate::manifest::load(recording.out_dir);
     let Some(record) = manifest.latest(relative_source, relative_output) else {
+        // Planning proved this name was free or this run's own. An unrecorded
+        // file arrived since, so the plan no longer describes the folder.
+        if planned {
+            return Err(Failure::OutputChanged);
+        }
         if crate::manifest::path(recording.out_dir)
             .symlink_metadata()
             .is_ok()
@@ -1412,6 +1456,15 @@ fn output_guard(
         };
     };
     if !record.installed(written) {
+        return Err(Failure::OutputChanged);
+    }
+    // A record is not enough for a planned destination. Planning pinned an
+    // absence or this source's own earlier output; a run since then could have
+    // written this name from the same source under different settings, and that
+    // is a newer result somebody chose, not the file the plan expected. Equal
+    // settings would have produced these very bytes, so only a differing recipe
+    // is refused.
+    if planned && record.recipe.as_deref() != Some(recording.stamp.recipe()) {
         return Err(Failure::OutputChanged);
     }
     Ok((false, Some(snapshot)))
@@ -3162,6 +3215,7 @@ pub(crate) mod tests {
             out_dir,
             stamp: &stamp,
             backup,
+            ownership: Ownership::Legacy,
         };
         super::convert_to(
             out_dir,
@@ -3198,6 +3252,7 @@ pub(crate) mod tests {
             out_dir: &out,
             stamp: &stamp,
             backup: None,
+            ownership: Ownership::Legacy,
         };
 
         assert_eq!(
@@ -3267,6 +3322,7 @@ pub(crate) mod tests {
             out_dir: &out,
             stamp: &stamp,
             backup: None,
+            ownership: Ownership::Legacy,
         };
 
         let failure = write_inner_with_hook(
