@@ -6,7 +6,10 @@
 //! apart — no automatic verdict is drawn as a confirmation, and an unknown
 //! value is drawn as unknown.
 
-use super::handoff_actions::{HandoffReview, ReviewRow, RowState, advisory_line, label};
+use super::handoff_actions::{
+    HandoffReview, ReviewRow, RowState, choice_labels, label, provenance_lines, resource_lines,
+    text_line,
+};
 use super::{Audit, is_checkbox_activation_key};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable};
@@ -45,7 +48,7 @@ impl Audit {
             .rows
             .iter()
             .enumerate()
-            .map(|(index, row)| self.handoff_row(index, row, review.root.is_some(), cx))
+            .map(|(index, row)| self.handoff_row(review, index, row, review.root.is_some(), cx))
             .collect();
         div()
             .debug_selector(|| "handoff-card".into())
@@ -113,10 +116,14 @@ impl Audit {
                     .debug_selector(|| "handoff-status".into())
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{confirmed} of {} confirmed · nothing is converted from this review",
-                        handoff.resources.len()
-                    )),
+                    .child(if self.handoff_reading {
+                        "Reading one source; the other rows wait for it.".to_string()
+                    } else {
+                        format!(
+                            "{confirmed} of {} confirmed · nothing is converted from this review",
+                            handoff.resources.len()
+                        )
+                    }),
             )
             .child(
                 div()
@@ -175,31 +182,7 @@ impl Audit {
         review: &HandoffReview,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let handoff = &review.pending.handoff;
         let muted = cx.theme().muted_foreground;
-        let mut lines = vec![
-            format!(
-                "Producer: {} {}",
-                handoff.producer, handoff.producer_revision
-            ),
-            format!("Task: {}", handoff.task),
-            format!("Observed: {}", handoff.observed),
-            format!("File: {}", label(&review.file)),
-        ];
-        if handoff.redactions.is_empty() {
-            lines.push("Redactions: none declared".into());
-        } else {
-            lines.push(format!("Redactions: {}", handoff.redactions.join(", ")));
-        }
-        // Scope, limits and every other field this schema does not define are
-        // shown exactly as the file holds them. Press has not read them, and
-        // saying so is the only honest label for a value it cannot interpret.
-        for (key, value) in &handoff.unknown {
-            lines.push(advisory_line(key, value));
-        }
-        for warning in &review.pending.warnings {
-            lines.push(format!("Warning: {warning}"));
-        }
         div()
             .debug_selector(|| "handoff-provenance".into())
             .flex()
@@ -207,7 +190,7 @@ impl Audit {
             .min_w_0()
             .text_size(px(11.))
             .text_color(muted)
-            .children(lines.into_iter().map(|line| {
+            .children(provenance_lines(review).into_iter().map(|line| {
                 div()
                     .min_w_0()
                     .whitespace_nowrap()
@@ -221,90 +204,27 @@ impl Audit {
     /// which file the user chose, and whether they have confirmed its bytes.
     fn handoff_row(
         &self,
+        review: &HandoffReview,
         index: usize,
         row: &ReviewRow,
         rooted: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let resource = self
-            .handoff_review
-            .as_ref()
-            .and_then(|review| {
-                review
-                    .pending
-                    .handoff
-                    .resources
-                    .iter()
-                    .find(|resource| resource.id == row.id)
-            })
-            .expect("every review row names a resource of its own report");
         let muted = cx.theme().muted_foreground;
         let busy = self.converting || matches!(row.state, RowState::Busy);
-        let mut facts = Vec::new();
-        facts.push(match (resource.width, resource.height) {
-            (Some(width), Some(height)) => format!("Observed: {width}×{height}"),
-            // An absent dimension is unknown, not zero and not a default.
-            _ => "Observed: dimensions unknown".to_string(),
-        });
-        facts.push(match resource.bytes {
-            Some(bytes) if resource.bytes_measured => {
-                format!("Bytes: {} measured", crate::scan::format_bytes(bytes))
-            }
-            Some(bytes) => format!("Bytes: {} estimated", crate::scan::format_bytes(bytes)),
-            None => "Bytes: unknown".to_string(),
-        });
-        if !resource.findings.is_empty() {
-            facts.push(format!("Findings: {}", resource.findings.join(", ")));
-        }
-        if !resource.formats.is_empty() {
-            facts.push(format!(
-                "Requested formats: {}",
-                resource.formats.join(", ")
-            ));
-        }
-        match resource.max_edge {
-            Some(edge) => facts.push(format!("Requested max edge: {edge}px")),
-            None => facts.push("Requested max edge: none".into()),
-        }
-        // Advisory producer metadata, including any observed or recommended
-        // format. It is shown, never applied: this review changes no recipe.
-        for (key, value) in &resource.unknown {
-            facts.push(advisory_line(key, value));
-        }
-        for note in &row.notes {
-            facts.push(format!("Note: {note}"));
-        }
-        if let RowState::Refused(reason) = &row.state {
-            facts.push(format!("Refused: {reason}"));
-        }
-        if matches!(row.state, RowState::Changed) {
-            facts.push("The file's bytes changed since it was confirmed.".into());
-        }
-        let match_text = match row.verdict {
-            None => "Match: choose a source folder first".to_string(),
-            Some(verdict) => format!(
-                "Match: {} (automatic; not a confirmation)",
-                crate::handoff::verdict_word(verdict)
-            ),
-        };
-        let chosen_text = match row.chosen.as_deref() {
-            Some(path) => format!("Chosen: {}", label(path)),
-            None => "Chosen: no file".to_string(),
-        };
-        let hidden_text = (row.hidden > 0).then(|| {
-            format!(
-                "{} more files match; reach them with Choose file…",
-                row.hidden
-            )
-        });
+        let facts = resource_lines(review, row);
+        let root = review.root.as_deref();
         let mut choices = Vec::new();
         for (position, path) in row.choices.iter().enumerate() {
             let id = row.id.clone();
             let selected = row.chosen.as_deref() == Some(path.as_path());
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| label(path));
+            // Two files can share a basename, so a chip that showed only the
+            // name would ask the user to choose between two identical labels.
+            // The path under the root distinguishes them, bounded from both
+            // ends so a long shared folder prefix cannot make two chips read
+            // alike either. The whole path is the announced name and the
+            // tooltip, so the keyboard reaches it as well as the pointer.
+            let (name, full) = choice_labels(root, path);
             choices.push(
                 Button::new(("handoff-choice", index * 100 + position))
                     .small()
@@ -312,6 +232,8 @@ impl Audit {
                     .when(!selected, |chip| chip.ghost())
                     .debug_selector(move || format!("handoff-choice-{index}-{position}"))
                     .label(name)
+                    .tooltip(full.clone())
+                    .accessibility_label(full)
                     .disabled(busy)
                     .on_click(cx.listener(move |audit, _, _, cx| {
                         // Chosen by position in this row's own list of paths,
@@ -323,8 +245,11 @@ impl Audit {
         let manual_id = row.id.clone();
         let confirm_id = row.id.clone();
         let recheck_id = row.id.clone();
-        let confirmable = rooted && row.chosen.is_some() && !busy;
-        let recheckable = matches!(row.state, RowState::Confirmed(_)) && !busy;
+        // One source read at a time, across the whole review: while one is
+        // out, no row offers to start another.
+        let reading = self.handoff_reading;
+        let confirmable = rooted && row.chosen.is_some() && !busy && !reading;
+        let recheckable = matches!(row.state, RowState::Confirmed(_)) && !busy && !reading;
         div()
             .debug_selector(move || format!("handoff-row-{index}"))
             .flex()
@@ -349,7 +274,9 @@ impl Audit {
                             .text_ellipsis()
                             .text_size(px(11.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(row.id.clone()),
+                            // A producer chose this id; it is drawn text like
+                            // every other string the report supplies.
+                            .child(text_line(&row.id)),
                     )
                     .child(
                         div()
@@ -367,32 +294,7 @@ impl Audit {
                     .min_w_0()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(
-                        div()
-                            .debug_selector(move || format!("handoff-match-{index}"))
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(match_text),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(move || format!("handoff-chosen-{index}"))
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(chosen_text),
-                    )
-                    .children(hidden_text.map(|text| {
-                        div()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(text)
-                    }))
+                    .debug_selector(move || format!("handoff-facts-{index}"))
                     .children(facts.into_iter().map(|fact| {
                         div()
                             .min_w_0()
@@ -415,7 +317,7 @@ impl Audit {
                             .ghost()
                             .debug_selector(move || format!("handoff-pick-{index}"))
                             .label("Choose file…")
-                            .disabled(!rooted || busy)
+                            .disabled(!rooted || busy || reading)
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 audit.choose_handoff_source(&manual_id, cx);
                             })),

@@ -8056,6 +8056,16 @@ fn report_root(tag: &str) -> PathBuf {
     root
 }
 
+/// The same folder with `r2`'s file too, so both rows have something to
+/// confirm.
+fn report_root_with_icon(tag: &str) -> PathBuf {
+    let root = report_root(tag);
+    crate::convert::tests::photo(8, 8)
+        .save(root.join("icon.webp"))
+        .expect("the fixture icon is written");
+    root
+}
+
 /// An audit with the imported report on screen, matched against `root`.
 fn reviewing<'a>(
     root: &Path,
@@ -8515,6 +8525,226 @@ fn the_review_card_stays_inside_a_narrow_window(cx: &mut TestAppContext) {
     );
     audit.read_with(cx, |audit, _| {
         assert!(audit.handoff_review.is_some(), "the review is still open");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every source read is bounded by the conversion limit, and a report may name
+/// five hundred resources. One read at a time, across the whole review: while
+/// one is out no other row can start another, and none of them offers to.
+#[gpui_kit::test]
+fn one_source_read_at_a_time_across_every_row(cx: &mut TestAppContext) {
+    let root = report_root_with_icon("handoff-one-read");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.select_handoff_choice("r2", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+        assert!(
+            audit.handoff_reading,
+            "the first confirmation takes the slot"
+        );
+        // The second one is refused before it changes anything at all.
+        audit.confirm_handoff_row("r2", cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        assert!(matches!(
+            review.row("r1").expect("the first row").state,
+            RowState::Busy
+        ));
+        assert!(
+            matches!(
+                review.row("r2").expect("the second row").state,
+                RowState::Unconfirmed
+            ),
+            "the refused confirmation left its row exactly as it was"
+        );
+    });
+    // And no row offers the action while the slot is taken.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("handoff-confirm-1").is_some(),
+        "the second row's Confirm is still drawn, disabled"
+    );
+
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.handoff_reading,
+            "the finished read released the slot"
+        );
+        assert_eq!(
+            audit
+                .handoff_review
+                .as_ref()
+                .expect("the review is open")
+                .confirmed_count(),
+            1
+        );
+    });
+
+    audit.update(cx, |audit, cx| audit.confirm_handoff_row("r2", cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit
+                .handoff_review
+                .as_ref()
+                .expect("the review is open")
+                .confirmed_count(),
+            2,
+            "the second row confirms once the first read is done"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The slot belongs to the read, not to the review that started it. Cancelling
+/// and importing again does not hand out a second read while the first one is
+/// still running; the slot comes back when that read actually finishes.
+#[gpui_kit::test]
+fn a_retired_read_keeps_the_slot_until_it_finishes(cx: &mut TestAppContext) {
+    let root = report_root_with_icon("handoff-retired-read");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.update_in(cx, |audit, window, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+        assert!(audit.handoff_reading);
+        audit.cancel_handoff_review(window, cx);
+        assert!(
+            audit.handoff_reading,
+            "cancelling the review does not stop a read already running"
+        );
+        let generation = audit.handoff_generation;
+        audit.open_handoff_review(
+            PathBuf::from("press-handoff.json"),
+            producer_report(),
+            generation,
+            window,
+            cx,
+        );
+        assert!(
+            audit.handoff_reading,
+            "and neither does importing another report"
+        );
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.handoff_reading,
+            "the retired read released the slot when it finished"
+        );
+        let review = audit
+            .handoff_review
+            .as_ref()
+            .expect("the new review is open");
+        assert_eq!(review.confirmed_count(), 0, "and confirmed nothing in it");
+        assert!(
+            review.root.is_none(),
+            "the new review has its own folder to choose"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A folder Press could not read completely cannot prove a resource is absent.
+/// The review carries the walk's own diagnostics and says so on every row that
+/// found nothing.
+#[gpui_kit::test]
+fn an_incomplete_folder_read_is_carried_into_the_review(cx: &mut TestAppContext) {
+    let root = report_root("handoff-incomplete-scan");
+    // A file that claims to be an image and is not: the walk sees it, fails to
+    // probe it, and records it rather than passing it to matching.
+    std::fs::write(root.join("broken.png"), b"not a png at all")
+        .expect("the broken file is written");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let scan = review.scan.as_ref().expect("the walk is recorded");
+        assert_eq!(scan.images, 1, "only the real image reached matching");
+        assert_eq!(scan.unreadable_total, 1);
+        assert!(scan.incomplete());
+
+        let lines = super::handoff_actions::provenance_lines(review);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("not read completely")),
+            "{lines:#?}"
+        );
+        assert!(lines.contains(&"  broken.png".to_string()), "{lines:#?}");
+
+        // `r2` found nothing here, and that is not the same as absent.
+        let icon = review.row("r2").expect("the unmatched row");
+        assert_eq!(icon.verdict, Some(crate::handoff::Verdict::Unmatched));
+        assert!(
+            super::handoff_actions::resource_lines(review, icon)[0].contains("not read completely"),
+            "an unmatched row from a partial walk says so"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Two candidates that share a basename are drawn as the different files they
+/// are, and choosing one keeps that file's own path.
+#[gpui_kit::test]
+fn duplicate_candidates_are_drawn_apart_and_keep_their_paths(cx: &mut TestAppContext) {
+    let root = scan_fixture("handoff-duplicates");
+    // The two folders share a prefix longer than a drawn line, which is the
+    // case an end clip loses.
+    let deep = "campaign-autumn-2026-approved-final".repeat(6);
+    for folder in ["a", "b"] {
+        let inside = root.join(&deep).join(folder);
+        std::fs::create_dir_all(&inside).expect("the subfolder is created");
+        crate::convert::tests::photo(8, 8)
+            .save(inside.join("icon.webp"))
+            .expect("the duplicate fixture is written");
+    }
+    let (audit, cx) = reviewing(&root, cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("handoff-choice-1-0").is_some()
+            && cx.debug_bounds("handoff-choice-1-1").is_some(),
+        "both candidates are drawn as their own chip"
+    );
+
+    let labels = audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let row = review.row("r2").expect("the icon row");
+        assert_eq!(row.verdict, Some(crate::handoff::Verdict::Ambiguous));
+        assert_eq!(row.choices.len(), 2, "both files are offered");
+        row.choices
+            .iter()
+            .map(|path| super::handoff_actions::choice_labels(review.root.as_deref(), path))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(labels.len(), 2);
+    assert_ne!(
+        labels[0].0, labels[1].0,
+        "two files called icon.webp are not drawn as the same label: {labels:?}"
+    );
+    assert_ne!(
+        labels[0].1, labels[1].1,
+        "and the name each one announces differs too"
+    );
+
+    // Choose the second by its position in the row's own list, and check the
+    // row kept that file's path rather than anything read off a label.
+    audit.update(cx, |audit, cx| audit.select_handoff_choice("r2", 1, cx));
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let row = review.row("r2").expect("the icon row");
+        let expected = row.choices[1].clone();
+        assert_eq!(row.chosen.as_deref(), Some(expected.as_path()));
+        assert!(
+            expected.parent().is_some_and(|parent| parent != root),
+            "the kept path is the one inside its own subfolder: {expected:?}"
+        );
     });
     let _ = std::fs::remove_dir_all(&root);
 }

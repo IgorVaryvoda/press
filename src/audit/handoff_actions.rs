@@ -32,7 +32,55 @@ pub(super) struct HandoffReview {
     /// until they select one: a report alone points at no folder.
     pub(super) root: Option<PathBuf>,
     pub(super) scanning: bool,
+    /// What the walk of that root could and could not read. Matching is only
+    /// as complete as the walk behind it, so this travels with the rows.
+    pub(super) scan: Option<ScanDiagnostics>,
     pub(super) rows: Vec<ReviewRow>,
+}
+
+/// What one walk of the chosen root found, and what it could not look at.
+/// A resource nothing answered to is "nothing was found" — which means
+/// "absent" only when the folder was read completely.
+pub(super) struct ScanDiagnostics {
+    /// Images the walk actually probed and offered to matching.
+    pub(super) images: usize,
+    /// Files under the root that would not decode, and folders the walk could
+    /// not enter. Both make matching's answers a lower bound.
+    pub(super) unreadable: Vec<PathBuf>,
+    pub(super) unreadable_total: usize,
+    pub(super) unentered: Vec<PathBuf>,
+    pub(super) unentered_total: usize,
+    /// Files this Press does not decode at all. They were seen and excluded,
+    /// which is a different thing from a file it failed to read.
+    pub(super) skipped_raw: usize,
+    pub(super) skipped_heic: usize,
+    pub(super) skipped_packages: usize,
+}
+
+impl ScanDiagnostics {
+    fn of(scan: &crate::scan::Scan) -> Self {
+        Self {
+            images: scan.entries.len(),
+            unreadable: scan.unreadable.iter().take(MAX_LINES).cloned().collect(),
+            unreadable_total: scan.unreadable.len(),
+            unentered: scan.walk_errors.iter().take(MAX_LINES).cloned().collect(),
+            unentered_total: scan.walk_errors.len(),
+            skipped_raw: scan.skipped_raw,
+            skipped_heic: scan.skipped_heic,
+            skipped_packages: scan.skipped_packages,
+        }
+    }
+
+    /// Whether the walk left part of the folder unread. While this holds, a
+    /// resource matching nothing has not been shown to be absent.
+    pub(super) fn incomplete(&self) -> bool {
+        self.unreadable_total > 0 || self.unentered_total > 0
+    }
+
+    /// Files that were seen and excluded because Press does not decode them.
+    pub(super) fn unsupported(&self) -> usize {
+        self.skipped_raw + self.skipped_heic + self.skipped_packages
+    }
 }
 
 impl HandoffReview {
@@ -222,6 +270,7 @@ impl Audit {
             pending,
             root: None,
             scanning: false,
+            scan: None,
             rows,
         });
         // The card is the last thing in the rail's scrolling settings; bring
@@ -363,7 +412,7 @@ impl Audit {
                     let scan = crate::scan::scan(&root, &root.join(crate::scan::OUTPUT_DIR));
                     let resolutions =
                         crate::handoff::resolve_to_root(&handoff, &root, &scan.entries);
-                    Ok((root, resolutions))
+                    Ok((root, ScanDiagnostics::of(&scan), resolutions))
                 })
                 .await;
             let _ = this.update(cx, |audit, cx| {
@@ -375,8 +424,9 @@ impl Audit {
                 };
                 review.scanning = false;
                 match scanned {
-                    Ok((root, resolutions)) => {
+                    Ok((root, diagnostics, resolutions)) => {
                         review.root = Some(root);
+                        review.scan = Some(diagnostics);
                         review.rows = resolutions
                             .into_iter()
                             .map(|resolution| ReviewRow {
@@ -544,6 +594,12 @@ impl Audit {
     /// no confirm-all, because a person confirming a list has confirmed
     /// nothing in particular.
     pub(super) fn confirm_handoff_row(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Guarded before anything moves: every source read is bounded by the
+        // conversion limit, so a report's five hundred rows could otherwise
+        // put five hundred of them in flight at once.
+        if self.handoff_reading {
+            return;
+        }
         let generation = self.handoff_generation;
         let Some(review) = self.handoff_review.as_mut() else {
             return;
@@ -560,6 +616,7 @@ impl Audit {
         row.state = RowState::Busy;
         row.request = row.request.wrapping_add(1);
         let request = row.request;
+        self.handoff_reading = true;
         cx.notify();
         let id = id.to_string();
         Self::read_handoff_source(root, path, id, generation, request, None, cx);
@@ -568,6 +625,9 @@ impl Audit {
     /// Read a confirmed row's file again and compare it byte for byte. The
     /// same size and timestamp are not an answer: only the bytes are.
     pub(super) fn recheck_handoff_row(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.handoff_reading {
+            return;
+        }
         let generation = self.handoff_generation;
         let Some(review) = self.handoff_review.as_mut() else {
             return;
@@ -586,6 +646,7 @@ impl Audit {
         row.state = RowState::Busy;
         row.request = row.request.wrapping_add(1);
         let request = row.request;
+        self.handoff_reading = true;
         cx.notify();
         let id = id.to_string();
         Self::read_handoff_source(root, path, id, generation, request, Some(expected), cx);
@@ -631,6 +692,12 @@ impl Audit {
                 })
                 .await;
             let _ = this.update(cx, |audit, cx| {
+                // The slot is released first and unconditionally. This read
+                // finished whether or not anybody still wants its answer, and
+                // every check below can decline it; releasing after one of
+                // them would leave the review unable to read anything again.
+                audit.handoff_reading = false;
+                cx.notify();
                 if !audit.owns_handoff_request(generation) {
                     return;
                 }
@@ -681,25 +748,365 @@ enum SourceOutcome {
     Refused(String),
 }
 
+/// How many entries of one list the card draws before it says how many it is
+/// not showing. A valid bounded report can still carry tens of thousands of
+/// preserved unknown fields, and one warning for each of them; the card is a
+/// review, not a rendering of the file.
+pub(super) const MAX_LINES: usize = 8;
+
+/// How long one drawn line may be. Every string in a report is bounded at
+/// `handoff::MAX_STRING_CHARS`, which is four thousand characters — a size
+/// meant for a parser, not for a line of a card.
+const MAX_LINE_CHARS: usize = 160;
+
+/// How much of a field name is drawn. A name is an identifier, not prose.
+const MAX_KEY_CHARS: usize = 48;
+
+/// One line of at most `limit` characters, with control characters removed so
+/// a value cannot break out of its line and read like something Press wrote.
+/// A line that was cut ends in an ellipsis, so a preview never passes for the
+/// whole value.
+fn clip(text: &str, limit: usize) -> String {
+    let mut readable = text.chars().filter(|character| !character.is_control());
+    let mut line: String = readable.by_ref().take(limit).collect();
+    if readable.next().is_some() {
+        line.push('…');
+    }
+    line
+}
+
+/// A preserved unknown value as text. The point of showing it is that the
+/// reader can see what the producer actually said — the export's scope and its
+/// recommended formats live in exactly these fields — so a compound value is
+/// previewed as JSON rather than summarized into its shape, and the clip marks
+/// where the preview stops. A whole report is bounded at one mebibyte and only
+/// `MAX_LINES` fields are drawn per section, which bounds this.
+fn advisory_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => clip(text, MAX_LINE_CHARS),
+        other => clip(
+            &serde_json::to_string(other).unwrap_or_else(|_| "unreadable value".into()),
+            MAX_LINE_CHARS,
+        ),
+    }
+}
+
 /// A preserved unknown field as one readable line. Producers add advisory
 /// metadata Press does not read, and dropping it from the card would hide what
 /// the file actually says. It is shown as text and stays text: no value here
 /// selects a format, a size, a folder or an action.
 pub(super) fn advisory_line(key: &str, value: &serde_json::Value) -> String {
-    const SHOWN: usize = 160;
-    let rendered = match value {
-        serde_json::Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    let mut line: String = rendered
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(SHOWN)
-        .collect();
-    if rendered.chars().filter(|c| !c.is_control()).count() > SHOWN {
-        line.push('…');
+    format!("{}: {}", clip(key, MAX_KEY_CHARS), advisory_value(value))
+}
+
+/// One drawn line of ordinary report text, clipped to fit the card.
+pub(super) fn text_line(text: &str) -> String {
+    clip(text, MAX_LINE_CHARS)
+}
+
+/// At most `MAX_LINES` of `items`, followed by one line naming how many were
+/// left out. `total` is counted, never collected: the caller passes an
+/// iterator, so fifty thousand fields cost eight strings to draw.
+///
+/// `tail` is the caller's own phrase because where the rest went differs.
+/// Report content is all still in the pending report; a walk's diagnostics
+/// are not in any report and are simply out of view.
+pub(super) fn bounded_lines(
+    items: impl Iterator<Item = String>,
+    total: usize,
+    tail: &str,
+) -> Vec<String> {
+    let mut lines: Vec<String> = items.take(MAX_LINES).collect();
+    if let Some(hidden) = total.checked_sub(MAX_LINES).filter(|hidden| *hidden > 0) {
+        lines.push(format!("…and {hidden} more {tail}"));
     }
-    format!("{key}: {line}")
+    lines
+}
+
+/// What the walk of the chosen root could and could not read, as lines. A
+/// folder that was not fully read cannot support the word "absent", so it says
+/// so here and every unmatched row repeats it.
+pub(super) fn scan_lines(scan: Option<&ScanDiagnostics>) -> Vec<String> {
+    let Some(scan) = scan else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!("Folder: {} images searched", scan.images)];
+    if scan.unsupported() > 0 {
+        // Seen and excluded, which is not the same as failed to read: these
+        // formats have no decoder here, and saying otherwise would invent
+        // support the app does not have.
+        let mut parts = Vec::new();
+        if scan.skipped_raw > 0 {
+            parts.push(format!("{} camera raw", scan.skipped_raw));
+        }
+        if scan.skipped_heic > 0 {
+            parts.push(format!("{} HEIC", scan.skipped_heic));
+        }
+        if scan.skipped_packages > 0 {
+            parts.push(format!("{} image package", scan.skipped_packages));
+        }
+        lines.push(format!(
+            "Not searched, unsupported here: {}",
+            parts.join(", ")
+        ));
+    }
+    if !scan.incomplete() {
+        return lines;
+    }
+    lines.push("This folder was not read completely, so a row below matching nothing has not been shown to be absent.".into());
+    if scan.unreadable_total > 0 {
+        lines.push(format!("Would not decode ({}):", scan.unreadable_total));
+        lines.extend(bounded_lines(
+            scan.unreadable
+                .iter()
+                .map(|path| format!("  {}", named(path))),
+            scan.unreadable_total,
+            "files, not listed here",
+        ));
+    }
+    if scan.unentered_total > 0 {
+        lines.push(format!("Could not enter ({}):", scan.unentered_total));
+        lines.extend(bounded_lines(
+            scan.unentered
+                .iter()
+                .map(|path| format!("  {}", named(path))),
+            scan.unentered_total,
+            "folders, not listed here",
+        ));
+    }
+    lines
+}
+
+/// Who produced the report, when, what it removed, what the folder search
+/// found, and what this Press kept without reading. Every list is bounded and
+/// says how much it left out; the pending report keeps all of it.
+pub(super) fn provenance_lines(review: &HandoffReview) -> Vec<String> {
+    let handoff = &review.pending.handoff;
+    let mut lines = vec![
+        text_line(&format!(
+            "Producer: {} {}",
+            handoff.producer, handoff.producer_revision
+        )),
+        text_line(&format!("Task: {}", handoff.task)),
+        text_line(&format!("Observed: {}", handoff.observed)),
+        text_line(&format!("File: {}", label(&review.file))),
+    ];
+    if handoff.redactions.is_empty() {
+        lines.push("Redactions: none declared".into());
+    } else {
+        lines.push(format!("Redactions ({}):", handoff.redactions.len()));
+        lines.extend(bounded_lines(
+            handoff
+                .redactions
+                .iter()
+                .map(|redaction| format!("  {}", text_line(redaction))),
+            handoff.redactions.len(),
+            "redactions, kept in the report",
+        ));
+    }
+    lines.extend(scan_lines(review.scan.as_ref()));
+    // Scope, limits and every other field this schema does not define are
+    // shown as the file holds them. Press has not read them, and saying so is
+    // the only honest label for a value it cannot interpret. A valid report
+    // can carry tens of thousands of them, with one warning each, so the card
+    // draws a bounded head and names the remainder.
+    if !handoff.unknown.is_empty() {
+        lines.push(format!(
+            "Advisory fields kept unread ({}):",
+            handoff.unknown.len()
+        ));
+        lines.extend(bounded_lines(
+            handoff
+                .unknown
+                .iter()
+                .map(|(key, value)| format!("  {}", advisory_line(key, value))),
+            handoff.unknown.len(),
+            "advisory fields, kept in the report",
+        ));
+    }
+    if !review.pending.warnings.is_empty() {
+        lines.push(format!("Warnings ({}):", review.pending.warnings.len()));
+        lines.extend(bounded_lines(
+            review
+                .pending
+                .warnings
+                .iter()
+                .map(|warning| format!("  {}", text_line(warning))),
+            review.pending.warnings.len(),
+            "warnings, kept in the report",
+        ));
+    }
+    lines
+}
+
+/// What one resource says about itself, what matching made of it, and what
+/// its row has decided. Same bounds as the provenance: a resource may carry
+/// sixty-four findings of four thousand characters each.
+pub(super) fn resource_lines(review: &HandoffReview, row: &ReviewRow) -> Vec<String> {
+    let Some(resource) = review
+        .pending
+        .handoff
+        .resources
+        .iter()
+        .find(|resource| resource.id == row.id)
+    else {
+        return Vec::new();
+    };
+    let scan = review.scan.as_ref();
+    let root = review.root.as_deref();
+    let mut lines = Vec::new();
+    lines.push(match row.verdict {
+        None => "Match: choose a source folder first".to_string(),
+        Some(verdict) => {
+            let mut line = format!(
+                "Match: {} (automatic; not a confirmation)",
+                crate::handoff::verdict_word(verdict)
+            );
+            // An incomplete walk cannot support "nothing is here".
+            if scan.is_some_and(ScanDiagnostics::incomplete)
+                && matches!(verdict, Verdict::Unmatched | Verdict::OutOfScope)
+            {
+                line.push_str(" — from a folder that was not read completely");
+            }
+            line
+        }
+    });
+    lines.push(match row.chosen.as_deref() {
+        // Under the root, so a duplicate basename reads as the file it is, and
+        // bounded from both ends, so a long shared folder prefix cannot eat
+        // the name that distinguishes it.
+        Some(path) => format!("Chosen: {}", choice_labels(root, path).0),
+        None => "Chosen: no file".to_string(),
+    });
+    if row.hidden > 0 {
+        lines.push(format!(
+            "{} more files match; reach them with Choose file…",
+            row.hidden
+        ));
+    }
+    lines.push(match (resource.width, resource.height) {
+        (Some(width), Some(height)) => format!("Observed: {width}×{height}"),
+        // An absent dimension is unknown, not zero and not a default.
+        _ => "Observed: dimensions unknown".to_string(),
+    });
+    lines.push(match resource.bytes {
+        Some(bytes) if resource.bytes_measured => {
+            format!("Bytes: {} measured", crate::scan::format_bytes(bytes))
+        }
+        Some(bytes) => format!("Bytes: {} estimated", crate::scan::format_bytes(bytes)),
+        None => "Bytes: unknown".to_string(),
+    });
+    if !resource.findings.is_empty() {
+        lines.push(format!("Findings ({}):", resource.findings.len()));
+        lines.extend(bounded_lines(
+            resource
+                .findings
+                .iter()
+                .map(|finding| format!("  {}", text_line(finding))),
+            resource.findings.len(),
+            "findings, kept in the report",
+        ));
+    }
+    if !resource.formats.is_empty() {
+        lines.push(format!("Requested formats ({}):", resource.formats.len()));
+        lines.extend(bounded_lines(
+            resource
+                .formats
+                .iter()
+                .map(|format| format!("  {}", text_line(format))),
+            resource.formats.len(),
+            "formats, kept in the report",
+        ));
+    }
+    lines.push(match resource.max_edge {
+        Some(edge) => format!("Requested max edge: {edge}px"),
+        None => "Requested max edge: none".to_string(),
+    });
+    // Advisory producer metadata, including any observed or recommended
+    // format. It is shown, never applied: this review changes no recipe.
+    if !resource.unknown.is_empty() {
+        lines.push(format!(
+            "Advisory fields kept unread ({}):",
+            resource.unknown.len()
+        ));
+        lines.extend(bounded_lines(
+            resource
+                .unknown
+                .iter()
+                .map(|(key, value)| format!("  {}", advisory_line(key, value))),
+            resource.unknown.len(),
+            "advisory fields, kept in the report",
+        ));
+    }
+    if !row.notes.is_empty() {
+        lines.extend(bounded_lines(
+            row.notes
+                .iter()
+                .map(|note| text_line(&format!("Note: {note}"))),
+            row.notes.len(),
+            "notes, kept in the report",
+        ));
+    }
+    if let RowState::Refused(reason) = &row.state {
+        lines.push(text_line(&format!("Refused: {reason}")));
+    }
+    if matches!(row.state, RowState::Changed) {
+        lines.push("The file's bytes changed since it was confirmed.".into());
+    }
+    lines
+}
+
+/// A path's own name for a diagnostic line, falling back to the whole path
+/// when it has none.
+fn named(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| label(path));
+    text_line(&name)
+}
+
+/// A label bounded to `limit` characters that keeps both of its ends. Clipping
+/// only the start draws two files sharing a long folder prefix as the same
+/// label, which is the one thing a chooser must never do; the tail carries the
+/// file's own name, so it keeps most of the room. Characters, not bytes, so a
+/// multi-byte name is never cut in half.
+fn clip_middle(text: &str, limit: usize) -> String {
+    let characters: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+    if characters.len() <= limit {
+        return characters.into_iter().collect();
+    }
+    let head = limit / 4;
+    let tail = limit - head - 1;
+    let mut line: String = characters[..head].iter().collect();
+    line.push('…');
+    line.extend(&characters[characters.len() - tail..]);
+    line
+}
+
+/// One local file's two labels: what the card draws, bounded so a long path
+/// cannot widen a row, and the whole path for the tooltip and the announced
+/// name. A local path is bounded by the filesystem it came from, unlike an
+/// arbitrary key in an imported report, so the name a screen reader reads and
+/// the name a pointer reveals both carry it complete — the visible label is
+/// the only one that has to fit.
+pub(super) fn choice_labels(root: Option<&Path>, path: &Path) -> (String, String) {
+    (
+        clip_middle(&under_root(root, path), MAX_LINE_CHARS),
+        label(path),
+    )
+}
+
+/// A path as it reads under the chosen root: `a/icon.webp` rather than just
+/// `icon.webp`, so two files that share a basename can be told apart by the
+/// person choosing between them. Display only — the row keeps the real path
+/// and confirms that. A path that is somehow not under the root shows whole,
+/// rather than silently shortening to something that is not where it is.
+pub(super) fn under_root(root: Option<&Path>, path: &Path) -> String {
+    let shown = root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
+    label(shown)
 }
 
 /// A path as text for a label only. The path itself stays a path.
@@ -712,12 +1119,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_advisory_value_is_shown_as_text_and_bounded() {
-        let long = serde_json::Value::String("x".repeat(400));
-        let line = advisory_line("scope", &long);
-        assert!(line.starts_with("scope: xxx"));
-        assert!(line.ends_with('…'));
-        assert_eq!(line.chars().count(), "scope: ".len() + 161);
+    fn an_advisory_key_and_value_are_both_bounded() {
+        let line = advisory_line(&"k".repeat(200), &serde_json::json!("x".repeat(4096)));
+        assert_eq!(
+            line.chars().count(),
+            MAX_KEY_CHARS + 1 + ": ".len() + MAX_LINE_CHARS + 1,
+            "both halves are clipped, each with its own ellipsis: {line}"
+        );
     }
 
     #[test]
@@ -728,6 +1136,389 @@ mod tests {
             "kind: full-auditrm -rf",
             "an advisory value is one line of text, never a second line that reads like a command"
         );
+    }
+
+    /// The count comes from the caller, so nothing has to be collected to
+    /// learn how much was left out.
+    #[test]
+    fn a_long_list_draws_a_bounded_head_and_says_what_it_left_out() {
+        let lines = bounded_lines(
+            (0..50_000).map(|index| format!("f{index}")),
+            50_000,
+            "fields",
+        );
+        assert_eq!(lines.len(), MAX_LINES + 1);
+        assert_eq!(lines[0], "f0");
+        assert_eq!(
+            lines[MAX_LINES],
+            format!("…and {} more fields", 50_000 - MAX_LINES)
+        );
+        let short = bounded_lines(["one".to_string()].into_iter(), 1, "fields");
+        assert_eq!(
+            short,
+            vec!["one".to_string()],
+            "a short list says nothing extra"
+        );
+    }
+
+    /// The shape of the accepted adversarial export: a valid, in-bounds report
+    /// whose tens of thousands of preserved unknown fields each produce a
+    /// warning. Built here rather than checking in the 940 KB file, so the
+    /// fixture lives with the behaviour it describes.
+    fn many_advisory_fields(extra: usize) -> PendingHandoff {
+        let mut envelope = serde_json::json!({
+            "schema": crate::handoff::SCHEMA_VERSION,
+            "producer": "imageguide-extension",
+            "producer_revision": "press-export-1",
+            "task": "full-audit",
+            "observed": "2026-09-09T06:47:22.361Z",
+            "redactions": ["page-url-and-title-omitted"],
+            "scope": {"kind": "full-audit", "filter": "all", "search_applied": false},
+            "resources": [{
+                "id": "r1",
+                "urls": [],
+                "path_hints": ["catalog-item.png"],
+                "width": 1800,
+                "height": 1200,
+                "bytes": 88945,
+                "bytes_measured": true,
+                "findings": ["oversized"],
+                "max_edge": null,
+                "formats": [],
+                "format_recommendations": ["webp", "avif"]
+            }]
+        });
+        let fields = envelope.as_object_mut().expect("the envelope is an object");
+        for index in 0..extra {
+            fields.insert(format!("extra_{index}"), serde_json::json!(index));
+        }
+        crate::handoff::parse_bytes(&serde_json::to_vec(&envelope).expect("the report serializes"))
+            .expect("a report of preserved unknown fields is still a valid report")
+    }
+
+    fn review_of(pending: PendingHandoff) -> HandoffReview {
+        let rows = pending
+            .handoff
+            .resources
+            .iter()
+            .map(|resource| ReviewRow::new(resource.id.clone()))
+            .collect();
+        HandoffReview {
+            generation: 0,
+            file: PathBuf::from("many-advisory-fields.json"),
+            pending,
+            root: None,
+            scanning: false,
+            scan: None,
+            rows,
+        }
+    }
+
+    /// The reason advisory fields are drawn at all is that the reader can see
+    /// what the producer said. A nested scope and a recommendation list must
+    /// therefore show their contents, marked where the preview stops — not a
+    /// count of how many things were inside them.
+    #[test]
+    fn a_nested_advisory_value_shows_its_content_in_the_preview() {
+        let review = review_of(many_advisory_fields(0));
+        let scope = provenance_lines(&review)
+            .into_iter()
+            .find(|line| line.trim_start().starts_with("scope: "))
+            .expect("the export's scope is drawn");
+        assert!(
+            scope.contains("full-audit") && scope.contains("\"filter\":\"all\""),
+            "the scope's own restriction is legible: {scope}"
+        );
+        let recommendation = resource_lines(&review, &review.rows[0])
+            .into_iter()
+            .find(|line| line.trim_start().starts_with("format_recommendations: "))
+            .expect("the resource's recommendation is drawn");
+        assert!(
+            recommendation.contains("webp") && recommendation.contains("avif"),
+            "an advisory format list reads as formats: {recommendation}"
+        );
+    }
+
+    /// A long value is previewed, not summarized away, and the ellipsis says
+    /// the preview stopped.
+    #[test]
+    fn a_long_advisory_value_is_previewed_and_marked() {
+        let long = serde_json::json!({"kind": "x".repeat(4000)});
+        let line = advisory_line("scope", &long);
+        assert!(line.starts_with("scope: {\"kind\":\"xxx"), "{line}");
+        assert!(
+            line.ends_with('…'),
+            "the preview says where it stops: {line}"
+        );
+        assert_eq!(line.chars().count(), "scope: ".len() + MAX_LINE_CHARS + 1);
+    }
+
+    /// Tens of thousands of advisory fields, and one warning each, must not
+    /// become tens of thousands of lines. The report keeps every one of them;
+    /// the card draws a bounded head and says how much it is not drawing.
+    #[test]
+    fn a_report_of_many_advisory_fields_draws_a_bounded_card() {
+        let pending = many_advisory_fields(50_000);
+        let fields = pending.handoff.unknown.len();
+        let warnings = pending.warnings.len();
+        assert_eq!(
+            fields, 50_001,
+            "scope plus every injected field is preserved"
+        );
+        // One warning for each of those, plus one for the resource's own
+        // preserved `format_recommendations`.
+        assert_eq!(
+            warnings,
+            fields + 1,
+            "and each one is still named as unread"
+        );
+
+        let review = review_of(pending);
+        let lines = provenance_lines(&review);
+        assert!(
+            lines.len() <= 4 + 2 + 2 * (MAX_LINES + 2),
+            "the card stays a card: {} lines",
+            lines.len()
+        );
+        assert!(
+            lines.contains(&format!("Advisory fields kept unread ({fields}):")),
+            "the full count is disclosed: {lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "…and {} more advisory fields, kept in the report",
+                fields - MAX_LINES
+            )),
+            "and so is how much is not drawn: {lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "…and {} more warnings, kept in the report",
+                warnings - MAX_LINES
+            )),
+            "warnings are bounded the same way: {lines:#?}"
+        );
+        assert!(
+            review.pending.handoff.unknown.len() == fields
+                && review.pending.warnings.len() == warnings,
+            "and drawing the card changed neither"
+        );
+    }
+
+    /// A resource's own lists are bounded on the same terms: the schema allows
+    /// sixty-four findings of four thousand characters each.
+    #[test]
+    fn a_resources_long_lists_are_bounded_with_their_counts() {
+        let mut pending = many_advisory_fields(0);
+        pending.handoff.resources[0].findings = (0..crate::handoff::MAX_LIST_ENTRIES)
+            .map(|index| format!("{index}-{}", "f".repeat(4096)))
+            .collect();
+        let review = review_of(pending);
+        let lines = resource_lines(&review, &review.rows[0]);
+        assert!(
+            lines.contains(&format!("Findings ({}):", crate::handoff::MAX_LIST_ENTRIES)),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "…and {} more findings, kept in the report",
+                crate::handoff::MAX_LIST_ENTRIES - MAX_LINES
+            )),
+            "{lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.chars().count() <= MAX_LINE_CHARS + 4),
+            "no drawn line runs away with a four-thousand-character finding"
+        );
+    }
+
+    fn walk(unreadable: usize, raw: usize) -> ScanDiagnostics {
+        ScanDiagnostics {
+            images: 3,
+            unreadable: (0..unreadable.min(MAX_LINES))
+                .map(|index| PathBuf::from(format!("/root/sub/broken-{index}.png")))
+                .collect(),
+            unreadable_total: unreadable,
+            unentered: Vec::new(),
+            unentered_total: 0,
+            skipped_raw: raw,
+            skipped_heic: 0,
+            skipped_packages: 0,
+        }
+    }
+
+    /// An incomplete walk cannot support the word "absent", and every row that
+    /// found nothing has to say so. Its own diagnostics are not in the report,
+    /// so they do not claim to be kept there.
+    #[test]
+    fn an_incomplete_walk_qualifies_every_row_that_found_nothing() {
+        let mut review = review_of(many_advisory_fields(0));
+        review.rows[0].verdict = Some(Verdict::Unmatched);
+        review.scan = Some(walk(20, 2));
+        assert!(
+            review
+                .scan
+                .as_ref()
+                .is_some_and(ScanDiagnostics::incomplete)
+        );
+
+        let lines = provenance_lines(&review);
+        assert!(
+            lines.contains(&"Folder: 3 images searched".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"Not searched, unsupported here: 2 camera raw".to_string()),
+            "an excluded format is named as unsupported, not as missing: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("not read completely")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"Would not decode (20):".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"  broken-0.png".to_string()),
+            "a small named set survives: {lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "…and {} more files, not listed here",
+                20 - MAX_LINES
+            )),
+            "the rest are out of view, not in a report that never held them: {lines:#?}"
+        );
+
+        let row = resource_lines(&review, &review.rows[0]);
+        assert_eq!(
+            row[0],
+            "Match: unmatched (automatic; not a confirmation) — from a folder that was not read completely"
+        );
+    }
+
+    /// A folder that was read completely says nothing about incompleteness.
+    #[test]
+    fn a_complete_walk_leaves_unmatched_unqualified() {
+        let mut review = review_of(many_advisory_fields(0));
+        review.rows[0].verdict = Some(Verdict::Unmatched);
+        review.scan = Some(walk(0, 0));
+        assert!(
+            !review
+                .scan
+                .as_ref()
+                .expect("a walk is recorded")
+                .incomplete()
+        );
+        let lines = provenance_lines(&review);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("not read completely")),
+            "{lines:#?}"
+        );
+        assert_eq!(
+            resource_lines(&review, &review.rows[0])[0],
+            "Match: unmatched (automatic; not a confirmation)"
+        );
+    }
+
+    /// Two candidates called `icon.webp` must not both be drawn as
+    /// `icon.webp`. Their labels differ by where they are, while the row keeps
+    /// the paths themselves.
+    #[test]
+    fn duplicate_basenames_are_told_apart_by_where_they_are() {
+        let root = PathBuf::from("/pictures/site");
+        let first = root.join("a").join("icon.webp");
+        let second = root.join("b").join("icon.webp");
+        let one = under_root(Some(&root), &first);
+        let other = under_root(Some(&root), &second);
+        assert_ne!(one, other, "the two labels are not the same label");
+        assert_eq!(
+            one,
+            PathBuf::from("a").join("icon.webp").display().to_string()
+        );
+        assert_eq!(
+            under_root(Some(&root), Path::new("/elsewhere/icon.webp")),
+            "/elsewhere/icon.webp",
+            "a path that is not under the root shows whole rather than pretending"
+        );
+
+        let mut review = review_of(many_advisory_fields(0));
+        review.root = Some(root);
+        review.rows[0].choices = vec![first, second.clone()];
+        review.rows[0].chosen = Some(second.clone());
+        assert_eq!(
+            review.rows[0].chosen.as_deref(),
+            Some(second.as_path()),
+            "the chosen file is still the path, not its label"
+        );
+        assert!(
+            resource_lines(&review, &review.rows[0]).contains(&format!(
+                "Chosen: {}",
+                PathBuf::from("b").join("icon.webp").display()
+            )),
+            "and the line names which of the two it is"
+        );
+    }
+
+    /// Two candidates whose paths first differ well past the visible bound.
+    /// An end clip would draw both as the same string and ask the user to
+    /// choose between two identical labels; keeping the tail is what makes
+    /// them a choice at all.
+    #[test]
+    fn candidates_differing_only_past_the_bound_still_read_apart() {
+        let root = PathBuf::from("/pictures");
+        let deep = "campaign-autumn-2026-approved-final".repeat(6);
+        assert!(
+            deep.chars().count() > MAX_LINE_CHARS,
+            "the shared prefix alone is longer than a drawn line"
+        );
+        let first = root.join(&deep).join("a").join("icon.webp");
+        let second = root.join(&deep).join("b").join("icon.webp");
+
+        let (one, one_full) = choice_labels(Some(&root), &first);
+        let (other, other_full) = choice_labels(Some(&root), &second);
+        assert_ne!(
+            one, other,
+            "the drawn labels are different labels: {one} / {other}"
+        );
+        assert!(
+            one.ends_with(&PathBuf::from("a").join("icon.webp").display().to_string())
+                && other.ends_with(&PathBuf::from("b").join("icon.webp").display().to_string()),
+            "each keeps the end that names its own file: {one} / {other}"
+        );
+        assert!(one.contains('…') && one.chars().count() <= MAX_LINE_CHARS);
+
+        // The whole path is what a screen reader announces and what a pointer
+        // reveals: neither is truncated, because a local path is bounded by
+        // the filesystem it came from.
+        assert_eq!(one_full, first.display().to_string());
+        assert_eq!(other_full, second.display().to_string());
+        assert!(!one_full.contains('…') && !other_full.contains('…'));
+    }
+
+    /// A short path is drawn whole, and a multi-byte name is never cut in the
+    /// middle of a character.
+    #[test]
+    fn a_short_path_is_drawn_whole_and_a_wide_one_is_cut_on_a_character() {
+        let root = PathBuf::from("/pictures");
+        let short = root.join("a").join("icon.webp");
+        assert_eq!(
+            choice_labels(Some(&root), &short).0,
+            PathBuf::from("a").join("icon.webp").display().to_string()
+        );
+
+        let wide = root.join("é".repeat(400)).join("画像.webp");
+        let (drawn, full) = choice_labels(Some(&root), &wide);
+        assert!(drawn.chars().count() <= MAX_LINE_CHARS);
+        assert!(drawn.ends_with("画像.webp"), "{drawn}");
+        assert_eq!(full, wide.display().to_string());
     }
 
     #[test]
