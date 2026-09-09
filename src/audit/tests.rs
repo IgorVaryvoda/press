@@ -6745,18 +6745,21 @@ fn settle_estimate(cx: &mut gpui_kit::VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// An encode is not instant — AVIF is seconds — so a source can be rewritten while
-/// its own sample is still encoding. The pixels in hand then describe a file nobody
-/// has, and a size measured from them would be a claim about the wrong image.
+/// An encode is not instant — AVIF is seconds — so a source can be rewritten before
+/// its own sample reaches a verdict. The pixels in hand then describe a file nobody
+/// has, and either a size or a refusal measured from them would be a claim about the
+/// wrong image.
 ///
 /// Both samplers, the window's estimate and the CLI dry run, answer through
 /// `sample_encode`, which checks the bytes it consumed against the file *after* the
-/// encoder returns. The rewrite below lands between preparation and the verdict,
-/// which is the entire window that check exists for; whether it lands at the start
-/// of that window or in the middle of the encoder's work is not something the code
-/// can tell apart, and neither can a slow writer.
+/// encoder returns, whatever the encoder returned. The rewrites below land between
+/// preparation and the verdict, which is the entire window that check exists for;
+/// whether one lands at the start of that window or in the middle of the encoder's
+/// work is not something the code can tell apart, and neither can a slow writer.
+/// Nothing here mutates a file at a chosen point inside the codec, and nothing waits
+/// on a clock to pretend it did.
 #[test]
-fn a_source_rewritten_while_its_sample_encodes_is_unknown_rather_than_a_size() {
+fn a_source_rewritten_before_its_sample_reaches_a_verdict_is_unknown_rather_than_a_size() {
     let root = scan_fixture("sample-rewrite");
     let path = root.join("shot.png");
     // Two real PNGs of the same length. Nothing reads past IEND, so the shorter is
@@ -6862,17 +6865,55 @@ fn a_source_rewritten_while_its_sample_encodes_is_unknown_rather_than_a_size() {
     )
     .expect("the sixteen-bit fixture is written");
     let deep_prepared = convert::prepare(&deep, max_edge).expect("the deep source prepares");
+    let deep_bytes = std::fs::metadata(&deep).unwrap().len();
     assert_eq!(
         sample_encode(
             &deep_prepared,
             &deep,
-            std::fs::metadata(&deep).unwrap().len(),
+            deep_bytes,
             Format::WebP,
             Quality::LOSSLESS,
             crate::avif::DEFAULT_SPEED
         ),
         SampleOutcome::Refused
     );
+
+    // The same prepared sixteen-bit pixels, with the file underneath now an
+    // eight-bit PNG the same recipe encodes without complaint. The refusal the
+    // encoder still reports is a verdict on an image nobody has, and a refusal is
+    // not free: it takes its slice out of the total as a file the run would write
+    // nothing for. So it is unknown too, and a projection standing on it alone is
+    // no projection.
+    std::fs::write(&deep, png(37)).expect("an eight-bit source takes the deep one's name");
+    let stale_refusal = sample_encode(
+        &deep_prepared,
+        &deep,
+        deep_bytes,
+        Format::WebP,
+        Quality::LOSSLESS,
+        crate::avif::DEFAULT_SPEED,
+    );
+    assert_eq!(
+        stale_refusal,
+        SampleOutcome::Unknown,
+        "a refusal read off pixels the file no longer holds was counted against it"
+    );
+    assert!(project_total(&[(deep_bytes, stale_refusal)]).is_none());
+
+    // The bytes that are there now really do encode, so that refusal could only
+    // have come from the pixels the sample no longer speaks for.
+    let replaced = convert::prepare(&deep, max_edge).expect("the replaced deep source prepares");
+    assert!(matches!(
+        sample_encode(
+            &replaced,
+            &deep,
+            std::fs::metadata(&deep).unwrap().len(),
+            Format::WebP,
+            Quality::LOSSLESS,
+            crate::avif::DEFAULT_SPEED
+        ),
+        SampleOutcome::Encoded(..)
+    ));
 
     let _ = std::fs::remove_dir_all(&root);
 }

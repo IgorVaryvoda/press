@@ -394,6 +394,27 @@ the `e6fedd0` commit message stand as published history and are corrected here a
 in this round's commit message rather than rewritten. The tradeoff is now stated
 as the work that is actually repeated.
 
+#### Final minor correction
+
+The post-encode identity check first landed on the encoder's successful arm alone,
+so a sample whose file had been rewritten underneath it could still be classified
+from pixels nobody has when the encoder refused or failed. Root reviewed that as
+minor — no stale size, no stale output and no stale authority can come of it — but
+a refusal is not free either: it takes its slice out of the total as a file the run
+would write nothing for. The check now runs on every result `encode_prepared`
+returns, before the classification, so any mismatch is `Unknown` whatever the
+encoder said; when the bytes still match, `Ok`, `Failed` and a refusal are
+classified exactly as before. One ordering change, no new helper or type.
+
+The existing regression grew one arm and kept the rest: the same prepared
+sixteen-bit source, with its file replaced by an eight-bit PNG the same recipe
+encodes without complaint, now yields `Unknown` and projects nothing, and those
+replaced bytes prepared afresh encode, so the refusal could only have come from
+pixels the sample no longer speaks for. The writer oracle, the stale-success arm
+and the genuine lossless-depth refusal are unchanged. The test is now named for
+what it does — a rewrite landing before the verdict — rather than a mutation timed
+inside the codec; there is still no sleep and no test-only production seam.
+
 Gates for this round, `CARGO_TARGET_DIR` inside this worktree, `TMPDIR` under
 `ux/test-tmp-d3`, run one at a time, logs under `ux/d3-preparation-r2/`, all exit
 code 0: `cargo test --locked` (635 passed, 2 ignored, plus 32/2/3 integration),

@@ -2104,13 +2104,17 @@ pub(crate) enum SampleOutcome {
 /// The shared verdict for both samplers, the window's estimate and the CLI dry
 /// run, so a folder is never quoted two different sizes.
 ///
-/// The identity is checked again after the encode, against the file on disk. An
+/// The identity is checked again after the encode, against the file on disk, and
+/// for every result the encoder returns rather than only for a successful one. An
 /// encode is not instant — AVIF is seconds — and a source rewritten while one ran
-/// leaves a size measured from pixels the file no longer holds. That sample is
-/// unknown rather than refused: the recipe rejected nothing, so its slice borrows
-/// the average instead of contributing a number, and a projection with nothing but
-/// such samples behind it is no projection at all. Reads the source, so this belongs
-/// on the worker that did the encoding, never on the main thread.
+/// leaves a size measured from pixels the file no longer holds; a refusal read off
+/// those same pixels is a verdict on an image nobody has, and it would take a slice
+/// out of the total on the strength of it. Either way the sample is unknown rather
+/// than refused: the recipe rejected nothing about the file that is there, so its
+/// slice borrows the average instead of contributing a number or a refusal, and a
+/// projection with nothing but such samples behind it is no projection at all.
+/// Reads the source, so this belongs on the worker that did the encoding, never on
+/// the main thread.
 pub(crate) fn sample_encode(
     prepared: &crate::scan::DecodedSource,
     source: &Path,
@@ -2119,11 +2123,12 @@ pub(crate) fn sample_encode(
     quality: Quality,
     avif_speed: u8,
 ) -> SampleOutcome {
-    match convert::encode_prepared(prepared, source, format, quality, avif_speed) {
-        Ok((_, encoded)) if prepared.identity.matches_path(source) => {
-            SampleOutcome::Encoded(source_bytes, encoded.len() as u64)
-        }
-        Ok(_) => SampleOutcome::Unknown,
+    let result = convert::encode_prepared(prepared, source, format, quality, avif_speed);
+    if !prepared.identity.matches_path(source) {
+        return SampleOutcome::Unknown;
+    }
+    match result {
+        Ok((_, encoded)) => SampleOutcome::Encoded(source_bytes, encoded.len() as u64),
         Err(convert::Failure::Failed) => SampleOutcome::Unknown,
         Err(_) => SampleOutcome::Refused,
     }
