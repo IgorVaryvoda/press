@@ -449,8 +449,14 @@ fn replace_and_restore_round_trip(
             "the restored {name} is the original, not an intermediate"
         );
     }
+    // Which restored names to expect back is worked out against the canonical
+    // fixture root, because that is the spelling the report writes its outputs
+    // in: Windows adds a `\\?\` prefix the fixture path never had, and an
+    // original restored over its own name would read as an extra generated
+    // output this run had to take away.
+    let restored = dir.canonicalize().expect("the fixture folder resolves");
     for output in installed {
-        if !names.iter().any(|name| dir.join(name) == output) {
+        if !names.iter().any(|name| restored.join(name) == output) {
             assert!(
                 !output.exists(),
                 "{} is taken away with the original back",
