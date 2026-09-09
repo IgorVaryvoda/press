@@ -252,6 +252,36 @@ across a restart, deployment and re-audit — the rest of the
 [H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
 — all remain open, as does any native Windows or macOS proof.
 
+### September 9 local-check label repair
+
+`press handoff --root <dir> --deployed <dir>` reads a second folder on this
+machine. It scanned that folder for files whose stem matched a mapping and whose
+format and longest edge met the resource's constraints, then reported the result
+as `deployed`, `deploy_summary.deployed` and a "verified against" heading. A
+local directory listing cannot show that a website serves those bytes, that the
+file is the reported image, that markup, viewport or saving model changed, or
+that anything was re-audited, so those labels claimed more than the code does.
+
+This corrects the labels, not the behaviour. The successful status is
+`local_match`; the JSON report carries `local_root`, `local_checks` with the
+matched `paths`, `local_summary` and a `local_evidence_scope` string stating the
+boundary inside the document; the text heading reads `local file check under
+<dir>` and repeats that scope on the next line. `--deployed` still parses and
+still needs `--root`, and `--help` now calls it a local folder check with no
+live site verification. `differs`, `missing`, `ambiguous`, the open findings
+listing and the exit-1-on-gaps semantics are unchanged, and the check still runs
+on automatic `path_match`/`candidate` mappings, which are name evidence and not
+a person's confirmation. As with the `confirmed` → `path_match` rename this
+corrects an unreleased draft — `git tag --contains 9f2031a` is still empty — so
+`HandoffReport.schema_version` stays `1` and the producer's envelope schema is
+untouched.
+
+This is a truthfulness repair to one label set, not H3. Deployment, re-audit,
+the local-export versus deployed distinction, changed viewport/model evidence
+and the rest of
+[H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
+all remain open.
+
 ### Isolated checkpoints for tomorrow
 
 | Worktree branch | Checkpoint | Closeout handling |

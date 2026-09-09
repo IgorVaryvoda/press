@@ -209,34 +209,42 @@ fn warn(handoff: &Handoff) -> Vec<String> {
     warnings
 }
 
-/// Whether one mapped resource verifies against the deployed tree.
+/// How one mapped resource fares against a second local folder. Every
+/// variant is evidence about filenames, formats and pixel dimensions on
+/// this machine; none of them says a website serves those bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeployStatus {
-    /// Exactly one deployed file answers to the mapping and meets its
+pub enum LocalCheckStatus {
+    /// Exactly one local file answers to the mapping's stem and meets its
     /// format and size constraints.
-    Deployed,
+    LocalMatch,
     /// Files answer to the name but violate a constraint.
     Differs,
-    /// Nothing under the deployed root answers to the mapping.
+    /// Nothing under the checked folder answers to the mapping.
     Missing,
-    /// Several deployed files meet the constraints: a choice, not a badge.
+    /// Several local files meet the constraints: a choice, not a badge.
     Ambiguous,
 }
 
-/// One resource's deployment verdict. Findings ride along as open items:
-/// an arrived file proves delivery, never that markup or review concerns
-/// are closed.
+/// One resource's local-file verdict. Findings ride along as open items:
+/// a file sitting on disk under the right name closes neither the page's
+/// markup work nor any review concern.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct DeploymentCheck {
+pub struct LocalCheck {
     pub id: String,
-    pub status: DeployStatus,
-    pub deployed: Vec<String>,
+    pub status: LocalCheckStatus,
+    pub paths: Vec<String>,
     pub notes: Vec<String>,
     pub findings: Vec<String>,
 }
 
-/// The deployed entry's format in the vocabulary constraints use. Content,
+/// What the local check looked at, carried beside the results so a JSON
+/// reader never has to infer the boundary. It is repeated verbatim in the
+/// text output.
+pub const LOCAL_EVIDENCE_SCOPE: &str = "filenames, formats and pixel dimensions of files in the given local folder; \
+not a live site, image identity, markup or a re-audit";
+
+/// A scanned entry's format in the vocabulary constraints use. Content,
 /// never the extension.
 fn entry_format(entry: &crate::scan::Entry) -> &'static str {
     match entry.format {
@@ -269,7 +277,7 @@ fn stem_of(path: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-/// What one deployed candidate violates, if anything. An empty list verifies.
+/// What one local candidate violates, if anything. An empty list passes.
 fn constraint_violations(resource: &HandoffResource, entry: &crate::scan::Entry) -> Vec<String> {
     let mut violations = Vec::new();
     if !resource.formats.is_empty()
@@ -294,17 +302,25 @@ fn constraint_violations(resource: &HandoffResource, entry: &crate::scan::Entry)
     violations
 }
 
-/// Verify every pinned-down mapping against a scan of the deployed tree.
-/// Only confirmed and candidate mappings carry exactly one local file, so
-/// only they verify: ambiguous mappings need confirmation first, and the
-/// rest name no file to look for. Association is by file stem, exactly or
-/// with a `-suffix`/`_suffix` derivative name — never by bytes, which
-/// re-encoding changes, and never by resemblance.
-pub fn verify_deployment(
+/// Check every pinned-down mapping against a scan of a second local folder.
+/// Only path-match and candidate mappings carry exactly one local file, so
+/// only they are checked: ambiguous mappings name several, and the rest name
+/// no file to look for. Association is by file stem, exactly or with a
+/// `-suffix`/`_suffix` derivative name — never by bytes, which re-encoding
+/// changes, and never by resemblance.
+///
+/// This reads a directory on this machine. It cannot see what a website
+/// serves, so a `LocalMatch` says a suitably named, suitably shaped file
+/// exists locally and nothing more: not that those bytes were published,
+/// not that the file is the reported image, not that the page's markup,
+/// viewport or saving model changed, and not that anything was re-audited.
+/// The mapping itself is still automatic name evidence, not a person's
+/// confirmation, and this check does not upgrade it.
+pub fn check_local_files(
     handoff: &Handoff,
     mappings: &[Mapping],
-    deployed: &[crate::scan::Entry],
-) -> Vec<DeploymentCheck> {
+    local: &[crate::scan::Entry],
+) -> Vec<LocalCheck> {
     let mut checks = Vec::new();
     for mapping in mappings {
         if !matches!(mapping.verdict, Verdict::PathMatch | Verdict::Candidate)
@@ -325,7 +341,7 @@ pub fn verify_deployment(
         }
         let mut exact = Vec::new();
         let mut suffixed = Vec::new();
-        for entry in deployed {
+        for entry in local {
             let candidate = stem_of(&entry.path);
             if candidate == stem {
                 exact.push(entry);
@@ -339,10 +355,10 @@ pub fn verify_deployment(
         // matters when no file kept the name.
         let pool = if exact.is_empty() { suffixed } else { exact };
         if pool.is_empty() {
-            checks.push(DeploymentCheck {
+            checks.push(LocalCheck {
                 id: mapping.id.clone(),
-                status: DeployStatus::Missing,
-                deployed: Vec::new(),
+                status: LocalCheckStatus::Missing,
+                paths: Vec::new(),
                 notes: Vec::new(),
                 findings: resource.findings.clone(),
             });
@@ -358,22 +374,22 @@ pub fn verify_deployment(
                 violations.append(&mut entry_violations);
             }
         }
-        let (status, deployed, mut notes) = match passing.len() {
+        let (status, paths, mut notes) = match passing.len() {
             1 => (
-                DeployStatus::Deployed,
+                LocalCheckStatus::LocalMatch,
                 vec![display(passing[0].path.clone())],
                 Vec::new(),
             ),
             0 => (
-                DeployStatus::Differs,
+                LocalCheckStatus::Differs,
                 pool.iter().map(|entry| display(&entry.path)).collect(),
                 violations,
             ),
             _ => (
-                DeployStatus::Ambiguous,
+                LocalCheckStatus::Ambiguous,
                 passing.iter().map(|entry| display(&entry.path)).collect(),
                 vec![format!(
-                    "{} deployed files meet the constraints",
+                    "{} local files meet the constraints",
                     passing.len()
                 )],
             ),
@@ -383,10 +399,10 @@ pub fn verify_deployment(
             notes.truncate(3);
             notes.push(format!("…and {hidden} more"));
         }
-        checks.push(DeploymentCheck {
+        checks.push(LocalCheck {
             id: mapping.id.clone(),
             status,
-            deployed,
+            paths,
             notes,
             findings: resource.findings.clone(),
         });
@@ -1577,7 +1593,7 @@ mod mapping_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn deployed(
+    fn local_entry(
         path: &std::path::Path,
         format: image::ImageFormat,
         width: u32,
@@ -1613,24 +1629,24 @@ mod mapping_tests {
     }
 
     #[test]
-    fn an_exact_deployed_derivative_verifies() {
-        let dir = workdir("deployed");
+    fn an_exact_local_derivative_matches() {
+        let dir = workdir("local-check");
         let local = dir.join("photos").join("hero.jpg");
         let (handoff, mappings) =
             constrained("hero", &local.to_string_lossy(), &["avif"], Some(1600));
         let out = dir.join("out");
-        let checks = verify_deployment(
+        let checks = check_local_files(
             &handoff,
             &mappings,
-            &[deployed(
+            &[local_entry(
                 &out.join("hero.avif"),
                 image::ImageFormat::Avif,
                 1200,
                 800,
             )],
         );
-        assert_eq!(checks[0].status, DeployStatus::Deployed);
-        assert_eq!(checks[0].deployed.len(), 1);
+        assert_eq!(checks[0].status, LocalCheckStatus::LocalMatch);
+        assert_eq!(checks[0].paths.len(), 1);
         assert_eq!(checks[0].findings, vec!["excess-dimensions".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1643,61 +1659,61 @@ mod mapping_tests {
             constrained("hero", &local.to_string_lossy(), &["jpeg"], Some(1600));
         let out = dir.join("out");
         // Avif where JPEG was asked: found, but violating.
-        let checks = verify_deployment(
+        let checks = check_local_files(
             &handoff,
             &mappings,
-            &[deployed(
+            &[local_entry(
                 &out.join("hero.avif"),
                 image::ImageFormat::Avif,
                 1200,
                 800,
             )],
         );
-        assert_eq!(checks[0].status, DeployStatus::Differs);
+        assert_eq!(checks[0].status, LocalCheckStatus::Differs);
         assert!(checks[0].notes.iter().any(|note| note.contains("jpeg")));
         // Right format, over the size limit.
         let (handoff, mappings) = constrained("hero", &local.to_string_lossy(), &[], Some(1000));
-        let checks = verify_deployment(
+        let checks = check_local_files(
             &handoff,
             &mappings,
-            &[deployed(
+            &[local_entry(
                 &out.join("hero.avif"),
                 image::ImageFormat::Avif,
                 1200,
                 800,
             )],
         );
-        assert_eq!(checks[0].status, DeployStatus::Differs);
+        assert_eq!(checks[0].status, LocalCheckStatus::Differs);
         assert!(checks[0].notes.iter().any(|note| note.contains("1000px")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn suffixed_derivatives_verify_and_exact_wins() {
+    fn suffixed_derivatives_match_and_exact_wins() {
         let dir = workdir("suffix");
         let local = dir.join("photos").join("hero.jpg");
         let out = dir.join("out");
         let (handoff, mappings) =
             constrained("hero", &local.to_string_lossy(), &["avif"], Some(1600));
-        // No exact stem: the suffixed derivative verifies.
-        let checks = verify_deployment(
+        // No exact stem: the suffixed derivative matches.
+        let checks = check_local_files(
             &handoff,
             &mappings,
-            &[deployed(
+            &[local_entry(
                 &out.join("hero-1600.avif"),
                 image::ImageFormat::Avif,
                 1200,
                 800,
             )],
         );
-        assert_eq!(checks[0].status, DeployStatus::Deployed);
+        assert_eq!(checks[0].status, LocalCheckStatus::LocalMatch);
         // An exact stem exists but violates: derivatives do not rescue it.
-        let checks = verify_deployment(
+        let checks = check_local_files(
             &handoff,
             &mappings,
             &[
-                deployed(&out.join("hero.png"), image::ImageFormat::Png, 1200, 800),
-                deployed(
+                local_entry(&out.join("hero.png"), image::ImageFormat::Png, 1200, 800),
+                local_entry(
                     &out.join("hero-1600.avif"),
                     image::ImageFormat::Avif,
                     1200,
@@ -1705,27 +1721,27 @@ mod mapping_tests {
                 ),
             ],
         );
-        assert_eq!(checks[0].status, DeployStatus::Differs);
+        assert_eq!(checks[0].status, LocalCheckStatus::Differs);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn two_passing_derivatives_stay_ambiguous_and_absent_is_missing() {
-        let dir = workdir("amb-deploy");
+        let dir = workdir("amb-local");
         let local = dir.join("photos").join("hero.jpg");
         let out = dir.join("out");
         let (handoff, mappings) = constrained("hero", &local.to_string_lossy(), &["avif"], None);
-        let checks = verify_deployment(
+        let checks = check_local_files(
             &handoff,
             &mappings,
             &[
-                deployed(
+                local_entry(
                     &out.join("hero-1600.avif"),
                     image::ImageFormat::Avif,
                     1200,
                     800,
                 ),
-                deployed(
+                local_entry(
                     &out.join("hero_800.avif"),
                     image::ImageFormat::Avif,
                     800,
@@ -1733,14 +1749,14 @@ mod mapping_tests {
                 ),
             ],
         );
-        assert_eq!(checks[0].status, DeployStatus::Ambiguous);
-        let checks = verify_deployment(&handoff, &mappings, &[]);
-        assert_eq!(checks[0].status, DeployStatus::Missing);
-        // Unpinned mappings verify nothing at all.
+        assert_eq!(checks[0].status, LocalCheckStatus::Ambiguous);
+        let checks = check_local_files(&handoff, &mappings, &[]);
+        assert_eq!(checks[0].status, LocalCheckStatus::Missing);
+        // Unpinned mappings check nothing at all.
         let mut floating = mappings;
         floating[0].verdict = Verdict::Ambiguous;
         floating[0].paths = vec!["a".into(), "b".into()];
-        assert!(verify_deployment(&handoff, &floating, &[]).is_empty());
+        assert!(check_local_files(&handoff, &floating, &[]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

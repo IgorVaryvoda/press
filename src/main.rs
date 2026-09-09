@@ -134,7 +134,9 @@ const HELP: &str = concat!(
     "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
     "                            explicit flags override it field by field\n",
     "  --root <dir>              Map handoff resources against this folder\n",
-    "  --deployed <dir>          Verify the mapping against deployed files\n",
+    "  --deployed <dir>          Check the mapping against files in this local\n",
+    "                            folder: filename, format and dimensions only,\n",
+    "                            with no live site verification\n",
     "                            (needs handoff --root)\n",
     "  --assignment <file>       Supplier assignment snapshot (needs supplier)\n",
     "  --fake <file>             Rehearsal script for supplier or studio service calls\n",
@@ -218,9 +220,11 @@ struct Args {
     /// Where `handoff` looks for the reported files. `None` validates the
     /// report without mapping it. Every other command refuses the flag.
     map_root: Option<PathBuf>,
-    /// The deployed tree `handoff --root` verifies against. Needs `--root`;
-    /// anything else refuses the flag.
-    map_deployed: Option<PathBuf>,
+    /// The second local folder `handoff --root` checks filenames, formats and
+    /// dimensions against. Spelled `--deployed` on the command line, which the
+    /// flag keeps for compatibility; nothing here reaches a website. Needs
+    /// `--root`; anything else refuses the flag.
+    local_check_root: Option<PathBuf>,
     /// A bounded, user-authored requirements snapshot for `check`.
     requirements_file: Option<PathBuf>,
     /// One run per target for `convert`: a saved recipe id and the output
@@ -293,7 +297,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut replace = false;
     let mut output = None;
     let mut map_root = None;
-    let mut map_deployed = None;
+    let mut local_check_root = None;
     let mut requirements_file = None;
     let mut targets = Vec::new();
     let mut supplier_verb = None;
@@ -432,7 +436,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--deployed" => {
                 let value = next_value(&mut rest, "--deployed", "a folder")?;
-                map_deployed = Some(PathBuf::from(value));
+                local_check_root = Some(PathBuf::from(value));
             }
             "--avif-speed" => {
                 conversion_option = true;
@@ -556,7 +560,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             replace,
             output,
             map_root: None,
-            map_deployed: None,
+            local_check_root: None,
             requirements_file: None,
             targets: Vec::new(),
             supplier_verb: None,
@@ -614,7 +618,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if map_root.is_some() && command != Command::Handoff {
         return Err("--root needs handoff".into());
     }
-    if map_deployed.is_some() && (command != Command::Handoff || map_root.is_none()) {
+    if local_check_root.is_some() && (command != Command::Handoff || map_root.is_none()) {
         return Err("--deployed needs handoff --root".into());
     }
     if requirements_file.is_some() && command != Command::Check {
@@ -627,7 +631,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             || output.is_some()
             || preset.is_some()
             || map_root.is_some()
-            || map_deployed.is_some()
+            || local_check_root.is_some()
             || !targets.is_empty()
             || replace
             || skip_existing
@@ -718,7 +722,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             || output.is_some()
             || preset.is_some()
             || map_root.is_some()
-            || map_deployed.is_some()
+            || local_check_root.is_some()
             || !targets.is_empty()
             || replace
             || skip_existing
@@ -758,7 +762,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             || output.is_some()
             || preset.is_some()
             || map_root.is_some()
-            || map_deployed.is_some()
+            || local_check_root.is_some()
             || !targets.is_empty())
     {
         return Err("supplier takes a folder, a verb and --assignment/--fake only".into());
@@ -842,7 +846,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         replace,
         output,
         map_root,
-        map_deployed,
+        local_check_root,
         requirements_file,
         targets,
         supplier_verb,
@@ -1695,8 +1699,8 @@ struct HandoffMappingSummary {
 }
 
 #[derive(Serialize)]
-struct HandoffDeploySummary {
-    deployed: usize,
+struct HandoffLocalSummary {
+    local_match: usize,
     differs: usize,
     missing: usize,
     ambiguous: usize,
@@ -1717,17 +1721,20 @@ struct HandoffReport {
     /// confirmation before anything converts them.
     mappings: Option<Vec<handoff::Mapping>>,
     summary: Option<HandoffMappingSummary>,
-    /// The verified deployed tree, absent without `--deployed`.
-    deployed_root: Option<String>,
-    deployed: Option<Vec<handoff::DeploymentCheck>>,
-    deploy_summary: Option<HandoffDeploySummary>,
+    /// The second local folder checked, absent without `--deployed`. The
+    /// flag keeps its spelling; the fields say what was actually read, and
+    /// `local_evidence_scope` says how far the result reaches.
+    local_root: Option<String>,
+    local_checks: Option<Vec<handoff::LocalCheck>>,
+    local_summary: Option<HandoffLocalSummary>,
+    local_evidence_scope: Option<&'static str>,
 }
 
 fn handoff_report(
     target: &Path,
     pending: &handoff::PendingHandoff,
     mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
-    deployed: Option<(&PathBuf, &Vec<handoff::DeploymentCheck>)>,
+    local: Option<(&PathBuf, &Vec<handoff::LocalCheck>)>,
 ) -> HandoffReport {
     let (root, mappings, summary) = match mapped {
         None => (None, None, None),
@@ -1751,24 +1758,29 @@ fn handoff_report(
             (Some(path_text(root)), Some(mappings.clone()), Some(summary))
         }
     };
-    let (deployed_root, deployed, deploy_summary) = match deployed {
-        None => (None, None, None),
+    let (local_root, local_checks, local_summary, local_evidence_scope) = match local {
+        None => (None, None, None, None),
         Some((root, checks)) => {
-            let mut summary = HandoffDeploySummary {
-                deployed: 0,
+            let mut summary = HandoffLocalSummary {
+                local_match: 0,
                 differs: 0,
                 missing: 0,
                 ambiguous: 0,
             };
             for check in checks {
                 match check.status {
-                    handoff::DeployStatus::Deployed => summary.deployed += 1,
-                    handoff::DeployStatus::Differs => summary.differs += 1,
-                    handoff::DeployStatus::Missing => summary.missing += 1,
-                    handoff::DeployStatus::Ambiguous => summary.ambiguous += 1,
+                    handoff::LocalCheckStatus::LocalMatch => summary.local_match += 1,
+                    handoff::LocalCheckStatus::Differs => summary.differs += 1,
+                    handoff::LocalCheckStatus::Missing => summary.missing += 1,
+                    handoff::LocalCheckStatus::Ambiguous => summary.ambiguous += 1,
                 }
             }
-            (Some(path_text(root)), Some(checks.clone()), Some(summary))
+            (
+                Some(path_text(root)),
+                Some(checks.clone()),
+                Some(summary),
+                Some(handoff::LOCAL_EVIDENCE_SCOPE),
+            )
         }
     };
     HandoffReport {
@@ -1782,22 +1794,24 @@ fn handoff_report(
         root,
         mappings,
         summary,
-        deployed_root,
-        deployed,
-        deploy_summary,
+        local_root,
+        local_checks,
+        local_summary,
+        local_evidence_scope,
     }
 }
 
 /// The validated task, briefly: warnings are diagnostics, so they go to
 /// stderr beside the summary rather than into the task listing. With a
 /// mapped root every resource gets one verdict line; candidates name the
-/// file they resemble without claiming it. Deployment lines follow the same
-/// shape, and open findings stay listed as page work, never as closed items.
+/// file they resemble without claiming it. Local-check lines follow the same
+/// shape under a heading that states how far they reach, and open findings
+/// stay listed as page work, never as closed items.
 fn print_handoff(
     target: &Path,
     pending: &handoff::PendingHandoff,
     mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
-    deployed: Option<(&PathBuf, &Vec<handoff::DeploymentCheck>)>,
+    local: Option<(&PathBuf, &Vec<handoff::LocalCheck>)>,
 ) {
     outln!(
         "{}: task {} from {}: {} resources",
@@ -1821,11 +1835,17 @@ fn print_handoff(
             }
         }
     }
-    if let Some((root, checks)) = deployed {
-        outln!("verified against {}", root.display());
+    if let Some((root, checks)) = local {
+        outln!("local file check under {}", root.display());
+        outln!("  scope: {}", handoff::LOCAL_EVIDENCE_SCOPE);
         for check in checks {
-            let detail = check.deployed.first().map(String::as_str).unwrap_or("-");
-            outln!("{} {}: {}", deploy_word(check.status), check.id, detail);
+            let detail = check.paths.first().map(String::as_str).unwrap_or("-");
+            outln!(
+                "{} {}: {}",
+                local_status_word(check.status),
+                check.id,
+                detail
+            );
             for note in &check.notes {
                 outln!("  note: {note}");
             }
@@ -1848,12 +1868,12 @@ fn print_handoff(
     }
 }
 
-fn deploy_word(status: handoff::DeployStatus) -> &'static str {
+fn local_status_word(status: handoff::LocalCheckStatus) -> &'static str {
     match status {
-        handoff::DeployStatus::Deployed => "deployed",
-        handoff::DeployStatus::Differs => "differs",
-        handoff::DeployStatus::Missing => "missing",
-        handoff::DeployStatus::Ambiguous => "ambiguous",
+        handoff::LocalCheckStatus::LocalMatch => "local_match",
+        handoff::LocalCheckStatus::Differs => "differs",
+        handoff::LocalCheckStatus::Missing => "missing",
+        handoff::LocalCheckStatus::Ambiguous => "ambiguous",
     }
 }
 
@@ -2393,45 +2413,45 @@ fn main() {
                     }
                 };
                 let mapped = mapped.as_ref().map(|mapped| (&mapped.0, &mapped.1));
-                // Deployment verification scans the deployed tree and checks
-                // each pinned-down mapping against it. Findings stay open:
-                // an arrived file proves delivery, never review approval.
-                let deployed = match args.map_deployed.as_deref() {
+                // `--deployed` names a second folder on this machine. The
+                // walk is the same header-only scan an audit uses, so the
+                // check sees filenames, formats and dimensions there and
+                // nothing about a website. Findings stay open either way.
+                let local = match args.local_check_root.as_deref() {
                     None => None,
-                    Some(deployed_root) => {
-                        if !deployed_root.is_dir() {
-                            eprintln!("press: {} is not a folder", deployed_root.display());
+                    Some(local_root) => {
+                        if !local_root.is_dir() {
+                            eprintln!("press: {} is not a folder", local_root.display());
                             std::process::exit(2);
                         }
-                        let deployed_scan =
-                            scan::scan(deployed_root, &deployed_root.join(scan::OUTPUT_DIR));
-                        print_scan_errors(&deployed_scan);
+                        let local_scan = scan::scan(local_root, &local_root.join(scan::OUTPUT_DIR));
+                        print_scan_errors(&local_scan);
                         let checks = match mapped {
-                            Some((_, mappings)) => handoff::verify_deployment(
+                            Some((_, mappings)) => handoff::check_local_files(
                                 &pending.handoff,
                                 mappings,
-                                &deployed_scan.entries,
+                                &local_scan.entries,
                             ),
                             None => Vec::new(),
                         };
-                        Some((deployed_root.to_path_buf(), checks))
+                        Some((local_root.to_path_buf(), checks))
                     }
                 };
-                let deployed = deployed.as_ref().map(|deployed| (&deployed.0, &deployed.1));
+                let local = local.as_ref().map(|local| (&local.0, &local.1));
                 if args.json {
-                    if write_json(&handoff_report(&target, &pending, mapped, deployed)).is_err() {
+                    if write_json(&handoff_report(&target, &pending, mapped, local)).is_err() {
                         eprintln!("press: could not write JSON");
                         std::process::exit(1);
                     }
                 } else {
-                    print_handoff(&target, &pending, mapped, deployed);
+                    print_handoff(&target, &pending, mapped, local);
                 }
-                // Gaps in verification are an incomplete checklist, not a
+                // Gaps in the local check are an incomplete checklist, not a
                 // clean bill: exit 1 names work left, like a partial run.
-                let gaps = deployed.is_some_and(|(_, checks)| {
+                let gaps = local.is_some_and(|(_, checks)| {
                     checks
                         .iter()
-                        .any(|check| !matches!(check.status, handoff::DeployStatus::Deployed))
+                        .any(|check| !matches!(check.status, handoff::LocalCheckStatus::LocalMatch))
                 });
                 std::process::exit(i32::from(gaps));
             }
@@ -5326,7 +5346,7 @@ mod tests {
                 "live"
             ])
             .unwrap()
-            .map_deployed
+            .local_check_root
             .is_some()
         );
         assert!(parse(&["handoff", "r.json", "--deployed", "live"]).is_err());

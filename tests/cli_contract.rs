@@ -537,43 +537,47 @@ fn handoff_refuses_a_missing_root() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn deployed_tree(dir: &Path) -> (PathBuf, PathBuf) {
+/// A source root plus a second local folder holding a real converted
+/// derivative of it. The second folder is what `--deployed` reads: a
+/// directory on this machine, never a website.
+fn local_check_tree(dir: &Path) -> (PathBuf, PathBuf) {
     let root = dir.join("photos");
     std::fs::create_dir_all(&root).expect("the root is created");
     std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
-    let deployed = dir.join("live");
-    std::fs::create_dir_all(&deployed).expect("the deployed dir is created");
-    // A real conversion produces the deployed derivative: same stem, AVIF.
+    let checked = dir.join("live");
+    std::fs::create_dir_all(&checked).expect("the checked dir is created");
+    // A real conversion produces the derivative: same stem, AVIF.
     let output = run(&[
         "convert",
         &root.to_string_lossy(),
         "--output",
-        &deployed.to_string_lossy(),
+        &checked.to_string_lossy(),
         "--format",
         "avif",
     ]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(deployed.join("hero.avif").is_file());
-    (root, deployed)
+    assert!(checked.join("hero.avif").is_file());
+    (root, checked)
 }
 
-fn deployed_resource(id: &str, formats: &[&str]) -> serde_json::Value {
+fn constrained_resource(id: &str, formats: &[&str]) -> serde_json::Value {
     let mut resource = minimal_resource(id, &["hero.jpg"]);
     resource["formats"] = serde_json::json!(formats);
     resource["max_edge"] = serde_json::json!(1600);
+    resource["findings"] = serde_json::json!(["excess-dimensions", "missing-alt"]);
     resource
 }
 
 #[test]
-fn handoff_deployed_verifies_constraints_and_names_gaps() {
-    let dir = workdir("deployed");
-    let (root, deployed) = deployed_tree(&dir);
+fn handoff_local_check_reports_local_matches_and_names_gaps() {
+    let dir = workdir("local-check");
+    let (root, checked) = local_check_tree(&dir);
     let report = mapping_report(
         &dir,
         "report.json",
         serde_json::json!([
-            deployed_resource("r1", &["avif"]),
-            deployed_resource("r2", &["jpeg"]),
+            constrained_resource("r1", &["avif"]),
+            constrained_resource("r2", &["jpeg"]),
         ]),
     );
     let output = run(&[
@@ -582,33 +586,62 @@ fn handoff_deployed_verifies_constraints_and_names_gaps() {
         "--root",
         &root.to_string_lossy(),
         "--deployed",
-        &deployed.to_string_lossy(),
+        &checked.to_string_lossy(),
         "--json",
     ]);
-    // One derivative arrived meeting its constraints, the other answers to
+    // One derivative sits there meeting its constraints, the other answers to
     // the name in the wrong format: gaps exit 1, like a partial run.
     assert_eq!(output.status.code(), Some(1));
     let doc = stdout_json(&output);
-    let statuses: Vec<&str> = doc["deployed"]
+    let statuses: Vec<&str> = doc["local_checks"]
         .as_array()
         .expect("checks list")
         .iter()
         .map(|check| check["status"].as_str().expect("a status"))
         .collect();
-    assert_eq!(statuses, vec!["deployed", "differs"]);
-    assert_eq!(doc["deploy_summary"]["deployed"], 1);
-    assert_eq!(doc["deploy_summary"]["differs"], 1);
+    assert_eq!(statuses, vec!["local_match", "differs"]);
+    assert_eq!(doc["local_summary"]["local_match"], 1);
+    assert_eq!(doc["local_summary"]["differs"], 1);
+    assert_eq!(doc["local_root"], checked.to_string_lossy().as_ref());
+    // The scope rides along, so no reader has to infer how far a match reaches.
+    let scope = doc["local_evidence_scope"]
+        .as_str()
+        .expect("the scope is stated");
+    for boundary in ["local folder", "not a live site", "markup", "re-audit"] {
+        assert!(scope.contains(boundary), "{scope}");
+    }
+    // The finding a person still has to fix stays listed against the match.
+    let findings: Vec<&str> = doc["local_checks"][0]["findings"]
+        .as_array()
+        .expect("findings list")
+        .iter()
+        .map(|finding| finding.as_str().expect("a finding"))
+        .collect();
+    assert_eq!(findings, vec!["excess-dimensions", "missing-alt"]);
+    assert!(
+        doc["local_checks"][0]["paths"][0]
+            .as_str()
+            .expect("the matched file")
+            .ends_with("hero.avif")
+    );
+    // Nothing in the document claims a deployment, in a status, a summary
+    // key or anywhere else.
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !raw.contains("deploy"),
+        "a local directory check must not report deployment: {raw}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn handoff_deployed_clean_tree_exits_zero() {
-    let dir = workdir("deployed-clean");
-    let (root, deployed) = deployed_tree(&dir);
+fn handoff_local_check_text_states_a_local_only_scope() {
+    let dir = workdir("local-check-clean");
+    let (root, checked) = local_check_tree(&dir);
     let report = mapping_report(
         &dir,
         "report.json",
-        serde_json::json!([deployed_resource("r1", &["avif"])]),
+        serde_json::json!([constrained_resource("r1", &["avif"])]),
     );
     let output = run(&[
         "handoff",
@@ -616,19 +649,37 @@ fn handoff_deployed_clean_tree_exits_zero() {
         "--root",
         &root.to_string_lossy(),
         "--deployed",
-        &deployed.to_string_lossy(),
+        &checked.to_string_lossy(),
     ]);
     assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("deployed r1"),
-        "the checklist names the verified file"
+        text.contains("local file check under"),
+        "the heading says what was read: {text}"
+    );
+    assert!(
+        text.contains("scope: filenames, formats and pixel dimensions")
+            && text.contains("not a live site"),
+        "the heading is followed by its boundary: {text}"
+    );
+    assert!(
+        text.contains("local_match r1"),
+        "the checklist names the matched file: {text}"
+    );
+    assert!(
+        text.contains("open findings") && text.contains("missing-alt"),
+        "page work stays open beside a match: {text}"
+    );
+    assert!(
+        !text.contains("deploy") && !text.contains("verified against"),
+        "no line claims a verified deployment: {text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn handoff_deployed_missing_tree_reports_missing() {
-    let dir = workdir("deployed-missing");
+fn handoff_local_check_empty_tree_reports_missing() {
+    let dir = workdir("local-check-missing");
     let root = dir.join("photos");
     std::fs::create_dir_all(&root).expect("the root is created");
     std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
@@ -637,7 +688,7 @@ fn handoff_deployed_missing_tree_reports_missing() {
     let report = mapping_report(
         &dir,
         "report.json",
-        serde_json::json!([deployed_resource("r1", &["avif"])]),
+        serde_json::json!([constrained_resource("r1", &["avif"])]),
     );
     let output = run(&[
         "handoff",
@@ -650,7 +701,7 @@ fn handoff_deployed_missing_tree_reports_missing() {
     ]);
     assert_eq!(output.status.code(), Some(1));
     let doc = stdout_json(&output);
-    assert_eq!(doc["deployed"][0]["status"], "missing");
+    assert_eq!(doc["local_checks"][0]["status"], "missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
