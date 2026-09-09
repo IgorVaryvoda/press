@@ -8670,25 +8670,6 @@ fn an_invalid_update_signature_keeps_download_available_for_retry(cx: &mut TestA
 
 use super::handoff_actions::RowState;
 
-fn press_key(cx: &mut gpui_kit::VisualTestContext, key: &str) {
-    let keystroke = gpui_kit::Keystroke::parse(key).expect("the keystroke parses");
-    cx.update(|window, cx| {
-        window.dispatch_event(
-            gpui_kit::PlatformInput::KeyDown(gpui_kit::KeyDownEvent {
-                keystroke: keystroke.clone(),
-                is_held: false,
-                prefer_character_input: false,
-            }),
-            cx,
-        );
-        window.dispatch_event(
-            gpui_kit::PlatformInput::KeyUp(gpui_kit::KeyUpEvent { keystroke }),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-}
-
 /// The producer's landed fixture, exactly as it is checked in beside the
 /// consumer tests. `r1` hints `hero.jpg` and `r2` hints `icon.webp`.
 fn producer_report() -> crate::handoff::PendingHandoff {
