@@ -972,8 +972,10 @@ pub(super) fn resource_lines(review: &HandoffReview, row: &ReviewRow) -> Vec<Str
         }
     });
     lines.push(match row.chosen.as_deref() {
-        // Under the root, so a duplicate basename reads as the file it is.
-        Some(path) => text_line(&format!("Chosen: {}", under_root(root, path))),
+        // Under the root, so a duplicate basename reads as the file it is, and
+        // bounded from both ends, so a long shared folder prefix cannot eat
+        // the name that distinguishes it.
+        Some(path) => format!("Chosen: {}", choice_labels(root, path).0),
         None => "Chosen: no file".to_string(),
     });
     if row.hidden > 0 {
@@ -1062,6 +1064,37 @@ fn named(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| label(path));
     text_line(&name)
+}
+
+/// A label bounded to `limit` characters that keeps both of its ends. Clipping
+/// only the start draws two files sharing a long folder prefix as the same
+/// label, which is the one thing a chooser must never do; the tail carries the
+/// file's own name, so it keeps most of the room. Characters, not bytes, so a
+/// multi-byte name is never cut in half.
+fn clip_middle(text: &str, limit: usize) -> String {
+    let characters: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+    if characters.len() <= limit {
+        return characters.into_iter().collect();
+    }
+    let head = limit / 4;
+    let tail = limit - head - 1;
+    let mut line: String = characters[..head].iter().collect();
+    line.push('…');
+    line.extend(&characters[characters.len() - tail..]);
+    line
+}
+
+/// One local file's two labels: what the card draws, bounded so a long path
+/// cannot widen a row, and the whole path for the tooltip and the announced
+/// name. A local path is bounded by the filesystem it came from, unlike an
+/// arbitrary key in an imported report, so the name a screen reader reads and
+/// the name a pointer reveals both carry it complete — the visible label is
+/// the only one that has to fit.
+pub(super) fn choice_labels(root: Option<&Path>, path: &Path) -> (String, String) {
+    (
+        clip_middle(&under_root(root, path), MAX_LINE_CHARS),
+        label(path),
+    )
 }
 
 /// A path as it reads under the chosen root: `a/icon.webp` rather than just
@@ -1432,6 +1465,60 @@ mod tests {
             )),
             "and the line names which of the two it is"
         );
+    }
+
+    /// Two candidates whose paths first differ well past the visible bound.
+    /// An end clip would draw both as the same string and ask the user to
+    /// choose between two identical labels; keeping the tail is what makes
+    /// them a choice at all.
+    #[test]
+    fn candidates_differing_only_past_the_bound_still_read_apart() {
+        let root = PathBuf::from("/pictures");
+        let deep = "campaign-autumn-2026-approved-final".repeat(6);
+        assert!(
+            deep.chars().count() > MAX_LINE_CHARS,
+            "the shared prefix alone is longer than a drawn line"
+        );
+        let first = root.join(&deep).join("a").join("icon.webp");
+        let second = root.join(&deep).join("b").join("icon.webp");
+
+        let (one, one_full) = choice_labels(Some(&root), &first);
+        let (other, other_full) = choice_labels(Some(&root), &second);
+        assert_ne!(
+            one, other,
+            "the drawn labels are different labels: {one} / {other}"
+        );
+        assert!(
+            one.ends_with(&PathBuf::from("a").join("icon.webp").display().to_string())
+                && other.ends_with(&PathBuf::from("b").join("icon.webp").display().to_string()),
+            "each keeps the end that names its own file: {one} / {other}"
+        );
+        assert!(one.contains('…') && one.chars().count() <= MAX_LINE_CHARS);
+
+        // The whole path is what a screen reader announces and what a pointer
+        // reveals: neither is truncated, because a local path is bounded by
+        // the filesystem it came from.
+        assert_eq!(one_full, first.display().to_string());
+        assert_eq!(other_full, second.display().to_string());
+        assert!(!one_full.contains('…') && !other_full.contains('…'));
+    }
+
+    /// A short path is drawn whole, and a multi-byte name is never cut in the
+    /// middle of a character.
+    #[test]
+    fn a_short_path_is_drawn_whole_and_a_wide_one_is_cut_on_a_character() {
+        let root = PathBuf::from("/pictures");
+        let short = root.join("a").join("icon.webp");
+        assert_eq!(
+            choice_labels(Some(&root), &short).0,
+            PathBuf::from("a").join("icon.webp").display().to_string()
+        );
+
+        let wide = root.join("é".repeat(400)).join("画像.webp");
+        let (drawn, full) = choice_labels(Some(&root), &wide);
+        assert!(drawn.chars().count() <= MAX_LINE_CHARS);
+        assert!(drawn.ends_with("画像.webp"), "{drawn}");
+        assert_eq!(full, wide.display().to_string());
     }
 
     #[test]

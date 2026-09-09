@@ -8695,14 +8695,23 @@ fn an_incomplete_folder_read_is_carried_into_the_review(cx: &mut TestAppContext)
 #[gpui_kit::test]
 fn duplicate_candidates_are_drawn_apart_and_keep_their_paths(cx: &mut TestAppContext) {
     let root = scan_fixture("handoff-duplicates");
+    // The two folders share a prefix longer than a drawn line, which is the
+    // case an end clip loses.
+    let deep = "campaign-autumn-2026-approved-final".repeat(6);
     for folder in ["a", "b"] {
-        std::fs::create_dir_all(root.join(folder)).expect("the subfolder is created");
+        let inside = root.join(&deep).join(folder);
+        std::fs::create_dir_all(&inside).expect("the subfolder is created");
         crate::convert::tests::photo(8, 8)
-            .save(root.join(folder).join("icon.webp"))
+            .save(inside.join("icon.webp"))
             .expect("the duplicate fixture is written");
     }
     let (audit, cx) = reviewing(&root, cx);
     cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("handoff-choice-1-0").is_some()
+            && cx.debug_bounds("handoff-choice-1-1").is_some(),
+        "both candidates are drawn as their own chip"
+    );
 
     let labels = audit.read_with(cx, |audit, _| {
         let review = audit.handoff_review.as_ref().expect("the review is open");
@@ -8711,13 +8720,17 @@ fn duplicate_candidates_are_drawn_apart_and_keep_their_paths(cx: &mut TestAppCon
         assert_eq!(row.choices.len(), 2, "both files are offered");
         row.choices
             .iter()
-            .map(|path| super::handoff_actions::under_root(review.root.as_deref(), path))
+            .map(|path| super::handoff_actions::choice_labels(review.root.as_deref(), path))
             .collect::<Vec<_>>()
     });
     assert_eq!(labels.len(), 2);
     assert_ne!(
-        labels[0], labels[1],
+        labels[0].0, labels[1].0,
         "two files called icon.webp are not drawn as the same label: {labels:?}"
+    );
+    assert_ne!(
+        labels[0].1, labels[1].1,
+        "and the name each one announces differs too"
     );
 
     // Choose the second by its position in the row's own list, and check the

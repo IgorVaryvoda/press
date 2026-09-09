@@ -7,8 +7,8 @@
 //! value is drawn as unknown.
 
 use super::handoff_actions::{
-    HandoffReview, ReviewRow, RowState, label, provenance_lines, resource_lines, text_line,
-    under_root,
+    HandoffReview, ReviewRow, RowState, choice_labels, label, provenance_lines, resource_lines,
+    text_line,
 };
 use super::{Audit, is_checkbox_activation_key};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -220,10 +220,11 @@ impl Audit {
             let selected = row.chosen.as_deref() == Some(path.as_path());
             // Two files can share a basename, so a chip that showed only the
             // name would ask the user to choose between two identical labels.
-            // The path under the root distinguishes them, and the whole path
-            // is on the tooltip when the chip has to clip it.
-            let name = text_line(&under_root(root, path));
-            let full = label(path);
+            // The path under the root distinguishes them, bounded from both
+            // ends so a long shared folder prefix cannot make two chips read
+            // alike either. The whole path is the announced name and the
+            // tooltip, so the keyboard reaches it as well as the pointer.
+            let (name, full) = choice_labels(root, path);
             choices.push(
                 Button::new(("handoff-choice", index * 100 + position))
                     .small()
@@ -231,7 +232,8 @@ impl Audit {
                     .when(!selected, |chip| chip.ghost())
                     .debug_selector(move || format!("handoff-choice-{index}-{position}"))
                     .label(name)
-                    .tooltip(full)
+                    .tooltip(full.clone())
+                    .accessibility_label(full)
                     .disabled(busy)
                     .on_click(cx.listener(move |audit, _, _, cx| {
                         // Chosen by position in this row's own list of paths,
