@@ -256,6 +256,94 @@ the screenshots; they and `proof.json` stay under `ux/` in the workbench
 worktree as review artifacts, untracked here and not release proof. The proof is
 Linux only: macOS and Windows remain the separate native CI gate.
 
+### September 9 handoff review increment
+
+The extension landed its Press export on `main` at `2e56550`. Its fixture
+`test/fixtures/press-handoff.json` is copied byte for byte into
+`tests/fixtures/` here, pinned to LF, and checked against the SHA-256 it landed
+as, so a producer change that moves the shared contract fails on this side too.
+
+On top of that, this branch adds the **session review** half of H2 and nothing
+else. The window imports a report through the same bounded read and parser the
+CLI uses, the user selects one folder, matching runs off the update thread, and
+each resource is confirmed individually against the bytes on disk, with a
+recheck that revokes a confirmation when those bytes change. The review writes
+no job, recipe, setting or output, replaces no dataset, and starts no
+conversion; it lives only as long as the session.
+
+The CLI verdict `confirmed` is renamed to `path_match` (and the JSON summary
+key with it) because it only ever meant "one exact supplied hint named one
+existing file". No release tag contains the `handoff` command — `git tag
+--contains 9f2031a` is empty — so this corrects an unreleased draft rather than
+breaking a shipped contract, and `HandoffReport.schema_version` stays `1`. The
+producer's own envelope schema is unaffected. `press skill` guidance is updated
+to the labels the binary actually prints.
+
+A valid report can be a mebibyte of preserved advisory fields with a warning for
+each, so the card draws a bounded head of every list, previews each value with a
+visible ellipsis, and discloses the counts it is not drawing; the pending report
+keeps all of it. Source reads take one review-wide slot, so five hundred rows
+cannot put five hundred bounded reads in flight, and the slot is released by the
+read that finishes rather than by the review that started it. The card also
+carries the folder walk's own diagnostics: a folder Press could not read
+completely cannot show a resource to be absent, and every row that matched
+nothing says so.
+
+This is one increment, not H2. Preparing confirmed sources, durable task state
+across a restart, deployment and re-audit — the rest of the
+[H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
+— all remain open, as does any native Windows or macOS proof.
+
+### September 9 local-check label repair
+
+`press handoff --root <dir> --deployed <dir>` reads a second folder on this
+machine. It scanned that folder for files whose stem matched a mapping and whose
+format and longest edge met the resource's constraints, then reported the result
+as `deployed`, `deploy_summary.deployed` and a "verified against" heading. A
+local directory listing cannot show that a website serves those bytes, that the
+file is the reported image, that markup, viewport or saving model changed, or
+that anything was re-audited, so those labels claimed more than the code does.
+
+This corrects the labels, not the behaviour. The successful status is
+`local_match`; the JSON report carries `local_root`, `local_checks` with the
+matched `paths`, `local_summary` and a `local_evidence_scope` string stating the
+boundary inside the document; the text heading reads `local file check under
+<dir>` and repeats that scope on the next line. `--deployed` still parses and
+still needs `--root`, and `--help` now calls it a local folder check with no
+live site verification. `differs`, `missing`, `ambiguous`, the open findings
+listing and the exit-1-on-gaps semantics are unchanged, and the check still runs
+on automatic `path_match`/`candidate` mappings, which are name evidence and not
+a person's confirmation. As with the `confirmed` → `path_match` rename this
+corrects an unreleased draft — `git tag --contains 9f2031a` is still empty — so
+`HandoffReport.schema_version` stays `1` and the producer's envelope schema is
+untouched.
+
+Review of that first attempt found two ways the corrected labels could still
+read as more than they were, and both are fixed here. The check now returns one
+row per reported resource: a resource whose mapping pinned down no single local
+file comes back `not_checked` with the verdict that caused it, counted in
+`local_summary.not_checked`, so a report of nothing but unmatched resources no
+longer produces an empty checklist, an all-zero summary and exit 0. A pass now
+needs one row per resource and every one of them matching. The human text takes
+its open findings from every pending resource rather than from the rows that
+found a file, so an unmatched image's page work stays listed.
+
+Both walks also carry their own shortfalls into the report. Each folder actually
+scanned appears under `scans` with its root and a `source_root` or
+`local_check_root` scope, naming what would not decode and what could not be
+entered — bounded at `MAX_SHOWN_CHOICES` names with explicit totals and omission
+counts — and an incomplete walk exits 1 whether or not a local check was asked
+for, because an unread file may be the competing match nobody saw. Raw, HEIC and
+package files stay excluded by design and are counted apart from failures; no
+decoder is claimed for them. The producer's `pending` report is untouched by any
+of this: filesystem trouble belongs to the run, not to what the producer sent.
+
+This is a truthfulness repair to one label set, not H3. Deployment, re-audit,
+the local-export versus deployed distinction, changed viewport/model evidence
+and the rest of
+[H2 and H3 acceptance](browser-handoff-plan.md#implementation-prs-and-acceptance)
+all remain open.
+
 ### Isolated checkpoints for tomorrow
 
 | Worktree branch | Checkpoint | Closeout handling |

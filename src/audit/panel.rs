@@ -514,7 +514,8 @@ impl Audit {
                                 self.recipes_skipped.len()
                             ))
                     }))
-                    .child(self.sets_section(cx)),
+                    .child(self.sets_section(cx))
+                    .child(self.handoff_section(cx)),
             )
             .child(
                 div()
@@ -1382,6 +1383,7 @@ impl Audit {
                                 let delete = job.clone();
                                 let csv = job.clone();
                                 let import = job.clone();
+                                let report = job.clone();
                                 let export = job.clone();
                                 let act = |audit: &gpui_kit::WeakEntity<Audit>,
                                        cx: &mut App,
@@ -1431,6 +1433,18 @@ impl Audit {
                                 ))
                                 .item(PopupMenuItem::new("Import job…").on_click(
                                     move |_, _, cx| act(&import, cx, Audit::import_job_file),
+                                ))
+                                // Reviewing a report is not editing this job,
+                                // so it stays available while the folder's
+                                // saved jobs are still an open choice.
+                                .item(PopupMenuItem::new("Import ImageGuide report…").on_click(
+                                    move |_, window, cx| {
+                                        if let Some(audit) = report.upgrade() {
+                                            audit.update(cx, |audit, cx| {
+                                                audit.import_handoff_file(window, cx);
+                                            });
+                                        }
+                                    },
                                 ))
                                 .item(
                                     PopupMenuItem::new("Export job…").on_click(

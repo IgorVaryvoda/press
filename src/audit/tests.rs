@@ -8654,3 +8654,741 @@ fn an_invalid_update_signature_keeps_download_available_for_retry(cx: &mut TestA
         assert!(audit.updater.message.contains("Couldn’t download"));
     });
 }
+
+// ---------------------------------------------------------------------------
+// Imported ImageGuide report review
+//
+// The review is session state: these tests drive it the way the window does
+// and check both what it decides and what it leaves alone. Nothing here is
+// allowed to write a job, a recipe, an output or a source file.
+// ---------------------------------------------------------------------------
+
+use super::handoff_actions::RowState;
+
+fn press_key(cx: &mut gpui_kit::VisualTestContext, key: &str) {
+    let keystroke = gpui_kit::Keystroke::parse(key).expect("the keystroke parses");
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui_kit::PlatformInput::KeyDown(gpui_kit::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui_kit::PlatformInput::KeyUp(gpui_kit::KeyUpEvent { keystroke }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+}
+
+/// The producer's landed fixture, exactly as it is checked in beside the
+/// consumer tests. `r1` hints `hero.jpg` and `r2` hints `icon.webp`.
+fn producer_report() -> crate::handoff::PendingHandoff {
+    let bytes = include_bytes!("../../tests/fixtures/press-handoff.json");
+    crate::handoff::parse_bytes(bytes).expect("the landed producer fixture imports")
+}
+
+/// A folder the report can be matched against, holding the file `r1` hints at.
+fn report_root(tag: &str) -> PathBuf {
+    let root = scan_fixture(tag);
+    crate::convert::tests::photo(16, 16)
+        .save(root.join("hero.jpg"))
+        .expect("the fixture photo is written");
+    root
+}
+
+/// The same folder with `r2`'s file too, so both rows have something to
+/// confirm.
+fn report_root_with_icon(tag: &str) -> PathBuf {
+    let root = report_root(tag);
+    crate::convert::tests::photo(8, 8)
+        .save(root.join("icon.webp"))
+        .expect("the fixture icon is written");
+    root
+}
+
+/// An audit with the imported report on screen, matched against `root`.
+fn reviewing<'a>(
+    root: &Path,
+    cx: &'a mut TestAppContext,
+) -> (gpui_kit::Entity<Audit>, &'a mut gpui_kit::VisualTestContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    open_review(&audit, root, cx);
+    (audit, cx)
+}
+
+/// Open the imported report over `root` and leave the frame that carries the
+/// card's tab stops and its scroll position delivered.
+fn open_review(audit: &gpui_kit::Entity<Audit>, root: &Path, cx: &mut gpui_kit::VisualTestContext) {
+    audit.update_in(cx, |audit, window, cx| {
+        let generation = audit.handoff_generation;
+        audit.open_handoff_review(
+            PathBuf::from("press-handoff.json"),
+            producer_report(),
+            generation,
+            window,
+            cx,
+        );
+        audit.set_handoff_root(root.to_path_buf(), cx);
+    });
+    cx.run_until_parked();
+    // The card's keyboard and its scroll both need a frame that has laid it
+    // out, exactly as they do when a user opens it from the menu.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+/// Everything the review must not touch, captured so it can be compared after.
+fn untouched(audit: &Audit, root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files: Vec<(PathBuf, Vec<u8>)> = audit
+        .entries
+        .iter()
+        .chain(std::iter::empty())
+        .map(|entry| {
+            (
+                entry.path.clone(),
+                std::fs::read(&entry.path).expect("the dataset fixture is on disk"),
+            )
+        })
+        .collect();
+    for item in std::fs::read_dir(root).expect("the review root is readable") {
+        let path = item.expect("the entry reads").path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).expect("the review fixture is on disk");
+            files.push((path, bytes));
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Every row of an imported report starts unconfirmed, and so does the row
+/// whose supplied hint named exactly one file: an exact hint is evidence about
+/// a name, and only a person confirms an image.
+#[gpui_kit::test]
+fn an_exact_path_match_still_starts_unconfirmed_and_unchosen(cx: &mut TestAppContext) {
+    let root = report_root("handoff-exact");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        assert_eq!(review.root.as_deref(), Some(root.as_path()));
+        assert_eq!(review.rows.len(), 2);
+        let hero = review.row("r1").expect("the report's first resource");
+        assert_eq!(hero.verdict, Some(crate::handoff::Verdict::PathMatch));
+        assert_eq!(hero.choices, vec![root.join("hero.jpg")]);
+        assert!(
+            hero.chosen.is_none(),
+            "matching offers the file; it does not choose it"
+        );
+        assert!(matches!(hero.state, RowState::Unconfirmed));
+        assert_eq!(review.confirmed_count(), 0);
+        // The second resource's icon is not in this folder.
+        let icon = review.row("r2").expect("the report's second resource");
+        assert_eq!(icon.verdict, Some(crate::handoff::Verdict::Unmatched));
+        assert!(icon.choices.is_empty());
+    });
+    assert!(cx.debug_bounds("handoff-card").is_some());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Choosing the offered file and confirming it records the bytes that were
+/// read, and touches nothing else: no job, no recipe, no output, no source.
+#[gpui_kit::test]
+fn confirming_a_row_records_its_bytes_and_writes_nothing(cx: &mut TestAppContext) {
+    let root = report_root("handoff-confirm");
+    let (audit, cx) = reviewing(&root, cx);
+    let (before, job_before, dataset_before) = audit.read_with(cx, |audit, _| {
+        (
+            untouched(audit, &root),
+            audit.work_job.clone(),
+            audit.dataset_generation,
+        )
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+    });
+    cx.run_until_parked();
+
+    let hero = root.join("hero.jpg");
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let row = review.row("r1").expect("the confirmed row");
+        let RowState::Confirmed(confirmed) = &row.state else {
+            panic!("the row is confirmed, not {}", row.state.word());
+        };
+        assert_eq!(confirmed.source.path, hero);
+        assert_eq!(
+            confirmed.identity,
+            crate::manifest::SourceIdentity::from_bytes(
+                &std::fs::read(&hero).expect("the fixture is on disk")
+            ),
+            "the identity is the bytes that were read"
+        );
+        assert_eq!(confirmed.source.bytes, confirmed.identity.bytes);
+        assert_eq!(review.confirmed_count(), 1);
+        // A confirmed webpage resource is not a product, a role or a mapping.
+        assert_eq!(&audit.work_job, &job_before);
+        assert!(audit.work_job.products.is_empty());
+        assert_eq!(audit.dataset_generation, dataset_before);
+        assert!(audit.results.is_empty());
+        assert_eq!(untouched(audit, &root), before, "no file was rewritten");
+    });
+    assert!(
+        !root.join(crate::scan::OUTPUT_DIR).exists(),
+        "a review creates no output folder"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same size and the same timestamp are not an answer. A recheck reads the
+/// bytes again, and different bytes revoke the confirmation rather than
+/// quietly updating it.
+#[gpui_kit::test]
+fn a_replaced_source_revokes_its_confirmation_on_recheck(cx: &mut TestAppContext) {
+    let root = report_root("handoff-recheck");
+    let (audit, cx) = reviewing(&root, cx);
+    audit.update(cx, |audit, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+    });
+    cx.run_until_parked();
+
+    let hero = root.join("hero.jpg");
+    let stamp = std::fs::metadata(&hero)
+        .expect("the fixture is on disk")
+        .modified()
+        .expect("the filesystem reports a timestamp");
+    let mut replacement = std::fs::read(&hero).expect("the fixture reads");
+    let last = replacement.len() - 1;
+    replacement[last] ^= 0xff;
+    std::fs::write(&hero, &replacement).expect("the replacement is written");
+    std::fs::File::options()
+        .write(true)
+        .open(&hero)
+        .expect("the file opens")
+        .set_modified(stamp)
+        .expect("the timestamp goes back");
+
+    audit.update(cx, |audit, cx| audit.recheck_handoff_row("r1", cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let row = review.row("r1").expect("the rechecked row");
+        assert!(
+            matches!(row.state, RowState::Changed),
+            "the row reads as changed, not {}",
+            row.state.word()
+        );
+        assert_eq!(review.confirmed_count(), 0, "the confirmation is revoked");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An exact hint reaching its file through a link inside the root confirms the
+/// file the kernel opened, and rechecking that confirmation answers instead of
+/// leaving the row reading for the rest of the session.
+#[cfg(unix)]
+#[gpui_kit::test]
+fn an_in_root_alias_confirms_and_rechecks_to_an_answer(cx: &mut TestAppContext) {
+    let root = scan_fixture("handoff-alias");
+    std::fs::create_dir_all(root.join("images")).expect("the subfolder is created");
+    crate::convert::tests::photo(16, 16)
+        .save(root.join("images").join("hero.jpg"))
+        .expect("the fixture photo is written");
+    std::os::unix::fs::symlink(root.join("images"), root.join("alias"))
+        .expect("the in-root alias is created");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.update(cx, |audit, cx| {
+        // The file as it is reached through the alias: what a path hint of
+        // `alias/hero.jpg` resolves to for the user who typed it.
+        let request = audit
+            .start_handoff_row_request("r1")
+            .expect("the row takes a request");
+        audit.apply_handoff_choice("r1", root.join("alias").join("hero.jpg"), request, cx);
+    });
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| audit.confirm_handoff_row("r1", cx));
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| audit.recheck_handoff_row("r1", cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        let row = audit
+            .handoff_review
+            .as_ref()
+            .expect("the review is open")
+            .row("r1")
+            .expect("the aliased row");
+        let RowState::Confirmed(confirmed) = &row.state else {
+            panic!("the recheck answered, leaving {}", row.state.word());
+        };
+        assert_eq!(
+            confirmed.source.path,
+            root.join("images").join("hero.jpg"),
+            "the confirmation names the file, not the way in"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A read that finishes after the row was pointed somewhere else is a result
+/// about a file the user has moved off. It must not confirm the row, and
+/// choosing the first file back must not let that older read stand in for a
+/// confirmation nobody asked for a second time.
+#[gpui_kit::test]
+fn a_read_for_a_superseded_choice_never_confirms_the_row(cx: &mut TestAppContext) {
+    let root = report_root("handoff-superseded");
+    crate::convert::tests::photo(16, 16)
+        .save(root.join("other.jpg"))
+        .expect("the second fixture photo is written");
+    let (audit, cx) = reviewing(&root, cx);
+    let hero = root.join("hero.jpg");
+    let other = root.join("other.jpg");
+
+    audit.update(cx, |audit, cx| {
+        let request = audit
+            .start_handoff_row_request("r1")
+            .expect("the row takes a request");
+        audit.apply_handoff_choice("r1", hero.clone(), request, cx);
+    });
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        // Confirm the first file, then change the row's mind and go back to it
+        // before that read has landed.
+        audit.confirm_handoff_row("r1", cx);
+        let second = audit
+            .start_handoff_row_request("r1")
+            .expect("the row takes a request");
+        audit.apply_handoff_choice("r1", other.clone(), second, cx);
+        let third = audit
+            .start_handoff_row_request("r1")
+            .expect("the row takes a request");
+        audit.apply_handoff_choice("r1", hero.clone(), third, cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        let row = audit
+            .handoff_review
+            .as_ref()
+            .expect("the review is open")
+            .row("r1")
+            .expect("the row");
+        assert!(
+            matches!(row.state, RowState::Unconfirmed),
+            "an in-flight read cannot confirm a choice that was made again: {}",
+            row.state.word()
+        );
+        assert_eq!(row.chosen.as_deref(), Some(hero.as_path()));
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Pointing the review at another folder retires the scan, the matches and
+/// every confirmation made under the old root, and never leaves a row saying
+/// it is still reading.
+#[gpui_kit::test]
+fn a_new_root_retires_the_confirmations_made_under_the_old_one(cx: &mut TestAppContext) {
+    let root = report_root("handoff-first-root");
+    let second = report_root("handoff-second-root");
+    let (audit, cx) = reviewing(&root, cx);
+    audit.update(cx, |audit, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit
+                .handoff_review
+                .as_ref()
+                .expect("the review is open")
+                .confirmed_count(),
+            1
+        );
+    });
+
+    audit.update(cx, |audit, cx| {
+        // A recheck in flight, and the folder changes underneath it.
+        audit.recheck_handoff_row("r1", cx);
+        audit.set_handoff_root(second.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        assert_eq!(review.root.as_deref(), Some(second.as_path()));
+        assert_eq!(review.confirmed_count(), 0);
+        let row = review.row("r1").expect("the row");
+        assert!(
+            !matches!(row.state, RowState::Busy),
+            "no row is left reading a folder nobody is reviewing"
+        );
+        assert_eq!(row.choices, vec![second.join("hero.jpg")]);
+    });
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&second);
+}
+
+/// A folder dialog the user cancels leaves the review as it was, without a row
+/// stuck on a read that was disowned when the dialog opened.
+#[gpui_kit::test]
+fn a_cancelled_folder_dialog_leaves_no_row_reading(cx: &mut TestAppContext) {
+    let root = report_root("handoff-cancelled-dialog");
+    let (audit, cx) = reviewing(&root, cx);
+    audit.update(cx, |audit, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+        // The user reaches for another folder while that read is out, and then
+        // dismisses the dialog: no root arrives, so nothing replaces the rows.
+        audit.retarget_handoff_review();
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        let row = audit
+            .handoff_review
+            .as_ref()
+            .expect("the review is still open")
+            .row("r1")
+            .expect("the row");
+        assert!(
+            matches!(row.state, RowState::Unconfirmed),
+            "the disowned read left the row usable, not {}",
+            row.state.word()
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Opening a folder replaces the dataset, and a review resolves one report
+/// against one folder: it retires with the folder it described.
+#[gpui_kit::test]
+fn a_new_dataset_retires_the_review(cx: &mut TestAppContext) {
+    let root = report_root("handoff-dataset");
+    let (audit, cx) = reviewing(&root, cx);
+    let generation = audit.read_with(cx, |audit, _| audit.handoff_generation);
+
+    let next = photo_fixture("handoff-new-folder", 1);
+    audit.update(cx, |audit, cx| audit.request_folder(next.clone(), cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.handoff_review.is_none(), "the review retired");
+        assert_ne!(
+            audit.handoff_generation, generation,
+            "and its detached work was disowned with it"
+        );
+    });
+    assert!(cx.debug_bounds("handoff-card").is_none());
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&next);
+}
+
+/// The card takes the keyboard when it opens, Tab moves between its own
+/// actions, and Escape closes it and gives the keyboard back to the list
+/// without the same key reaching the rows underneath.
+#[gpui_kit::test]
+fn the_review_holds_the_keyboard_and_escape_returns_it(cx: &mut TestAppContext) {
+    let root = report_root("handoff-keyboard");
+    let (audit, cx) = reviewing(&root, cx);
+
+    let first = cx.update(|window, cx| {
+        let card = audit.read(cx).handoff_review_focus.clone();
+        assert!(
+            card.contains_focused(window, cx),
+            "the keyboard is inside the review"
+        );
+        assert!(
+            !card.is_focused(window),
+            "focus sits on a button inside the review, not on its wrapper"
+        );
+        window
+            .focused(cx)
+            .expect("something inside holds the focus")
+    });
+    press_key(cx, "tab");
+    cx.update(|window, cx| {
+        let card = audit.read(cx).handoff_review_focus.clone();
+        let second = window.focused(cx).expect("Tab lands on another action");
+        assert!(card.contains_focused(window, cx), "Tab stays in the review");
+        assert_ne!(second, first, "Tab moved off the button it started on");
+    });
+
+    press_key(cx, "escape");
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.handoff_review.is_none(), "Escape closes the review");
+        assert!(
+            audit.compare.is_none(),
+            "the same key must not reach the list and open a comparison"
+        );
+    });
+    cx.update(|window, cx| assert!(audit.read(cx).focus.is_focused(window)));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The card is bounded and scrolls inside itself. On the narrowest window the
+/// app allows it stays inside the rail rather than growing past it.
+#[gpui_kit::test]
+fn the_review_card_stays_inside_a_narrow_window(cx: &mut TestAppContext) {
+    let root = report_root("handoff-narrow");
+    let (audit, cx) = convertible_audit(1, cx);
+    cx.simulate_resize(size(px(800.), px(600.)));
+    cx.run_until_parked();
+    open_review(&audit, &root, cx);
+
+    let settings = cx
+        .debug_bounds("rail-settings")
+        .expect("the rail's scrolling settings are drawn");
+    let card = cx
+        .debug_bounds("handoff-card")
+        .expect("the review card is drawn");
+    let body = cx
+        .debug_bounds("handoff-body")
+        .expect("the card's scrolling body is drawn");
+    assert!(
+        card.left() >= settings.left() && card.right() <= settings.right(),
+        "a long path never widens the card past the rail: {card:?} in {settings:?}"
+    );
+    assert!(
+        card.top() >= settings.top() && card.bottom() <= settings.bottom(),
+        "the whole card is visible on the narrowest window: {card:?} in {settings:?}"
+    );
+    assert!(
+        body.size.height <= px(super::handoff_view::CARD_MAX_HEIGHT),
+        "the resource list scrolls inside its bound rather than growing: {body:?}"
+    );
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.handoff_review.is_some(), "the review is still open");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every source read is bounded by the conversion limit, and a report may name
+/// five hundred resources. One read at a time, across the whole review: while
+/// one is out no other row can start another, and none of them offers to.
+#[gpui_kit::test]
+fn one_source_read_at_a_time_across_every_row(cx: &mut TestAppContext) {
+    let root = report_root_with_icon("handoff-one-read");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.update(cx, |audit, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.select_handoff_choice("r2", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+        assert!(
+            audit.handoff_reading,
+            "the first confirmation takes the slot"
+        );
+        // The second one is refused before it changes anything at all.
+        audit.confirm_handoff_row("r2", cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        assert!(matches!(
+            review.row("r1").expect("the first row").state,
+            RowState::Busy
+        ));
+        assert!(
+            matches!(
+                review.row("r2").expect("the second row").state,
+                RowState::Unconfirmed
+            ),
+            "the refused confirmation left its row exactly as it was"
+        );
+    });
+    // And no row offers the action while the slot is taken.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("handoff-confirm-1").is_some(),
+        "the second row's Confirm is still drawn, disabled"
+    );
+
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.handoff_reading,
+            "the finished read released the slot"
+        );
+        assert_eq!(
+            audit
+                .handoff_review
+                .as_ref()
+                .expect("the review is open")
+                .confirmed_count(),
+            1
+        );
+    });
+
+    audit.update(cx, |audit, cx| audit.confirm_handoff_row("r2", cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit
+                .handoff_review
+                .as_ref()
+                .expect("the review is open")
+                .confirmed_count(),
+            2,
+            "the second row confirms once the first read is done"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The slot belongs to the read, not to the review that started it. Cancelling
+/// and importing again does not hand out a second read while the first one is
+/// still running; the slot comes back when that read actually finishes.
+#[gpui_kit::test]
+fn a_retired_read_keeps_the_slot_until_it_finishes(cx: &mut TestAppContext) {
+    let root = report_root_with_icon("handoff-retired-read");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.update_in(cx, |audit, window, cx| {
+        audit.select_handoff_choice("r1", 0, cx);
+        audit.confirm_handoff_row("r1", cx);
+        assert!(audit.handoff_reading);
+        audit.cancel_handoff_review(window, cx);
+        assert!(
+            audit.handoff_reading,
+            "cancelling the review does not stop a read already running"
+        );
+        let generation = audit.handoff_generation;
+        audit.open_handoff_review(
+            PathBuf::from("press-handoff.json"),
+            producer_report(),
+            generation,
+            window,
+            cx,
+        );
+        assert!(
+            audit.handoff_reading,
+            "and neither does importing another report"
+        );
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.handoff_reading,
+            "the retired read released the slot when it finished"
+        );
+        let review = audit
+            .handoff_review
+            .as_ref()
+            .expect("the new review is open");
+        assert_eq!(review.confirmed_count(), 0, "and confirmed nothing in it");
+        assert!(
+            review.root.is_none(),
+            "the new review has its own folder to choose"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A folder Press could not read completely cannot prove a resource is absent.
+/// The review carries the walk's own diagnostics and says so on every row that
+/// found nothing.
+#[gpui_kit::test]
+fn an_incomplete_folder_read_is_carried_into_the_review(cx: &mut TestAppContext) {
+    let root = report_root("handoff-incomplete-scan");
+    // A file that claims to be an image and is not: the walk sees it, fails to
+    // probe it, and records it rather than passing it to matching.
+    std::fs::write(root.join("broken.png"), b"not a png at all")
+        .expect("the broken file is written");
+    let (audit, cx) = reviewing(&root, cx);
+
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let scan = review.scan.as_ref().expect("the walk is recorded");
+        assert_eq!(scan.images, 1, "only the real image reached matching");
+        assert_eq!(scan.unreadable_total, 1);
+        assert!(scan.incomplete());
+
+        let lines = super::handoff_actions::provenance_lines(review);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("not read completely")),
+            "{lines:#?}"
+        );
+        assert!(lines.contains(&"  broken.png".to_string()), "{lines:#?}");
+
+        // `r2` found nothing here, and that is not the same as absent.
+        let icon = review.row("r2").expect("the unmatched row");
+        assert_eq!(icon.verdict, Some(crate::handoff::Verdict::Unmatched));
+        assert!(
+            super::handoff_actions::resource_lines(review, icon)[0].contains("not read completely"),
+            "an unmatched row from a partial walk says so"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Two candidates that share a basename are drawn as the different files they
+/// are, and choosing one keeps that file's own path.
+#[gpui_kit::test]
+fn duplicate_candidates_are_drawn_apart_and_keep_their_paths(cx: &mut TestAppContext) {
+    let root = scan_fixture("handoff-duplicates");
+    // The two folders share a prefix longer than a drawn line, which is the
+    // case an end clip loses.
+    let deep = "campaign-autumn-2026-approved-final".repeat(6);
+    for folder in ["a", "b"] {
+        let inside = root.join(&deep).join(folder);
+        std::fs::create_dir_all(&inside).expect("the subfolder is created");
+        crate::convert::tests::photo(8, 8)
+            .save(inside.join("icon.webp"))
+            .expect("the duplicate fixture is written");
+    }
+    let (audit, cx) = reviewing(&root, cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("handoff-choice-1-0").is_some()
+            && cx.debug_bounds("handoff-choice-1-1").is_some(),
+        "both candidates are drawn as their own chip"
+    );
+
+    let labels = audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let row = review.row("r2").expect("the icon row");
+        assert_eq!(row.verdict, Some(crate::handoff::Verdict::Ambiguous));
+        assert_eq!(row.choices.len(), 2, "both files are offered");
+        row.choices
+            .iter()
+            .map(|path| super::handoff_actions::choice_labels(review.root.as_deref(), path))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(labels.len(), 2);
+    assert_ne!(
+        labels[0].0, labels[1].0,
+        "two files called icon.webp are not drawn as the same label: {labels:?}"
+    );
+    assert_ne!(
+        labels[0].1, labels[1].1,
+        "and the name each one announces differs too"
+    );
+
+    // Choose the second by its position in the row's own list, and check the
+    // row kept that file's path rather than anything read off a label.
+    audit.update(cx, |audit, cx| audit.select_handoff_choice("r2", 1, cx));
+    audit.read_with(cx, |audit, _| {
+        let review = audit.handoff_review.as_ref().expect("the review is open");
+        let row = review.row("r2").expect("the icon row");
+        let expected = row.choices[1].clone();
+        assert_eq!(row.chosen.as_deref(), Some(expected.as_path()));
+        assert!(
+            expected.parent().is_some_and(|parent| parent != root),
+            "the kept path is the one inside its own subfolder: {expected:?}"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
