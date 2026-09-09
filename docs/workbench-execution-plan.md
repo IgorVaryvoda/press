@@ -194,7 +194,7 @@ D3 preparation experiment was stopped and is not part of this tree.
 | Slice | Landed evidence | Boundary at closeout |
 | --- | --- | --- |
 | F1 | Exact source/output identity, bounded consumed bytes, recipe processing revision and content-verified reuse in `b6570f6` | GUI preparation parity remains open under D3 |
-| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated, and the export review's keyboard lifecycle followed on `codex/workbench-export-focus` | The review's focus ring and the real Save picker still need a native-window proof; no complete UI or all-platform claim |
+| F2/F3 subset | Bounded imports, privacy preview, explicit saved-job choice and asynchronous ownership in `b6570f6`; F3 visibility and native export were demonstrated, and the export review's keyboard lifecycle followed on `codex/workbench-export-focus` at `1b520fe`, proved in a native Linux window | Linux only; macOS and Windows stay with native CI, and no complete UI claim follows |
 | D2 | Strict local requirements snapshots and actual-output reports in `b6570f6`; use `press check <file-or-folder> --requirements-file <spec> [--json]` | Requirements are local and user-authored; required unsupported checks stay `not_checked`, so a report is not approval |
 | Muse Spark fakehost | The fixture-only supplier and interrupted Studio rehearsal review was completed through `698e990` (supplier base `e447f41`) with explicit fake scripts and durable local attempts | No native auth, retailer service, hosted inference, billing or live pilot was performed |
 | A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
@@ -236,8 +236,25 @@ Escape stop at the review instead of reaching the list behind it. Cancel, Escape
 and a completed save all hand the keyboard back to the list. Four GPUI tests
 drive the real dropdown, the delivered frame and whole key presses, because
 `simulate_keystrokes` sends only the key down while a button activates on the
-key up. The focus ring and the real Save picker at 800x600 remain a
-native-window proof this host has not recorded.
+key up.
+
+Root independently re-ran the gates on that commit — 666 passed by default and
+682 with the updater feature, plus all-targets/all-features clippy and
+`cargo fmt --check` — and reviewed the code before it was proved in a native
+window rather than argued from tests. Root ran the normal `cargo build --locked`
+debug app, not a release build, from source `1b520fe`, binary SHA-256
+`6223460b66958e1b3377359c3652791c417c5a3804941bb5d7517a7634c33eb5`, at 800x600
+under an isolated Gamescope session with a private X11 display and DBus.
+Choosing the Alpha job explicitly and pressing Up then Enter in the job dropdown
+opened the review with a visible focus ring on Export. Return opened the real
+native Save dialog; cancelling that dialog left the review up and Export still
+usable. Tab visibly reached Cancel, Enter there closed the review, and Escape
+closed it too. An explicit Save wrote the 647-byte Alpha catalog portable job,
+SHA-256 `c2750313dc9a46d0742546be824a8bd13854d4b4b75c1e28ae18d58a89aa23e9`, and
+closed the review, after which Down moved the audit cursor again. Root reviewed
+the screenshots; they and `proof.json` stay under `ux/` in the workbench
+worktree as review artifacts, untracked here and not release proof. The proof is
+Linux only: macOS and Windows remain the separate native CI gate.
 
 ### Isolated checkpoints for tomorrow
 
