@@ -1704,6 +1704,70 @@ struct HandoffLocalSummary {
     differs: usize,
     missing: usize,
     ambiguous: usize,
+    /// Resources the check never looked for. A summary of matches alone
+    /// would read as a complete checklist when it is not.
+    not_checked: usize,
+}
+
+/// Where one scan happened, in the vocabulary of the flag that asked for it.
+const SOURCE_SCAN: &str = "source_root";
+const LOCAL_CHECK_SCAN: &str = "local_check_root";
+
+/// What one header-only walk could not read, kept beside the results it
+/// shortened and tagged with the root it came from. Names are bounded like a
+/// mapping's choices — past `MAX_SHOWN_CHOICES` the omission count travels
+/// instead of the paths — so a diagnostic never turns the report into a
+/// directory listing. Files excluded by design are counted apart and are not
+/// failures: no decoder is claimed for them here.
+#[derive(Serialize)]
+struct HandoffScanDiagnostics {
+    root: String,
+    scope: &'static str,
+    /// Files that look like images by extension and would not decode.
+    unreadable: Vec<String>,
+    unreadable_total: usize,
+    unreadable_omitted: usize,
+    /// Directories the walk could not enter: every count beside them is short.
+    walk_errors: Vec<String>,
+    walk_errors_total: usize,
+    walk_errors_omitted: usize,
+    excluded_raw: usize,
+    excluded_heic: usize,
+    excluded_packages: usize,
+    /// False when anything above could not be read or entered, which makes
+    /// every result beside it provisional: a competing file may be unseen.
+    complete: bool,
+}
+
+/// Sorted names up to the shared bound, with however many were left out.
+fn bounded_paths(paths: &[PathBuf]) -> (Vec<String>, usize) {
+    let mut names = sorted_paths(paths);
+    let omitted = names.len().saturating_sub(handoff::MAX_SHOWN_CHOICES);
+    names.truncate(handoff::MAX_SHOWN_CHOICES);
+    (names, omitted)
+}
+
+fn scan_diagnostics(
+    root: &Path,
+    scope: &'static str,
+    scanned: &scan::Scan,
+) -> HandoffScanDiagnostics {
+    let (unreadable, unreadable_omitted) = bounded_paths(&scanned.unreadable);
+    let (walk_errors, walk_errors_omitted) = bounded_paths(&scanned.walk_errors);
+    HandoffScanDiagnostics {
+        root: path_text(root),
+        scope,
+        unreadable,
+        unreadable_total: scanned.unreadable.len(),
+        unreadable_omitted,
+        walk_errors,
+        walk_errors_total: scanned.walk_errors.len(),
+        walk_errors_omitted,
+        excluded_raw: scanned.skipped_raw,
+        excluded_heic: scanned.skipped_heic,
+        excluded_packages: scanned.skipped_packages,
+        complete: scanned.unreadable.is_empty() && scanned.walk_errors.is_empty(),
+    }
 }
 
 #[derive(Serialize)]
@@ -1728,6 +1792,10 @@ struct HandoffReport {
     local_checks: Option<Vec<handoff::LocalCheck>>,
     local_summary: Option<HandoffLocalSummary>,
     local_evidence_scope: Option<&'static str>,
+    /// One entry per folder actually walked, empty when the report was only
+    /// validated. These are this run's filesystem diagnostics; `pending`
+    /// stays exactly what the producer sent and never acquires them.
+    scans: Vec<HandoffScanDiagnostics>,
 }
 
 fn handoff_report(
@@ -1735,6 +1803,7 @@ fn handoff_report(
     pending: &handoff::PendingHandoff,
     mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
     local: Option<(&PathBuf, &Vec<handoff::LocalCheck>)>,
+    scans: Vec<HandoffScanDiagnostics>,
 ) -> HandoffReport {
     let (root, mappings, summary) = match mapped {
         None => (None, None, None),
@@ -1766,6 +1835,7 @@ fn handoff_report(
                 differs: 0,
                 missing: 0,
                 ambiguous: 0,
+                not_checked: 0,
             };
             for check in checks {
                 match check.status {
@@ -1773,6 +1843,7 @@ fn handoff_report(
                     handoff::LocalCheckStatus::Differs => summary.differs += 1,
                     handoff::LocalCheckStatus::Missing => summary.missing += 1,
                     handoff::LocalCheckStatus::Ambiguous => summary.ambiguous += 1,
+                    handoff::LocalCheckStatus::NotChecked => summary.not_checked += 1,
                 }
             }
             (
@@ -1798,6 +1869,7 @@ fn handoff_report(
         local_checks,
         local_summary,
         local_evidence_scope,
+        scans,
     }
 }
 
@@ -1806,12 +1878,15 @@ fn handoff_report(
 /// mapped root every resource gets one verdict line; candidates name the
 /// file they resemble without claiming it. Local-check lines follow the same
 /// shape under a heading that states how far they reach, and open findings
-/// stay listed as page work, never as closed items.
+/// stay listed as page work, never as closed items. Each walked root reports
+/// what it could not read directly under its own heading, so a short scan is
+/// never invisible beside the results it shortened.
 fn print_handoff(
     target: &Path,
     pending: &handoff::PendingHandoff,
     mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
     local: Option<(&PathBuf, &Vec<handoff::LocalCheck>)>,
+    scans: &[HandoffScanDiagnostics],
 ) {
     outln!(
         "{}: task {} from {}: {} resources",
@@ -1822,6 +1897,9 @@ fn print_handoff(
     );
     if let Some((root, mappings)) = mapped {
         outln!("mapped against {}", root.display());
+        if let Some(diagnostics) = scans.iter().find(|scan| scan.scope == SOURCE_SCAN) {
+            print_scan_diagnostics(diagnostics);
+        }
         for mapping in mappings {
             let detail = mapping.paths.first().map(String::as_str).unwrap_or("-");
             outln!(
@@ -1838,6 +1916,9 @@ fn print_handoff(
     if let Some((root, checks)) = local {
         outln!("local file check under {}", root.display());
         outln!("  scope: {}", handoff::LOCAL_EVIDENCE_SCOPE);
+        if let Some(diagnostics) = scans.iter().find(|scan| scan.scope == LOCAL_CHECK_SCAN) {
+            print_scan_diagnostics(diagnostics);
+        }
         for check in checks {
             let detail = check.paths.first().map(String::as_str).unwrap_or("-");
             outln!(
@@ -1850,9 +1931,15 @@ fn print_handoff(
                 outln!("  note: {note}");
             }
         }
-        let mut findings: Vec<&str> = checks
+        // Every reported resource keeps its findings here, including one the
+        // check never looked for: an unmatched image's page work is still open.
+        // They are the producer's observations, listed as items, never as
+        // instructions to carry out.
+        let mut findings: Vec<&str> = pending
+            .handoff
+            .resources
             .iter()
-            .flat_map(|check| check.findings.iter().map(String::as_str))
+            .flat_map(|resource| resource.findings.iter().map(String::as_str))
             .collect();
         findings.sort_unstable();
         findings.dedup();
@@ -1874,6 +1961,45 @@ fn local_status_word(status: handoff::LocalCheckStatus) -> &'static str {
         handoff::LocalCheckStatus::Differs => "differs",
         handoff::LocalCheckStatus::Missing => "missing",
         handoff::LocalCheckStatus::Ambiguous => "ambiguous",
+        handoff::LocalCheckStatus::NotChecked => "not_checked",
+    }
+}
+
+/// A scan's own shortfalls, printed under the heading of the root they belong
+/// to. A complete walk with nothing excluded prints nothing.
+fn print_scan_diagnostics(diagnostics: &HandoffScanDiagnostics) {
+    if !diagnostics.complete {
+        outln!(
+            "  scan incomplete: {} would not decode, {} could not be entered",
+            diagnostics.unreadable_total,
+            diagnostics.walk_errors_total
+        );
+        for path in &diagnostics.unreadable {
+            outln!("    would not decode: {path}");
+        }
+        if diagnostics.unreadable_omitted > 0 {
+            outln!(
+                "    …and {} more that would not decode",
+                diagnostics.unreadable_omitted
+            );
+        }
+        for path in &diagnostics.walk_errors {
+            outln!("    could not enter: {path}");
+        }
+        if diagnostics.walk_errors_omitted > 0 {
+            outln!(
+                "    …and {} more that could not be entered",
+                diagnostics.walk_errors_omitted
+            );
+        }
+    }
+    if diagnostics.excluded_raw + diagnostics.excluded_heic + diagnostics.excluded_packages > 0 {
+        outln!(
+            "  excluded by design, not read here: {} raw, {} heic, {} packages",
+            diagnostics.excluded_raw,
+            diagnostics.excluded_heic,
+            diagnostics.excluded_packages
+        );
     }
 }
 
@@ -2397,6 +2523,7 @@ fn main() {
                 // Mapping reads the chosen root through the same header-only
                 // walk as an audit. It never converts: candidates wait for
                 // explicit confirmation.
+                let mut scans = Vec::new();
                 let mapped = match args.map_root.as_deref() {
                     None => None,
                     Some(map_root) => {
@@ -2405,7 +2532,7 @@ fn main() {
                             std::process::exit(2);
                         }
                         let scanned = scan::scan(map_root, &map_root.join(scan::OUTPUT_DIR));
-                        print_scan_errors(&scanned);
+                        scans.push(scan_diagnostics(map_root, SOURCE_SCAN, &scanned));
                         Some((
                             map_root.to_path_buf(),
                             handoff::map_to_root(&pending.handoff, map_root, &scanned.entries),
@@ -2425,7 +2552,7 @@ fn main() {
                             std::process::exit(2);
                         }
                         let local_scan = scan::scan(local_root, &local_root.join(scan::OUTPUT_DIR));
-                        print_scan_errors(&local_scan);
+                        scans.push(scan_diagnostics(local_root, LOCAL_CHECK_SCAN, &local_scan));
                         let checks = match mapped {
                             Some((_, mappings)) => handoff::check_local_files(
                                 &pending.handoff,
@@ -2438,22 +2565,33 @@ fn main() {
                     }
                 };
                 let local = local.as_ref().map(|local| (&local.0, &local.1));
+                // A walk that could not read everything leaves every result
+                // beside it provisional — an unseen file may be the competing
+                // match — so it is a failure on its own, with or without a
+                // local check. Files excluded by design are not that: they are
+                // counted and no decoder is claimed for them.
+                let incomplete = scans.iter().any(|scan| !scan.complete);
+                // Gaps in the local check are an incomplete checklist, not a
+                // clean bill: exit 1 names work left, like a partial run. A
+                // resource the check never looked for is such a gap, so a pass
+                // needs one row per reported resource and every one of them
+                // matching.
+                let gaps = local.is_some_and(|(_, checks)| {
+                    checks.len() != pending.handoff.resources.len()
+                        || checks.iter().any(|check| {
+                            !matches!(check.status, handoff::LocalCheckStatus::LocalMatch)
+                        })
+                });
                 if args.json {
-                    if write_json(&handoff_report(&target, &pending, mapped, local)).is_err() {
+                    if write_json(&handoff_report(&target, &pending, mapped, local, scans)).is_err()
+                    {
                         eprintln!("press: could not write JSON");
                         std::process::exit(1);
                     }
                 } else {
-                    print_handoff(&target, &pending, mapped, local);
+                    print_handoff(&target, &pending, mapped, local, &scans);
                 }
-                // Gaps in the local check are an incomplete checklist, not a
-                // clean bill: exit 1 names work left, like a partial run.
-                let gaps = local.is_some_and(|(_, checks)| {
-                    checks
-                        .iter()
-                        .any(|check| !matches!(check.status, handoff::LocalCheckStatus::LocalMatch))
-                });
-                std::process::exit(i32::from(gaps));
+                std::process::exit(i32::from(incomplete || gaps));
             }
             Err(message) => {
                 eprintln!("press: {}: {message}", target.display());
@@ -5315,6 +5453,62 @@ mod tests {
         );
         assert!(parse(&["restore", "/photos", "--json"]).is_err());
         assert!(parse(&["restore", "/photos", "--avif"]).is_err());
+    }
+
+    /// Walk errors need a directory the process may not enter, which no
+    /// portable fixture can arrange without changing permissions. The scan
+    /// carries them as plain paths, so the diagnostic is exercised from a
+    /// synthetic scan instead.
+    #[test]
+    fn scan_diagnostics_name_a_bounded_few_and_count_the_rest() {
+        let many: Vec<PathBuf> = (0..11)
+            .map(|n| PathBuf::from(format!("/r/{n:02}.png")))
+            .collect();
+        let scanned = scan::Scan {
+            entries: Vec::new(),
+            skipped_raw: 2,
+            skipped_heic: 1,
+            skipped_packages: 0,
+            unreadable: many,
+            walk_errors: vec![PathBuf::from("/r/locked")],
+            existing_output: 0,
+        };
+        let diagnostics = scan_diagnostics(Path::new("/r"), SOURCE_SCAN, &scanned);
+        assert_eq!(diagnostics.scope, SOURCE_SCAN);
+        assert_eq!(diagnostics.root, "/r");
+        // The names stop at the shared bound; the remainder travels as a count.
+        assert_eq!(diagnostics.unreadable.len(), handoff::MAX_SHOWN_CHOICES);
+        assert_eq!(diagnostics.unreadable_total, 11);
+        assert_eq!(
+            diagnostics.unreadable_omitted,
+            11 - handoff::MAX_SHOWN_CHOICES
+        );
+        assert_eq!(diagnostics.unreadable[0], "/r/00.png");
+        assert_eq!(diagnostics.walk_errors, vec!["/r/locked".to_string()]);
+        assert_eq!(diagnostics.walk_errors_total, 1);
+        assert_eq!(diagnostics.walk_errors_omitted, 0);
+        assert!(
+            !diagnostics.complete,
+            "an unenterable folder shortens the walk"
+        );
+        // Raw and HEIC are excluded by design, counted rather than blamed:
+        // leaving them out is policy, not a failure to read them.
+        assert_eq!(diagnostics.excluded_raw, 2);
+        assert_eq!(diagnostics.excluded_heic, 1);
+        let excluded_only = scan::Scan {
+            entries: Vec::new(),
+            skipped_raw: 3,
+            skipped_heic: 4,
+            skipped_packages: 5,
+            unreadable: Vec::new(),
+            walk_errors: Vec::new(),
+            existing_output: 0,
+        };
+        let diagnostics = scan_diagnostics(Path::new("/r"), LOCAL_CHECK_SCAN, &excluded_only);
+        assert!(
+            diagnostics.complete,
+            "excluded types do not make a walk incomplete"
+        );
     }
 
     #[test]

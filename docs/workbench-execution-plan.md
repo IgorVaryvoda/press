@@ -286,6 +286,26 @@ corrects an unreleased draft — `git tag --contains 9f2031a` is still empty —
 `HandoffReport.schema_version` stays `1` and the producer's envelope schema is
 untouched.
 
+Review of that first attempt found two ways the corrected labels could still
+read as more than they were, and both are fixed here. The check now returns one
+row per reported resource: a resource whose mapping pinned down no single local
+file comes back `not_checked` with the verdict that caused it, counted in
+`local_summary.not_checked`, so a report of nothing but unmatched resources no
+longer produces an empty checklist, an all-zero summary and exit 0. A pass now
+needs one row per resource and every one of them matching. The human text takes
+its open findings from every pending resource rather than from the rows that
+found a file, so an unmatched image's page work stays listed.
+
+Both walks also carry their own shortfalls into the report. Each folder actually
+scanned appears under `scans` with its root and a `source_root` or
+`local_check_root` scope, naming what would not decode and what could not be
+entered — bounded at `MAX_SHOWN_CHOICES` names with explicit totals and omission
+counts — and an incomplete walk exits 1 whether or not a local check was asked
+for, because an unread file may be the competing match nobody saw. Raw, HEIC and
+package files stay excluded by design and are counted apart from failures; no
+decoder is claimed for them. The producer's `pending` report is untouched by any
+of this: filesystem trouble belongs to the run, not to what the producer sent.
+
 This is a truthfulness repair to one label set, not H3. Deployment, re-audit,
 the local-export versus deployed distinction, changed viewport/model evidence
 and the rest of

@@ -224,6 +224,10 @@ pub enum LocalCheckStatus {
     Missing,
     /// Several local files meet the constraints: a choice, not a badge.
     Ambiguous,
+    /// The mapping pinned down no single local file, so nothing was looked
+    /// for. An unmatched, ambiguous or out-of-scope resource leaves a hole in
+    /// the checklist, and a hole is never a pass.
+    NotChecked,
 }
 
 /// One resource's local-file verdict. Findings ride along as open items:
@@ -302,12 +306,40 @@ fn constraint_violations(resource: &HandoffResource, entry: &crate::scan::Entry)
     violations
 }
 
-/// Check every pinned-down mapping against a scan of a second local folder.
-/// Only path-match and candidate mappings carry exactly one local file, so
-/// only they are checked: ambiguous mappings name several, and the rest name
-/// no file to look for. Association is by file stem, exactly or with a
-/// `-suffix`/`_suffix` derivative name — never by bytes, which re-encoding
-/// changes, and never by resemblance.
+/// Why one resource was not checked, named rather than counted. The wording
+/// stays in the mapping's own vocabulary so a reader can trace the hole back
+/// to the verdict that caused it.
+fn unchecked_reason(mapping: Option<&Mapping>) -> String {
+    let Some(mapping) = mapping else {
+        return "no mapping under the source root: nothing was looked for".to_string();
+    };
+    match mapping.verdict {
+        Verdict::PathMatch | Verdict::Candidate => {
+            if mapping.paths.len() == 1 {
+                "the mapped path has no filename to look for".to_string()
+            } else {
+                format!(
+                    "the {} mapping names {} files, not one",
+                    verdict_word(mapping.verdict),
+                    mapping.paths.len()
+                )
+            }
+        }
+        verdict => format!(
+            "{} under the source root: no single local file to look for",
+            verdict_word(verdict)
+        ),
+    }
+}
+
+/// Check the report against a scan of a second local folder, one row per
+/// resource in report order. Only path-match and candidate mappings carry
+/// exactly one local file, so only they are looked for; ambiguous mappings
+/// name several and the rest name none, and those resources come back
+/// `NotChecked` rather than absent, so the caller can see the checklist is
+/// short. Association is by file stem, exactly or with a `-suffix`/`_suffix`
+/// derivative name — never by bytes, which re-encoding changes, and never by
+/// resemblance.
 ///
 /// This reads a directory on this machine. It cannot see what a website
 /// serves, so a `LocalMatch` says a suitably named, suitably shaped file
@@ -322,21 +354,29 @@ pub fn check_local_files(
     local: &[crate::scan::Entry],
 ) -> Vec<LocalCheck> {
     let mut checks = Vec::new();
-    for mapping in mappings {
-        if !matches!(mapping.verdict, Verdict::PathMatch | Verdict::Candidate)
-            || mapping.paths.len() != 1
-        {
-            continue;
-        }
-        let Some(resource) = handoff
-            .resources
-            .iter()
-            .find(|known| known.id == mapping.id)
-        else {
-            continue;
+    for resource in &handoff.resources {
+        let mapping = mappings.iter().find(|mapping| mapping.id == resource.id);
+        // Only a mapping that pinned down exactly one local file names a stem
+        // to look for. Every other resource still gets a row, because the
+        // caller asked about the whole report and a silent omission would read
+        // as a clean checklist.
+        let stem = match mapping {
+            Some(mapping)
+                if matches!(mapping.verdict, Verdict::PathMatch | Verdict::Candidate)
+                    && mapping.paths.len() == 1 =>
+            {
+                stem_of(std::path::Path::new(&mapping.paths[0]))
+            }
+            _ => String::new(),
         };
-        let stem = stem_of(std::path::Path::new(&mapping.paths[0]));
         if stem.is_empty() {
+            checks.push(LocalCheck {
+                id: resource.id.clone(),
+                status: LocalCheckStatus::NotChecked,
+                paths: Vec::new(),
+                notes: vec![unchecked_reason(mapping)],
+                findings: resource.findings.clone(),
+            });
             continue;
         }
         let mut exact = Vec::new();
@@ -356,7 +396,7 @@ pub fn check_local_files(
         let pool = if exact.is_empty() { suffixed } else { exact };
         if pool.is_empty() {
             checks.push(LocalCheck {
-                id: mapping.id.clone(),
+                id: resource.id.clone(),
                 status: LocalCheckStatus::Missing,
                 paths: Vec::new(),
                 notes: Vec::new(),
@@ -400,7 +440,7 @@ pub fn check_local_files(
             notes.push(format!("…and {hidden} more"));
         }
         checks.push(LocalCheck {
-            id: mapping.id.clone(),
+            id: resource.id.clone(),
             status,
             paths,
             notes,
@@ -1752,11 +1792,23 @@ mod mapping_tests {
         assert_eq!(checks[0].status, LocalCheckStatus::Ambiguous);
         let checks = check_local_files(&handoff, &mappings, &[]);
         assert_eq!(checks[0].status, LocalCheckStatus::Missing);
-        // Unpinned mappings check nothing at all.
+        // An unpinned mapping names no file to look for, and says so in its
+        // own row: the resource keeps its findings and never falls out of the
+        // checklist.
         let mut floating = mappings;
         floating[0].verdict = Verdict::Ambiguous;
         floating[0].paths = vec!["a".into(), "b".into()];
-        assert!(check_local_files(&handoff, &floating, &[]).is_empty());
+        let checks = check_local_files(&handoff, &floating, &[]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, LocalCheckStatus::NotChecked);
+        assert!(checks[0].paths.is_empty());
+        assert!(checks[0].notes[0].contains("ambiguous"), "{:?}", checks[0]);
+        assert_eq!(checks[0].findings, vec!["excess-dimensions".to_string()]);
+        // A resource nothing mapped at all is a hole too, not an omission.
+        let orphan = check_local_files(&handoff, &[], &[]);
+        assert_eq!(orphan.len(), 1);
+        assert_eq!(orphan[0].status, LocalCheckStatus::NotChecked);
+        assert!(orphan[0].notes[0].contains("no mapping"), "{:?}", orphan[0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -706,6 +706,232 @@ fn handoff_local_check_empty_tree_reports_missing() {
 }
 
 #[test]
+fn handoff_local_check_covers_every_resource_and_never_passes_a_hole() {
+    let dir = workdir("local-check-unmatched");
+    let (root, checked) = local_check_tree(&dir);
+    // Neither resource is under the source root, so nothing is looked for.
+    let mut resources = vec![
+        constrained_resource("absent-one", &["avif"]),
+        constrained_resource("absent-two", &["avif"]),
+    ];
+    resources[0]["path_hints"] = serde_json::json!(["nowhere-one.jpg"]);
+    resources[1]["path_hints"] = serde_json::json!(["nowhere-two.jpg"]);
+    let report = mapping_report(&dir, "report.json", serde_json::json!(resources));
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+        "--json",
+    ]);
+    // Nothing checked is a short checklist, not a clean one.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    let checks = doc["local_checks"].as_array().expect("checks list");
+    assert_eq!(checks.len(), 2, "one row per reported resource");
+    for check in checks {
+        assert_eq!(check["status"], "not_checked");
+        assert!(
+            check["notes"][0]
+                .as_str()
+                .expect("a reason")
+                .contains("unmatched"),
+            "the hole names the verdict that caused it: {check}"
+        );
+        // The page work an unmatched image still owes stays on its row.
+        assert_eq!(
+            check["findings"],
+            serde_json::json!(["excess-dimensions", "missing-alt"])
+        );
+    }
+    assert_eq!(doc["local_summary"]["not_checked"], 2);
+    assert_eq!(doc["local_summary"]["local_match"], 0);
+    // The text listing keeps those findings open too.
+    let text = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+    ]);
+    assert_eq!(text.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(
+        text.contains("not_checked absent-one") && text.contains("not_checked absent-two"),
+        "every resource is listed: {text}"
+    );
+    assert!(
+        text.contains("open findings") && text.contains("missing-alt"),
+        "findings survive a resource nothing looked for: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_local_check_mixes_matches_and_holes_without_losing_either() {
+    let dir = workdir("local-check-mixed");
+    let (root, checked) = local_check_tree(&dir);
+    let mut resources = vec![
+        constrained_resource("hero", &["avif"]),
+        constrained_resource("absent", &["avif"]),
+    ];
+    resources[1]["path_hints"] = serde_json::json!(["nowhere.jpg"]);
+    let report = mapping_report(&dir, "report.json", serde_json::json!(resources));
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+        "--json",
+    ]);
+    // One real match does not carry the resource beside it.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    let statuses: Vec<&str> = doc["local_checks"]
+        .as_array()
+        .expect("checks list")
+        .iter()
+        .map(|check| check["status"].as_str().expect("a status"))
+        .collect();
+    assert_eq!(statuses, vec!["local_match", "not_checked"]);
+    assert_eq!(doc["local_summary"]["local_match"], 1);
+    assert_eq!(doc["local_summary"]["not_checked"], 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_reports_what_each_scan_could_not_read_and_fails() {
+    let dir = workdir("local-check-unreadable");
+    let (root, checked) = local_check_tree(&dir);
+    // A file that claims an image extension and would not decode, in each
+    // walked root. Neither is the mapped file, so the match still succeeds
+    // and only the short walk stands between it and a clean exit.
+    std::fs::write(root.join("broken-source.png"), b"not a png at all")
+        .expect("the source fixture is written");
+    std::fs::write(checked.join("broken-local.png"), b"not a png at all")
+        .expect("the local fixture is written");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([constrained_resource("hero", &["avif"])]),
+    );
+    let output = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+        "--json",
+    ]);
+    // The resource still matches, and the run still fails: an unread file may
+    // be the competing match nobody saw.
+    assert_eq!(output.status.code(), Some(1));
+    let doc = stdout_json(&output);
+    assert_eq!(doc["local_checks"][0]["status"], "local_match");
+    let scans = doc["scans"].as_array().expect("one entry per walked root");
+    assert_eq!(scans.len(), 2);
+    for (scope, expected_root, broken) in [
+        ("source_root", &root, "broken-source.png"),
+        ("local_check_root", &checked, "broken-local.png"),
+    ] {
+        let scan = scans
+            .iter()
+            .find(|scan| scan["scope"] == scope)
+            .unwrap_or_else(|| panic!("{scope} is reported"));
+        assert_eq!(scan["root"], expected_root.to_string_lossy().as_ref());
+        assert_eq!(scan["complete"], false);
+        assert_eq!(scan["unreadable_total"], 1);
+        assert_eq!(scan["unreadable_omitted"], 0);
+        assert_eq!(scan["walk_errors_total"], 0);
+        assert!(
+            scan["unreadable"][0]
+                .as_str()
+                .expect("the named file")
+                .ends_with(broken),
+            "the diagnostic names the file, not a count: {scan}"
+        );
+    }
+    // The producer's own report never acquires this run's filesystem trouble.
+    assert!(
+        !serde_json::to_string(&doc["pending"])
+            .expect("pending serializes")
+            .contains("broken-source.png"),
+        "pending stays what the producer sent"
+    );
+    let text = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--deployed",
+        &checked.to_string_lossy(),
+    ]);
+    assert_eq!(text.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert_eq!(
+        text.matches("scan incomplete").count(),
+        2,
+        "each root reports its own short walk: {text}"
+    );
+    assert!(
+        text.contains("would not decode: ") && text.contains("broken-local.png"),
+        "the human text names the unread files: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn handoff_mapping_alone_still_passes_but_not_with_a_short_walk() {
+    let dir = workdir("mapping-scan");
+    let root = dir.join("photos");
+    std::fs::create_dir_all(&root).expect("the root is created");
+    std::fs::write(root.join("hero.jpg"), photo_png()).expect("hero is written");
+    let report = mapping_report(
+        &dir,
+        "report.json",
+        serde_json::json!([minimal_resource("r1", &["hero.jpg"])]),
+    );
+    // Mapping on its own is a listing, not a checklist: unmatched resources
+    // do not fail it and a clean walk exits 0.
+    let clean = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(clean.status.code(), Some(0));
+    let doc = stdout_json(&clean);
+    assert_eq!(doc["scans"].as_array().map(Vec::len), Some(1));
+    assert_eq!(doc["scans"][0]["scope"], "source_root");
+    assert_eq!(doc["scans"][0]["complete"], true);
+    assert!(
+        doc["local_checks"].is_null(),
+        "no local check was asked for"
+    );
+    // The same run over a folder the walk could not fully read does fail.
+    std::fs::write(root.join("broken.png"), b"not a png at all").expect("the fixture is written");
+    let short = run(&[
+        "handoff",
+        &report.to_string_lossy(),
+        "--root",
+        &root.to_string_lossy(),
+        "--json",
+    ]);
+    assert_eq!(short.status.code(), Some(1));
+    let doc = stdout_json(&short);
+    assert_eq!(doc["scans"][0]["complete"], false);
+    assert_eq!(doc["scans"][0]["unreadable_total"], 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn convert_targets_write_each_namespace_with_its_recipe() {
     let dir = workdir("targets");
     photo(&dir, "a.png");
