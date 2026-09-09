@@ -309,11 +309,13 @@ remote log and from the locally reproduced equivalent, not observed: native proo
 stays pending on the next remote CI run, which has to be pushed before any
 all-platform claim.
 
-Not covered: the window's multi-item drop path (`request_folders`/`request_files`)
-still installs the dropped spelling as its root, so folders dropped through an
-alias keep the same split. Its normal open path is already canonical through
-`navigation_path`, and resolving a drop would put filesystem work on the UI
-thread, so it is left as it stands rather than changed here.
+No window change was needed. Every production entry into the audit normalizes
+first: `request_path` resolves a single opened path through `navigation_path`,
+and `request_paths` maps the same resolver over every dropped or picked path
+before `batch_root` derives a root from them, so the multi-item drop reaches
+`request_folders`/`request_files` with its root and its paths already in one
+canonical spelling. `build_audit` resolves its launch root the same way, and the
+window's own launch carries no entries.
 
 The browser producer H1 has landed on the extension's `main` at `2e56550` and
 PR 3 passes all checks. Nothing about H2 or H3 follows from that.
