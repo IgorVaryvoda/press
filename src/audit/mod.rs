@@ -473,6 +473,11 @@ pub(crate) struct Audit {
     /// choice, cancel and dataset replacement, so a picker, scan or read that
     /// finishes afterwards cannot revive a review that is gone.
     handoff_generation: u64,
+    /// The one source read a review may have out at a time. Each read is
+    /// bounded by the conversion source limit, so a report's five hundred
+    /// rows must not be five hundred of them; the slot outlives the review
+    /// that started the read, because the read itself does.
+    handoff_reading: bool,
     /// The review card owns the keyboard while it is open.
     handoff_review_focus: FocusHandle,
     /// The card scrolls inside its own bound rather than growing the rail.
@@ -2441,6 +2446,7 @@ pub(crate) fn build_audit(
             job_export_preview_focus,
             handoff_review: None,
             handoff_generation: 0,
+            handoff_reading: false,
             handoff_review_focus,
             handoff_scroll: ScrollHandle::new(),
             job_request_generation: 0,

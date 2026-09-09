@@ -199,7 +199,7 @@ D3 preparation experiment was stopped and is not part of this tree.
 | Muse Spark fakehost | The fixture-only supplier and interrupted Studio rehearsal review was completed through `698e990` (supplier base `e447f41`) with explicit fake scripts and durable local attempts | No native auth, retailer service, hosted inference, billing or live pilot was performed |
 | A2/A3 | Not landed; isolated checkpoint `codex/workbench-identity` at `d62dfd0` | Saved plans must not be presented as silently executable |
 | D1 | Not landed; isolated checkpoint `codex/workbench-job-safety` at `fc9ad974` | The existing CLI target subset is not independent GUI target delivery |
-| H1 | Producer landed on the extension's `main` at `2e56550`; the consumer-side checkpoint noted here was `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
+| H1 | Not landed; extension checkpoint `codex/press-handoff` at `7216e32` | Local mapping/export work is not browser deployment or live re-audit proof |
 | D3 | Not landed; preparation/parity work was stopped before integration | No maintained Google/eBay packs, policy catalog or pack approval is included |
 | HEIF | Not landed; investigation only | No decoder, packaging or platform proof is included |
 
@@ -246,6 +246,16 @@ existing file". No release tag contains the `handoff` command — `git tag
 breaking a shipped contract, and `HandoffReport.schema_version` stays `1`. The
 producer's own envelope schema is unaffected. `press skill` guidance is updated
 to the labels the binary actually prints.
+
+A valid report can be a mebibyte of preserved advisory fields with a warning for
+each, so the card draws a bounded head of every list, previews each value with a
+visible ellipsis, and discloses the counts it is not drawing; the pending report
+keeps all of it. Source reads take one review-wide slot, so five hundred rows
+cannot put five hundred bounded reads in flight, and the slot is released by the
+read that finishes rather than by the review that started it. The card also
+carries the folder walk's own diagnostics: a folder Press could not read
+completely cannot show a resource to be absent, and every row that matched
+nothing says so.
 
 This is one increment, not H2. Preparing confirmed sources, durable task state
 across a restart, deployment and re-audit — the rest of the

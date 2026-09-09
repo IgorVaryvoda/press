@@ -115,8 +115,10 @@ incomplete inspection cannot claim all required checks passed.
 The current local workbench checkpoint includes the reviewed F1/F2/F3 subset and
 D2 requirements checks. F3 visibility and native export were demonstrated on
 Linux; keyboard action focus still needs follow-up. A2/A3 saved-plan execution,
-the D1 GUI target journey, D3 preparation and maintained packs, H1 browser
-delivery, and HEIF support are not landed. These local results do not claim a
+the D1 GUI target journey, D3 preparation and maintained packs, and HEIF support
+are not landed. The ImageGuide extension has landed its Press export, and this
+checkpoint adds the review half of the desktop side; H2 preparation and H3
+browser delivery and re-audit are not landed. These local results do not claim a
 complete UI, all-platform support, marketplace approval, or a live service.
 
 `press handoff` validates an imported ImageGuide report and can inspect mappings
