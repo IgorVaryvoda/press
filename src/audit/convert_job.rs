@@ -55,7 +55,79 @@ fn conversion_landing_applies(
         && current_cancel.is_some_and(|current| Arc::ptr_eq(current, cancel))
 }
 
+/// One pass of a run: a folder to write into and the settings to write with.
+///
+/// A folder with no delivery targets makes exactly one of these, which is the
+/// run Press has always done. A product-set job with targets makes one per
+/// target, and they run one after another inside the same conversion.
+#[derive(Clone)]
+pub(super) struct Delivery {
+    pub(super) id: String,
+    /// The namespace under the run's output root. Empty is the root itself.
+    pub(super) out: PathBuf,
+    pub(super) format: Format,
+    pub(super) quality: Quality,
+    pub(super) max_edge: MaxEdge,
+}
+
+/// What one delivery wrote, for the row that configured it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct DeliveryOutcome {
+    pub(super) written: usize,
+    pub(super) failed: usize,
+}
+
 impl Audit {
+    /// The passes this run will make.
+    ///
+    /// Every target resolves its recipe now, against the library as it stands,
+    /// exactly as `press convert --target` does. A target that names a recipe
+    /// nobody saved any more stops the run by name rather than silently
+    /// delivering the folder's current settings.
+    fn delivery_runs(&self) -> Result<Vec<Delivery>, String> {
+        if self.work_job.targets.is_empty() {
+            return Ok(vec![Delivery {
+                id: String::new(),
+                out: PathBuf::new(),
+                format: self.format,
+                quality: self.quality,
+                max_edge: self.max_edge,
+            }]);
+        }
+        if self.output == Output::Replace {
+            return Err(
+                "Delivery targets write into folders of their own, which Replace has none of. \
+                 Choose an output folder, or remove the targets."
+                    .into(),
+            );
+        }
+        crate::job::validate_target_namespaces(&self.work_job.targets)?;
+        // The same library the command line resolves a target against: the
+        // personal recipes this window loaded, plus the built-ins, which live in
+        // the model rather than on disk.
+        let mut library = self.recipes.clone();
+        library.extend(crate::recipe::Recipe::builtins());
+        crate::job::prepare_targets(&self.work_job.targets, &library)?
+            .into_iter()
+            .map(|target| {
+                let (format, quality, max_edge) = match &target.recipe {
+                    Some(recipe) => {
+                        let (format, quality, max_edge, _) = recipe.effective();
+                        (format, quality, max_edge)
+                    }
+                    None => (self.format, self.quality, self.max_edge),
+                };
+                Ok(Delivery {
+                    id: target.id,
+                    out: target.out,
+                    format,
+                    quality,
+                    max_edge,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn start_conversion(&mut self, cx: &mut Context<Self>) {
         if self.converting
             || self.local_ai_busy()
@@ -69,6 +141,13 @@ impl Audit {
         if targets.is_empty() {
             return;
         }
+        let deliveries = match self.delivery_runs() {
+            Ok(deliveries) => deliveries,
+            Err(message) => {
+                self.notify_error("conversion", "Couldn’t start the delivery", message, cx);
+                return;
+            }
+        };
         // Image-menu conversion also needs the live controls and Stop in view.
         self.open_rail(Rail::Convert, cx);
         self.clear_error("conversion", cx);
@@ -88,9 +167,6 @@ impl Audit {
         // Replace mode is the only run that moves an original, and it moves it
         // into one mirror of the audited tree that the scan steps over.
         let replace = self.output == Output::Replace;
-        let quality = self.quality;
-        let format = self.format;
-        let max_edge = self.max_edge;
         let sources: Vec<(usize, PathBuf)> = targets
             .into_iter()
             .filter_map(|index| Some((index, self.entries.get(index)?.path.clone())))
@@ -103,7 +179,7 @@ impl Audit {
             .iter()
             .map(|entry| entry.path.clone())
             .collect();
-        let stamp = manifest::Stamp::new(format, quality, max_edge);
+        self.delivery_progress.clear();
 
         let plan_root = root.clone();
         let proof_root = root.clone();
@@ -161,156 +237,186 @@ impl Audit {
             if !current {
                 return;
             }
-            let out_dir = context.output_root().to_path_buf();
-
-            let plan_out_dir = out_dir.clone();
-            let backups = replace.then(|| manifest::backup_root(&out_dir));
-            let planning_cancel = cancel.clone();
-            let sources = cx
-                .background_executor()
-                .spawn(async move {
-                    if planning_cancel.load(Ordering::Acquire) {
-                        return Vec::new();
-                    }
-                    plan_sources(
-                        &plan_root,
-                        &plan_out_dir,
-                        backups.as_deref(),
-                        sources,
-                        &audited,
-                        format,
-                    )
-                })
-                .await;
-            // A replaced dataset or run must not start writing after a slow plan
-            // lands. A stopped current run falls through to normal stop reporting;
-            // its queue will not start even one encode.
-            let current = this
-                .read_with(cx, |audit, _| {
-                    conversion_landing_applies(
-                        audit.dataset_generation,
-                        audit.convert_cancel.as_ref(),
-                        dataset_generation,
-                        &cancel,
-                    )
-                })
-                .unwrap_or(false);
-            if !current {
-                return;
-            }
-
-            // A sliding window rather than batches. Batching waited for all eight of a
-            // chunk before starting the ninth, so one 40MB photo held seven workers
-            // idle; here a finished file is replaced immediately. The window is what
-            // bounds memory: every file in flight holds a fully decoded image.
-            let workers = convert::workers(format);
-            type Landed = (usize, Result<convert::Converted, convert::Failure>);
-            let mut inflight: Vec<gpui_kit::Task<Landed>> = Vec::new();
-            let mut queued = sources.iter();
-            let mut completed = Vec::with_capacity(workers);
-
-            loop {
-                // A stop closes the queue, not the window. Abandoning an encode
-                // half way would leave a partial file where the folder expects a
-                // whole one, so the files already in flight are seen through and
-                // nothing after them is started.
-                let stopped = cancel.load(Ordering::Acquire);
-                while !stopped && inflight.len() < workers {
-                    let Some(planned) = queued.next() else {
-                        break;
-                    };
-                    let index = planned.index;
-                    let source = planned.source.clone();
-                    let written = planned.written.clone();
-                    let backup = planned.backup.clone();
-                    let out_dir = out_dir.clone();
-                    let root = root.clone();
-                    let stamp = stamp.clone();
-                    inflight.push(cx.background_executor().spawn(async move {
-                        // The record and the backup move belong to the write, one
-                        // file at a time: a run killed here has a record for every
-                        // original it moved and moved none it has no record for.
-                        let recording = convert::Recording::for_source(
-                            &root,
-                            &out_dir,
-                            &stamp,
-                            backup.as_ref(),
-                        );
-                        let converted = match written {
-                            Ok(written) => convert::convert_to(
-                                &out_dir,
-                                &source,
-                                &written,
-                                Some(&recording),
-                                format,
-                                quality,
-                                max_edge,
-                            ),
-                            Err(failure) => Err(failure),
-                        };
-                        (index, converted)
-                    }));
-                }
-                if inflight.is_empty() {
+            let root_out_dir = context.output_root().to_path_buf();
+            // The destination the results view describes is the first pass. The
+            // others report on their own rows: one row of the list has one
+            // output here, and a second target's copy of it would take the
+            // first one's place in compare, restore and the saved bytes.
+            let mut primary_out_dir = None;
+            for (position, delivery) in deliveries.into_iter().enumerate() {
+                // A stop between passes is a stop: the pass in flight is seen
+                // through, and the next target never starts.
+                if cancel.load(Ordering::Acquire) {
                     break;
                 }
-                // Take whichever file finishes first. Waiting for source order here
-                // quietly turns one slow image back into a batch barrier.
-                let ((index, result), _, remaining) = select_all(inflight).await;
-                inflight = remaining;
-                completed.push((index, result));
-
-                // Publishing once per file made a 6,000-image conversion rebuild the
-                // same window 6,000 times. One worker-window keeps progress live while
-                // cutting UI invalidations by 87.5% for WebP.
-                let work_remaining =
-                    !inflight.is_empty() || (!stopped && !queued.as_slice().is_empty());
-                if !progress_batch_ready(completed.len(), workers, work_remaining) {
-                    continue;
+                let primary = position == 0;
+                let out_dir = root_out_dir.join(&delivery.out);
+                let format = delivery.format;
+                let quality = delivery.quality;
+                let max_edge = delivery.max_edge;
+                let stamp = manifest::Stamp::new(format, quality, max_edge);
+                let plan_root = plan_root.clone();
+                let sources = sources.clone();
+                let audited = audited.clone();
+                if primary {
+                    primary_out_dir = Some(out_dir.clone());
                 }
-                let batch = std::mem::take(&mut completed);
 
-                if this
-                    .update(cx, |audit, cx| {
-                        if !conversion_landing_applies(
+                let plan_out_dir = out_dir.clone();
+                let backups = replace.then(|| manifest::backup_root(&out_dir));
+                let planning_cancel = cancel.clone();
+                let sources = cx
+                    .background_executor()
+                    .spawn(async move {
+                        if planning_cancel.load(Ordering::Acquire) {
+                            return Vec::new();
+                        }
+                        plan_sources(
+                            &plan_root,
+                            &plan_out_dir,
+                            backups.as_deref(),
+                            sources,
+                            &audited,
+                            format,
+                        )
+                    })
+                    .await;
+                // A replaced dataset or run must not start writing after a slow plan
+                // lands. A stopped current run falls through to normal stop reporting;
+                // its queue will not start even one encode.
+                let current = this
+                    .read_with(cx, |audit, _| {
+                        conversion_landing_applies(
                             audit.dataset_generation,
                             audit.convert_cancel.as_ref(),
                             dataset_generation,
                             &cancel,
-                        ) {
-                            return;
-                        }
-                        for (index, result) in batch {
-                            match result {
-                                Ok(converted) => {
-                                    audit.record_result(
-                                        index,
-                                        format,
-                                        converted.bytes,
-                                        converted.written,
-                                    );
-                                }
-                                Err(error) => {
-                                    // Keyed by row, so the badge, the Failed chip and
-                                    // the report all read one map. The fallback is the
-                                    // word `--json` uses for a failure with no reason.
-                                    audit.failures.insert(
-                                        index,
-                                        error
-                                            .reason()
-                                            .unwrap_or_else(|| "conversion failed".to_string()),
-                                    );
+                        )
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return;
+                }
+
+                // A sliding window rather than batches. Batching waited for all eight of a
+                // chunk before starting the ninth, so one 40MB photo held seven workers
+                // idle; here a finished file is replaced immediately. The window is what
+                // bounds memory: every file in flight holds a fully decoded image.
+                let workers = convert::workers(format);
+                type Landed = (usize, Result<convert::Converted, convert::Failure>);
+                let mut inflight: Vec<gpui_kit::Task<Landed>> = Vec::new();
+                let mut queued = sources.iter();
+                let mut completed = Vec::with_capacity(workers);
+
+                loop {
+                    // A stop closes the queue, not the window. Abandoning an encode
+                    // half way would leave a partial file where the folder expects a
+                    // whole one, so the files already in flight are seen through and
+                    // nothing after them is started.
+                    let stopped = cancel.load(Ordering::Acquire);
+                    while !stopped && inflight.len() < workers {
+                        let Some(planned) = queued.next() else {
+                            break;
+                        };
+                        let index = planned.index;
+                        let source = planned.source.clone();
+                        let written = planned.written.clone();
+                        let backup = planned.backup.clone();
+                        let out_dir = out_dir.clone();
+                        let root = root.clone();
+                        let stamp = stamp.clone();
+                        inflight.push(cx.background_executor().spawn(async move {
+                            // The record and the backup move belong to the write, one
+                            // file at a time: a run killed here has a record for every
+                            // original it moved and moved none it has no record for.
+                            let recording = convert::Recording::for_source(
+                                &root,
+                                &out_dir,
+                                &stamp,
+                                backup.as_ref(),
+                            );
+                            let converted = match written {
+                                Ok(written) => convert::convert_to(
+                                    &out_dir,
+                                    &source,
+                                    &written,
+                                    Some(&recording),
+                                    format,
+                                    quality,
+                                    max_edge,
+                                ),
+                                Err(failure) => Err(failure),
+                            };
+                            (index, converted)
+                        }));
+                    }
+                    if inflight.is_empty() {
+                        break;
+                    }
+                    // Take whichever file finishes first. Waiting for source order here
+                    // quietly turns one slow image back into a batch barrier.
+                    let ((index, result), _, remaining) = select_all(inflight).await;
+                    inflight = remaining;
+                    completed.push((index, result));
+
+                    // Publishing once per file made a 6,000-image conversion rebuild the
+                    // same window 6,000 times. One worker-window keeps progress live while
+                    // cutting UI invalidations by 87.5% for WebP.
+                    let work_remaining =
+                        !inflight.is_empty() || (!stopped && !queued.as_slice().is_empty());
+                    if !progress_batch_ready(completed.len(), workers, work_remaining) {
+                        continue;
+                    }
+                    let batch = std::mem::take(&mut completed);
+
+                    if this
+                        .update(cx, |audit, cx| {
+                            if !conversion_landing_applies(
+                                audit.dataset_generation,
+                                audit.convert_cancel.as_ref(),
+                                dataset_generation,
+                                &cancel,
+                            ) {
+                                return;
+                            }
+                            for (index, result) in batch {
+                                match result {
+                                    Ok(converted) => {
+                                        if primary {
+                                            audit.record_result(
+                                                index,
+                                                format,
+                                                converted.bytes,
+                                                converted.written,
+                                            );
+                                        }
+                                        audit.record_delivery(&delivery.id, true);
+                                    }
+                                    Err(error) => {
+                                        // Keyed by row, so the badge, the Failed chip and
+                                        // the report all read one map. The fallback is the
+                                        // word `--json` uses for a failure with no reason.
+                                        if primary {
+                                            audit.failures.insert(
+                                                index,
+                                                error.reason().unwrap_or_else(|| {
+                                                    "conversion failed".to_string()
+                                                }),
+                                            );
+                                        }
+                                        audit.record_delivery(&delivery.id, false);
+                                    }
                                 }
                             }
-                        }
-                        if !audit.failures.is_empty() {
-                            audit.failure_summary = named(audit.failure_names().into_iter());
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
+                            if !audit.failures.is_empty() {
+                                audit.failure_summary = named(audit.failure_names().into_iter());
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
 
@@ -335,7 +441,9 @@ impl Audit {
                     // The run cleared results when its destination proved out, so
                     // anything recorded now was written at this destination. An
                     // all-failed run recorded nothing and erases neither field.
-                    if !audit.results.is_empty() {
+                    if !audit.results.is_empty()
+                        && let Some(out_dir) = primary_out_dir.as_ref()
+                    {
                         audit.conversion_destination = Some((output.clone(), out_dir.clone()));
                         audit.latest_output_root = Some(out_dir.clone());
                     }

@@ -1072,6 +1072,46 @@ pub struct PreparedTarget {
 /// Resolve target recipe references against known recipes. Like the
 /// single-target path, a bound id with no recipe refuses with its name
 /// rather than falling back to whatever is selected.
+/// Two delivery targets may not write into one folder, and none may sit inside
+/// another. A target's namespace is a plain relative name: it travels with a
+/// portable job, so it can carry no root, no `..` and no drive.
+pub fn validate_target_namespaces(targets: &[JobTarget]) -> Result<(), String> {
+    for target in targets {
+        crate::output::normal_relative(&target.out).map_err(|_| {
+            format!(
+                "target {:?} output is not a plain relative path: {}",
+                target.id,
+                target.out.display()
+            )
+        })?;
+    }
+    for (index, left) in targets.iter().enumerate() {
+        for right in &targets[index + 1..] {
+            if left.out == right.out {
+                return Err(format!(
+                    "targets {:?} and {:?} write to the same folder {}",
+                    left.id,
+                    right.id,
+                    left.out.display()
+                ));
+            }
+            if left.out.starts_with(&right.out) || right.out.starts_with(&left.out) {
+                return Err(format!(
+                    "targets {:?} and {:?} overlap at {}",
+                    left.id,
+                    right.id,
+                    if left.out.starts_with(&right.out) {
+                        left.out.display().to_string()
+                    } else {
+                        right.out.display().to_string()
+                    }
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare_targets(
     targets: &[JobTarget],
     recipes: &[crate::recipe::Recipe],

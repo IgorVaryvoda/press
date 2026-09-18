@@ -454,6 +454,9 @@ pub(crate) struct Audit {
     recipe_prompt: Option<RecipePrompt>,
     /// The name Save as and Rename read. Unfocused text, applied on click.
     recipe_name_input: gpui_kit::Entity<InputState>,
+    /// What each delivery target wrote in the current run, keyed by target id.
+    /// Cleared when a run starts, so a row never reports another run's numbers.
+    delivery_progress: HashMap<String, convert_job::DeliveryOutcome>,
     /// The product-set block folds closed: it is a second job, not a setting.
     sets_open: bool,
     /// The saved-plan block folds closed for the same reason.
@@ -2474,6 +2477,7 @@ pub(crate) fn build_audit(
             recipes_skipped,
             selected_recipe: None,
             recipe_prompt: None,
+            delivery_progress: HashMap::new(),
             sets_open: false,
             plan_open: false,
             plan_work: None,
