@@ -1657,6 +1657,21 @@ impl Audit {
                     )
                     .child(
                         Button::new(gpui_kit::SharedString::from(format!(
+                            "delivery-regenerate-{id}"
+                        )))
+                        .debug_selector(|| "delivery-target-regenerate".into())
+                        .small()
+                        .ghost()
+                        .icon(IconName::Replace)
+                        .tooltip("Convert only what this target is missing or has outdated")
+                        .disabled(edit_disabled)
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |audit, _, _, cx| audit.regenerate_delivery_target(&id, cx)
+                        })),
+                    )
+                    .child(
+                        Button::new(gpui_kit::SharedString::from(format!(
                             "delivery-remove-{id}"
                         )))
                         .small()

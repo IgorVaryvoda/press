@@ -9675,3 +9675,74 @@ fn one_delivery_target_runs_alone_from_its_row(cx: &mut TestAppContext) {
     });
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Regenerating asks the folder, not the screen: a target that already
+/// delivered every selected image at these settings re-encodes nothing, and
+/// one whose source has been edited since re-encodes exactly that file.
+#[gpui_kit::test]
+fn regenerating_a_target_converts_only_what_it_owes(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    audit.update(cx, |audit, _| {
+        audit.work_job.targets = vec![crate::job::JobTarget {
+            id: "web".into(),
+            name: "Web".into(),
+            recipe: None,
+            recipe_snapshot: None,
+            out: PathBuf::from("web"),
+        }];
+    });
+    audit.update(cx, |audit, cx| audit.run_delivery_target("web", cx));
+    cx.run_until_parked();
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let delivered = root.join(crate::scan::OUTPUT_DIR).join("web");
+    let first = std::fs::metadata(delivered.join("shot-0.webp"))
+        .and_then(|data| data.modified())
+        .expect("the first target run delivered");
+    let second_bytes = std::fs::read(delivered.join("shot-1.webp")).expect("both were delivered");
+
+    // Nothing has changed, so nothing is owed.
+    audit.update(cx, |audit, cx| audit.regenerate_delivery_target("web", cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.converting,
+            "a target that owes nothing starts no run"
+        );
+        assert!(
+            audit
+                .delivery_progress
+                .get("web")
+                .is_none_or(|row| row.written == 2),
+            "the earlier run's tally is not replaced by an empty one"
+        );
+    });
+    assert_eq!(
+        std::fs::metadata(delivered.join("shot-0.webp"))
+            .and_then(|data| data.modified())
+            .expect("the output is still there"),
+        first,
+        "a current output is left exactly as it was"
+    );
+
+    // One source changes. Only that row is owed.
+    crate::convert::tests::photo(16, 16)
+        .save(root.join("shot-0.png"))
+        .expect("the source is edited");
+    audit.update(cx, |audit, cx| audit.regenerate_delivery_target("web", cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.delivery_progress.get("web").map(|row| row.written),
+            Some(1),
+            "one image was owed and one was delivered"
+        );
+    });
+    assert_eq!(
+        std::fs::read(delivered.join("shot-1.webp")).expect("the untouched output stays"),
+        second_bytes,
+        "the image nobody edited was not written again"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

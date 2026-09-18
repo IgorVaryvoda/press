@@ -110,3 +110,34 @@ sessions learn.
 - 2026-09-06: Released v0.6.0 from main: tool strip + resizable panel +
   preset rework on top of the v0.5.0 header batch. CI not watched in that
   session either; check both release runs before announcing.
+| 2026-09-18 | self | `cargo test <bare_name> -- --exact` ran 0 tests and still exited 0, so two new tests looked green without running | With `--exact` the filter must be the full path (`audit::tests::<name>`); list first with `cargo test -- --list \| grep <name>` |
+- 2026-09-18: A new Convert-rail section placed above `handoff_section` failed
+  `the_review_card_stays_inside_a_narrow_window` by half a pixel (card 123+331.5
+  vs region 87+367). New rail sections go last, after the handoff card, not
+  between it and the settings.
+- 2026-09-18: Landed A2/A3 saved plans (`codex/workbench-identity`) onto main
+  v0.6.8 and added the window surface (`src/audit/plan_actions.rs`, Saved plan
+  section in the Convert rail). Three Opus reviews found ten defects, all fixed;
+  the worst was `execute_item` writing the plan's AVIF speed into the
+  process-wide dial, which is harmless in a CLI process and poisons the window's
+  later conversions and its settings file. Gates: 766 passed, clippy, fmt, diff
+  --check. Pushed, not merged to main.
+- 2026-09-18: Gate runs started while edits are still landing compile a mixed
+  tree; their green means nothing. Run the last gate pass after the final edit,
+  and treat every earlier pass as a smoke test.
+- 2026-09-18: PR CI timing on this repo: ubuntu ~7m, windows ~23m, macOS
+  ~1h12m. A macOS job sitting in "Test" for over an hour is normal here, not a
+  hang. `ci.yml` has no `concurrency` group, so pushing a fix does not cancel
+  the in-flight run: both report, and the slow macOS answer is not lost.
+- 2026-09-18: Windows CI failed clippy (not tests) on `-D warnings` dead code:
+  `tests/cli_contract.rs` helpers used only by `#[cfg(unix)]` FIFO tests. Gate
+  the helper with `#[cfg(unix)]` too. Local Linux clippy cannot catch this;
+  sweep for helpers whose callers are all unix-gated before pushing.
+| 2026-09-18 | self | Ran `cargo clippy --all-targets --features updater` without `-- -D warnings` and called the D1 merge green; it carried 3 warnings (one dead parameter, two arg-count lints) that CI turns into errors | Always run CI's exact command, `-- -D warnings` included. A warning count of 0 is the gate, not the exit code |
+| 2026-09-18 | CI | A new job.rs test used `PathBuf::from("/tmp")` as an absolute job root; Windows refused it ("job root /tmp is not absolute") and only CI saw it | Use `std::env::temp_dir()` for any absolute-path fixture. The napkin's Windows rule covers separators; this is the same rule for roots |
+- 2026-09-18: The v0.6.9 macOS release job died at minute 74, after all 718
+  tests passed, on `codesign ... --timestamp` for the twelfth bundled dylib:
+  "A timestamp was expected but was not found" — Apple's timestamp service, not
+  our code. The packaging step now retries three times (signing is idempotent,
+  it replaces the signature it finds). Re-run the failed job when it happens
+  again; the assets already built are not lost.

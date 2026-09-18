@@ -55,6 +55,50 @@ fn conversion_landing_applies(
         && current_cancel.is_some_and(|current| Arc::ptr_eq(current, cancel))
 }
 
+/// The rows a target has no current output for.
+///
+/// Current means the folder's own record for this source under this target's
+/// namespace: the recorded output is the file on disk, it was written with this
+/// target's settings, and the source still hashes to what the record says. A
+/// record from before fingerprints, or one whose source has been edited, reads
+/// as outdated and is converted again — re-encoding a file is cheap beside
+/// delivering a stale one.
+///
+/// This hashes sources and outputs, so it belongs on the background executor.
+fn outdated_rows(
+    root: &Path,
+    out_dir: &Path,
+    fingerprint: &str,
+    sources: &[(usize, PathBuf)],
+    format: Format,
+) -> Vec<usize> {
+    let recorded = manifest::load(out_dir);
+    let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
+    let destination = convert::Destination {
+        out_dir,
+        backups: None,
+        manifest: &recorded,
+    };
+    let planned = convert::plan_outputs(root, &paths, &paths, &destination, format);
+    sources
+        .iter()
+        .zip(planned)
+        .filter_map(|((index, source), written)| {
+            let written = written.ok()?;
+            let relative_source = source.strip_prefix(root).ok()?;
+            let relative_output = written.strip_prefix(out_dir).ok()?;
+            let current = recorded
+                .latest(relative_source, relative_output)
+                .is_some_and(|record| {
+                    record.installed(&written)
+                        && record.recipe.as_deref() == Some(fingerprint)
+                        && record.source_matches(source) == Some(true)
+                });
+            (!current).then_some(*index)
+        })
+        .collect()
+}
+
 /// One pass of a run: a folder to write into and the settings to write with.
 ///
 /// A folder with no delivery targets makes exactly one of these, which is the
@@ -137,7 +181,7 @@ impl Audit {
                 return;
             }
         };
-        self.start_conversion_with(deliveries, cx);
+        self.start_conversion_with(deliveries, None, cx);
     }
 
     /// Convert the ticked rows for one target, from its row in the rail.
@@ -160,10 +204,106 @@ impl Audit {
         else {
             return;
         };
-        self.start_conversion_with(vec![delivery], cx);
+        self.start_conversion_with(vec![delivery], None, cx);
     }
 
-    fn start_conversion_with(&mut self, deliveries: Vec<Delivery>, cx: &mut Context<Self>) {
+    /// `rows` is the selection this run converts. `None` is the ticked rows, and
+    /// a regenerate passes the narrower set it worked out from the folder.
+    /// Convert only what one target is missing or has outdated.
+    ///
+    /// The folder is asked, not the screen: a row that was delivered by an
+    /// earlier run, at these settings, from these bytes, is left alone. A target
+    /// that owes nothing says so instead of re-encoding the folder.
+    pub(super) fn regenerate_delivery_target(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.converting || self.plan_busy() {
+            return;
+        }
+        let deliveries = match self.delivery_runs() {
+            Ok(deliveries) => deliveries,
+            Err(message) => {
+                self.notify_error("conversion", "Couldn’t start the delivery", message, cx);
+                return;
+            }
+        };
+        let Some(delivery) = deliveries
+            .into_iter()
+            .find(|delivery| delivery.id == id)
+            .filter(|_| !id.is_empty())
+        else {
+            return;
+        };
+        let rows = self.targets();
+        if rows.is_empty() {
+            return;
+        }
+        let sources: Vec<(usize, PathBuf)> = rows
+            .into_iter()
+            .filter_map(|index| Some((index, self.entries.get(index)?.path.clone())))
+            .collect();
+        let root = self.root.clone();
+        let output = self.output.clone();
+        let dataset = self.dataset_generation;
+        // The row's own wording, so a toast names what the person clicked.
+        let name = self
+            .work_job
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .map_or_else(|| id.to_string(), |target| target.name.clone());
+        cx.spawn(async move |this, cx| {
+            let out = delivery.out.clone();
+            let format = delivery.format;
+            let fingerprint = crate::recipe::fingerprint_settings(
+                delivery.format,
+                delivery.quality,
+                delivery.max_edge,
+                Some(crate::avif::speed()),
+            );
+            let classify_root = root.clone();
+            // Hashing sources and outputs is filesystem work: never on the click.
+            let outdated = cx
+                .background_executor()
+                .spawn(async move {
+                    let context = output.context(&classify_root)?;
+                    let out_dir = context.output_root().join(&out);
+                    Ok::<Vec<usize>, String>(outdated_rows(
+                        &classify_root,
+                        &out_dir,
+                        &fingerprint,
+                        &sources,
+                        format,
+                    ))
+                })
+                .await;
+            let _ = this.update(cx, |audit, cx| {
+                if audit.dataset_generation != dataset {
+                    return;
+                }
+                match outdated {
+                    Ok(rows) if rows.is_empty() => {
+                        audit.notify_success(
+                            "conversion",
+                            "Nothing to regenerate",
+                            format!("{name} already delivers every selected image."),
+                            cx,
+                        );
+                    }
+                    Ok(rows) => audit.start_conversion_with(vec![delivery], Some(rows), cx),
+                    Err(message) => {
+                        audit.notify_error("conversion", "Couldn’t read the target", message, cx)
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn start_conversion_with(
+        &mut self,
+        deliveries: Vec<Delivery>,
+        rows: Option<Vec<usize>>,
+        cx: &mut Context<Self>,
+    ) {
         if self.converting
             || self.local_ai_busy()
             || self.studio_busy()
@@ -172,7 +312,7 @@ impl Audit {
         {
             return;
         }
-        let targets = self.targets();
+        let targets = rows.unwrap_or_else(|| self.targets());
         if targets.is_empty() {
             return;
         }
