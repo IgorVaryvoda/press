@@ -2253,6 +2253,10 @@ fn saved_plan_binds_a_source_root_reached_through_a_link_and_its_parent() {
 }
 
 /// The run state a binding leaves behind, once it exists.
+///
+/// Only the killed-retry tests read it, and those need a FIFO to stop a process
+/// inside its source read, so this reads as dead code everywhere else.
+#[cfg(unix)]
 fn run_state_path(dir: &Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .expect("the plan folder is readable")
@@ -2264,6 +2268,7 @@ fn run_state_path(dir: &Path) -> Option<PathBuf> {
         })
 }
 
+#[cfg(unix)]
 fn run_state(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).expect("the run state is readable"))
         .expect("the run state is JSON")
