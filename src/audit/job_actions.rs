@@ -985,6 +985,66 @@ impl Audit {
         .detach();
     }
 }
+impl Audit {
+    /// Add one delivery target: a saved recipe, delivered into a folder of its
+    /// own under the run's output root.
+    ///
+    /// The recipe names the target and owns the folder, so adding one is a
+    /// single click. A job that needs another name or another folder still
+    /// carries them: the command line writes them, and an imported job keeps
+    /// what it was given.
+    pub(super) fn add_delivery_target(&mut self, recipe_id: &str, cx: &mut Context<Self>) {
+        if self.converting || self.job_choice_pending() {
+            return;
+        }
+        let mut library = self.recipes.clone();
+        library.extend(crate::recipe::Recipe::builtins());
+        let Some(recipe) = library.iter().find(|recipe| recipe.id == recipe_id) else {
+            self.notify_error(
+                "jobs",
+                "Couldn’t add the target",
+                format!("{recipe_id:?} is not saved as a recipe anymore"),
+                cx,
+            );
+            return;
+        };
+        let target = job::JobTarget {
+            id: recipe.id.clone(),
+            name: recipe.name.clone(),
+            recipe: Some(recipe.id.clone()),
+            out: PathBuf::from(&recipe.id),
+        };
+        let mut targets = self.work_job.targets.clone();
+        targets.push(target);
+        if let Err(message) = job::validate_target_namespaces(&targets) {
+            self.notify_error("jobs", "Couldn’t add the target", message, cx);
+            return;
+        }
+        let Some(dir) = self.job_dir_or_notify(cx) else {
+            return;
+        };
+        self.mutate_job(&dir, cx, move |job| job.targets = targets);
+        cx.notify();
+    }
+
+    pub(super) fn remove_delivery_target(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.converting || self.job_choice_pending() {
+            return;
+        }
+        let id = id.to_string();
+        let Some(dir) = self.job_dir_or_notify(cx) else {
+            return;
+        };
+        // The row goes, and so does what the last run recorded against it: a
+        // tally with no row to read it is a number nobody can check.
+        self.delivery_progress.remove(&id);
+        self.mutate_job(&dir, cx, move |job| {
+            job.targets.retain(|target| target.id != id);
+        });
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

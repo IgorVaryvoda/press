@@ -9499,3 +9499,123 @@ fn opening_another_folder_retires_the_plan_in_hand(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(first);
     let _ = std::fs::remove_dir_all(second);
 }
+
+/// A job with delivery targets converts once per target, in one run: two
+/// folders, two formats, one pass owning the results view and every pass
+/// reporting on its own row.
+#[gpui_kit::test]
+fn a_job_with_delivery_targets_converts_once_per_target(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    audit.update(cx, |audit, _| {
+        audit.work_job.targets = vec![
+            crate::job::JobTarget {
+                id: "web".into(),
+                name: "Web".into(),
+                recipe: None,
+                out: PathBuf::from("web"),
+            },
+            crate::job::JobTarget {
+                id: "small".into(),
+                name: "Small".into(),
+                recipe: Some("small-files".into()),
+                out: PathBuf::from("small"),
+            },
+        ];
+    });
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let out = root.join(crate::scan::OUTPUT_DIR);
+    for index in 0..2 {
+        assert!(
+            out.join("web").join(format!("shot-{index}.webp")).exists(),
+            "the first target wrote its own folder in its own format"
+        );
+        assert!(
+            out.join("small")
+                .join(format!("shot-{index}.avif"))
+                .exists(),
+            "the second target wrote its own folder in its recipe's format"
+        );
+    }
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.converting, "the run released the window");
+        assert!(audit.convert_cancel.is_none());
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        let written = |id: &str| audit.delivery_progress.get(id).map(|row| row.written);
+        assert_eq!(written("web"), Some(2), "{:?}", audit.delivery_progress);
+        assert_eq!(written("small"), Some(2), "{:?}", audit.delivery_progress);
+        // One row of the list has one output in the results view, and it is the
+        // first target's: the second would otherwise take its place in compare,
+        // restore and the saved bytes.
+        assert_eq!(audit.results.len(), 2);
+        assert!(
+            audit
+                .result_paths
+                .values()
+                .all(|path| path.parent().is_some_and(|dir| dir.ends_with("web"))),
+            "the results view describes the first pass"
+        );
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The rail lists the job's delivery targets, so a folder that delivers two
+/// things says so where the job is configured.
+#[gpui_kit::test]
+fn the_rail_lists_the_jobs_delivery_targets(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    audit.update(cx, |audit, cx| {
+        audit.work_job.targets = vec![crate::job::JobTarget {
+            id: "small-files".into(),
+            name: "Small delivery".into(),
+            recipe: Some("small-files".into()),
+            out: PathBuf::from("small-files"),
+        }];
+        audit.sets_open = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("delivery-targets").is_some());
+    assert!(
+        cx.debug_bounds("delivery-target-row").is_some(),
+        "the configured target has a row of its own"
+    );
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Replace rewrites the folder the run reads from, and a delivery target needs
+/// a folder of its own under an output root. The run says so before it starts
+/// rather than writing the first target over the sources.
+#[gpui_kit::test]
+fn delivery_targets_refuse_to_run_in_replace_mode(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    audit.update(cx, |audit, _| {
+        audit.output = Output::Replace;
+        audit.work_job.targets = vec![crate::job::JobTarget {
+            id: "small-files".into(),
+            name: "Small delivery".into(),
+            recipe: Some("small-files".into()),
+            out: PathBuf::from("small-files"),
+        }];
+    });
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.converting, "the run never started");
+        assert!(audit.results.is_empty());
+    });
+    assert_eq!(notification_count(cx), 1);
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    assert!(
+        !root.join("press-originals").exists(),
+        "nothing moved an original"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

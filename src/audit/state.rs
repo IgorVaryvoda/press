@@ -198,6 +198,20 @@ impl Audit {
             .collect()
     }
 
+    /// One delivery's running tally, for the target row that configured it.
+    /// A run with no delivery targets has no row to report to and no id to key.
+    pub(super) fn record_delivery(&mut self, id: &str, written: bool) {
+        if id.is_empty() {
+            return;
+        }
+        let outcome = self.delivery_progress.entry(id.to_string()).or_default();
+        if written {
+            outcome.written += 1;
+        } else {
+            outcome.failed += 1;
+        }
+    }
+
     pub(super) fn record_result(
         &mut self,
         index: usize,

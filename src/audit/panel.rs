@@ -1596,7 +1596,134 @@ impl Audit {
                     )
                     .children(stale_rows)
             }))
+            .children(open.then(|| self.delivery_targets_block(cx)))
             .into_any_element()
+    }
+
+    /// The folders this job delivers, one per saved recipe.
+    ///
+    /// A target is a recipe plus a folder of its own, so adding one is a single
+    /// click and the row says what the last run wrote into it. Jobs that arrive
+    /// from the command line or from an import may carry their own names and
+    /// folders; those are shown as they stand and are never rewritten here.
+    fn delivery_targets_block(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let edit_disabled = self.converting || self.job_choice_pending();
+        let rows: Vec<_> = self
+            .work_job
+            .targets
+            .iter()
+            .map(|target| {
+                let outcome = self.delivery_progress.get(&target.id).copied();
+                let id = target.id.clone();
+                let label = format!("{} · {}/", target.name, target.out.display());
+                let tally = outcome.map(|outcome| match outcome.failed {
+                    0 => format!("{} written", outcome.written),
+                    failed => format!("{} written · {failed} failed", outcome.written),
+                });
+                div()
+                    .debug_selector(|| "delivery-target-row".into())
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(px(11.))
+                            .child(label),
+                    )
+                    .children(tally.map(|tally| {
+                        div()
+                            .debug_selector(|| "delivery-target-tally".into())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tally)
+                    }))
+                    .child(
+                        Button::new(gpui_kit::SharedString::from(format!(
+                            "delivery-remove-{id}"
+                        )))
+                        .small()
+                        .ghost()
+                        .icon(IconName::Close)
+                        .tooltip("Remove this target")
+                        .disabled(edit_disabled)
+                        .on_click(cx.listener(move |audit, _, _, cx| {
+                            audit.remove_delivery_target(&id, cx);
+                        })),
+                    )
+            })
+            .collect();
+        let taken: Vec<&str> = self
+            .work_job
+            .targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect();
+        let mut library = self.recipes.clone();
+        library.extend(crate::recipe::Recipe::builtins());
+        let choices: Vec<(String, String)> = library
+            .iter()
+            .filter(|recipe| !taken.contains(&recipe.id.as_str()))
+            .map(|recipe| (recipe.id.clone(), recipe.name.clone()))
+            .collect();
+        let audit = cx.entity().downgrade();
+        div()
+            .debug_selector(|| "delivery-targets".into())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Delivery targets"),
+                    )
+                    .child(
+                        Button::new("delivery-add")
+                            .debug_selector(|| "delivery-add".into())
+                            .small()
+                            .ghost()
+                            .label("Add target")
+                            .dropdown_caret(true)
+                            .disabled(edit_disabled || choices.is_empty())
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for (id, name) in &choices {
+                                    let audit = audit.clone();
+                                    let id = id.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(format!("{name} · {id}/")).on_click(
+                                            move |_, _, cx| {
+                                                if let Some(audit) = audit.upgrade() {
+                                                    audit.update(cx, |audit, cx| {
+                                                        audit.add_delivery_target(&id, cx);
+                                                    });
+                                                }
+                                            },
+                                        ),
+                                    );
+                                }
+                                menu
+                            }),
+                    ),
+            )
+            .children(rows)
+            .children(self.work_job.targets.is_empty().then(|| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Without targets, Convert writes one output folder with the settings above.",
+                    )
+            }))
     }
 
     /// One product with its roles, mapped files and row operations. Missing
