@@ -9512,12 +9512,14 @@ fn a_job_with_delivery_targets_converts_once_per_target(cx: &mut TestAppContext)
                 id: "web".into(),
                 name: "Web".into(),
                 recipe: None,
+                recipe_snapshot: None,
                 out: PathBuf::from("web"),
             },
             crate::job::JobTarget {
                 id: "small".into(),
                 name: "Small".into(),
                 recipe: Some("small-files".into()),
+                recipe_snapshot: None,
                 out: PathBuf::from("small"),
             },
         ];
@@ -9572,6 +9574,7 @@ fn the_rail_lists_the_jobs_delivery_targets(cx: &mut TestAppContext) {
             id: "small-files".into(),
             name: "Small delivery".into(),
             recipe: Some("small-files".into()),
+            recipe_snapshot: None,
             out: PathBuf::from("small-files"),
         }];
         audit.sets_open = true;
@@ -9600,6 +9603,7 @@ fn delivery_targets_refuse_to_run_in_replace_mode(cx: &mut TestAppContext) {
             id: "small-files".into(),
             name: "Small delivery".into(),
             recipe: Some("small-files".into()),
+            recipe_snapshot: None,
             out: PathBuf::from("small-files"),
         }];
     });
@@ -9617,5 +9621,57 @@ fn delivery_targets_refuse_to_run_in_replace_mode(cx: &mut TestAppContext) {
         !root.join("press-originals").exists(),
         "nothing moved an original"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A target that failed or arrived late should not need the whole job run
+/// again. Its row runs it alone, and the other targets are left exactly as they
+/// were — no files, no tally.
+#[gpui_kit::test]
+fn one_delivery_target_runs_alone_from_its_row(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    audit.update(cx, |audit, _| {
+        audit.work_job.targets = vec![
+            crate::job::JobTarget {
+                id: "web".into(),
+                name: "Web".into(),
+                recipe: None,
+                recipe_snapshot: None,
+                out: PathBuf::from("web"),
+            },
+            crate::job::JobTarget {
+                id: "small".into(),
+                name: "Small".into(),
+                recipe: Some("small-files".into()),
+                recipe_snapshot: None,
+                out: PathBuf::from("small"),
+            },
+        ];
+    });
+
+    audit.update(cx, |audit, cx| audit.run_delivery_target("small", cx));
+    cx.run_until_parked();
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let out = root.join(crate::scan::OUTPUT_DIR);
+    assert!(
+        out.join("small").join("shot-0.avif").is_file(),
+        "the row that was clicked delivered"
+    );
+    assert!(
+        !out.join("web").exists(),
+        "no other target was touched by this run"
+    );
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.converting);
+        assert_eq!(
+            audit.delivery_progress.get("small").map(|row| row.written),
+            Some(1)
+        );
+        assert!(
+            !audit.delivery_progress.contains_key("web"),
+            "a row nobody ran reports nothing"
+        );
+    });
     let _ = std::fs::remove_dir_all(root);
 }

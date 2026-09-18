@@ -1643,6 +1643,19 @@ impl Audit {
                             .child(tally)
                     }))
                     .child(
+                        Button::new(gpui_kit::SharedString::from(format!("delivery-run-{id}")))
+                            .debug_selector(|| "delivery-target-run".into())
+                            .small()
+                            .ghost()
+                            .icon(IconName::Play)
+                            .tooltip("Convert the ticked images for this target")
+                            .disabled(edit_disabled)
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |audit, _, _, cx| audit.run_delivery_target(&id, cx)
+                            })),
+                    )
+                    .child(
                         Button::new(gpui_kit::SharedString::from(format!(
                             "delivery-remove-{id}"
                         )))

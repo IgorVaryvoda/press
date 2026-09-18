@@ -15,7 +15,15 @@ use crate::convert::{Failure, Format, MaxEdge, Quality};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_PLAN_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
+/// What one item's receipt can weigh: its paths, its hashes and, when the plan
+/// was reviewed against requirements, one result per rule under `MAX_RULES`.
+const STATE_BYTES_PER_ITEM: u64 = 24 * 1024;
+/// Room for the state's own header on the smallest plan.
+const STATE_BYTES_FLOOR: u64 = 1024 * 1024;
+/// The most items one plan may hold. Sources and targets are bounded on their
+/// own, but their product is what the run state has to carry, and a state that
+/// cannot be written is a run that cannot say what it wrote.
+pub const MAX_ITEMS: usize = 65_536;
 pub const MAX_SOURCES: usize = 16_384;
 pub const MAX_TARGETS: usize = 16;
 /// A portable path long enough for any real tree and short enough that a plan
@@ -28,6 +36,10 @@ pub enum ExecutionMode {
     ContinueUnstarted,
     RetryFailed,
     Cancel,
+    /// Put cancelled items back on the queue. It encodes nothing: cancelling is
+    /// a decision about work, and taking it back has to be as explicit and as
+    /// harmless as making it was.
+    ReinstateCancelled,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -281,6 +293,12 @@ impl Plan {
         }
         if self.targets.is_empty() || self.targets.len() > MAX_TARGETS {
             return Err(format!("saved plan needs 1-{MAX_TARGETS} targets"));
+        }
+        if self.sources.len().saturating_mul(self.targets.len()) > MAX_ITEMS {
+            return Err(format!(
+                "saved plan holds {} items, more than the {MAX_ITEMS} one run state can carry",
+                self.sources.len() * self.targets.len()
+            ));
         }
         let mut item_ids = std::collections::HashSet::new();
         let mut source_paths = std::collections::HashSet::new();
@@ -1061,11 +1079,12 @@ pub fn execute(
         _lock,
     } = bind(plan_path, source_root, output_root, requirements, false)?;
     let source_root = source_root.as_path();
+    let bound = state_bound(&plan);
     // Whatever the last run recorded, believe the folder. A receipt is repaired
     // from manifest and hash evidence before any item is chosen for work, so an
     // invented success cannot skip an encode and a lost receipt cannot repeat one.
     reconcile_items(&plan, source_root, output_root, requirements, &mut state)?;
-    save_state(&state_path, &state)?;
+    save_state(&state_path, &state, bound)?;
 
     // A failure inside this loop cannot be a refusal: files are landing. It
     // stops the run and travels back in the report beside the items it wrote.
@@ -1084,15 +1103,22 @@ pub fn execute(
                 }
                 ExecutionMode::RetryFailed => state.items[index].status == ItemStatus::Failed,
                 ExecutionMode::Cancel => state.items[index].status == ItemStatus::Unstarted,
+                ExecutionMode::ReinstateCancelled => {
+                    state.items[index].status == ItemStatus::Cancelled
+                }
             };
             if !eligible {
                 continue;
             }
-            if mode == ExecutionMode::Cancel {
-                state.items[index].status = ItemStatus::Cancelled;
+            if let ExecutionMode::Cancel | ExecutionMode::ReinstateCancelled = mode {
+                state.items[index].status = if mode == ExecutionMode::Cancel {
+                    ItemStatus::Cancelled
+                } else {
+                    ItemStatus::Unstarted
+                };
                 state.items[index].error = None;
                 clear_receipt(&mut state.items[index]);
-                if let Err(error) = save_state(&state_path, &state) {
+                if let Err(error) = save_state(&state_path, &state, bound) {
                     stopped_by = Some(error);
                     break 'run;
                 }
@@ -1113,7 +1139,7 @@ pub fn execute(
                 state.items[index].status = ItemStatus::Failed;
                 state.items[index].error = mapping.error.clone();
                 clear_receipt(&mut state.items[index]);
-                if let Err(error) = save_state(&state_path, &state) {
+                if let Err(error) = save_state(&state_path, &state, bound) {
                     stopped_by = Some(error);
                     break 'run;
                 }
@@ -1127,7 +1153,7 @@ pub fn execute(
             state.items[index].status = ItemStatus::Running;
             state.items[index].error = None;
             clear_receipt(&mut state.items[index]);
-            if let Err(error) = save_state(&state_path, &state) {
+            if let Err(error) = save_state(&state_path, &state, bound) {
                 stopped_by = Some(error);
                 break 'run;
             }
@@ -1147,7 +1173,7 @@ pub fn execute(
                     clear_receipt(&mut state.items[index]);
                 }
             }
-            if let Err(error) = save_state(&state_path, &state) {
+            if let Err(error) = save_state(&state_path, &state, bound) {
                 stopped_by = Some(error);
                 break 'run;
             }
@@ -1184,8 +1210,9 @@ pub fn reconcile(
         _lock,
     } = bind(plan_path, source_root, output_root, requirements, true)?;
     let source_root = source_root.as_path();
+    let bound = state_bound(&plan);
     reconcile_items(&plan, source_root, output_root, requirements, &mut state)?;
-    save_state(&state_path, &state)?;
+    save_state(&state_path, &state, bound)?;
     Ok(result(&plan, &state, "reconcile"))
 }
 
@@ -1702,8 +1729,15 @@ fn check_requirements(
         .ok_or_else(|| "the requirements checker reported no output".to_string())?;
     // The checker reads the output itself. Its findings are only this run's
     // evidence while they describe the same bytes this receipt identifies.
-    if report.output_hash.as_deref() != Some(installed.hash.as_str()) {
-        return Err("the installed output changed while it was being checked".into());
+    match report.output_hash.as_deref() {
+        Some(hash) if hash == installed.hash => {}
+        Some(_) => return Err("the installed output changed while it was being checked".into()),
+        // The checker refused the file rather than describing other bytes: too
+        // large for its bounded read, or gone between the two reads. Saying it
+        // changed would name the wrong thing to go and look at.
+        None => {
+            return Err("the requirements checker could not read the installed output".into());
+        }
     }
     Ok(ItemRequirements {
         id: receipt.requirements.id,
@@ -1871,13 +1905,25 @@ fn root_text(path: &Path) -> String {
 /// receipt at all — is checked against the plan here. `reconcile_items` then
 /// re-establishes each written item from manifest and hash evidence, so a
 /// well-formed invented success still cannot skip an encode.
+/// The most this plan's run state may weigh, read or written.
+///
+/// A fixed ceiling refuses an ordinary large plan half way through its run, and
+/// then refuses to read back the state it already wrote, which strands the run
+/// for good. This grows with the work instead, and `MAX_ITEMS` keeps it finite.
+// ponytail: the largest legal plan bounds this at about 1.5 GiB; shrink the
+// stored receipt (summary in the state, detail recomputed) if that ever bites.
+fn state_bound(plan: &Plan) -> u64 {
+    STATE_BYTES_FLOOR
+        + STATE_BYTES_PER_ITEM * (plan.sources.len() as u64) * (plan.targets.len() as u64)
+}
+
 fn load_state(
     path: &Path,
     plan: &Plan,
     source_root: &Path,
     output_root: &Path,
 ) -> Result<RunState, String> {
-    let bytes = read_bounded(path, MAX_STATE_BYTES, "saved run state")?;
+    let bytes = read_bounded(path, state_bound(plan), "saved run state")?;
     let state: RunState = serde_json::from_slice(&bytes)
         .map_err(|error| format!("saved run state does not parse: {error}"))?;
     if state.schema_version != SCHEMA_VERSION {
@@ -2011,11 +2057,11 @@ fn validate_item(
 /// through it. An occupied name is stepped over rather than removed, because it
 /// is not this run's file to delete. Every failure is returned, and the previous
 /// complete state stays on disk until the rename succeeds.
-fn save_state(path: &Path, state: &RunState) -> Result<(), String> {
+fn save_state(path: &Path, state: &RunState, bound: u64) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > MAX_STATE_BYTES {
+    if bytes.len() as u64 > bound {
         return Err(format!(
-            "saved run state exceeds the {MAX_STATE_BYTES}-byte limit"
+            "saved run state exceeds the {bound}-byte limit this plan allows"
         ));
     }
     if path
@@ -2458,6 +2504,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A fixed ceiling refused an ordinary large run half way through and then
+    /// refused to read back the state it had already written. The ceiling grows
+    /// with the work instead, and it is the same number on the way in and out.
+    #[test]
+    fn a_run_states_ceiling_grows_with_the_plan_it_describes() {
+        let small = one_source_plan();
+        assert_eq!(
+            state_bound(&small),
+            STATE_BYTES_FLOOR + STATE_BYTES_PER_ITEM,
+            "one source and one target is one item above the floor"
+        );
+
+        let many = sealed(
+            (0..64)
+                .map(|index| source(&format!("shot-{index}.png")))
+                .collect(),
+            vec![PlanTarget {
+                target_id: "default".into(),
+                out: String::new(),
+                recipe: recipe(),
+                mappings: (0..64)
+                    .map(|index| {
+                        mapping(&format!("shot-{index}.png"), &format!("shot-{index}.webp"))
+                    })
+                    .collect(),
+            }],
+        );
+        assert_eq!(
+            state_bound(&many),
+            STATE_BYTES_FLOOR + STATE_BYTES_PER_ITEM * 64
+        );
+        assert!(
+            state_bound(&many) > state_bound(&small),
+            "more work, more room to describe it"
+        );
+    }
+
     #[test]
     fn a_planned_mapping_carries_the_destination_it_was_reviewed_against() {
         let mut plan = one_source_plan();
@@ -2623,14 +2706,15 @@ mod tests {
         let (source_root, output_root) = roots();
         let state = new_state(&plan, &source_root, &output_root);
         let path = dir.join("state.json");
-        save_state(&path, &state).expect("the first state is written");
+        save_state(&path, &state, STATE_BYTES_FLOOR).expect("the first state is written");
         let before = std::fs::read(&path).expect("the first state is readable");
 
         let mut progressed = state;
         progressed.items[0].status = ItemStatus::Cancelled;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
             .expect("the folder is made read-only");
-        let error = save_state(&path, &progressed).expect_err("a folder that refuses a new file");
+        let error = save_state(&path, &progressed, STATE_BYTES_FLOOR)
+            .expect_err("a folder that refuses a new file");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .expect("the folder is made writable again");
 
@@ -2653,7 +2737,8 @@ mod tests {
         let plan = one_source_plan();
         let (source_root, output_root) = roots();
         let state = new_state(&plan, &source_root, &output_root);
-        let error = save_state(&path, &state).expect_err("a link is not the run state");
+        let error =
+            save_state(&path, &state, STATE_BYTES_FLOOR).expect_err("a link is not the run state");
         assert!(error.contains("not a regular file"), "{error}");
         assert!(
             !dir.join("elsewhere.json").exists(),

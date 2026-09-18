@@ -128,7 +128,42 @@ impl Audit {
             .collect()
     }
 
+    /// Convert the ticked rows, once per delivery target the job names.
     pub(super) fn start_conversion(&mut self, cx: &mut Context<Self>) {
+        let deliveries = match self.delivery_runs() {
+            Ok(deliveries) => deliveries,
+            Err(message) => {
+                self.notify_error("conversion", "Couldn’t start the delivery", message, cx);
+                return;
+            }
+        };
+        self.start_conversion_with(deliveries, cx);
+    }
+
+    /// Convert the ticked rows for one target, from its row in the rail.
+    ///
+    /// The row is the only place that knows which target a person meant, and a
+    /// target that failed or arrived late should not need the whole job run
+    /// again to catch up.
+    pub(super) fn run_delivery_target(&mut self, id: &str, cx: &mut Context<Self>) {
+        let deliveries = match self.delivery_runs() {
+            Ok(deliveries) => deliveries,
+            Err(message) => {
+                self.notify_error("conversion", "Couldn’t start the delivery", message, cx);
+                return;
+            }
+        };
+        let Some(delivery) = deliveries
+            .into_iter()
+            .find(|delivery| delivery.id == id)
+            .filter(|_| !id.is_empty())
+        else {
+            return;
+        };
+        self.start_conversion_with(vec![delivery], cx);
+    }
+
+    fn start_conversion_with(&mut self, deliveries: Vec<Delivery>, cx: &mut Context<Self>) {
         if self.converting
             || self.local_ai_busy()
             || self.studio_busy()
@@ -141,13 +176,6 @@ impl Audit {
         if targets.is_empty() {
             return;
         }
-        let deliveries = match self.delivery_runs() {
-            Ok(deliveries) => deliveries,
-            Err(message) => {
-                self.notify_error("conversion", "Couldn’t start the delivery", message, cx);
-                return;
-            }
-        };
         // Image-menu conversion also needs the live controls and Stop in view.
         self.open_rail(Rail::Convert, cx);
         self.clear_error("conversion", cx);
@@ -179,7 +207,13 @@ impl Audit {
             .iter()
             .map(|entry| entry.path.clone())
             .collect();
-        self.delivery_progress.clear();
+        // A whole-job run starts every row's tally again; a single target's
+        // re-run only starts its own, so the other rows keep what they wrote.
+        if deliveries.len() > 1 {
+            self.delivery_progress.clear();
+        } else if let Some(delivery) = deliveries.first() {
+            self.delivery_progress.remove(&delivery.id);
+        }
 
         let plan_root = root.clone();
         let proof_root = root.clone();

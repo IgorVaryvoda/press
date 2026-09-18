@@ -147,7 +147,7 @@ impl Recipe {
         (format, quality, MaxEdge(self.max_edge), self.avif_speed)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA_VERSION {
             return Err(format!(
                 "unsupported recipe schema {} (this Press reads schema {SCHEMA_VERSION})",

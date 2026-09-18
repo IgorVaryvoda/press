@@ -1012,6 +1012,9 @@ impl Audit {
             id: recipe.id.clone(),
             name: recipe.name.clone(),
             recipe: Some(recipe.id.clone()),
+            // Pinned here, so editing or deleting the preset later cannot change
+            // what this job delivers under a name somebody already reviewed.
+            recipe_snapshot: Some(recipe.clone()),
             out: PathBuf::from(&recipe.id),
         };
         let mut targets = self.work_job.targets.clone();
