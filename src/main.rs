@@ -19,6 +19,8 @@ mod manifest;
 mod menus;
 mod output;
 mod recipe;
+pub mod requirements;
+mod saved_plan;
 mod scan;
 mod settings;
 mod sirv;
@@ -59,11 +61,19 @@ fn write_text(out: &mut impl std::io::Write, text: &str) -> std::io::Result<bool
 /// the end of the run, not a crash, so it exits 0 and the hook stays installed for
 /// everything that really is one.
 fn print_text(text: &str) {
+    print_text_with_code(text, 0)
+}
+
+/// The same guard for a command whose exit code is its result. `press audit |
+/// head` has nothing to lose by exiting 0, but a saved-plan run that wrote half
+/// its files must not report a clean run because the reader left: the code the
+/// run earned survives the closed pipe.
+fn print_text_with_code(text: &str, code: i32) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match write_text(&mut out, text) {
         Ok(true) => {}
-        Ok(false) => std::process::exit(0),
+        Ok(false) => std::process::exit(code),
         Err(error) => {
             eprintln!("press: could not write to stdout: {error}");
             std::process::exit(1);
@@ -93,7 +103,11 @@ const HELP: &str = concat!(
     "  press audit <PATH> [--json]\n",
     "  press convert <PATH> [OPTIONS]\n",
     "  press restore <PATH>\n",
+    "  press plan --root <PATH> --output <DIR> --plan <FILE> [OPTIONS]\n",
+    "  press execute <FILE> --root <PATH> --output <DIR> (--continue-unstarted|--retry-failed|--cancel)\n",
+    "  press reconcile <FILE> --root <PATH> --output <DIR>\n",
     "  press handoff <FILE>\n",
+    "  press check <FILE_OR_FOLDER> --requirements-file <FILE> [--json]\n",
     "  press supplier <PATH> <verb> [OPTIONS]\n",
     "  press studio <verb> [OPTIONS]\n",
     "  press skill\n",
@@ -102,7 +116,11 @@ const HELP: &str = concat!(
     "  audit      Read image headers without opening a window or writing files\n",
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
     "  restore    Put back the originals a --replace run moved aside\n",
+    "  plan       Save a portable conversion plan without writing images\n",
+    "  execute    Run a saved plan against explicitly rebound roots\n",
+    "  reconcile  Repair a saved plan receipt from installed outputs\n",
     "  handoff    Validate an ImageGuide report into a pending local task\n",
+    "  check      Inspect actual output bytes against a local requirements snapshot\n",
     "  supplier   Prepare, submit and reconcile product images as a supplier\n",
     "  studio     Rehearse one bounded hosted operation against a local script\n",
     "  skill      Print the bundled Agent Skill to stdout\n",
@@ -124,14 +142,23 @@ const HELP: &str = concat!(
     "  --skip-existing           Skip a source whose output already matches this\n",
     "                            format, quality, max edge and AVIF speed\n",
     "  --dry-run                 Plan and project a conversion, write nothing\n",
+    "  --plan <file>             File to create for the plan command\n",
+    "  --continue-unstarted      Execute only unstarted saved-plan items\n",
+    "  --retry-failed            Execute only failed saved-plan items\n",
+    "  --cancel                  Mark unstarted saved-plan items cancelled\n",
     "  --target <recipe>=<dir>    Convert once more with a saved recipe into\n",
-    "                            its own folder; repeatable, convert only\n",
+    "                            its own folder; repeatable, convert or plan\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
     "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
     "                            explicit flags override it field by field\n",
+    "  --requirements-file <file>\n",
+    "                            Local requirements snapshot for check, plan,\n",
+    "                            execute or reconcile\n",
     "  --root <dir>              Map handoff resources against this folder\n",
-    "  --deployed <dir>          Verify the mapping against deployed files\n",
+    "  --deployed <dir>          Check the mapping against files in this local\n",
+    "                            folder: filename, format and dimensions only,\n",
+    "                            with no live site verification\n",
     "                            (needs handoff --root)\n",
     "  --assignment <file>       Supplier assignment snapshot (needs supplier)\n",
     "  --fake <file>             Rehearsal script for supplier or studio service calls\n",
@@ -177,9 +204,13 @@ enum Command {
     Audit,
     Convert,
     Handoff,
+    Check,
     Supplier,
     Studio,
     Restore,
+    Plan,
+    Execute,
+    Reconcile,
     Skill,
     Update,
     Help,
@@ -214,9 +245,19 @@ struct Args {
     /// Where `handoff` looks for the reported files. `None` validates the
     /// report without mapping it. Every other command refuses the flag.
     map_root: Option<PathBuf>,
-    /// The deployed tree `handoff --root` verifies against. Needs `--root`;
-    /// anything else refuses the flag.
-    map_deployed: Option<PathBuf>,
+    /// The second local folder `handoff --root` checks filenames, formats and
+    /// dimensions against. Spelled `--deployed` on the command line, which the
+    /// flag keeps for compatibility; nothing here reaches a website. Needs
+    /// `--root`; anything else refuses the flag.
+    local_check_root: Option<PathBuf>,
+    /// Explicit source root for saved-plan creation and execution. Handoff keeps
+    /// its separate mapping root because imported reports have another contract.
+    plan_root: Option<PathBuf>,
+    /// Saved plan path to create. Execute and reconcile take their plan as the
+    /// positional root value, so this flag is creation-only.
+    plan_file: Option<PathBuf>,
+    /// A bounded, user-authored requirements snapshot for `check`.
+    requirements_file: Option<PathBuf>,
     /// One run per target for `convert`: a saved recipe id and the output
     /// namespace under the run's output root. Empty is a plain convert.
     targets: Vec<TargetSpec>,
@@ -241,6 +282,10 @@ struct Args {
     skip_existing: bool,
     /// Plan and project the conversion without writing anything.
     dry_run: bool,
+    /// Saved-plan lifecycle mode. Exactly one is required for execute.
+    continue_unstarted: bool,
+    retry_failed: bool,
+    cancel: bool,
     unknown: Vec<String>,
     /// A preset file resolved as the recipe base. Explicit flags override it
     /// field by field; the window never reads it implicitly.
@@ -287,7 +332,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut replace = false;
     let mut output = None;
     let mut map_root = None;
-    let mut map_deployed = None;
+    let mut local_check_root = None;
+    let mut plan_root = None;
+    let mut plan_file = None;
+    let mut requirements_file = None;
     let mut targets = Vec::new();
     let mut supplier_verb = None;
     let mut supplier_attempt = None;
@@ -303,6 +351,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut studio_fake = None;
     let mut skip_existing = false;
     let mut dry_run = false;
+    let mut continue_unstarted = false;
+    let mut retry_failed = false;
+    let mut cancel = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
     let mut preset = None;
@@ -315,8 +366,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         match argument.as_str() {
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
+            "plan" if root.is_none() && command == Command::Window => command = Command::Plan,
+            "execute" if root.is_none() && command == Command::Window => command = Command::Execute,
+            "reconcile" if root.is_none() && command == Command::Window => {
+                command = Command::Reconcile
+            }
             "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
             "handoff" if root.is_none() && command == Command::Window => command = Command::Handoff,
+            "check" if root.is_none() && command == Command::Window => command = Command::Check,
             "supplier" if root.is_none() && command == Command::Window => {
                 command = Command::Supplier
             }
@@ -378,7 +435,22 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--root" => {
                 let value = next_value(&mut rest, "--root", "a folder")?;
-                map_root = Some(PathBuf::from(value));
+                if matches!(
+                    command,
+                    Command::Plan | Command::Execute | Command::Reconcile
+                ) {
+                    plan_root = Some(PathBuf::from(value));
+                } else {
+                    map_root = Some(PathBuf::from(value));
+                }
+            }
+            "--plan" => {
+                let value = next_value(&mut rest, "--plan", "a file")?;
+                plan_file = Some(PathBuf::from(value));
+            }
+            "--requirements-file" => {
+                let value = next_value(&mut rest, "--requirements-file", "a requirements file")?;
+                requirements_file = Some(PathBuf::from(value));
             }
             "--assignment" => {
                 let value = next_value(&mut rest, "--assignment", "an assignment file")?;
@@ -420,7 +492,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--deployed" => {
                 let value = next_value(&mut rest, "--deployed", "a folder")?;
-                map_deployed = Some(PathBuf::from(value));
+                local_check_root = Some(PathBuf::from(value));
             }
             "--avif-speed" => {
                 conversion_option = true;
@@ -464,6 +536,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 dry_run = true;
             }
+            "--continue-unstarted" => continue_unstarted = true,
+            "--retry-failed" => retry_failed = true,
+            "--cancel" => cancel = true,
             "--target" => {
                 let value =
                     next_value(&mut rest, "--target", "a recipe and folder like night=web")?;
@@ -544,7 +619,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             replace,
             output,
             map_root: None,
-            map_deployed: None,
+            local_check_root: None,
+            plan_root: None,
+            plan_file: None,
+            requirements_file: None,
             targets: Vec::new(),
             supplier_verb: None,
             supplier_attempt: None,
@@ -560,6 +638,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             studio_fake: None,
             skip_existing,
             dry_run,
+            continue_unstarted,
+            retry_failed,
+            cancel,
             preset: None,
             preset_overrides: Vec::new(),
             unknown,
@@ -599,13 +680,69 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         return Err("handoff takes only a report file".into());
     }
     if map_root.is_some() && command != Command::Handoff {
-        return Err("--root needs handoff".into());
+        // `--root` belongs to whichever command it follows. Written before the
+        // command, it lands here, and naming only handoff would send someone
+        // typing `press --root src plan …` looking for a flag that is theirs.
+        return Err(
+            "--root comes after the command that takes it: handoff, plan, execute or reconcile"
+                .into(),
+        );
     }
-    if map_deployed.is_some() && (command != Command::Handoff || map_root.is_none()) {
+    if plan_root.is_some()
+        && !matches!(
+            command,
+            Command::Plan | Command::Execute | Command::Reconcile
+        )
+    {
+        return Err("--root needs plan, execute or reconcile".into());
+    }
+    if plan_file.is_some() && command != Command::Plan {
+        return Err("--plan needs plan".into());
+    }
+    if local_check_root.is_some() && (command != Command::Handoff || map_root.is_none()) {
         return Err("--deployed needs handoff --root".into());
     }
-    if !targets.is_empty() && command != Command::Convert {
-        return Err("--target needs convert".into());
+    if requirements_file.is_some()
+        && !matches!(
+            command,
+            Command::Check | Command::Plan | Command::Execute | Command::Reconcile
+        )
+    {
+        return Err("--requirements-file needs check, plan, execute or reconcile".into());
+    }
+    if command == Command::Check
+        && (conversion_option
+            || grid
+            || !subfolders
+            || output.is_some()
+            || preset.is_some()
+            || map_root.is_some()
+            || local_check_root.is_some()
+            || !targets.is_empty()
+            || replace
+            || skip_existing
+            || dry_run
+            || supplier_assignment.is_some()
+            || supplier_fake.is_some()
+            || supplier_verb.is_some()
+            || supplier_attempt.is_some()
+            || studio_verb.is_some()
+            || studio_tool.is_some()
+            || studio_image.is_some()
+            || studio_job.is_some()
+            || studio_out.is_some()
+            || studio_payer.is_some()
+            || studio_prompt.is_some()
+            || studio_fake.is_some()
+            || !unknown.is_empty())
+    {
+        return Err("check takes a file or folder, --requirements-file and --json only".into());
+    }
+    if command == Command::Check && requirements_file.is_none() {
+        return Err("check needs --requirements-file <file>".into());
+    }
+    if !targets.is_empty() && !matches!(command, Command::Convert | Command::Plan) {
+        return Err("--target needs convert or plan".into());
     }
     if !targets.is_empty() && (format_set || quality_set || edge_set || speed_set) {
         return Err(
@@ -661,7 +798,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             || output.is_some()
             || preset.is_some()
             || map_root.is_some()
-            || map_deployed.is_some()
+            || local_check_root.is_some()
             || !targets.is_empty()
             || replace
             || skip_existing
@@ -701,10 +838,38 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             || output.is_some()
             || preset.is_some()
             || map_root.is_some()
-            || map_deployed.is_some()
+            || local_check_root.is_some()
             || !targets.is_empty())
     {
         return Err("supplier takes a folder, a verb and --assignment/--fake only".into());
+    }
+    if matches!(command, Command::Execute | Command::Reconcile)
+        && (format_set
+            || quality_set
+            || edge_set
+            || speed_set
+            || preset.is_some()
+            || !targets.is_empty()
+            || replace
+            || skip_existing
+            || dry_run)
+    {
+        return Err("saved plan execution uses the settings and mappings in the plan".into());
+    }
+    if command == Command::Reconcile && (continue_unstarted || retry_failed || cancel) {
+        return Err("reconcile does not execute items".into());
+    }
+    if command == Command::Execute
+        && u8::from(continue_unstarted) + u8::from(retry_failed) + u8::from(cancel) != 1
+    {
+        return Err(
+            "execute needs exactly one of --continue-unstarted, --retry-failed or --cancel".into(),
+        );
+    }
+    if command == Command::Plan
+        && (replace || skip_existing || dry_run || continue_unstarted || retry_failed || cancel)
+    {
+        return Err("plan saves a snapshot; execution flags need execute".into());
     }
     if json
         && !matches!(
@@ -712,14 +877,25 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             Command::Audit
                 | Command::Convert
                 | Command::Handoff
+                | Command::Check
                 | Command::Supplier
                 | Command::Studio
+                | Command::Plan
+                | Command::Execute
+                | Command::Reconcile
         )
     {
-        return Err("--json needs audit, convert, handoff or supplier".into());
+        return Err(
+            "--json needs an inspect, conversion, handoff, supplier or saved-plan command".into(),
+        );
     }
-    if command == Command::Handoff && !subfolders {
-        return Err("--no-subfolders needs audit or convert".into());
+    if !subfolders
+        && !matches!(
+            command,
+            Command::Audit | Command::Convert | Command::Plan | Command::Window
+        )
+    {
+        return Err("--no-subfolders needs audit, convert or plan".into());
     }
     if matches!(command, Command::Skill | Command::Update)
         && (root.is_some()
@@ -747,6 +923,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Convert && grid {
         return Err("--grid is available only for the window".into());
     }
+    if matches!(
+        command,
+        Command::Plan | Command::Execute | Command::Reconcile
+    ) && grid
+    {
+        return Err("--grid is available only for the window".into());
+    }
     if command == Command::Window && !subfolders {
         return Err(
             "--no-subfolders needs audit or convert; the window has a Subfolders chip".into(),
@@ -770,6 +953,42 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if replace && output.is_some() {
         return Err("--replace writes beside each source; it takes no --output".into());
     }
+    match command {
+        Command::Plan => {
+            if root.is_some() {
+                return Err("plan takes --root <folder>, not a positional path".into());
+            }
+            if plan_root.is_none() || output.is_none() || plan_file.is_none() {
+                return Err(
+                    "plan needs --root <folder>, --output <folder> and --plan <file>".into(),
+                );
+            }
+        }
+        Command::Execute | Command::Reconcile => {
+            if root.is_none() {
+                return Err(format!("{} needs a saved plan file", command_name(command)));
+            }
+            if plan_root.is_none() || output.is_none() {
+                return Err(format!(
+                    "{} needs --root <folder> and --output <folder>",
+                    command_name(command)
+                ));
+            }
+            if plan_file.is_some() {
+                return Err("--plan is only for plan creation".into());
+            }
+        }
+        _ => {
+            if continue_unstarted
+                || retry_failed
+                || cancel
+                || plan_root.is_some()
+                || plan_file.is_some()
+            {
+                return Err("saved-plan options need plan, execute or reconcile".into());
+            }
+        }
+    }
 
     Ok(Args {
         root,
@@ -784,7 +1003,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         replace,
         output,
         map_root,
-        map_deployed,
+        local_check_root,
+        plan_root,
+        plan_file,
+        requirements_file,
         targets,
         supplier_verb,
         supplier_attempt,
@@ -800,6 +1022,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         studio_fake,
         skip_existing,
         dry_run,
+        continue_unstarted,
+        retry_failed,
+        cancel,
         preset,
         preset_overrides,
         unknown,
@@ -812,6 +1037,26 @@ fn select_command(command: &mut Command, selected: Command, flag: &str) -> Resul
     }
     *command = selected;
     Ok(())
+}
+
+fn command_name(command: Command) -> &'static str {
+    match command {
+        Command::Plan => "plan",
+        Command::Execute => "execute",
+        Command::Reconcile => "reconcile",
+        Command::Audit => "audit",
+        Command::Convert => "convert",
+        Command::Handoff => "handoff",
+        Command::Check => "check",
+        Command::Supplier => "supplier",
+        Command::Studio => "studio",
+        Command::Restore => "restore",
+        Command::Window => "window",
+        Command::Skill => "skill",
+        Command::Update => "update",
+        Command::Help => "help",
+        Command::Version => "version",
+    }
 }
 
 fn set_root(root: &mut Option<PathBuf>, value: String) -> Result<(), String> {
@@ -932,8 +1177,12 @@ fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) -
 }
 
 fn write_json(value: &impl Serialize) -> Result<(), String> {
+    write_json_with_code(value, 0)
+}
+
+fn write_json_with_code(value: &impl Serialize, code: i32) -> Result<(), String> {
     let document = serde_json::to_string(value).map_err(|error| error.to_string())?;
-    print_text(&format!("{document}\n"));
+    print_text_with_code(&format!("{document}\n"), code);
     Ok(())
 }
 
@@ -1116,6 +1365,38 @@ fn walk_output(target: &Path, chosen: Option<&Path>) -> PathBuf {
     } else {
         default
     }
+}
+
+/// The audited path in the one spelling every later boundary uses.
+///
+/// A folder resolves outright. A single file resolves only its parent and keeps
+/// the name that was typed: following a final symlink would point the run at the
+/// referent instead of the file that was chosen, and in replace mode that moves
+/// somebody else's file, possibly from outside the folder. The parent is all the
+/// root and the source have to agree on, because the root is what a record
+/// spells its source relative to.
+///
+/// The kernel does the resolving, not a lexical walk. `link/../photo.png` names
+/// the parent of what the link points at, and dropping the `..` against the
+/// typed spelling first names a different folder: the run would then audit and
+/// replace files under `link`'s own parent, which is not the folder that was
+/// asked for. The target is already known to exist here, so this only ever
+/// resolves a path the caller can reach.
+fn audited_path(target: &Path, open_single: bool) -> std::io::Result<PathBuf> {
+    if !open_single {
+        return std::fs::canonicalize(target);
+    }
+    let name = target.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path does not name a file",
+        )
+    })?;
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Ok(std::fs::canonicalize(parent)?.join(name))
 }
 
 /// The counts a run only mentions when they happened. Zero skipped and zero failed
@@ -1308,6 +1589,9 @@ fn project_run(
     // before it estimates; so does this, rather than trusting the caller's order.
     let mut entries: Vec<&Entry> = entries.to_vec();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
+    // One read of the speed dial for the whole projection, so every sample answers
+    // for the same recipe the run would stamp.
+    let avif_speed = crate::avif::speed();
     let weights: Vec<u64> = entries.iter().map(|entry| entry.bytes).collect();
     let slices = audit::sample_size(format).min(weights.len());
     let jobs = audit::strata(&weights, slices);
@@ -1333,23 +1617,18 @@ fn project_run(
                     // projection never spends savings a refused file will not
                     // deliver. A backend failure is not a verdict — that sample
                     // stays unknown and borrows the average, as before.
-                    let outcome = scan::decode_for_conversion(&entry.path, max_edge)
-                        .ok()
-                        .zip(format.resolve(&entry.path).ok())
-                        .map(|((image, profile), format)| {
-                            let image = max_edge.apply(image);
-                            match convert::check_lossless_depth(&image, format, quality)
-                                .and_then(|()| convert::check_image_budget(&image))
-                                .and_then(|()| {
-                                    convert::encode(&image, format, quality, profile.as_deref())
-                                        .map(|encoded| encoded.len() as u64)
-                                }) {
-                                Ok(encoded) => audit::SampleOutcome::Encoded(entry.bytes, encoded),
-                                Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
-                                Err(_) => audit::SampleOutcome::Refused,
-                            }
-                        })
-                        .unwrap_or(audit::SampleOutcome::Unknown);
+                    let outcome = match convert::prepare(&entry.path, max_edge) {
+                        Ok(prepared) => audit::sample_encode(
+                            &prepared,
+                            &entry.path,
+                            entry.bytes,
+                            format,
+                            quality,
+                            avif_speed,
+                        ),
+                        Err(convert::Failure::Failed) => audit::SampleOutcome::Unknown,
+                        Err(_) => audit::SampleOutcome::Refused,
+                    };
                     sampled.lock()[job] = Some((slice_bytes, outcome));
                 }
             });
@@ -1628,7 +1907,7 @@ fn convert_headless(
 
 #[derive(Serialize)]
 struct HandoffMappingSummary {
-    confirmed: usize,
+    path_match: usize,
     candidate: usize,
     ambiguous: usize,
     unmatched: usize,
@@ -1636,11 +1915,75 @@ struct HandoffMappingSummary {
 }
 
 #[derive(Serialize)]
-struct HandoffDeploySummary {
-    deployed: usize,
+struct HandoffLocalSummary {
+    local_match: usize,
     differs: usize,
     missing: usize,
     ambiguous: usize,
+    /// Resources the check never looked for. A summary of matches alone
+    /// would read as a complete checklist when it is not.
+    not_checked: usize,
+}
+
+/// Where one scan happened, in the vocabulary of the flag that asked for it.
+const SOURCE_SCAN: &str = "source_root";
+const LOCAL_CHECK_SCAN: &str = "local_check_root";
+
+/// What one header-only walk could not read, kept beside the results it
+/// shortened and tagged with the root it came from. Names are bounded like a
+/// mapping's choices — past `MAX_SHOWN_CHOICES` the omission count travels
+/// instead of the paths — so a diagnostic never turns the report into a
+/// directory listing. Files excluded by design are counted apart and are not
+/// failures: no decoder is claimed for them here.
+#[derive(Serialize)]
+struct HandoffScanDiagnostics {
+    root: String,
+    scope: &'static str,
+    /// Files that look like images by extension and would not decode.
+    unreadable: Vec<String>,
+    unreadable_total: usize,
+    unreadable_omitted: usize,
+    /// Directories the walk could not enter: every count beside them is short.
+    walk_errors: Vec<String>,
+    walk_errors_total: usize,
+    walk_errors_omitted: usize,
+    excluded_raw: usize,
+    excluded_heic: usize,
+    excluded_packages: usize,
+    /// False when anything above could not be read or entered, which makes
+    /// every result beside it provisional: a competing file may be unseen.
+    complete: bool,
+}
+
+/// Sorted names up to the shared bound, with however many were left out.
+fn bounded_paths(paths: &[PathBuf]) -> (Vec<String>, usize) {
+    let mut names = sorted_paths(paths);
+    let omitted = names.len().saturating_sub(handoff::MAX_SHOWN_CHOICES);
+    names.truncate(handoff::MAX_SHOWN_CHOICES);
+    (names, omitted)
+}
+
+fn scan_diagnostics(
+    root: &Path,
+    scope: &'static str,
+    scanned: &scan::Scan,
+) -> HandoffScanDiagnostics {
+    let (unreadable, unreadable_omitted) = bounded_paths(&scanned.unreadable);
+    let (walk_errors, walk_errors_omitted) = bounded_paths(&scanned.walk_errors);
+    HandoffScanDiagnostics {
+        root: path_text(root),
+        scope,
+        unreadable,
+        unreadable_total: scanned.unreadable.len(),
+        unreadable_omitted,
+        walk_errors,
+        walk_errors_total: scanned.walk_errors.len(),
+        walk_errors_omitted,
+        excluded_raw: scanned.skipped_raw,
+        excluded_heic: scanned.skipped_heic,
+        excluded_packages: scanned.skipped_packages,
+        complete: scanned.unreadable.is_empty() && scanned.walk_errors.is_empty(),
+    }
 }
 
 #[derive(Serialize)]
@@ -1658,23 +2001,31 @@ struct HandoffReport {
     /// confirmation before anything converts them.
     mappings: Option<Vec<handoff::Mapping>>,
     summary: Option<HandoffMappingSummary>,
-    /// The verified deployed tree, absent without `--deployed`.
-    deployed_root: Option<String>,
-    deployed: Option<Vec<handoff::DeploymentCheck>>,
-    deploy_summary: Option<HandoffDeploySummary>,
+    /// The second local folder checked, absent without `--deployed`. The
+    /// flag keeps its spelling; the fields say what was actually read, and
+    /// `local_evidence_scope` says how far the result reaches.
+    local_root: Option<String>,
+    local_checks: Option<Vec<handoff::LocalCheck>>,
+    local_summary: Option<HandoffLocalSummary>,
+    local_evidence_scope: Option<&'static str>,
+    /// One entry per folder actually walked, empty when the report was only
+    /// validated. These are this run's filesystem diagnostics; `pending`
+    /// stays exactly what the producer sent and never acquires them.
+    scans: Vec<HandoffScanDiagnostics>,
 }
 
 fn handoff_report(
     target: &Path,
     pending: &handoff::PendingHandoff,
     mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
-    deployed: Option<(&PathBuf, &Vec<handoff::DeploymentCheck>)>,
+    local: Option<(&PathBuf, &Vec<handoff::LocalCheck>)>,
+    scans: Vec<HandoffScanDiagnostics>,
 ) -> HandoffReport {
     let (root, mappings, summary) = match mapped {
         None => (None, None, None),
         Some((root, mappings)) => {
             let mut summary = HandoffMappingSummary {
-                confirmed: 0,
+                path_match: 0,
                 candidate: 0,
                 ambiguous: 0,
                 unmatched: 0,
@@ -1682,7 +2033,7 @@ fn handoff_report(
             };
             for mapping in mappings {
                 match mapping.verdict {
-                    handoff::Verdict::Confirmed => summary.confirmed += 1,
+                    handoff::Verdict::PathMatch => summary.path_match += 1,
                     handoff::Verdict::Candidate => summary.candidate += 1,
                     handoff::Verdict::Ambiguous => summary.ambiguous += 1,
                     handoff::Verdict::Unmatched => summary.unmatched += 1,
@@ -1692,24 +2043,31 @@ fn handoff_report(
             (Some(path_text(root)), Some(mappings.clone()), Some(summary))
         }
     };
-    let (deployed_root, deployed, deploy_summary) = match deployed {
-        None => (None, None, None),
+    let (local_root, local_checks, local_summary, local_evidence_scope) = match local {
+        None => (None, None, None, None),
         Some((root, checks)) => {
-            let mut summary = HandoffDeploySummary {
-                deployed: 0,
+            let mut summary = HandoffLocalSummary {
+                local_match: 0,
                 differs: 0,
                 missing: 0,
                 ambiguous: 0,
+                not_checked: 0,
             };
             for check in checks {
                 match check.status {
-                    handoff::DeployStatus::Deployed => summary.deployed += 1,
-                    handoff::DeployStatus::Differs => summary.differs += 1,
-                    handoff::DeployStatus::Missing => summary.missing += 1,
-                    handoff::DeployStatus::Ambiguous => summary.ambiguous += 1,
+                    handoff::LocalCheckStatus::LocalMatch => summary.local_match += 1,
+                    handoff::LocalCheckStatus::Differs => summary.differs += 1,
+                    handoff::LocalCheckStatus::Missing => summary.missing += 1,
+                    handoff::LocalCheckStatus::Ambiguous => summary.ambiguous += 1,
+                    handoff::LocalCheckStatus::NotChecked => summary.not_checked += 1,
                 }
             }
-            (Some(path_text(root)), Some(checks.clone()), Some(summary))
+            (
+                Some(path_text(root)),
+                Some(checks.clone()),
+                Some(summary),
+                Some(handoff::LOCAL_EVIDENCE_SCOPE),
+            )
         }
     };
     HandoffReport {
@@ -1723,22 +2081,28 @@ fn handoff_report(
         root,
         mappings,
         summary,
-        deployed_root,
-        deployed,
-        deploy_summary,
+        local_root,
+        local_checks,
+        local_summary,
+        local_evidence_scope,
+        scans,
     }
 }
 
 /// The validated task, briefly: warnings are diagnostics, so they go to
 /// stderr beside the summary rather than into the task listing. With a
 /// mapped root every resource gets one verdict line; candidates name the
-/// file they resemble without claiming it. Deployment lines follow the same
-/// shape, and open findings stay listed as page work, never as closed items.
+/// file they resemble without claiming it. Local-check lines follow the same
+/// shape under a heading that states how far they reach, and open findings
+/// stay listed as page work, never as closed items. Each walked root reports
+/// what it could not read directly under its own heading, so a short scan is
+/// never invisible beside the results it shortened.
 fn print_handoff(
     target: &Path,
     pending: &handoff::PendingHandoff,
     mapped: Option<(&PathBuf, &Vec<handoff::Mapping>)>,
-    deployed: Option<(&PathBuf, &Vec<handoff::DeploymentCheck>)>,
+    local: Option<(&PathBuf, &Vec<handoff::LocalCheck>)>,
+    scans: &[HandoffScanDiagnostics],
 ) {
     outln!(
         "{}: task {} from {}: {} resources",
@@ -1749,11 +2113,14 @@ fn print_handoff(
     );
     if let Some((root, mappings)) = mapped {
         outln!("mapped against {}", root.display());
+        if let Some(diagnostics) = scans.iter().find(|scan| scan.scope == SOURCE_SCAN) {
+            print_scan_diagnostics(diagnostics);
+        }
         for mapping in mappings {
             let detail = mapping.paths.first().map(String::as_str).unwrap_or("-");
             outln!(
                 "{} {}: {}",
-                verdict_word(mapping.verdict),
+                handoff::verdict_word(mapping.verdict),
                 mapping.id,
                 detail
             );
@@ -1762,18 +2129,33 @@ fn print_handoff(
             }
         }
     }
-    if let Some((root, checks)) = deployed {
-        outln!("verified against {}", root.display());
+    if let Some((root, checks)) = local {
+        outln!("local file check under {}", root.display());
+        outln!("  scope: {}", handoff::LOCAL_EVIDENCE_SCOPE);
+        if let Some(diagnostics) = scans.iter().find(|scan| scan.scope == LOCAL_CHECK_SCAN) {
+            print_scan_diagnostics(diagnostics);
+        }
         for check in checks {
-            let detail = check.deployed.first().map(String::as_str).unwrap_or("-");
-            outln!("{} {}: {}", deploy_word(check.status), check.id, detail);
+            let detail = check.paths.first().map(String::as_str).unwrap_or("-");
+            outln!(
+                "{} {}: {}",
+                local_status_word(check.status),
+                check.id,
+                detail
+            );
             for note in &check.notes {
                 outln!("  note: {note}");
             }
         }
-        let mut findings: Vec<&str> = checks
+        // Every reported resource keeps its findings here, including one the
+        // check never looked for: an unmatched image's page work is still open.
+        // They are the producer's observations, listed as items, never as
+        // instructions to carry out.
+        let mut findings: Vec<&str> = pending
+            .handoff
+            .resources
             .iter()
-            .flat_map(|check| check.findings.iter().map(String::as_str))
+            .flat_map(|resource| resource.findings.iter().map(String::as_str))
             .collect();
         findings.sort_unstable();
         findings.dedup();
@@ -1789,22 +2171,51 @@ fn print_handoff(
     }
 }
 
-fn verdict_word(verdict: handoff::Verdict) -> &'static str {
-    match verdict {
-        handoff::Verdict::Confirmed => "confirmed",
-        handoff::Verdict::Candidate => "candidate",
-        handoff::Verdict::Ambiguous => "ambiguous",
-        handoff::Verdict::Unmatched => "unmatched",
-        handoff::Verdict::OutOfScope => "out of scope",
+fn local_status_word(status: handoff::LocalCheckStatus) -> &'static str {
+    match status {
+        handoff::LocalCheckStatus::LocalMatch => "local_match",
+        handoff::LocalCheckStatus::Differs => "differs",
+        handoff::LocalCheckStatus::Missing => "missing",
+        handoff::LocalCheckStatus::Ambiguous => "ambiguous",
+        handoff::LocalCheckStatus::NotChecked => "not_checked",
     }
 }
 
-fn deploy_word(status: handoff::DeployStatus) -> &'static str {
-    match status {
-        handoff::DeployStatus::Deployed => "deployed",
-        handoff::DeployStatus::Differs => "differs",
-        handoff::DeployStatus::Missing => "missing",
-        handoff::DeployStatus::Ambiguous => "ambiguous",
+/// A scan's own shortfalls, printed under the heading of the root they belong
+/// to. A complete walk with nothing excluded prints nothing.
+fn print_scan_diagnostics(diagnostics: &HandoffScanDiagnostics) {
+    if !diagnostics.complete {
+        outln!(
+            "  scan incomplete: {} would not decode, {} could not be entered",
+            diagnostics.unreadable_total,
+            diagnostics.walk_errors_total
+        );
+        for path in &diagnostics.unreadable {
+            outln!("    would not decode: {path}");
+        }
+        if diagnostics.unreadable_omitted > 0 {
+            outln!(
+                "    …and {} more that would not decode",
+                diagnostics.unreadable_omitted
+            );
+        }
+        for path in &diagnostics.walk_errors {
+            outln!("    could not enter: {path}");
+        }
+        if diagnostics.walk_errors_omitted > 0 {
+            outln!(
+                "    …and {} more that could not be entered",
+                diagnostics.walk_errors_omitted
+            );
+        }
+    }
+    if diagnostics.excluded_raw + diagnostics.excluded_heic + diagnostics.excluded_packages > 0 {
+        outln!(
+            "  excluded by design, not read here: {} raw, {} heic, {} packages",
+            diagnostics.excluded_raw,
+            diagnostics.excluded_heic,
+            diagnostics.excluded_packages
+        );
     }
 }
 
@@ -2150,6 +2561,269 @@ fn convert_targets(
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
 
+fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, String> {
+    // A headless command runs on `Settings::default()`, never on the settings
+    // file. Reading that file here would put a speed in the plan's recipe
+    // fingerprint that `press convert` on the same machine never uses, and the
+    // two would then refuse each other's outputs over a number that changes no
+    // bytes at all outside AVIF.
+    let configured_speed = args.avif_speed.map(|speed| speed.min(10));
+    if args.targets.is_empty() {
+        return Ok(vec![saved_plan::TargetInput {
+            id: "default".into(),
+            out: String::new(),
+            recipe: saved_plan::EffectiveRecipe::from_settings(
+                args.format,
+                args.quality,
+                args.max_edge,
+                configured_speed,
+            ),
+        }]);
+    }
+    let library = target_library();
+    let job_targets: Vec<crate::job::JobTarget> = args
+        .targets
+        .iter()
+        .map(|target| crate::job::JobTarget {
+            id: target.recipe.clone(),
+            name: target.recipe.clone(),
+            recipe: Some(target.recipe.clone()),
+            // A command-line target names a recipe from the library and resolves
+            // it now. Pinning a snapshot is a saved job's contract, not this
+            // one's.
+            recipe_snapshot: None,
+            out: target.out.clone(),
+        })
+        .collect();
+    let prepared = crate::job::prepare_targets(&job_targets, &library)?;
+    prepared
+        .into_iter()
+        .map(|target| {
+            let recipe = target
+                .recipe
+                .ok_or_else(|| format!("target {:?} has no resolved recipe", target.id))?;
+            let (format, quality, max_edge, speed) = recipe.effective();
+            Ok(saved_plan::TargetInput {
+                id: target.id,
+                out: saved_plan::portable_relative(&target.out)?,
+                recipe: saved_plan::EffectiveRecipe::from_settings(
+                    format,
+                    quality,
+                    max_edge,
+                    speed.or(configured_speed),
+                ),
+            })
+        })
+        .collect()
+}
+
+/// The two roots a saved-plan command binds, each resolved as what it really is.
+///
+/// The source folder is asked of the filesystem rather than of the path string.
+/// `scan::canonical_boundary` folds `..` lexically because it also has to name
+/// destinations that do not exist yet; a source folder is not one of those. It
+/// is here now, and `link/..` is the parent of what the link points at, which
+/// is the folder the kernel opens and the only one whose files a plan may go on
+/// to hash, name relatively and convert.
+fn saved_plan_context(source: &Path, output: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let resolved = std::fs::canonicalize(source).map_err(|error| {
+        format!(
+            "saved plan source {} cannot be established: {error}",
+            source.display()
+        )
+    })?;
+    if !resolved.is_dir() {
+        return Err(format!(
+            "saved plan source {} is not a folder",
+            source.display()
+        ));
+    }
+    let destination = settings::Output::Folder(output.to_path_buf());
+    let context = destination.context(&resolved)?;
+    Ok((resolved, context.output_root().to_path_buf()))
+}
+
+fn saved_plan_scan(source: &Path, output: &Path, subfolders: bool) -> Result<scan::Scan, String> {
+    if subfolders {
+        Ok(scan::scan(source, output))
+    } else {
+        scan::browse(source, output)
+            .map(|browse| browse.scan)
+            .map_err(|error| {
+                format!(
+                    "saved plan source {} cannot be read: {error}",
+                    source.display()
+                )
+            })
+    }
+}
+
+/// The rules a saved-plan command was given, parsed through the shared bounded
+/// reader. A plan records only which snapshot it was reviewed against, so the
+/// document itself has to arrive again with every command that uses it.
+fn saved_plan_requirements(
+    args: &Args,
+) -> Result<Option<requirements::RequirementsSnapshot>, String> {
+    args.requirements_file
+        .as_deref()
+        .map(requirements::parse_file)
+        .transpose()
+}
+
+fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32) -> ! {
+    if json {
+        let report = serde_json::json!({
+            "schema_version": saved_plan::SCHEMA_VERSION,
+            "command": command,
+            "status": "failed",
+            "error": error,
+        });
+        if let Err(write_error) = write_json_with_code(&report, code) {
+            eprintln!("press: could not write JSON: {write_error}");
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!("press: {command}: {error}");
+    }
+    std::process::exit(code)
+}
+
+fn saved_plan_headless(args: &Args) -> i32 {
+    match args.command {
+        Command::Plan => {
+            let source_arg = args
+                .plan_root
+                .as_deref()
+                .expect("parser requires plan root");
+            let output_arg = args.output.as_deref().expect("parser requires plan output");
+            let plan_path = args
+                .plan_file
+                .as_deref()
+                .expect("parser requires plan file");
+            let (source, output) = match saved_plan_context(source_arg, output_arg) {
+                Ok(binding) => binding,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let scanned = match saved_plan_scan(&source, &output, args.subfolders) {
+                Ok(scanned) => scanned,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let targets = match saved_plan_targets(args) {
+                Ok(targets) => targets,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let requirements = match saved_plan_requirements(args) {
+                Ok(requirements) => requirements,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let plan = match saved_plan::build(
+                &source,
+                &output,
+                &scanned.entries,
+                scanned.unreadable.len() + scanned.walk_errors.len(),
+                targets,
+                requirements.as_ref(),
+            ) {
+                Ok(plan) => plan,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            if let Err(error) = saved_plan::save_new(plan_path, &plan) {
+                saved_plan_error("plan", error, args.json, 2);
+            }
+            if args.json {
+                let report = serde_json::json!({
+                    "schema_version": saved_plan::SCHEMA_VERSION,
+                    "command": "plan",
+                    "status": "planned",
+                    "plan": plan,
+                });
+                if let Err(error) = write_json(&report) {
+                    eprintln!("press: could not write JSON: {error}");
+                    return 1;
+                }
+            } else {
+                outln!(
+                    "saved {} with {} sources and {} targets",
+                    plan.plan_id,
+                    plan.sources.len(),
+                    plan.targets.len()
+                );
+            }
+            0
+        }
+        Command::Execute | Command::Reconcile => {
+            let command = command_name(args.command);
+            let plan_path = args.root.as_deref().expect("parser requires plan path");
+            let source_arg = args
+                .plan_root
+                .as_deref()
+                .expect("parser requires plan root");
+            let output_arg = args.output.as_deref().expect("parser requires plan output");
+            let (source, output) = match saved_plan_context(source_arg, output_arg) {
+                Ok(binding) => binding,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            let requirements = match saved_plan_requirements(args) {
+                Ok(requirements) => requirements,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            let requirements = requirements.as_ref();
+            let result = if args.command == Command::Execute {
+                let mode = if args.continue_unstarted {
+                    saved_plan::ExecutionMode::ContinueUnstarted
+                } else if args.retry_failed {
+                    saved_plan::ExecutionMode::RetryFailed
+                } else if args.cancel {
+                    saved_plan::ExecutionMode::Cancel
+                } else {
+                    unreachable!("parser requires an execution mode")
+                };
+                // The command line runs a plan to its end: a stop here is the
+                // person killing the process, and the run state survives that.
+                saved_plan::execute(plan_path, &source, &output, mode, requirements, &mut |_| {
+                    true
+                })
+            } else {
+                saved_plan::reconcile(plan_path, &source, &output, requirements)
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            if args.json {
+                if let Err(error) = write_json_with_code(&result.report, result.exit_code) {
+                    eprintln!("press: could not write JSON: {error}");
+                    return 1;
+                }
+            } else {
+                print_text_with_code(
+                    &format!(
+                        "{} {}: {} written, {} failed, {} unstarted, {} cancelled, {} requirements not met\n",
+                        command,
+                        result.report.plan_id,
+                        result.report.counts.written,
+                        result.report.counts.failed,
+                        result.report.counts.unstarted,
+                        result.report.counts.cancelled,
+                        result.report.counts.requirements_failed
+                    ),
+                    result.exit_code,
+                );
+                if let Some(error) = &result.report.error {
+                    eprintln!("press: {command}: {error}");
+                }
+                for item in &result.report.items {
+                    if let Some(error) = &item.error {
+                        eprintln!("press: {} {}: {error}", item.target_id, item.source);
+                    }
+                }
+            }
+            result.exit_code
+        }
+        _ => unreachable!("saved plan dispatch only accepts saved plan commands"),
+    }
+}
+
 fn main() {
     let pending_crash = crash::pending_snapshot();
     crash::install();
@@ -2176,7 +2850,11 @@ fn main() {
         | Command::Audit
         | Command::Convert
         | Command::Restore
+        | Command::Plan
+        | Command::Execute
+        | Command::Reconcile
         | Command::Handoff
+        | Command::Check
         | Command::Supplier
         | Command::Studio => {}
     }
@@ -2202,6 +2880,13 @@ fn main() {
             args.studio_fake.as_deref(),
             args.json,
         ));
+    }
+
+    if matches!(
+        args.command,
+        Command::Plan | Command::Execute | Command::Reconcile
+    ) {
+        std::process::exit(saved_plan_headless(&args));
     }
 
     // Headless commands do not inherit window state. An agent should get the same
@@ -2235,6 +2920,7 @@ fn main() {
                     Command::Audit => "audit",
                     Command::Restore => "restore",
                     Command::Handoff => "handoff",
+                    Command::Check => "check",
                     Command::Supplier => "supplier",
                     _ => "convert",
                 }
@@ -2277,6 +2963,16 @@ fn main() {
         std::process::exit(restore_headless(&target));
     }
 
+    if args.command == Command::Check {
+        std::process::exit(check_headless(
+            &target,
+            args.requirements_file
+                .as_deref()
+                .expect("check requires a requirements file"),
+            args.json,
+        ));
+    }
+
     // Supplier verbs run a saved job's attempt queue: prepare off the folder's
     // files, submit and reconcile through an explicit rehearsal intake, and
     // cancel, correct or report locally. Only the attempt log is written.
@@ -2317,6 +3013,7 @@ fn main() {
                 // Mapping reads the chosen root through the same header-only
                 // walk as an audit. It never converts: candidates wait for
                 // explicit confirmation.
+                let mut scans = Vec::new();
                 let mapped = match args.map_root.as_deref() {
                     None => None,
                     Some(map_root) => {
@@ -2325,7 +3022,7 @@ fn main() {
                             std::process::exit(2);
                         }
                         let scanned = scan::scan(map_root, &map_root.join(scan::OUTPUT_DIR));
-                        print_scan_errors(&scanned);
+                        scans.push(scan_diagnostics(map_root, SOURCE_SCAN, &scanned));
                         Some((
                             map_root.to_path_buf(),
                             handoff::map_to_root(&pending.handoff, map_root, &scanned.entries),
@@ -2333,47 +3030,58 @@ fn main() {
                     }
                 };
                 let mapped = mapped.as_ref().map(|mapped| (&mapped.0, &mapped.1));
-                // Deployment verification scans the deployed tree and checks
-                // each pinned-down mapping against it. Findings stay open:
-                // an arrived file proves delivery, never review approval.
-                let deployed = match args.map_deployed.as_deref() {
+                // `--deployed` names a second folder on this machine. The
+                // walk is the same header-only scan an audit uses, so the
+                // check sees filenames, formats and dimensions there and
+                // nothing about a website. Findings stay open either way.
+                let local = match args.local_check_root.as_deref() {
                     None => None,
-                    Some(deployed_root) => {
-                        if !deployed_root.is_dir() {
-                            eprintln!("press: {} is not a folder", deployed_root.display());
+                    Some(local_root) => {
+                        if !local_root.is_dir() {
+                            eprintln!("press: {} is not a folder", local_root.display());
                             std::process::exit(2);
                         }
-                        let deployed_scan =
-                            scan::scan(deployed_root, &deployed_root.join(scan::OUTPUT_DIR));
-                        print_scan_errors(&deployed_scan);
+                        let local_scan = scan::scan(local_root, &local_root.join(scan::OUTPUT_DIR));
+                        scans.push(scan_diagnostics(local_root, LOCAL_CHECK_SCAN, &local_scan));
                         let checks = match mapped {
-                            Some((_, mappings)) => handoff::verify_deployment(
+                            Some((_, mappings)) => handoff::check_local_files(
                                 &pending.handoff,
                                 mappings,
-                                &deployed_scan.entries,
+                                &local_scan.entries,
                             ),
                             None => Vec::new(),
                         };
-                        Some((deployed_root.to_path_buf(), checks))
+                        Some((local_root.to_path_buf(), checks))
                     }
                 };
-                let deployed = deployed.as_ref().map(|deployed| (&deployed.0, &deployed.1));
+                let local = local.as_ref().map(|local| (&local.0, &local.1));
+                // A walk that could not read everything leaves every result
+                // beside it provisional — an unseen file may be the competing
+                // match — so it is a failure on its own, with or without a
+                // local check. Files excluded by design are not that: they are
+                // counted and no decoder is claimed for them.
+                let incomplete = scans.iter().any(|scan| !scan.complete);
+                // Gaps in the local check are an incomplete checklist, not a
+                // clean bill: exit 1 names work left, like a partial run. A
+                // resource the check never looked for is such a gap, so a pass
+                // needs one row per reported resource and every one of them
+                // matching.
+                let gaps = local.is_some_and(|(_, checks)| {
+                    checks.len() != pending.handoff.resources.len()
+                        || checks.iter().any(|check| {
+                            !matches!(check.status, handoff::LocalCheckStatus::LocalMatch)
+                        })
+                });
                 if args.json {
-                    if write_json(&handoff_report(&target, &pending, mapped, deployed)).is_err() {
+                    if write_json(&handoff_report(&target, &pending, mapped, local, scans)).is_err()
+                    {
                         eprintln!("press: could not write JSON");
                         std::process::exit(1);
                     }
                 } else {
-                    print_handoff(&target, &pending, mapped, deployed);
+                    print_handoff(&target, &pending, mapped, local, &scans);
                 }
-                // Gaps in verification are an incomplete checklist, not a
-                // clean bill: exit 1 names work left, like a partial run.
-                let gaps = deployed.is_some_and(|(_, checks)| {
-                    checks
-                        .iter()
-                        .any(|check| !matches!(check.status, handoff::DeployStatus::Deployed))
-                });
-                std::process::exit(i32::from(gaps));
+                std::process::exit(i32::from(incomplete || gaps));
             }
             Err(message) => {
                 eprintln!("press: {}: {message}", target.display());
@@ -2417,9 +3125,24 @@ fn main() {
         );
     }
 
+    // Everything downstream of the walk derives its boundary from the canonical
+    // spelling: the output context, the collision keys that protect audited
+    // originals, the run record and the backup mirror. Resolving the audited path
+    // once, before the walk, is what makes those one namespace. An alias left in
+    // place is a second one, and the two never meet: `a.png` stops colliding with
+    // the audited `a.webp` beside it, a WebP replaced by a WebP stops recognising
+    // its own name, and a replace run overwrites an original it never backed up.
+    // The typed path stays the one every report names.
+    let audited = match audited_path(&target, open_single) {
+        Ok(audited) => audited,
+        Err(error) => {
+            eprintln!("press: could not resolve {}: {error}", target.display());
+            std::process::exit(2);
+        }
+    };
     let (scanned, root) = if open_single {
-        let parent = target.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let Some(entry) = scan::probe(&target) else {
+        let parent = audited.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let Some(entry) = scan::probe(&audited) else {
             eprintln!("press: {} is not an image", target.display());
             std::process::exit(2);
         };
@@ -2436,17 +3159,14 @@ fn main() {
             parent,
         )
     } else if args.subfolders {
-        let output = walk_output(&target, args.output.as_deref());
-        (scan::scan(&target, &output), target.clone())
+        let output = walk_output(&audited, args.output.as_deref());
+        (scan::scan(&audited, &output), audited.clone())
     } else {
-        // The one-level read names files by their canonical root, so the root
-        // follows it or the listing would lose its relative spelling.
-        let output = walk_output(&target, args.output.as_deref());
-        match scan::browse(&target, &output) {
-            Ok(browsed) => (
-                browsed.scan,
-                scan::canonical_boundary(&target).unwrap_or_else(|_| target.clone()),
-            ),
+        // The one-level read names files by their canonical root, which the walk
+        // already starts from, or the listing would lose its relative spelling.
+        let output = walk_output(&audited, args.output.as_deref());
+        match scan::browse(&audited, &output) {
+            Ok(browsed) => (browsed.scan, audited.clone()),
             Err(error) => {
                 eprintln!("press: {}: {error}", target.display());
                 std::process::exit(2);
@@ -2655,6 +3375,102 @@ fn restore_headless(root: &Path) -> i32 {
         restore.failures.len()
     );
     i32::from(!restore.failures.is_empty())
+}
+
+/// Inspect one output file or every regular file below a chosen output folder.
+/// The requirement pack is local data; this command never uploads or rewrites.
+fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
+    let snapshot = match requirements::parse_file(requirements_path) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("press: {error}");
+            return 2;
+        }
+    };
+    let (root, refs) = if target.is_file() {
+        let root = target.parent().unwrap_or_else(|| Path::new("."));
+        (
+            root.to_path_buf(),
+            vec![requirements::OutputRef {
+                source: None,
+                output: target
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| target.to_path_buf()),
+                processing: None,
+            }],
+        )
+    } else if target.is_dir() {
+        let target = match std::fs::canonicalize(target) {
+            Ok(target) => target,
+            Err(error) => {
+                eprintln!("press: could not resolve {}: {error}", target.display());
+                return 1;
+            }
+        };
+        let requirements_path = match std::fs::canonicalize(requirements_path) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("press: could not resolve requirements file: {error}");
+                return 2;
+            }
+        };
+        let mut refs = Vec::new();
+        for item in walkdir::WalkDir::new(&target).follow_links(false) {
+            let item = match item {
+                Ok(item) => item,
+                Err(error) => {
+                    eprintln!("press: could not inspect {}: {error}", target.display());
+                    return 1;
+                }
+            };
+            let path = item.path();
+            if !item.file_type().is_file()
+                || path.file_name() == Some(std::ffi::OsStr::new(manifest::NAME))
+                || path == requirements_path
+            {
+                continue;
+            }
+            if refs.len() == requirements::MAX_OUTPUTS {
+                eprintln!(
+                    "press: check found more than {} outputs",
+                    requirements::MAX_OUTPUTS
+                );
+                return 1;
+            }
+            let Some(relative) = path.strip_prefix(&target).ok() else {
+                continue;
+            };
+            refs.push(requirements::OutputRef {
+                source: None,
+                output: relative.to_path_buf(),
+                processing: None,
+            });
+        }
+        refs.sort_by(|left, right| left.output.cmp(&right.output));
+        (target, refs)
+    } else {
+        eprintln!("press: {} is not a file or folder", target.display());
+        return 2;
+    };
+    let receipt = match requirements::inspect_outputs(&root, &refs, &snapshot) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            eprintln!("press: {error}");
+            return 1;
+        }
+    };
+    let result = if json {
+        requirements::render_json(&receipt).map(|json| print_text(&format!("{json}\n")))
+    } else {
+        print_text(&requirements::render_report(&receipt));
+        Ok(())
+    };
+    if let Err(error) = result {
+        eprintln!("press: {error}");
+        return 1;
+    }
+    i32::from(!receipt.all_required_pass)
 }
 
 fn studio_error(error: studio_ledger::LedgerError) -> String {
@@ -3921,6 +4737,89 @@ mod tests {
     }
 
     #[test]
+    fn saved_plan_commands_require_explicit_bindings_and_one_mode() {
+        let plan = parse(&[
+            "plan",
+            "--root",
+            "source",
+            "--output",
+            "output",
+            "--plan",
+            "plan.json",
+        ])
+        .unwrap();
+        assert_eq!(plan.command, Command::Plan);
+        assert_eq!(plan.plan_root.as_deref(), Some(Path::new("source")));
+        assert_eq!(plan.plan_file.as_deref(), Some(Path::new("plan.json")));
+        assert_eq!(plan.output.as_deref(), Some(Path::new("output")));
+
+        let execute = parse(&[
+            "execute",
+            "plan.json",
+            "--root",
+            "source",
+            "--output",
+            "output",
+            "--retry-failed",
+        ])
+        .unwrap();
+        assert_eq!(execute.command, Command::Execute);
+        assert!(execute.retry_failed);
+        assert!(!execute.continue_unstarted);
+
+        assert!(
+            parse(&[
+                "execute",
+                "plan.json",
+                "--root",
+                "source",
+                "--output",
+                "output"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "execute",
+                "plan.json",
+                "--root",
+                "source",
+                "--output",
+                "output",
+                "--continue-unstarted",
+                "--retry-failed",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "reconcile",
+                "plan.json",
+                "--root",
+                "source",
+                "--output",
+                "output",
+                "--cancel",
+            ])
+            .is_err()
+        );
+        assert!(parse(&["convert", "source", "--cancel"]).is_err());
+        assert!(
+            parse(&[
+                "plan",
+                "--root",
+                "source",
+                "--output",
+                "output",
+                "--plan",
+                "plan.json",
+                "--cancel",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn the_jpeg_and_same_formats_parse_and_refuse_lossless() {
         assert_eq!(parse(&["--jpeg", "x"]).unwrap().format, Format::Jpeg);
         assert_eq!(
@@ -5145,6 +6044,62 @@ mod tests {
         assert!(parse(&["restore", "/photos", "--avif"]).is_err());
     }
 
+    /// Walk errors need a directory the process may not enter, which no
+    /// portable fixture can arrange without changing permissions. The scan
+    /// carries them as plain paths, so the diagnostic is exercised from a
+    /// synthetic scan instead.
+    #[test]
+    fn scan_diagnostics_name_a_bounded_few_and_count_the_rest() {
+        let many: Vec<PathBuf> = (0..11)
+            .map(|n| PathBuf::from(format!("/r/{n:02}.png")))
+            .collect();
+        let scanned = scan::Scan {
+            entries: Vec::new(),
+            skipped_raw: 2,
+            skipped_heic: 1,
+            skipped_packages: 0,
+            unreadable: many,
+            walk_errors: vec![PathBuf::from("/r/locked")],
+            existing_output: 0,
+        };
+        let diagnostics = scan_diagnostics(Path::new("/r"), SOURCE_SCAN, &scanned);
+        assert_eq!(diagnostics.scope, SOURCE_SCAN);
+        assert_eq!(diagnostics.root, "/r");
+        // The names stop at the shared bound; the remainder travels as a count.
+        assert_eq!(diagnostics.unreadable.len(), handoff::MAX_SHOWN_CHOICES);
+        assert_eq!(diagnostics.unreadable_total, 11);
+        assert_eq!(
+            diagnostics.unreadable_omitted,
+            11 - handoff::MAX_SHOWN_CHOICES
+        );
+        assert_eq!(diagnostics.unreadable[0], "/r/00.png");
+        assert_eq!(diagnostics.walk_errors, vec!["/r/locked".to_string()]);
+        assert_eq!(diagnostics.walk_errors_total, 1);
+        assert_eq!(diagnostics.walk_errors_omitted, 0);
+        assert!(
+            !diagnostics.complete,
+            "an unenterable folder shortens the walk"
+        );
+        // Raw and HEIC are excluded by design, counted rather than blamed:
+        // leaving them out is policy, not a failure to read them.
+        assert_eq!(diagnostics.excluded_raw, 2);
+        assert_eq!(diagnostics.excluded_heic, 1);
+        let excluded_only = scan::Scan {
+            entries: Vec::new(),
+            skipped_raw: 3,
+            skipped_heic: 4,
+            skipped_packages: 5,
+            unreadable: Vec::new(),
+            walk_errors: Vec::new(),
+            existing_output: 0,
+        };
+        let diagnostics = scan_diagnostics(Path::new("/r"), LOCAL_CHECK_SCAN, &excluded_only);
+        assert!(
+            diagnostics.complete,
+            "excluded types do not make a walk incomplete"
+        );
+    }
+
     #[test]
     fn handoff_takes_only_a_report_file() {
         let handoff = parse(&["handoff", "report.json"]).unwrap();
@@ -5174,7 +6129,7 @@ mod tests {
                 "live"
             ])
             .unwrap()
-            .map_deployed
+            .local_check_root
             .is_some()
         );
         assert!(parse(&["handoff", "r.json", "--deployed", "live"]).is_err());

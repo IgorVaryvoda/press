@@ -1,8 +1,9 @@
 # Agent-friendly local execution
 
-Proposed extension of the existing CLI, 2026-09-08. Owner role: processing/CLI
+Local extension of the existing CLI, 2026-09-08. Owner role: processing/CLI
 engineer. The [execution ledger](workbench-execution-plan.md) owns priority.
-No saved-plan command, MCP service or new report schema is implemented by this PR.
+The saved-plan commands are a local CLI protocol; no MCP service is required.
+They use schema version 1 for portable plans and restartable receipts.
 
 ## Start from the real interface
 
@@ -45,9 +46,35 @@ framework-specific wrappers deferred until a real client cannot use the CLI.
 
 ## A2: a saved plan is a snapshot, not authorization
 
-Proposed lifecycle: **inspect -> resolve -> preview a plan -> authorize execution
--> execute/reconcile -> inspect receipt**. Name the commands only in the
-implementation PR after the data contract is reviewed.
+The implemented local lifecycle is:
+
+```sh
+press plan --root ./source --output ./output --plan ./plan.json --format webp --quality 80 --json
+press execute ./plan.json --root ./source --output ./output --continue-unstarted --json
+press reconcile ./plan.json --root ./source --output ./output --json
+```
+
+All three also accept `--requirements-file <local-spec>`, the bounded snapshot
+`press check` reads. The plan records only the snapshot's identity, provenance,
+effective interval and digest; execution must supply the same document again,
+and a different one under the same id and revision is refused. Written outputs
+whose required checks do not pass are `counts.requirements_failed`, a partial
+run with exit `1`, never an approval; an inapplicable snapshot or an
+`unsupported` constraint stays NotApplicable/NotChecked and cannot pass.
+
+Creation records relative paths, bounded source identities, collision mappings,
+effective settings and the engine revision. Execution binds both roots explicitly
+again. It does not replace originals, execute plan text, upload or inherit
+permission. `--retry-failed` is a separate explicit mode from
+`--continue-unstarted`; `--cancel` records pending items as cancelled without
+encoding. Reconcile verifies installed manifest/output hashes and repairs a
+missing receipt without encoding again. JSON schema 1 uses exit `0` for complete,
+`1` for a partial run with item states and `2` for an invalid invocation, binding
+or plan with a named top-level error.
+
+The lifecycle is **inspect -> resolve -> preview a plan -> authorize execution
+-> execute/reconcile -> inspect receipt**. The local commands above implement
+that lifecycle; policy and external authority remain outside the plan.
 
 | Plan field | Required meaning |
 | --- | --- |
@@ -61,9 +88,19 @@ implementation PR after the data contract is reviewed.
 Keep portable task data separate from machine-local execution bindings. A plan
 copied to another machine must be rebound and revalidated, not treated as permission
 to access its original absolute paths. No shell snippets or automatic downloads.
+Every relative name in a plan passes the same portable-component rule saved jobs
+export by, refusing a literal backslash, a drive or alternate-stream marker, a
+reserved Windows device, a control character and a trailing dot or space rather
+than retargeting them. A target's `out` is a namespace, never authority: shared,
+nested or link-aliased namespaces, and two sources planned onto one destination,
+are refused before any effect.
 
 Before execution revalidate sources, output ownership, destination confinement,
-policy applicability and engine compatibility. A changed input or different
+policy applicability and engine compatibility. A source that resolves outside the
+explicitly rebound source root is refused before its bytes are consumed, whatever
+its hash. Saved-plan destinations do not inherit ordinary conversion's permission
+to overwrite an unrecorded output because it is older than its source; that
+compatibility stays with `press convert`. A changed input or different
 collision outcome invalidates the affected plan; explain it and require a new
 review rather than silently executing a different job. Snapshot/hash handling must
 cover the actual bytes processed, not only a stat performed before the read.

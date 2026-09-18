@@ -9,7 +9,7 @@ do not upload files, and the folder size is bounded by the disk rather than by a
 browser tab. Files leave the machine only when you explicitly use a Sirv upload or
 run a Studio API tool.
 
-![Press auditing a folder of PNG exports, with the Convert rail open beside the list](docs/audit.webp)
+![Press 0.6.6 auditing six product-photo exports, with the folder sidebar and Convert settings open](docs/audit.webp)
 
 Press is the desktop companion to the site and the
 [Chrome extension](https://chromewebstore.google.com/detail/hinifcidioledficgenmdncpkifnngap).
@@ -64,7 +64,9 @@ downloads and installs the latest release from the command line.
 
 ## Status
 
-Audit, thumbnails, and WebP, AVIF, and JPEG XL conversion all work.
+Audit, thumbnails, and WebP, AVIF, JPEG XL, and JPEG conversion all work.
+The **Keep** format preserves each source’s format; saved presets let you reuse
+your format, quality, size limit, and AVIF speed settings.
 
 ```bash
 press                                         # empty state: pick or drop
@@ -79,17 +81,18 @@ press convert ~/path/to/folder --format jxl --lossless
 press convert ~/path/to/folder --output ~/build/images   # write somewhere else
 press convert ~/path/to/folder --skip-existing           # only sources that changed
 press convert ~/path/to/folder --dry-run                 # plan and project, write nothing
+press check ~/path/to/folder --requirements-file ./requirements.json --json
 press update                                    # install the latest signed release
 ```
 
 `press --help` is the complete command reference. `audit` never writes. `convert`
 writes mirrored output under `optimized/`, or under `--output`/`-o` when you name a
 folder; the older `PATH --convert --avif` form remains compatible.
-`--skip-existing` checks recorded outputs against the effective recipe and available
-source content hash, so changed settings or detected source edits require another
-conversion. Older outputs without a record use timestamps. Each skipped file has a
-named reason in the JSON report; externally changed outputs retain the existing
-ownership checks.
+`--skip-existing` checks recorded outputs against the effective recipe and the
+available source content hash, so changed settings or detected source edits require
+another conversion. Older outputs without a record use timestamps. Each skipped
+file has a named reason in the JSON report; externally changed outputs retain the
+existing ownership checks.
 `--dry-run` writes nothing: it reports the name each file would be written to and
 projects the total from the same sample the window's estimate uses. With `--json`, stdout contains one document with
 exact byte counts, per-file findings or conversion outcomes, and named failures.
@@ -102,11 +105,31 @@ The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discove
 automatically by Codex when it runs here. Installed builds also carry the same text:
 `press skill` prints it for use by agents in another workspace.
 
+`press check <file-or-folder> --requirements-file <local-spec> [--json]` inspects
+actual output bytes against one bounded, user-authored requirements snapshot. It
+reports relative names, content-derived format, dimensions, byte counts and hashes;
+it does not contact a retailer or treat a local report as approval. The bundled
+technical subset records required unsupported checks as `not_checked`, so an
+incomplete inspection cannot claim all required checks passed.
+
+The current local workbench checkpoint includes the reviewed F1/F2/F3 subset and
+D2 requirements checks. F3 visibility and native export were demonstrated on
+Linux; keyboard action focus still needs follow-up. A2/A3 saved-plan execution,
+the D1 GUI target journey, D3 preparation and maintained packs, and HEIF support
+are not landed. The ImageGuide extension has landed its Press export, and this
+checkpoint adds the review half of the desktop side; H2 preparation and H3
+browser delivery and re-audit are not landed. These local results do not claim a
+complete UI, all-platform support, marketplace approval, or a live service.
+
 `press handoff` validates an imported ImageGuide report and can inspect mappings
-under an explicitly chosen local root. `press supplier` and `press studio` provide
+under an explicitly chosen local root. The window can now review one too:
+**Import ImageGuide report…** in the job menu opens a report, matches it against
+one folder you choose, and lets you confirm each resource's local source against
+the bytes on disk. That review prepares nothing and converts nothing, and it
+does not survive closing the app. `press supplier` and `press studio` provide
 local service rehearsals with explicit `--fake` scripts. They do not submit to a
 retailer, upload images, run hosted AI or spend credits. See the
-[execution ledger](docs/workbench-execution-plan.md#september-8-implementation-follow-up)
+[execution ledger](docs/workbench-execution-plan.md#september-8-closeout-checkpoint)
 for the implemented slices and remaining integration work.
 
 Launched with no path it opens on an empty state: **Open folder…**, **Open images…**,
@@ -218,19 +241,25 @@ part of a normal audit, comparison, or conversion.
 
 ## Converting
 
-The bar along the foot of the window holds the local verbs: **Convert** and the two
+The selection bar along the foot of the window holds the local verbs: **Convert** and the two
 local models. Choosing one opens a rail on the right with that operation's own
 settings and the button that commits it — for Convert, the
-presets, format, quality and size limit, with the projected saving above the button.
+preset chooser, format, quality and size limit, with the projected saving above the button.
+The preset menu can save your settings for later runs; destination and replace mode
+stay separate from a preset.
 Hosted Studio operations appear in the preview where one exact image or completed
 local result supplies their context.
 `press convert` does the same work without a window.
 
 Files are written to `optimized/` inside the folder, mirroring its subfolder layout.
 **Change** in the rail picks a different destination — a staging folder, a share, a
-build tree — and the choice is remembered and follows you to the next folder. Sources
-are never touched either way, and the output folder is excluded from later scans so a
+build tree — and the choice is remembered and follows you to the next folder.
+In this copy workflow, sources are never touched, and the output folder is excluded
+from later scans so a
 second run does not offer to convert its own output.
+
+**Replace originals in place** is a separate, opt-in mode. Press keeps the
+originals in `press-originals/`; `press restore` can put them back.
 
 A finished run opens on what it produced: each output beside the file it came from,
 read off disk rather than encoded again for the preview, with a strip of every file
@@ -253,8 +282,8 @@ already-optimal JPEG usually costs bytes, and that is worth seeing.
 ### Size first
 
 Most of the weight in a web image is its dimensions, not its format. Re-encoding a
-6400px photo as AVIF still hands back a 6400px photo. The **full / 2400px / 1600px /
-1000px** buttons cap the longest edge before encoding, and that single setting beats
+6400px photo as AVIF still hands back a 6400px photo. The **Original / 2400 / 1600 /
+1000** buttons cap the longest edge before encoding, and that single setting beats
 every format change:
 
 | Same twelve files, q80 | Result |
@@ -276,17 +305,17 @@ compression, and the resize is not the part you need to eyeball.
 **Grid** switches the list for a gallery of tiles, virtualised the same way — a folder
 of 5,700 images decodes only the tiles on screen. `--grid` opens straight into it.
 
+![Press 0.6.6 showing six selected product-photo exports in the gallery](docs/gallery.webp)
+
 ### Before you convert
 
-The toolbar carries a live projection: **≈ 3.1 MB · −96% (from 4)**. Four files are
-encoded in memory, spread across the list rather than taken from the top, and the
-ratio is applied to the whole job. It re-runs when the format, quality, size or
-filter changes, after a short pause so dragging the slider does not start a run per
-pixel.
+The Convert sidebar projects the output size and saving for the selected files.
+Press encodes a sample in memory and shows how much of the selection it sampled.
+The estimate updates when selection, format, quality, size or filter changes,
+after a short pause so dragging the slider does not start a run per pixel.
 
-It is a sample, and it says so — on the twelve-file folder above it projected 3.1 MB
-against an actual 4.6 MB. Right about the order of the saving, not a promise about
-the byte.
+The projection is an estimate. A finished run reports the actual output sizes,
+including any files that grew.
 
 ### Around the list
 
@@ -318,7 +347,7 @@ Tick rows to convert only those. With nothing ticked, Convert stays disabled; th
 keeps estimates and writes limited to files you explicitly selected. On a large
 folder you usually want the heaviest files, which are already at the top.
 
-### WebP, AVIF, or JPEG XL
+### WebP, AVIF, JPEG XL, or JPEG
 
 64 size-stratified files from a real photo library, at q80 on a 16-thread machine:
 
@@ -332,11 +361,14 @@ The current path is 58% faster and 9% smaller than the former rav1e path at matc
 visual quality. It uses the system libavif and libaom libraries directly, with libyuv
 acceleration where packaged, so there is no subprocess per image.
 
-JPEG XL is available from the same format dropdown and from `--jxl`. Its jixel
+JPEG XL is available from the same format controls and from `--jxl`. Its jixel
 encoder and jxl-oxide decoder are both written in Rust. It supports both lossy
 quality levels and true lossless output. Press audits `.jxl` inputs by their contents,
 makes thumbnails and comparisons from them, and refuses to flatten an animated JPEG
 XL into a still during conversion.
+
+JPEG is available for workflows that need `.jpg` output. **Keep** retains each
+source’s format; the CLI equivalents are `--format jpeg` and `--format same`.
 
 AVIF has no lossless option here. Lossless AVIF is routinely larger than the other
 lossless options and much slower to produce, so the UI hides that switch for AVIF.
@@ -376,7 +408,9 @@ cargo build --release   # fetches the pinned Rust toolchain on first run
 cargo test
 ```
 
-Needs `dav1d` to decode AVIF and libavif with libaom to encode it. JPEG XL encoding
+Needs `dav1d` to decode AVIF and libavif with libaom to encode it. The libavif
+build must include its dav1d decoder backend because Press selects that backend
+explicitly to enforce the native frame-size limit. JPEG XL encoding
 and decoding are Rust dependencies. Linux packages also provide libyuv for faster
 AVIF pixel conversion:
 
@@ -402,5 +436,5 @@ and asset crates together. `Cargo.lock` pins the actual versions; CI builds `--l
 
 MIT. See [LICENSE](LICENSE).
 
-The two screenshots in this README were resized to 1100px and compressed by this
-tool — 3.7 MB of PNG to 159 KB of WebP at q88.
+The screenshots show Press 0.6.6 on macOS, captured on 8 September 2026 and
+compressed to WebP by Press at q90. [Capture details and photo credits](docs/screenshots.md).

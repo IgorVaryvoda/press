@@ -111,6 +111,9 @@ fn snapshot_failure(error: scan::ConversionDecodeError) -> convert::Failure {
         scan::ConversionDecodeError::Failed => convert::Failure::Failed,
         scan::ConversionDecodeError::TooLarge => convert::Failure::TooLarge,
         scan::ConversionDecodeError::SourceChanged => convert::Failure::SourceChanged,
+        scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            convert::Failure::UnsupportedAvifTransform
+        }
         scan::ConversionDecodeError::AnimatedGif => convert::Failure::AnimatedGif,
         scan::ConversionDecodeError::AnimatedPng => convert::Failure::AnimatedPng,
         scan::ConversionDecodeError::AnimatedWebP => convert::Failure::AnimatedWebP,
@@ -328,6 +331,7 @@ impl Audit {
         if self.converting
             || self.local_ai_busy()
             || self.studio_busy()
+            || self.plan_busy()
             || self.scan_blocks_delivery()
         {
             return;

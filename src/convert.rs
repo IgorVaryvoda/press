@@ -55,6 +55,8 @@ pub enum Failure {
     LosslessNeedsIntegerSamples,
     /// The image would need more decoded memory than one file may hold.
     TooLarge,
+    /// AVIF orientation or crop metadata is outside the supported preparation subset.
+    UnsupportedAvifTransform,
     ProfileNotAttached,
     JpegNeedsOpaque,
     KeepFormatUnavailable(String),
@@ -87,6 +89,9 @@ impl Failure {
                 Some("lossless JPEG XL cannot keep 32-bit floating point samples".into())
             }
             Self::TooLarge => Some("this image is too large to convert".into()),
+            Self::UnsupportedAvifTransform => {
+                Some("AVIF orientation transforms are not supported".into())
+            }
             Self::ProfileNotAttached => Some("the colour profile could not be attached".into()),
             Self::JpegNeedsOpaque => Some("JPEG cannot keep transparency".into()),
             Self::KeepFormatUnavailable(name) => {
@@ -329,24 +334,33 @@ pub struct Converted {
     pub height: u32,
 }
 
-/// Encode `image` in `format`. Returns the encoded bytes.
+/// Encode `image` in `format` at whatever AVIF speed the process is currently set
+/// to. For callers with no run or request to freeze — the thumbnail cache, a
+/// Studio candidate, a test — the global dial is the only answer there is.
+///
+/// Anything that also records or caches what it encoded uses `encode_with_speed`
+/// instead, so the bytes and the record cannot come from two different reads of a
+/// setting the user can change mid-run.
 ///
 /// `profile` is the source's ICC profile, which every output format here can carry.
-/// Previews pass `None`; a file being written to disk passes what it was decoded
-/// with, or the colours it was tagged with are lost on the way out.
+/// A file being written to disk passes what it was decoded with, or the colours it
+/// was tagged with are lost on the way out.
 pub fn encode(
     image: &DynamicImage,
     format: Format,
     quality: Quality,
     profile: Option<&[u8]>,
 ) -> Result<Vec<u8>, Failure> {
-    encode_with_avif_speed(image, format, quality, profile, crate::avif::speed())
+    encode_with_speed(image, format, quality, profile, crate::avif::speed())
 }
 
-/// Encode with a run-local AVIF speed. Normal previews and the legacy conversion
-/// path use the process setting through [`encode`]; a multi-target run passes its
-/// frozen recipe value here so another target or preview cannot change it mid-run.
-pub(crate) fn encode_with_avif_speed(
+/// The same encode at an explicitly frozen AVIF speed.
+///
+/// Speed changes the bytes libaom writes, so the run that stamps a manifest, the
+/// comparison that keys a cache on it and the estimate that quotes a size all have
+/// to encode at the speed they captured, not at the speed the settings file happens
+/// to hold when the encoder is finally reached.
+pub fn encode_with_speed(
     image: &DynamicImage,
     format: Format,
     quality: Quality,
@@ -946,12 +960,49 @@ pub struct Backup {
     pub moved: bool,
 }
 
+/// What stood at a planned destination when a person reviewed the plan.
+///
+/// A plan carries this and nothing else about the folder it will write into, so
+/// the writer can ask whether the destination is still the one that was
+/// consented to rather than infer permission from a recipe or a timestamp.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewedDestination {
+    /// The name was free. What was reviewed was creating a file here, not
+    /// replacing one that has arrived since.
+    Absent,
+    /// This plan's own source had already written exactly these bytes here, and
+    /// the folder's manifest still credited them to the source bytes the plan
+    /// hashed. Replacing them is the rerun that was reviewed, under whatever
+    /// settings were chosen for it.
+    Own { sha256: String, bytes: u64 },
+    /// Something else stood here: a file no manifest credits to this source, a
+    /// folder, or a link. A plan never carries consent to replace it.
+    Foreign,
+}
+
+/// Who may own a destination that already exists when the run reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ownership<'a> {
+    /// Ordinary conversion. An unrecorded file at the destination is still
+    /// overwritten when it is older than its source, which is the rule headless
+    /// runs had before manifests existed and consumers still rely on.
+    Legacy,
+    /// A saved plan pinned this destination when it was reviewed, and this is
+    /// what it pinned. Anything else standing here now belongs to somebody
+    /// else, whatever its timestamp or recipe claims.
+    Planned(&'a ReviewedDestination),
+}
+
 /// What one file adds to the folder's record before its output takes the name.
 pub struct Recording<'a> {
     pub root: &'a Path,
     pub out_dir: &'a Path,
     pub stamp: &'a crate::manifest::Stamp,
     pub backup: Option<&'a Backup>,
+    /// Checked at the writer boundary, not only in a caller's preflight: the
+    /// destination can change between the two.
+    pub ownership: Ownership<'a>,
 }
 
 impl<'a> Recording<'a> {
@@ -970,6 +1021,24 @@ impl<'a> Recording<'a> {
             out_dir,
             stamp,
             backup,
+            ownership: Ownership::Legacy,
+        }
+    }
+
+    /// The same record, for a destination a reviewed plan already claimed, with
+    /// the state that review pinned there.
+    pub fn for_planned(
+        root: &'a Path,
+        out_dir: &'a Path,
+        stamp: &'a crate::manifest::Stamp,
+        reviewed: &'a ReviewedDestination,
+    ) -> Self {
+        Self {
+            root,
+            out_dir,
+            stamp,
+            backup: None,
+            ownership: Ownership::Planned(reviewed),
         }
     }
 }
@@ -1233,7 +1302,9 @@ fn write_inner_with_hook(
     // old walk from the output root never looked that high.
     ensure_absolute_parents(final_parent)?;
     let (same_name, expected_output) = match recorded {
-        Some((source, recording, _)) => output_guard(written, source, recording)?,
+        Some((source, recording, source_identity)) => {
+            output_guard(written, source, source_identity, recording)?
+        }
         None => (false, None),
     };
     before_final_validation();
@@ -1326,7 +1397,7 @@ fn write_inner_with_hook(
             && let Err(failure) = move_to_backup(
                 source,
                 &backup.path,
-                &crate::manifest::backup_root(recording.root),
+                &crate::manifest::backup_root(recording.out_dir),
             )
         {
             let _ = std::fs::remove_file(&partial);
@@ -1377,6 +1448,7 @@ fn write_inner_with_hook(
 fn output_guard(
     written: &Path,
     source: &Path,
+    source_identity: &crate::manifest::SourceIdentity,
     recording: &Recording,
 ) -> Result<(bool, Option<crate::manifest::FileIdentity>), Failure> {
     let same_name = recording.backup.is_some() && path_key(source) == path_key(written);
@@ -1387,13 +1459,26 @@ fn output_guard(
     // cannot be renamed over, and allowing the final rename to report that
     // failure lets replace mode put its original back without touching the
     // directory.
-    if written
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.is_dir())
-    {
-        return Ok((false, None));
+    let reviewed = match recording.ownership {
+        Ownership::Legacy => None,
+        Ownership::Planned(reviewed) => Some(reviewed),
+    };
+    if let Ok(metadata) = written.symlink_metadata() {
+        // A plan pinned one ordinary file here. A directory cannot be renamed
+        // over and a symlink would install the bytes wherever it points, so
+        // both are refused before anything is staged rather than left to the
+        // rename.
+        if reviewed.is_some() && (metadata.is_dir() || metadata.file_type().is_symlink()) {
+            return Err(Failure::OutputChanged);
+        }
+        if metadata.is_dir() {
+            return Ok((false, None));
+        }
     }
     let Some(snapshot) = output_snapshot(written)? else {
+        // Nothing stands here. An absence is nobody's file: a plan that pinned
+        // one writes, and so does a plan whose own reviewed output has been
+        // taken away since, which is the file the person asked for either way.
         return Ok((false, None));
     };
     let relative_source = source
@@ -1405,7 +1490,21 @@ fn output_guard(
     // Ponytail ceiling: this fallback reloads one manifest for one existing
     // destination; batch planning already loaded the manifest once.
     let manifest = crate::manifest::load(recording.out_dir);
-    let Some(record) = manifest.latest(relative_source, relative_output) else {
+    let record = manifest.latest(relative_source, relative_output);
+    if let Some(reviewed) = reviewed {
+        return planned_guard(
+            written,
+            reviewed,
+            record,
+            snapshot,
+            source_identity,
+            recording,
+        )
+        .map(|snapshot| (false, Some(snapshot)));
+    }
+    let Some(record) = record else {
+        // Planning proved this name was free or this run's own. An unrecorded
+        // file arrived since, so the plan no longer describes the folder.
         if crate::manifest::path(recording.out_dir)
             .symlink_metadata()
             .is_ok()
@@ -1425,6 +1524,57 @@ fn output_guard(
         return Err(Failure::OutputChanged);
     }
     Ok((false, Some(snapshot)))
+}
+
+/// What a saved plan may take back at a destination it already found occupied.
+///
+/// Two things and nothing else: the exact bytes the person reviewed as this
+/// source's own output, whatever settings they have chosen since, and a file
+/// this folder's manifest still credits to these very source bytes under this
+/// very recipe, which is this plan's own installed result after an interruption.
+///
+/// A newer output written from another source after the plan was reviewed fails
+/// both, even when it shares this recipe and this name and even when the source
+/// it displaced has since been restored byte for byte. Somebody chose that file;
+/// a plan reviewed against an absence never carried permission to replace it.
+fn planned_guard(
+    written: &Path,
+    reviewed: &ReviewedDestination,
+    record: Option<&crate::manifest::Record>,
+    snapshot: crate::manifest::FileIdentity,
+    source_identity: &crate::manifest::SourceIdentity,
+    recording: &Recording,
+) -> Result<crate::manifest::FileIdentity, Failure> {
+    // The pin is one half of the evidence, and the plan is the half a stranger
+    // can write. This folder's manifest still has to credit these bytes to these
+    // source bytes, exactly as it did when the plan was reviewed. Without it the
+    // file is an output tree copied without its manifest, or a crafted plan
+    // naming a file it never produced.
+    if let ReviewedDestination::Own { sha256, bytes } = reviewed
+        && *sha256 == snapshot.hash
+        && *bytes == snapshot.bytes
+        && record.is_some_and(|record| {
+            record.source_hash.as_deref() == Some(source_identity.hash.as_str())
+                && record.source_bytes == source_identity.bytes
+                && record.output_hash.as_deref() == Some(snapshot.hash.as_str())
+                && record.output_bytes == snapshot.bytes
+                && record.installed(written)
+        })
+    {
+        return Ok(snapshot);
+    }
+    let mine = record.is_some_and(|record| {
+        record.source_hash.as_deref() == Some(source_identity.hash.as_str())
+            && record.source_bytes == source_identity.bytes
+            && record.recipe.as_deref() == Some(recording.stamp.recipe())
+            && record.output_hash.as_deref() == Some(snapshot.hash.as_str())
+            && record.installed(written)
+    });
+    if mine {
+        Ok(snapshot)
+    } else {
+        Err(Failure::OutputChanged)
+    }
 }
 
 fn output_snapshot(path: &Path) -> Result<Option<crate::manifest::FileIdentity>, Failure> {
@@ -1599,6 +1749,11 @@ fn reject_windows_reparse(path: &Path) -> Result<(), Failure> {
 /// why the cap sits an order of magnitude below physical RAM rather than at it.
 pub const MAX_DECODE_BYTES: u64 = 1 << 30;
 
+/// The native AVIF decoder accepts a pixel limit in addition to its byte limit.
+/// At eight bytes per pixel this is the largest frame that fits the shared
+/// decoded-memory budget, including sixteen-bit RGBA output.
+pub const MAX_DECODE_PIXELS: u32 = (MAX_DECODE_BYTES / 8) as u32;
+
 /// The compressed snapshot is retained beside decoded pixels until the write
 /// boundary. Keep that second allocation bounded too, so a highly compressed
 /// source cannot consume the entire process budget before its dimensions are
@@ -1666,6 +1821,98 @@ pub fn check_lossless_depth(
         return Err(Failure::LosslessNeedsIntegerSamples);
     }
     Ok(())
+}
+
+/// Decode `source` from one bounded byte snapshot and bring it to the delivered
+/// size: the pixels every encoder in this app must start from.
+///
+/// The result is `scan::DecodedSource`, unchanged — the image, the profile a wide
+/// gamut file loses without, the identity of the bytes the decoder consumed, and
+/// the container those same bytes were identified as. Preparation adds the one
+/// resize and the memory budget; it does not add another representation of the
+/// same four facts.
+pub fn prepare(source: &Path, max_edge: MaxEdge) -> Result<crate::scan::DecodedSource, Failure> {
+    prepare_inner(
+        crate::scan::decode_for_conversion_with_identity(source, max_edge),
+        max_edge,
+    )
+}
+
+/// The same preparation, refused unless the bytes on disk are still the ones a
+/// caller already recorded.
+pub fn prepare_expected(
+    source: &Path,
+    max_edge: MaxEdge,
+    expected: &crate::manifest::SourceIdentity,
+) -> Result<crate::scan::DecodedSource, Failure> {
+    prepare_inner(
+        crate::scan::decode_for_conversion_checked(source, max_edge, expected),
+        max_edge,
+    )
+}
+
+fn prepare_inner(
+    decoded: Result<crate::scan::DecodedSource, crate::scan::ConversionDecodeError>,
+    max_edge: MaxEdge,
+) -> Result<crate::scan::DecodedSource, Failure> {
+    let mut prepared = decoded.map_err(decode_failure)?;
+    // Exactly once. A second `apply` over already-scaled pixels is a second
+    // resample, and the file it describes would not be the file the run writes.
+    prepared.image = max_edge.apply(prepared.image);
+    check_image_budget(&prepared.image)?;
+    Ok(prepared)
+}
+
+/// The encoder a request means for a prepared source, resolved from the container
+/// the decode identified. `Same` never re-probes the path here: that probe could
+/// answer for one file while these pixels came from another.
+pub fn resolve_prepared(
+    prepared: &crate::scan::DecodedSource,
+    source: &Path,
+    format: Format,
+) -> Result<Format, Failure> {
+    format.resolve_content(source, prepared.format)
+}
+
+/// Encode prepared pixels at a frozen recipe, giving the resolved format beside the
+/// bytes.
+///
+/// The writer, the comparison, the estimate and the dry run all answer through
+/// here, so a `Same` request, a lossless request over a depth the format cannot
+/// keep, and the speed the bytes were written at are one verdict everywhere
+/// instead of four copies of the rule that drift apart.
+pub fn encode_prepared(
+    prepared: &crate::scan::DecodedSource,
+    source: &Path,
+    format: Format,
+    quality: Quality,
+    avif_speed: u8,
+) -> Result<(Format, Vec<u8>), Failure> {
+    let format = resolve_prepared(prepared, source, format)?;
+    check_lossless_depth(&prepared.image, format, quality)?;
+    let encoded = encode_with_speed(
+        &prepared.image,
+        format,
+        quality,
+        prepared.profile.as_deref(),
+        avif_speed,
+    )?;
+    Ok((format, encoded))
+}
+
+fn decode_failure(error: crate::scan::ConversionDecodeError) -> Failure {
+    match error {
+        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
+        crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
+        crate::scan::ConversionDecodeError::UnsupportedAvifTransform => {
+            Failure::UnsupportedAvifTransform
+        }
+        crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
+        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
+        crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
+        crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
+        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
+    }
 }
 
 /// Read, encode, and write one file to the path `plan_outputs` chose for it.
@@ -1762,32 +2009,18 @@ fn convert_to_inner(
     expected: Option<&crate::manifest::SourceIdentity>,
     avif_speed: u8,
 ) -> Result<Converted, Failure> {
-    let decoded = match expected {
-        Some(expected) => crate::scan::decode_for_conversion_checked(source, max_edge, expected),
-        None => crate::scan::decode_for_conversion_with_identity(source, max_edge),
-    }
-    .map_err(|error| match error {
-        crate::scan::ConversionDecodeError::Failed => Failure::Failed,
-        crate::scan::ConversionDecodeError::TooLarge => Failure::TooLarge,
-        crate::scan::ConversionDecodeError::SourceChanged => Failure::SourceChanged,
-        crate::scan::ConversionDecodeError::AnimatedGif => Failure::AnimatedGif,
-        crate::scan::ConversionDecodeError::AnimatedPng => Failure::AnimatedPng,
-        crate::scan::ConversionDecodeError::AnimatedWebP => Failure::AnimatedWebP,
-        crate::scan::ConversionDecodeError::AnimatedJpegXl => Failure::AnimatedJpegXl,
-    })?;
-    let crate::scan::DecodedSource {
-        image,
-        profile,
-        identity: source_identity,
-        format: source_format,
-    } = decoded;
-    let format = format.resolve_content(source, source_format)?;
-    let decoded = max_edge.apply(image);
-    check_image_budget(&decoded)?;
-    check_lossless_depth(&decoded, format, quality)?;
-    let (width, height) = (decoded.width(), decoded.height());
-    let encoded =
-        encode_with_avif_speed(&decoded, format, quality, profile.as_deref(), avif_speed)?;
+    let prepared = match expected {
+        Some(expected) => prepare_expected(source, max_edge, expected),
+        None => prepare(source, max_edge),
+    }?;
+    // The speed the record will claim is the speed the encoder is handed. A run
+    // stamps once; a settings change while it writes cannot make the manifest
+    // describe bytes nobody produced. A delivery target freezes its recipe speed
+    // into the stamp it builds, so this reads that too.
+    let avif_speed =
+        recording.map_or_else(crate::avif::speed, |recording| recording.stamp.avif_speed());
+    let (width, height) = (prepared.image.width(), prepared.image.height());
+    let (_, encoded) = encode_prepared(&prepared, source, format, quality, avif_speed)?;
     match recording {
         Some(recording) => write_recorded(
             output_root,
@@ -1795,7 +2028,7 @@ fn convert_to_inner(
             written,
             &encoded,
             recording,
-            &source_identity,
+            &prepared.identity,
         )?,
         None => write_output(output_root, written, &encoded)?,
     }
@@ -1898,7 +2131,7 @@ pub(crate) mod tests {
         profile
     }
 
-    fn write_tagged_png(path: &Path, image: &DynamicImage, profile: &[u8]) {
+    pub(crate) fn write_tagged_png(path: &Path, image: &DynamicImage, profile: &[u8]) {
         let file = std::fs::File::create(path).unwrap();
         let mut encoder = image::codecs::png::PngEncoder::new(file);
         image::ImageEncoder::set_icc_profile(&mut encoder, profile.to_vec()).unwrap();
@@ -2746,6 +2979,80 @@ pub(crate) mod tests {
         assert_eq!(crate::avif::configured_speed(), None);
     }
 
+    /// Speed changes the bytes libaom writes, so the run that records a speed has to
+    /// encode at that speed. The process dial stays where it is: a run's stamp is the
+    /// recipe, and this proves the writer reads it rather than the dial, which
+    /// another thread or a settings change could move underneath a half-finished run.
+    #[test]
+    fn an_avif_run_encodes_at_the_speed_its_record_claims() {
+        let dir = temp_dir("stamped-speed");
+        let out_dir = dir.join("optimized");
+        let source = dir.join("shot.png");
+        let written = out_dir.join("shot.avif");
+        photo(64, 64).save(&source).unwrap();
+
+        let stamp = crate::manifest::Stamp::with_speed(
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            Some(10),
+        );
+        assert_eq!(stamp.avif_speed(), 10);
+        assert_ne!(
+            crate::avif::speed(),
+            10,
+            "the dial must disagree or this proves nothing"
+        );
+        let recording = Recording::for_source(&dir, &out_dir, &stamp, None);
+        super::convert_to(
+            &out_dir,
+            &source,
+            &written,
+            Some(&recording),
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+        )
+        .expect("the AVIF is written");
+
+        let installed = std::fs::read(&written).unwrap();
+        let prepared = prepare(&source, MaxEdge::FULL).expect("the source prepares");
+        assert_eq!(
+            installed,
+            encode_with_speed(&prepared.image, Format::Avif, Quality::lossy(60.), None, 10)
+                .unwrap(),
+            "the run wrote bytes its record does not describe"
+        );
+        assert_ne!(
+            installed,
+            encode_with_speed(
+                &prepared.image,
+                Format::Avif,
+                Quality::lossy(60.),
+                None,
+                crate::avif::speed(),
+            )
+            .unwrap(),
+            "the run fell back to the process dial"
+        );
+
+        let manifest = crate::manifest::load(&out_dir);
+        assert_eq!(manifest.outputs.len(), 1);
+        assert_eq!(manifest.outputs[0].avif_speed, Some(10));
+
+        // And the comparison view, asked for that same frozen speed, quotes the size
+        // of the file that was actually installed.
+        let pair = crate::compare::build(
+            &source,
+            Format::Avif,
+            Quality::lossy(60.),
+            MaxEdge::FULL,
+            10,
+        )
+        .expect("the comparison builds");
+        assert_eq!(pair.converted_bytes, installed.len() as u64);
+    }
+
     /// The scaled decode changes what conversion holds in memory, not what it writes:
     /// a 4000px JPEG asked for 1000px still exports 1000px.
     #[test]
@@ -3195,6 +3502,7 @@ pub(crate) mod tests {
             out_dir,
             stamp: &stamp,
             backup,
+            ownership: Ownership::Legacy,
         };
         super::convert_to(
             out_dir,
@@ -3231,6 +3539,7 @@ pub(crate) mod tests {
             out_dir: &out,
             stamp: &stamp,
             backup: None,
+            ownership: Ownership::Legacy,
         };
 
         assert_eq!(
@@ -3300,6 +3609,7 @@ pub(crate) mod tests {
             out_dir: &out,
             stamp: &stamp,
             backup: None,
+            ownership: Ownership::Legacy,
         };
 
         let failure = write_inner_with_hook(
