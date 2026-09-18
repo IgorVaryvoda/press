@@ -286,8 +286,9 @@ pub struct Probed {
     pub width: u32,
     pub height: u32,
     /// The encoded sample depth where the container states it before any pixels
-    /// are decoded. `None` where the shared header API does not report one; it
-    /// is never guessed.
+    /// are decoded: AVIF from its own header, JPEG and WebP from the decoder's
+    /// original colour type. `None` for every other container, where reading it
+    /// would mean decoding the pixels. It is never guessed.
     pub depth_bits: Option<u8>,
 }
 
@@ -330,11 +331,24 @@ pub fn probe_bytes(bytes: &[u8]) -> Result<Probed, ProbeRefusal> {
             ) {
                 std::mem::swap(&mut width, &mut height);
             }
+            // The same header read the requirement checks use, so a plan and a
+            // check state one depth for one file.
+            let depth_bits = match format {
+                ImageFormat::Jpeg => crate::requirements::encoded_depth_bits(
+                    &mut decoder,
+                    crate::requirements::ContentFormat::Jpeg,
+                ),
+                ImageFormat::WebP => crate::requirements::encoded_depth_bits(
+                    &mut decoder,
+                    crate::requirements::ContentFormat::Webp,
+                ),
+                _ => None,
+            };
             return Ok(Probed {
                 format: format.into(),
                 width,
                 height,
-                depth_bits: None,
+                depth_bits,
             });
         }
     }

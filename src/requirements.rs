@@ -1075,7 +1075,7 @@ fn content_format_from_image(format: ImageFormat) -> ContentFormat {
     }
 }
 
-fn encoded_depth_bits<D: image::ImageDecoder>(
+pub(crate) fn encoded_depth_bits<D: image::ImageDecoder>(
     decoder: &mut D,
     format: ContentFormat,
 ) -> Option<u8> {

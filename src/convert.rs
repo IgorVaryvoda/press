@@ -1545,9 +1545,21 @@ fn planned_guard(
     source_identity: &crate::manifest::SourceIdentity,
     recording: &Recording,
 ) -> Result<crate::manifest::FileIdentity, Failure> {
+    // The pin is one half of the evidence, and the plan is the half a stranger
+    // can write. This folder's manifest still has to credit these bytes to these
+    // source bytes, exactly as it did when the plan was reviewed. Without it the
+    // file is an output tree copied without its manifest, or a crafted plan
+    // naming a file it never produced.
     if let ReviewedDestination::Own { sha256, bytes } = reviewed
         && *sha256 == snapshot.hash
         && *bytes == snapshot.bytes
+        && record.is_some_and(|record| {
+            record.source_hash.as_deref() == Some(source_identity.hash.as_str())
+                && record.source_bytes == source_identity.bytes
+                && record.output_hash.as_deref() == Some(snapshot.hash.as_str())
+                && record.output_bytes == snapshot.bytes
+                && record.installed(written)
+        })
     {
         return Ok(snapshot);
     }

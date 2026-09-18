@@ -515,7 +515,11 @@ impl Audit {
                             ))
                     }))
                     .child(self.sets_section(cx))
-                    .child(self.handoff_section(cx)),
+                    // Last in the rail on purpose: the imported-report card
+                    // above has to fit whole on the narrowest window, and a
+                    // section between it and the settings pushes it off.
+                    .child(self.handoff_section(cx))
+                    .child(self.plan_section(cx)),
             )
             .child(
                 div()

@@ -3300,3 +3300,60 @@ fn supplier_cancel_and_correct_relink_history() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = script;
 }
+
+/// A plan is data, not a machine's layout. The same document binds to a second
+/// pair of roots holding the same bytes and writes there. What it must not do is
+/// take a name it never produced, so the third layout plants somebody else's
+/// file under the planned output and the run has to leave it exactly as it is.
+#[test]
+fn a_saved_plan_binds_to_another_layout_and_still_refuses_a_stranger_file() {
+    let (dir, source_dir, _output, source, output_root, plan) =
+        saved_plan_fixture("saved-portable");
+    let planned = create_saved_plan(&source, &output_root, &plan);
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+
+    let second_source = dir.join("second-source");
+    let second_output = dir.join("second-output");
+    std::fs::create_dir_all(&second_source).expect("the second source root is created");
+    std::fs::create_dir_all(&second_output).expect("the second output root is created");
+    std::fs::copy(source_dir.join("shot.png"), second_source.join("shot.png"))
+        .expect("the same bytes land in the second layout");
+    let executed = execute_saved_plan(
+        &plan,
+        &second_source.to_string_lossy(),
+        &second_output.to_string_lossy(),
+        "--continue-unstarted",
+    );
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    let receipt = stdout_json(&executed);
+    assert_eq!(receipt["counts"]["written"], 1);
+    assert!(
+        second_output.join("shot.webp").exists(),
+        "the plan converted under a layout it was never created against"
+    );
+
+    let third_source = dir.join("third-source");
+    let third_output = dir.join("third-output");
+    std::fs::create_dir_all(&third_source).expect("the third source root is created");
+    std::fs::create_dir_all(&third_output).expect("the third output root is created");
+    std::fs::copy(source_dir.join("shot.png"), third_source.join("shot.png"))
+        .expect("the same bytes land in the third layout");
+    let stranger = third_output.join("shot.webp");
+    std::fs::write(&stranger, b"somebody else's file").expect("the stranger file is planted");
+    let refused = execute_saved_plan(
+        &plan,
+        &third_source.to_string_lossy(),
+        &third_output.to_string_lossy(),
+        "--continue-unstarted",
+    );
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    let receipt = stdout_json(&refused);
+    assert_eq!(receipt["counts"]["written"], 0);
+    assert_eq!(receipt["counts"]["failed"], 1);
+    assert_eq!(
+        std::fs::read(&stranger).expect("the stranger file is still there"),
+        b"somebody else's file",
+        "a plan that pinned an absence never took this name"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

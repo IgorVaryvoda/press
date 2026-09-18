@@ -273,8 +273,11 @@ impl Plan {
                 self.write_scope
             ));
         }
-        if self.sources.len() > MAX_SOURCES {
-            return Err(format!("saved plan has more than {MAX_SOURCES} sources"));
+        // An empty plan would execute to "complete" and report a finished run
+        // of nothing, which is exactly what a folder of undecodable files
+        // produces. A plan holds work or it is refused.
+        if self.sources.is_empty() || self.sources.len() > MAX_SOURCES {
+            return Err(format!("saved plan needs 1-{MAX_SOURCES} sources"));
         }
         if self.targets.is_empty() || self.targets.len() > MAX_TARGETS {
             return Err(format!("saved plan needs 1-{MAX_TARGETS} targets"));
@@ -908,6 +911,12 @@ pub struct RunReport {
     pub schema_version: u32,
     pub command: &'static str,
     pub status: &'static str,
+    /// Why a run stopped early, when it stopped for something other than its
+    /// own items: a state that would not persist, or a plan that lost an item
+    /// between validation and execution. The counts and items below still
+    /// describe what the folder holds, which is why this is not a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub plan_id: String,
     pub digest: String,
     pub run_id: String,
@@ -944,6 +953,10 @@ pub struct RunResult {
 struct Bound<'a> {
     plan: Plan,
     requirements: Option<&'a crate::requirements::RequirementsSnapshot>,
+    /// The source root as the kernel names it. The run id, the state file and
+    /// the lock all derive from it, so every caller's spelling has to collapse
+    /// to this one before anything is opened.
+    source_root: PathBuf,
     state_path: PathBuf,
     state: RunState,
     _lock: RunLock,
@@ -974,6 +987,15 @@ fn bind<'a>(
         }
         (None, None) => {}
     }
+    // Two spellings of one folder — a trailing separator, a symlinked parent —
+    // would take two different locks and two different run states while writing
+    // into the same output folder. The identity comes from the filesystem.
+    let source_root = &std::fs::canonicalize(source_root).map_err(|error| {
+        format!(
+            "saved plan source root {} cannot be established: {error}",
+            source_root.display()
+        )
+    })?;
     validate_bindings(source_root, output_root)?;
     let state_path = state_path(plan_path, source_root, output_root)?;
     let lock = RunLock::acquire(&state_path)?;
@@ -1008,38 +1030,53 @@ fn bind<'a>(
     Ok(Bound {
         plan,
         requirements,
+        source_root: source_root.clone(),
         state_path,
         state,
         _lock: lock,
     })
 }
 
+/// Runs the plan's eligible items, one at a time, under one lock.
+///
+/// `watch` sees each item the run finished, in the order the run finished them,
+/// and answers whether to continue. A `false` stops the run before the next
+/// encode starts: every finished item is already on disk in the run state, so a
+/// stopped run is a run `--continue-unstarted` picks up. The command line passes
+/// a watcher that always continues; the window passes its Stop button.
 pub fn execute(
     plan_path: &Path,
     source_root: &Path,
     output_root: &Path,
     mode: ExecutionMode,
     requirements: Option<&crate::requirements::RequirementsSnapshot>,
+    watch: &mut dyn FnMut(&RunItem) -> bool,
 ) -> Result<RunResult, String> {
     let Bound {
         plan,
         requirements,
+        source_root,
         state_path,
         mut state,
         _lock,
     } = bind(plan_path, source_root, output_root, requirements, false)?;
+    let source_root = source_root.as_path();
     // Whatever the last run recorded, believe the folder. A receipt is repaired
     // from manifest and hash evidence before any item is chosen for work, so an
     // invented success cannot skip an encode and a lost receipt cannot repeat one.
     reconcile_items(&plan, source_root, output_root, requirements, &mut state)?;
     save_state(&state_path, &state)?;
 
-    for target in &plan.targets {
+    // A failure inside this loop cannot be a refusal: files are landing. It
+    // stops the run and travels back in the report beside the items it wrote.
+    let mut stopped_by = None;
+    'run: for target in &plan.targets {
         for source in &plan.sources {
             let Some(index) = state.items.iter().position(|item| {
                 item.item_id == source.item_id && item.target_id == target.target_id
             }) else {
-                return Err("saved run state is missing a plan item".into());
+                stopped_by = Some("saved run state is missing a plan item".to_string());
+                break 'run;
             };
             let eligible = match mode {
                 ExecutionMode::ContinueUnstarted => {
@@ -1055,7 +1092,13 @@ pub fn execute(
                 state.items[index].status = ItemStatus::Cancelled;
                 state.items[index].error = None;
                 clear_receipt(&mut state.items[index]);
-                save_state(&state_path, &state)?;
+                if let Err(error) = save_state(&state_path, &state) {
+                    stopped_by = Some(error);
+                    break 'run;
+                }
+                if !watch(&state.items[index]) {
+                    return Ok(result(&plan, &state, "execute"));
+                }
                 continue;
             }
             let Some(mapping) = target
@@ -1063,13 +1106,20 @@ pub fn execute(
                 .iter()
                 .find(|mapping| mapping.item_id == source.item_id)
             else {
-                return Err("saved plan is missing a target mapping".into());
+                stopped_by = Some("saved plan is missing a target mapping".to_string());
+                break 'run;
             };
             if mapping.status != MappingStatus::Planned {
                 state.items[index].status = ItemStatus::Failed;
                 state.items[index].error = mapping.error.clone();
                 clear_receipt(&mut state.items[index]);
-                save_state(&state_path, &state)?;
+                if let Err(error) = save_state(&state_path, &state) {
+                    stopped_by = Some(error);
+                    break 'run;
+                }
+                if !watch(&state.items[index]) {
+                    return Ok(result(&plan, &state, "execute"));
+                }
                 continue;
             }
             // This is the state a killed run leaves behind, so it is written as
@@ -1077,7 +1127,10 @@ pub fn execute(
             state.items[index].status = ItemStatus::Running;
             state.items[index].error = None;
             clear_receipt(&mut state.items[index]);
-            save_state(&state_path, &state)?;
+            if let Err(error) = save_state(&state_path, &state) {
+                stopped_by = Some(error);
+                break 'run;
+            }
             match execute_item(
                 &plan,
                 target,
@@ -1094,10 +1147,26 @@ pub fn execute(
                     clear_receipt(&mut state.items[index]);
                 }
             }
-            save_state(&state_path, &state)?;
+            if let Err(error) = save_state(&state_path, &state) {
+                stopped_by = Some(error);
+                break 'run;
+            }
+            // Between files, never inside one: the item just saved is the last
+            // thing this run did, and stopping here leaves the folder and the
+            // receipt describing the same set of outputs.
+            if !watch(&state.items[index]) {
+                return Ok(result(&plan, &state, "execute"));
+            }
         }
     }
-    Ok(result(&plan, &state, "execute"))
+    let mut outcome = result(&plan, &state, "execute");
+    if let Some(error) = stopped_by {
+        // Whatever the counts say, a run that could not finish is not complete.
+        outcome.report.status = "partial";
+        outcome.report.error = Some(error);
+        outcome.exit_code = 1;
+    }
+    Ok(outcome)
 }
 
 pub fn reconcile(
@@ -1109,10 +1178,12 @@ pub fn reconcile(
     let Bound {
         plan,
         requirements,
+        source_root,
         state_path,
         mut state,
         _lock,
     } = bind(plan_path, source_root, output_root, requirements, true)?;
+    let source_root = source_root.as_path();
     reconcile_items(&plan, source_root, output_root, requirements, &mut state)?;
     save_state(&state_path, &state)?;
     Ok(result(&plan, &state, "reconcile"))
@@ -1381,7 +1452,10 @@ fn execute_item(
     let written = output_root.join(Path::new(output));
     let target_root = target_root(target, output_root);
     let (format, quality, max_edge) = target.recipe.settings()?;
-    crate::avif::set_speed(target.recipe.avif_speed);
+    // The plan's speed travels in the stamp, which is what `encode` reads when a
+    // recording is present. Writing it into the process-wide dial as well would
+    // outlive this item: in the window, every later conversion — and the speed
+    // the settings file then persists — would be the plan's, not the person's.
     let stamp = crate::manifest::Stamp::with_speed(
         format,
         quality,
@@ -1758,6 +1832,7 @@ fn result(plan: &Plan, state: &RunState, command: &'static str) -> RunResult {
         report: RunReport {
             schema_version: SCHEMA_VERSION,
             command,
+            error: None,
             status: if incomplete == 0 {
                 "complete"
             } else {

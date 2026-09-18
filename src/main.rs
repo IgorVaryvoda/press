@@ -61,11 +61,19 @@ fn write_text(out: &mut impl std::io::Write, text: &str) -> std::io::Result<bool
 /// the end of the run, not a crash, so it exits 0 and the hook stays installed for
 /// everything that really is one.
 fn print_text(text: &str) {
+    print_text_with_code(text, 0)
+}
+
+/// The same guard for a command whose exit code is its result. `press audit |
+/// head` has nothing to lose by exiting 0, but a saved-plan run that wrote half
+/// its files must not report a clean run because the reader left: the code the
+/// run earned survives the closed pipe.
+fn print_text_with_code(text: &str, code: i32) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match write_text(&mut out, text) {
         Ok(true) => {}
-        Ok(false) => std::process::exit(0),
+        Ok(false) => std::process::exit(code),
         Err(error) => {
             eprintln!("press: could not write to stdout: {error}");
             std::process::exit(1);
@@ -672,7 +680,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         return Err("handoff takes only a report file".into());
     }
     if map_root.is_some() && command != Command::Handoff {
-        return Err("--root needs handoff".into());
+        // `--root` belongs to whichever command it follows. Written before the
+        // command, it lands here, and naming only handoff would send someone
+        // typing `press --root src plan …` looking for a flag that is theirs.
+        return Err(
+            "--root comes after the command that takes it: handoff, plan, execute or reconcile"
+                .into(),
+        );
     }
     if plan_root.is_some()
         && !matches!(
@@ -885,7 +899,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--json needs an inspect, conversion, handoff, supplier or saved-plan command".into(),
         );
     }
-    if !subfolders && !matches!(command, Command::Audit | Command::Convert | Command::Plan) {
+    if !subfolders
+        && !matches!(
+            command,
+            Command::Audit | Command::Convert | Command::Plan | Command::Window
+        )
+    {
         return Err("--no-subfolders needs audit, convert or plan".into());
     }
     if matches!(command, Command::Skill | Command::Update)
@@ -912,6 +931,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         return Err("--grid is available only for the window".into());
     }
     if command == Command::Convert && grid {
+        return Err("--grid is available only for the window".into());
+    }
+    if matches!(
+        command,
+        Command::Plan | Command::Execute | Command::Reconcile
+    ) && grid
+    {
         return Err("--grid is available only for the window".into());
     }
     if command == Command::Window && !subfolders {
@@ -1161,8 +1187,12 @@ fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) -
 }
 
 fn write_json(value: &impl Serialize) -> Result<(), String> {
+    write_json_with_code(value, 0)
+}
+
+fn write_json_with_code(value: &impl Serialize, code: i32) -> Result<(), String> {
     let document = serde_json::to_string(value).map_err(|error| error.to_string())?;
-    print_text(&format!("{document}\n"));
+    print_text_with_code(&format!("{document}\n"), code);
     Ok(())
 }
 
@@ -2541,13 +2571,12 @@ fn convert_targets(
 }
 
 fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, String> {
-    // Headless saved-plan dispatch happens before the normal startup path reads
-    // settings and applies the process-wide AVIF dial. Resolve the same default
-    // here so the plan records the setting execution will actually use.
-    let configured_speed = args
-        .avif_speed
-        .or_else(|| crate::settings::load().avif_speed)
-        .map(|speed| speed.min(10));
+    // A headless command runs on `Settings::default()`, never on the settings
+    // file. Reading that file here would put a speed in the plan's recipe
+    // fingerprint that `press convert` on the same machine never uses, and the
+    // two would then refuse each other's outputs over a number that changes no
+    // bytes at all outside AVIF.
+    let configured_speed = args.avif_speed.map(|speed| speed.min(10));
     if args.targets.is_empty() {
         return Ok(vec![saved_plan::TargetInput {
             id: "default".into(),
@@ -2654,7 +2683,7 @@ fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32)
             "status": "failed",
             "error": error,
         });
-        if let Err(write_error) = write_json(&report) {
+        if let Err(write_error) = write_json_with_code(&report, code) {
             eprintln!("press: could not write JSON: {write_error}");
             std::process::exit(1);
         }
@@ -2754,7 +2783,11 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 } else {
                     unreachable!("parser requires an execution mode")
                 };
-                saved_plan::execute(plan_path, &source, &output, mode, requirements)
+                // The command line runs a plan to its end: a stop here is the
+                // person killing the process, and the run state survives that.
+                saved_plan::execute(plan_path, &source, &output, mode, requirements, &mut |_| {
+                    true
+                })
             } else {
                 saved_plan::reconcile(plan_path, &source, &output, requirements)
             };
@@ -2763,21 +2796,27 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 Err(error) => saved_plan_error(command, error, args.json, 2),
             };
             if args.json {
-                if let Err(error) = write_json(&result.report) {
+                if let Err(error) = write_json_with_code(&result.report, result.exit_code) {
                     eprintln!("press: could not write JSON: {error}");
                     return 1;
                 }
             } else {
-                outln!(
-                    "{} {}: {} written, {} failed, {} unstarted, {} cancelled, {} requirements not met",
-                    command,
-                    result.report.plan_id,
-                    result.report.counts.written,
-                    result.report.counts.failed,
-                    result.report.counts.unstarted,
-                    result.report.counts.cancelled,
-                    result.report.counts.requirements_failed
+                print_text_with_code(
+                    &format!(
+                        "{} {}: {} written, {} failed, {} unstarted, {} cancelled, {} requirements not met\n",
+                        command,
+                        result.report.plan_id,
+                        result.report.counts.written,
+                        result.report.counts.failed,
+                        result.report.counts.unstarted,
+                        result.report.counts.cancelled,
+                        result.report.counts.requirements_failed
+                    ),
+                    result.exit_code,
                 );
+                if let Some(error) = &result.report.error {
+                    eprintln!("press: {command}: {error}");
+                }
                 for item in &result.report.items {
                     if let Some(error) = &item.error {
                         eprintln!("press: {} {}: {error}", item.target_id, item.source);

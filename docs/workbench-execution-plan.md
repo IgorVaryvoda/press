@@ -684,3 +684,50 @@ window's own launch carries no entries.
 
 The browser producer H1 has landed on the extension's `main` at `2e56550` and
 PR 3 passes all checks. Nothing about H2 or H3 follows from that.
+
+## September 18 A2/A3 landing and its window surface
+
+The A2/A3 saved-plan checkpoint was merged onto the released `main` (v0.6.8) and
+given a window surface. Source evidence is `codex/workbench-identity`; the slice
+is still local tooling, not a confirmed external contract.
+
+The merge kept main's `local_check_root` naming and its `Stamp::avif_speed`
+beside the checkpoint's `Stamp::recipe`, and kept one seeded-fixture helper for
+the CLI tests.
+
+**Window surface.** The Convert rail carries a Saved plan section:
+`src/audit/plan_actions.rs` saves the ticked rows and the effective settings as
+a plan, opens a plan back, runs it, stops it between files, retries failed items
+and reconciles written outputs. Creating a plan re-reads the folder rather than
+trusting the rows on screen, because the plan records the bytes it hashed, and a
+selected file that has gone since the audit is named rather than dropped.
+Replace mode, an explicit file batch and an empty selection are refused before
+the picker opens. A plan reviewed against a requirements snapshot stays a
+command-line job: the window has nowhere to supply that document, and it says
+so instead of running the plan without its rules. `saved_plan::execute` now
+takes a watcher that sees each finished item and answers whether to continue;
+the command line passes one that always continues. Opening another folder
+retires the plan in hand and asks its run to stop.
+
+**Review findings closed in this landing.**
+
+| Finding | What changed |
+| --- | --- |
+| The process-wide AVIF dial followed a plan | `execute_item` no longer writes `avif::set_speed`. The plan's speed travels in the stamp, which is what the encoder reads; in the window the old call would have left every later conversion — and the speed the settings file persists — at the plan's value |
+| A pinned destination needed only the plan's word | `planned_guard`'s `Own` path now also requires this folder's manifest to credit those bytes to these source bytes, the same evidence the plan had when it pinned them. An output tree copied without its manifest, and a crafted plan naming a file it never produced, are both refused |
+| An empty plan executed to "complete" | `Plan::validate` refuses a plan with no sources, so a folder whose images none decode is refused at creation rather than reported as a finished run of nothing |
+| A failure after the first encode exited 2 with no item states | The item loop records the failure, stops, and returns the report: exit `1`, the counts and items that describe the folder, and a named top-level `error`. Exit `2` again means nothing was written |
+| A closed pipe turned every exit code into 0 | Saved-plan output writes through a guard that keeps the run's own code when the reader leaves. `press audit \| head` still exits 0 |
+| Two spellings of one source root took two locks | `bind` canonicalizes the source root before the run id, the state path and the lock derive from it |
+| `press plan` read the settings file for the AVIF speed | A headless command runs on `Settings::default()`. Reading the file put a speed in the plan's fingerprint that `press convert` on the same machine never used, and the two then refused each other's outputs |
+| `--grid` was accepted and ignored by the three new commands | Refused by name, as `audit` and `convert` refuse it |
+| The blanket `--no-subfolders` refusal shadowed the window's own message | The window keeps its message about the Subfolders chip |
+| A plan recorded no encoded depth for JPEG or WebP | `scan::probe_bytes` reads it through `requirements::encoded_depth_bits`, the same header read the requirement checks use, so a plan and a check state one depth for one file |
+
+**Still open.** A cancelled item has no path back: no execution mode makes one
+eligible again, and the plan reports partial for as long as its run state lives.
+The run state is rewritten whole after every item and refuses to persist past
+64 MB, which a very large plan with a large requirements snapshot can reach. A
+written output whose source is edited during the run becomes a failed item that
+neither mode revisits. None of these lose an output, and all three leave the
+folder describing itself.
