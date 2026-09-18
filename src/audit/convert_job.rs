@@ -147,6 +147,7 @@ fn target_output_root(output: &Output, root: &Path, target: &Path) -> Result<Pat
         .map(|context| context.output_root().to_path_buf())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn target_record_is_current(
     manifest: &manifest::Manifest,
     root: &Path,
@@ -169,6 +170,7 @@ fn target_record_is_current(
         && record.recipe.as_deref() == Some(fingerprint.as_str())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_target(
     target: &crate::job::JobTarget,
     root: &Path,
@@ -1018,7 +1020,10 @@ impl Audit {
                                 Some(error) => Err(error),
                                 None => match (written, expected) {
                                     (Ok(written), Some(expected)) => {
-                                        convert::convert_to_expected_with_avif_speed(
+                                        // The recording's stamp carries this
+                                        // target's frozen speed, and that is
+                                        // what the encoder reads.
+                                        convert::convert_to_expected(
                                             &out_dir,
                                             &source,
                                             &written,
@@ -1027,7 +1032,6 @@ impl Audit {
                                             quality,
                                             max_edge,
                                             &expected,
-                                            speed,
                                         )
                                     }
                                     (Err(error), _) => Err(error),
@@ -1399,7 +1403,7 @@ mod tests {
         })
         .save(&source)
         .unwrap();
-        let result = convert::convert_to_expected_with_avif_speed(
+        let result = convert::convert_to_expected(
             &root.join("target"),
             &source,
             &output,
@@ -1408,7 +1412,6 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             &expected,
-            crate::avif::DEFAULT_SPEED,
         );
         assert_eq!(result, Err(convert::Failure::SourceChanged));
         assert!(!output.exists(), "a changed source writes no target output");

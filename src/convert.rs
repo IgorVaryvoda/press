@@ -1940,7 +1940,6 @@ pub fn convert_to(
         quality,
         max_edge,
         None,
-        crate::avif::speed(),
     )
 }
 
@@ -1957,33 +1956,6 @@ pub fn convert_to_expected(
     max_edge: MaxEdge,
     expected: &crate::manifest::SourceIdentity,
 ) -> Result<Converted, Failure> {
-    convert_to_expected_with_avif_speed(
-        output_root,
-        source,
-        written,
-        recording,
-        format,
-        quality,
-        max_edge,
-        expected,
-        crate::avif::speed(),
-    )
-}
-
-/// Convert only when the source still matches a saved byte snapshot, using a
-/// caller-owned AVIF speed for a target run.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn convert_to_expected_with_avif_speed(
-    output_root: &Path,
-    source: &Path,
-    written: &Path,
-    recording: Option<&Recording>,
-    format: Format,
-    quality: Quality,
-    max_edge: MaxEdge,
-    expected: &crate::manifest::SourceIdentity,
-    avif_speed: u8,
-) -> Result<Converted, Failure> {
     convert_to_inner(
         output_root,
         source,
@@ -1993,7 +1965,6 @@ pub(crate) fn convert_to_expected_with_avif_speed(
         quality,
         max_edge,
         Some(expected),
-        avif_speed,
     )
 }
 
@@ -2007,7 +1978,6 @@ fn convert_to_inner(
     quality: Quality,
     max_edge: MaxEdge,
     expected: Option<&crate::manifest::SourceIdentity>,
-    avif_speed: u8,
 ) -> Result<Converted, Failure> {
     let prepared = match expected {
         Some(expected) => prepare_expected(source, max_edge, expected),
