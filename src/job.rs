@@ -660,9 +660,7 @@ fn portable_export_relative(
         let part = part
             .to_str()
             .ok_or_else(|| format!("{} is not valid UTF-8", path.display()))?;
-        // On Unix a backslash is a literal filename character. Windows will
-        // treat it as a separator, so exporting it would change the mapping.
-        if part.contains(['/', '\\']) || !portable_component(part) {
+        if !portable_component(part) {
             return Err(format!(
                 "{} contains an unsafe portable component",
                 path.display()
@@ -712,10 +710,20 @@ fn portable_import_relative(
     Ok(std::path::PathBuf::from(normalized))
 }
 
-fn portable_component(part: &str) -> bool {
+/// The one rule a portable path component has to pass, wherever a component
+/// travels between machines: no separator, no relative segment, no drive or
+/// alternate stream marker, no control character, no trailing alias, no
+/// reserved Windows device. Saved plans share it with exported jobs so a plan
+/// cannot name something one platform silently retargets.
+pub(crate) fn portable_component(part: &str) -> bool {
     if part.is_empty()
         || part == "."
         || part == ".."
+        // A component is one name. A separator inside it is a second name on
+        // the platform that honours it: on Unix a backslash is an ordinary
+        // filename character, and Windows reads the same byte as a folder
+        // boundary. Rejecting both here keeps every caller's boundary the same.
+        || part.contains(['/', '\\'])
         || part.contains(':')
         || part.chars().any(char::is_control)
         || part.ends_with(['.', ' '])

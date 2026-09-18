@@ -9378,3 +9378,124 @@ fn duplicate_candidates_are_drawn_apart_and_keep_their_paths(cx: &mut TestAppCon
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The window's Run button is the command line's `execute`: same engine, same
+/// two roots, and a receipt on disk when it lands. Pinning the sentence pins
+/// what the rail says a run did.
+#[gpui_kit::test]
+fn a_saved_plan_run_writes_its_outputs_and_reports_them(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    let (root, entries) =
+        audit.read_with(cx, |audit, _| (audit.root.clone(), audit.entries.clone()));
+    let output_root = root.join(crate::scan::OUTPUT_DIR);
+    let plan_path = root.join("plan.json");
+    let plan = crate::saved_plan::build(
+        &root,
+        &output_root,
+        &entries,
+        0,
+        vec![crate::saved_plan::TargetInput {
+            id: "default".into(),
+            out: String::new(),
+            recipe: crate::saved_plan::EffectiveRecipe::from_settings(
+                Format::WebP,
+                Quality::lossy(80.),
+                MaxEdge::FULL,
+                Some(crate::avif::speed()),
+            ),
+        }],
+        None,
+    )
+    .expect("the fixture folder plans");
+    let items = plan.sources.len();
+    crate::saved_plan::save_new(&plan_path, &plan).expect("the plan file is written");
+
+    audit.update(cx, |audit, cx| {
+        audit.plan_work = Some(plan_actions::PlanWork {
+            path: plan_path,
+            items,
+            requirements: None,
+        });
+        audit.run_plan(
+            Some(crate::saved_plan::ExecutionMode::ContinueUnstarted),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.plan_busy(), "the run landed and released the window");
+        assert_eq!(
+            audit.plan_status.as_deref(),
+            Some("2 written · 0 failed · 0 left")
+        );
+    });
+    for index in 0..2 {
+        assert!(
+            output_root.join(format!("shot-{index}.webp")).exists(),
+            "the plan wrote its output"
+        );
+    }
+    // The rail says it on screen, not only in state: a run opens the section it
+    // reports in, and the Run button that is also its Stop stays reachable.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("plan-status").is_some());
+    assert!(cx.debug_bounds("plan-run").is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Replace rewrites the folder the plan reads from, which a reviewed plan never
+/// does. The refusal lands before the picker opens, so nothing asks for a file
+/// it would then refuse to write.
+#[gpui_kit::test]
+fn replacing_originals_refuses_to_save_a_plan(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    audit.update(cx, |audit, cx| {
+        audit.output = Output::Replace;
+        audit.save_plan_file(cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.plan_work.is_none(), "no plan was taken in hand");
+        assert!(audit.plan_status.is_none());
+    });
+    assert_eq!(notification_count(cx), 1);
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A plan binds to one source root. Opening another folder must not leave the
+/// window holding a run token it can never land: that token is what blocks
+/// Convert, so a stale one would lock the new folder out of conversion.
+#[gpui_kit::test]
+fn opening_another_folder_retires_the_plan_in_hand(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let first = audit.read_with(cx, |audit, _| audit.root.clone());
+    let second = photo_fixture("plan-retire", 1);
+    let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    audit.update(cx, |audit, _| {
+        audit.plan_cancel = Some(token.clone());
+        audit.plan_status = Some("Running: 0 of 1.".into());
+        audit.plan_work = Some(plan_actions::PlanWork {
+            path: first.join("plan.json"),
+            items: 1,
+            requirements: None,
+        });
+    });
+
+    audit.update(cx, |audit, cx| audit.request_path(second.clone(), cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.plan_busy(), "the window is free to convert again");
+        assert!(audit.plan_work.is_none(), "the plan retired with its root");
+        assert!(audit.plan_status.is_none());
+    });
+    assert!(
+        token.load(Ordering::Acquire),
+        "the run it left behind was asked to stop"
+    );
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
+}

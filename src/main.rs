@@ -20,6 +20,7 @@ mod menus;
 mod output;
 mod recipe;
 pub mod requirements;
+mod saved_plan;
 mod scan;
 mod settings;
 mod sirv;
@@ -60,11 +61,19 @@ fn write_text(out: &mut impl std::io::Write, text: &str) -> std::io::Result<bool
 /// the end of the run, not a crash, so it exits 0 and the hook stays installed for
 /// everything that really is one.
 fn print_text(text: &str) {
+    print_text_with_code(text, 0)
+}
+
+/// The same guard for a command whose exit code is its result. `press audit |
+/// head` has nothing to lose by exiting 0, but a saved-plan run that wrote half
+/// its files must not report a clean run because the reader left: the code the
+/// run earned survives the closed pipe.
+fn print_text_with_code(text: &str, code: i32) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match write_text(&mut out, text) {
         Ok(true) => {}
-        Ok(false) => std::process::exit(0),
+        Ok(false) => std::process::exit(code),
         Err(error) => {
             eprintln!("press: could not write to stdout: {error}");
             std::process::exit(1);
@@ -94,6 +103,9 @@ const HELP: &str = concat!(
     "  press audit <PATH> [--json]\n",
     "  press convert <PATH> [OPTIONS]\n",
     "  press restore <PATH>\n",
+    "  press plan --root <PATH> --output <DIR> --plan <FILE> [OPTIONS]\n",
+    "  press execute <FILE> --root <PATH> --output <DIR> (--continue-unstarted|--retry-failed|--cancel)\n",
+    "  press reconcile <FILE> --root <PATH> --output <DIR>\n",
     "  press handoff <FILE>\n",
     "  press check <FILE_OR_FOLDER> --requirements-file <FILE> [--json]\n",
     "  press supplier <PATH> <verb> [OPTIONS]\n",
@@ -104,6 +116,9 @@ const HELP: &str = concat!(
     "  audit      Read image headers without opening a window or writing files\n",
     "  convert    Re-encode a file or folder into optimized/ without a window\n",
     "  restore    Put back the originals a --replace run moved aside\n",
+    "  plan       Save a portable conversion plan without writing images\n",
+    "  execute    Run a saved plan against explicitly rebound roots\n",
+    "  reconcile  Repair a saved plan receipt from installed outputs\n",
     "  handoff    Validate an ImageGuide report into a pending local task\n",
     "  check      Inspect actual output bytes against a local requirements snapshot\n",
     "  supplier   Prepare, submit and reconcile product images as a supplier\n",
@@ -127,12 +142,19 @@ const HELP: &str = concat!(
     "  --skip-existing           Skip a source whose output already matches this\n",
     "                            format, quality, max edge and AVIF speed\n",
     "  --dry-run                 Plan and project a conversion, write nothing\n",
+    "  --plan <file>             File to create for the plan command\n",
+    "  --continue-unstarted      Execute only unstarted saved-plan items\n",
+    "  --retry-failed            Execute only failed saved-plan items\n",
+    "  --cancel                  Mark unstarted saved-plan items cancelled\n",
     "  --target <recipe>=<dir>    Convert once more with a saved recipe into\n",
-    "                            its own folder; repeatable, convert only\n",
+    "                            its own folder; repeatable, convert or plan\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
     "                            higher is faster and slightly larger\n",
     "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
     "                            explicit flags override it field by field\n",
+    "  --requirements-file <file>\n",
+    "                            Local requirements snapshot for check, plan,\n",
+    "                            execute or reconcile\n",
     "  --root <dir>              Map handoff resources against this folder\n",
     "  --deployed <dir>          Check the mapping against files in this local\n",
     "                            folder: filename, format and dimensions only,\n",
@@ -186,6 +208,9 @@ enum Command {
     Supplier,
     Studio,
     Restore,
+    Plan,
+    Execute,
+    Reconcile,
     Skill,
     Update,
     Help,
@@ -225,6 +250,12 @@ struct Args {
     /// flag keeps for compatibility; nothing here reaches a website. Needs
     /// `--root`; anything else refuses the flag.
     local_check_root: Option<PathBuf>,
+    /// Explicit source root for saved-plan creation and execution. Handoff keeps
+    /// its separate mapping root because imported reports have another contract.
+    plan_root: Option<PathBuf>,
+    /// Saved plan path to create. Execute and reconcile take their plan as the
+    /// positional root value, so this flag is creation-only.
+    plan_file: Option<PathBuf>,
     /// A bounded, user-authored requirements snapshot for `check`.
     requirements_file: Option<PathBuf>,
     /// One run per target for `convert`: a saved recipe id and the output
@@ -251,6 +282,10 @@ struct Args {
     skip_existing: bool,
     /// Plan and project the conversion without writing anything.
     dry_run: bool,
+    /// Saved-plan lifecycle mode. Exactly one is required for execute.
+    continue_unstarted: bool,
+    retry_failed: bool,
+    cancel: bool,
     unknown: Vec<String>,
     /// A preset file resolved as the recipe base. Explicit flags override it
     /// field by field; the window never reads it implicitly.
@@ -298,6 +333,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut output = None;
     let mut map_root = None;
     let mut local_check_root = None;
+    let mut plan_root = None;
+    let mut plan_file = None;
     let mut requirements_file = None;
     let mut targets = Vec::new();
     let mut supplier_verb = None;
@@ -314,6 +351,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut studio_fake = None;
     let mut skip_existing = false;
     let mut dry_run = false;
+    let mut continue_unstarted = false;
+    let mut retry_failed = false;
+    let mut cancel = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
     let mut preset = None;
@@ -326,6 +366,11 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         match argument.as_str() {
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
+            "plan" if root.is_none() && command == Command::Window => command = Command::Plan,
+            "execute" if root.is_none() && command == Command::Window => command = Command::Execute,
+            "reconcile" if root.is_none() && command == Command::Window => {
+                command = Command::Reconcile
+            }
             "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
             "handoff" if root.is_none() && command == Command::Window => command = Command::Handoff,
             "check" if root.is_none() && command == Command::Window => command = Command::Check,
@@ -390,7 +435,18 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--root" => {
                 let value = next_value(&mut rest, "--root", "a folder")?;
-                map_root = Some(PathBuf::from(value));
+                if matches!(
+                    command,
+                    Command::Plan | Command::Execute | Command::Reconcile
+                ) {
+                    plan_root = Some(PathBuf::from(value));
+                } else {
+                    map_root = Some(PathBuf::from(value));
+                }
+            }
+            "--plan" => {
+                let value = next_value(&mut rest, "--plan", "a file")?;
+                plan_file = Some(PathBuf::from(value));
             }
             "--requirements-file" => {
                 let value = next_value(&mut rest, "--requirements-file", "a requirements file")?;
@@ -480,6 +536,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 dry_run = true;
             }
+            "--continue-unstarted" => continue_unstarted = true,
+            "--retry-failed" => retry_failed = true,
+            "--cancel" => cancel = true,
             "--target" => {
                 let value =
                     next_value(&mut rest, "--target", "a recipe and folder like night=web")?;
@@ -561,6 +620,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             output,
             map_root: None,
             local_check_root: None,
+            plan_root: None,
+            plan_file: None,
             requirements_file: None,
             targets: Vec::new(),
             supplier_verb: None,
@@ -577,6 +638,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             studio_fake: None,
             skip_existing,
             dry_run,
+            continue_unstarted,
+            retry_failed,
+            cancel,
             preset: None,
             preset_overrides: Vec::new(),
             unknown,
@@ -616,13 +680,35 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         return Err("handoff takes only a report file".into());
     }
     if map_root.is_some() && command != Command::Handoff {
-        return Err("--root needs handoff".into());
+        // `--root` belongs to whichever command it follows. Written before the
+        // command, it lands here, and naming only handoff would send someone
+        // typing `press --root src plan …` looking for a flag that is theirs.
+        return Err(
+            "--root comes after the command that takes it: handoff, plan, execute or reconcile"
+                .into(),
+        );
+    }
+    if plan_root.is_some()
+        && !matches!(
+            command,
+            Command::Plan | Command::Execute | Command::Reconcile
+        )
+    {
+        return Err("--root needs plan, execute or reconcile".into());
+    }
+    if plan_file.is_some() && command != Command::Plan {
+        return Err("--plan needs plan".into());
     }
     if local_check_root.is_some() && (command != Command::Handoff || map_root.is_none()) {
         return Err("--deployed needs handoff --root".into());
     }
-    if requirements_file.is_some() && command != Command::Check {
-        return Err("--requirements-file needs check".into());
+    if requirements_file.is_some()
+        && !matches!(
+            command,
+            Command::Check | Command::Plan | Command::Execute | Command::Reconcile
+        )
+    {
+        return Err("--requirements-file needs check, plan, execute or reconcile".into());
     }
     if command == Command::Check
         && (conversion_option
@@ -655,8 +741,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Check && requirements_file.is_none() {
         return Err("check needs --requirements-file <file>".into());
     }
-    if !targets.is_empty() && command != Command::Convert {
-        return Err("--target needs convert".into());
+    if !targets.is_empty() && !matches!(command, Command::Convert | Command::Plan) {
+        return Err("--target needs convert or plan".into());
     }
     if !targets.is_empty() && (format_set || quality_set || edge_set || speed_set) {
         return Err(
@@ -767,6 +853,34 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     {
         return Err("supplier takes a folder, a verb and --assignment/--fake only".into());
     }
+    if matches!(command, Command::Execute | Command::Reconcile)
+        && (format_set
+            || quality_set
+            || edge_set
+            || speed_set
+            || preset.is_some()
+            || !targets.is_empty()
+            || replace
+            || skip_existing
+            || dry_run)
+    {
+        return Err("saved plan execution uses the settings and mappings in the plan".into());
+    }
+    if command == Command::Reconcile && (continue_unstarted || retry_failed || cancel) {
+        return Err("reconcile does not execute items".into());
+    }
+    if command == Command::Execute
+        && u8::from(continue_unstarted) + u8::from(retry_failed) + u8::from(cancel) != 1
+    {
+        return Err(
+            "execute needs exactly one of --continue-unstarted, --retry-failed or --cancel".into(),
+        );
+    }
+    if command == Command::Plan
+        && (replace || skip_existing || dry_run || continue_unstarted || retry_failed || cancel)
+    {
+        return Err("plan saves a snapshot; execution flags need execute".into());
+    }
     if json
         && !matches!(
             command,
@@ -776,12 +890,22 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 | Command::Check
                 | Command::Supplier
                 | Command::Studio
+                | Command::Plan
+                | Command::Execute
+                | Command::Reconcile
         )
     {
-        return Err("--json needs audit, convert, handoff, check or supplier".into());
+        return Err(
+            "--json needs an inspect, conversion, handoff, supplier or saved-plan command".into(),
+        );
     }
-    if command == Command::Handoff && !subfolders {
-        return Err("--no-subfolders needs audit or convert".into());
+    if !subfolders
+        && !matches!(
+            command,
+            Command::Audit | Command::Convert | Command::Plan | Command::Window
+        )
+    {
+        return Err("--no-subfolders needs audit, convert or plan".into());
     }
     if matches!(command, Command::Skill | Command::Update)
         && (root.is_some()
@@ -809,6 +933,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if command == Command::Convert && grid {
         return Err("--grid is available only for the window".into());
     }
+    if matches!(
+        command,
+        Command::Plan | Command::Execute | Command::Reconcile
+    ) && grid
+    {
+        return Err("--grid is available only for the window".into());
+    }
     if command == Command::Window && !subfolders {
         return Err(
             "--no-subfolders needs audit or convert; the window has a Subfolders chip".into(),
@@ -832,6 +963,42 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if replace && output.is_some() {
         return Err("--replace writes beside each source; it takes no --output".into());
     }
+    match command {
+        Command::Plan => {
+            if root.is_some() {
+                return Err("plan takes --root <folder>, not a positional path".into());
+            }
+            if plan_root.is_none() || output.is_none() || plan_file.is_none() {
+                return Err(
+                    "plan needs --root <folder>, --output <folder> and --plan <file>".into(),
+                );
+            }
+        }
+        Command::Execute | Command::Reconcile => {
+            if root.is_none() {
+                return Err(format!("{} needs a saved plan file", command_name(command)));
+            }
+            if plan_root.is_none() || output.is_none() {
+                return Err(format!(
+                    "{} needs --root <folder> and --output <folder>",
+                    command_name(command)
+                ));
+            }
+            if plan_file.is_some() {
+                return Err("--plan is only for plan creation".into());
+            }
+        }
+        _ => {
+            if continue_unstarted
+                || retry_failed
+                || cancel
+                || plan_root.is_some()
+                || plan_file.is_some()
+            {
+                return Err("saved-plan options need plan, execute or reconcile".into());
+            }
+        }
+    }
 
     Ok(Args {
         root,
@@ -847,6 +1014,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         output,
         map_root,
         local_check_root,
+        plan_root,
+        plan_file,
         requirements_file,
         targets,
         supplier_verb,
@@ -863,6 +1032,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         studio_fake,
         skip_existing,
         dry_run,
+        continue_unstarted,
+        retry_failed,
+        cancel,
         preset,
         preset_overrides,
         unknown,
@@ -875,6 +1047,26 @@ fn select_command(command: &mut Command, selected: Command, flag: &str) -> Resul
     }
     *command = selected;
     Ok(())
+}
+
+fn command_name(command: Command) -> &'static str {
+    match command {
+        Command::Plan => "plan",
+        Command::Execute => "execute",
+        Command::Reconcile => "reconcile",
+        Command::Audit => "audit",
+        Command::Convert => "convert",
+        Command::Handoff => "handoff",
+        Command::Check => "check",
+        Command::Supplier => "supplier",
+        Command::Studio => "studio",
+        Command::Restore => "restore",
+        Command::Window => "window",
+        Command::Skill => "skill",
+        Command::Update => "update",
+        Command::Help => "help",
+        Command::Version => "version",
+    }
 }
 
 fn set_root(root: &mut Option<PathBuf>, value: String) -> Result<(), String> {
@@ -995,8 +1187,12 @@ fn audit_report(target: &Path, scanned: &scan::Scan, subfolders: Option<bool>) -
 }
 
 fn write_json(value: &impl Serialize) -> Result<(), String> {
+    write_json_with_code(value, 0)
+}
+
+fn write_json_with_code(value: &impl Serialize, code: i32) -> Result<(), String> {
     let document = serde_json::to_string(value).map_err(|error| error.to_string())?;
-    print_text(&format!("{document}\n"));
+    print_text_with_code(&format!("{document}\n"), code);
     Ok(())
 }
 
@@ -2374,6 +2570,265 @@ fn convert_targets(
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
 
+fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, String> {
+    // A headless command runs on `Settings::default()`, never on the settings
+    // file. Reading that file here would put a speed in the plan's recipe
+    // fingerprint that `press convert` on the same machine never uses, and the
+    // two would then refuse each other's outputs over a number that changes no
+    // bytes at all outside AVIF.
+    let configured_speed = args.avif_speed.map(|speed| speed.min(10));
+    if args.targets.is_empty() {
+        return Ok(vec![saved_plan::TargetInput {
+            id: "default".into(),
+            out: String::new(),
+            recipe: saved_plan::EffectiveRecipe::from_settings(
+                args.format,
+                args.quality,
+                args.max_edge,
+                configured_speed,
+            ),
+        }]);
+    }
+    let library = target_library();
+    let job_targets: Vec<crate::job::JobTarget> = args
+        .targets
+        .iter()
+        .map(|target| crate::job::JobTarget {
+            id: target.recipe.clone(),
+            name: target.recipe.clone(),
+            recipe: Some(target.recipe.clone()),
+            out: target.out.clone(),
+        })
+        .collect();
+    let prepared = crate::job::prepare_targets(&job_targets, &library)?;
+    prepared
+        .into_iter()
+        .map(|target| {
+            let recipe = target
+                .recipe
+                .ok_or_else(|| format!("target {:?} has no resolved recipe", target.id))?;
+            let (format, quality, max_edge, speed) = recipe.effective();
+            Ok(saved_plan::TargetInput {
+                id: target.id,
+                out: saved_plan::portable_relative(&target.out)?,
+                recipe: saved_plan::EffectiveRecipe::from_settings(
+                    format,
+                    quality,
+                    max_edge,
+                    speed.or(configured_speed),
+                ),
+            })
+        })
+        .collect()
+}
+
+/// The two roots a saved-plan command binds, each resolved as what it really is.
+///
+/// The source folder is asked of the filesystem rather than of the path string.
+/// `scan::canonical_boundary` folds `..` lexically because it also has to name
+/// destinations that do not exist yet; a source folder is not one of those. It
+/// is here now, and `link/..` is the parent of what the link points at, which
+/// is the folder the kernel opens and the only one whose files a plan may go on
+/// to hash, name relatively and convert.
+fn saved_plan_context(source: &Path, output: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let resolved = std::fs::canonicalize(source).map_err(|error| {
+        format!(
+            "saved plan source {} cannot be established: {error}",
+            source.display()
+        )
+    })?;
+    if !resolved.is_dir() {
+        return Err(format!(
+            "saved plan source {} is not a folder",
+            source.display()
+        ));
+    }
+    let destination = settings::Output::Folder(output.to_path_buf());
+    let context = destination.context(&resolved)?;
+    Ok((resolved, context.output_root().to_path_buf()))
+}
+
+fn saved_plan_scan(source: &Path, output: &Path, subfolders: bool) -> Result<scan::Scan, String> {
+    if subfolders {
+        Ok(scan::scan(source, output))
+    } else {
+        scan::browse(source, output)
+            .map(|browse| browse.scan)
+            .map_err(|error| {
+                format!(
+                    "saved plan source {} cannot be read: {error}",
+                    source.display()
+                )
+            })
+    }
+}
+
+/// The rules a saved-plan command was given, parsed through the shared bounded
+/// reader. A plan records only which snapshot it was reviewed against, so the
+/// document itself has to arrive again with every command that uses it.
+fn saved_plan_requirements(
+    args: &Args,
+) -> Result<Option<requirements::RequirementsSnapshot>, String> {
+    args.requirements_file
+        .as_deref()
+        .map(requirements::parse_file)
+        .transpose()
+}
+
+fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32) -> ! {
+    if json {
+        let report = serde_json::json!({
+            "schema_version": saved_plan::SCHEMA_VERSION,
+            "command": command,
+            "status": "failed",
+            "error": error,
+        });
+        if let Err(write_error) = write_json_with_code(&report, code) {
+            eprintln!("press: could not write JSON: {write_error}");
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!("press: {command}: {error}");
+    }
+    std::process::exit(code)
+}
+
+fn saved_plan_headless(args: &Args) -> i32 {
+    match args.command {
+        Command::Plan => {
+            let source_arg = args
+                .plan_root
+                .as_deref()
+                .expect("parser requires plan root");
+            let output_arg = args.output.as_deref().expect("parser requires plan output");
+            let plan_path = args
+                .plan_file
+                .as_deref()
+                .expect("parser requires plan file");
+            let (source, output) = match saved_plan_context(source_arg, output_arg) {
+                Ok(binding) => binding,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let scanned = match saved_plan_scan(&source, &output, args.subfolders) {
+                Ok(scanned) => scanned,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let targets = match saved_plan_targets(args) {
+                Ok(targets) => targets,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let requirements = match saved_plan_requirements(args) {
+                Ok(requirements) => requirements,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let plan = match saved_plan::build(
+                &source,
+                &output,
+                &scanned.entries,
+                scanned.unreadable.len() + scanned.walk_errors.len(),
+                targets,
+                requirements.as_ref(),
+            ) {
+                Ok(plan) => plan,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            if let Err(error) = saved_plan::save_new(plan_path, &plan) {
+                saved_plan_error("plan", error, args.json, 2);
+            }
+            if args.json {
+                let report = serde_json::json!({
+                    "schema_version": saved_plan::SCHEMA_VERSION,
+                    "command": "plan",
+                    "status": "planned",
+                    "plan": plan,
+                });
+                if let Err(error) = write_json(&report) {
+                    eprintln!("press: could not write JSON: {error}");
+                    return 1;
+                }
+            } else {
+                outln!(
+                    "saved {} with {} sources and {} targets",
+                    plan.plan_id,
+                    plan.sources.len(),
+                    plan.targets.len()
+                );
+            }
+            0
+        }
+        Command::Execute | Command::Reconcile => {
+            let command = command_name(args.command);
+            let plan_path = args.root.as_deref().expect("parser requires plan path");
+            let source_arg = args
+                .plan_root
+                .as_deref()
+                .expect("parser requires plan root");
+            let output_arg = args.output.as_deref().expect("parser requires plan output");
+            let (source, output) = match saved_plan_context(source_arg, output_arg) {
+                Ok(binding) => binding,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            let requirements = match saved_plan_requirements(args) {
+                Ok(requirements) => requirements,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            let requirements = requirements.as_ref();
+            let result = if args.command == Command::Execute {
+                let mode = if args.continue_unstarted {
+                    saved_plan::ExecutionMode::ContinueUnstarted
+                } else if args.retry_failed {
+                    saved_plan::ExecutionMode::RetryFailed
+                } else if args.cancel {
+                    saved_plan::ExecutionMode::Cancel
+                } else {
+                    unreachable!("parser requires an execution mode")
+                };
+                // The command line runs a plan to its end: a stop here is the
+                // person killing the process, and the run state survives that.
+                saved_plan::execute(plan_path, &source, &output, mode, requirements, &mut |_| {
+                    true
+                })
+            } else {
+                saved_plan::reconcile(plan_path, &source, &output, requirements)
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => saved_plan_error(command, error, args.json, 2),
+            };
+            if args.json {
+                if let Err(error) = write_json_with_code(&result.report, result.exit_code) {
+                    eprintln!("press: could not write JSON: {error}");
+                    return 1;
+                }
+            } else {
+                print_text_with_code(
+                    &format!(
+                        "{} {}: {} written, {} failed, {} unstarted, {} cancelled, {} requirements not met\n",
+                        command,
+                        result.report.plan_id,
+                        result.report.counts.written,
+                        result.report.counts.failed,
+                        result.report.counts.unstarted,
+                        result.report.counts.cancelled,
+                        result.report.counts.requirements_failed
+                    ),
+                    result.exit_code,
+                );
+                if let Some(error) = &result.report.error {
+                    eprintln!("press: {command}: {error}");
+                }
+                for item in &result.report.items {
+                    if let Some(error) = &item.error {
+                        eprintln!("press: {} {}: {error}", item.target_id, item.source);
+                    }
+                }
+            }
+            result.exit_code
+        }
+        _ => unreachable!("saved plan dispatch only accepts saved plan commands"),
+    }
+}
+
 fn main() {
     let pending_crash = crash::pending_snapshot();
     crash::install();
@@ -2400,6 +2855,9 @@ fn main() {
         | Command::Audit
         | Command::Convert
         | Command::Restore
+        | Command::Plan
+        | Command::Execute
+        | Command::Reconcile
         | Command::Handoff
         | Command::Check
         | Command::Supplier
@@ -2427,6 +2885,13 @@ fn main() {
             args.studio_fake.as_deref(),
             args.json,
         ));
+    }
+
+    if matches!(
+        args.command,
+        Command::Plan | Command::Execute | Command::Reconcile
+    ) {
+        std::process::exit(saved_plan_headless(&args));
     }
 
     // Headless commands do not inherit window state. An agent should get the same
@@ -4270,6 +4735,89 @@ mod tests {
             assert_eq!(args.json, json);
             assert_eq!(args.root, Some(PathBuf::from(root)));
         }
+    }
+
+    #[test]
+    fn saved_plan_commands_require_explicit_bindings_and_one_mode() {
+        let plan = parse(&[
+            "plan",
+            "--root",
+            "source",
+            "--output",
+            "output",
+            "--plan",
+            "plan.json",
+        ])
+        .unwrap();
+        assert_eq!(plan.command, Command::Plan);
+        assert_eq!(plan.plan_root.as_deref(), Some(Path::new("source")));
+        assert_eq!(plan.plan_file.as_deref(), Some(Path::new("plan.json")));
+        assert_eq!(plan.output.as_deref(), Some(Path::new("output")));
+
+        let execute = parse(&[
+            "execute",
+            "plan.json",
+            "--root",
+            "source",
+            "--output",
+            "output",
+            "--retry-failed",
+        ])
+        .unwrap();
+        assert_eq!(execute.command, Command::Execute);
+        assert!(execute.retry_failed);
+        assert!(!execute.continue_unstarted);
+
+        assert!(
+            parse(&[
+                "execute",
+                "plan.json",
+                "--root",
+                "source",
+                "--output",
+                "output"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "execute",
+                "plan.json",
+                "--root",
+                "source",
+                "--output",
+                "output",
+                "--continue-unstarted",
+                "--retry-failed",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "reconcile",
+                "plan.json",
+                "--root",
+                "source",
+                "--output",
+                "output",
+                "--cancel",
+            ])
+            .is_err()
+        );
+        assert!(parse(&["convert", "source", "--cancel"]).is_err());
+        assert!(
+            parse(&[
+                "plan",
+                "--root",
+                "source",
+                "--output",
+                "output",
+                "--plan",
+                "plan.json",
+                "--cancel",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

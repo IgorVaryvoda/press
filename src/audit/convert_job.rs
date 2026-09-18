@@ -60,6 +60,7 @@ impl Audit {
         if self.converting
             || self.local_ai_busy()
             || self.studio_busy()
+            || self.plan_busy()
             || self.scan_blocks_delivery()
         {
             return;

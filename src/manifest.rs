@@ -236,6 +236,12 @@ impl Stamp {
         }
     }
 
+    /// The effective-settings fingerprint this stamp writes with each record.
+    /// One authority: callers compare against it rather than recomputing it.
+    pub(crate) fn recipe(&self) -> &str {
+        &self.recipe
+    }
+
     /// The AVIF speed this stamp claims, as the encoder wants it. `Stamp::new`
     /// reads the process-wide dial once at the start of a run; every file that run
     /// writes then encodes at this value rather than reading the dial again, so the
