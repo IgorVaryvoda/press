@@ -1958,7 +1958,8 @@ mod tests {
 
         // A pin under another name is refused: the row would say one thing and
         // deliver another.
-        let mut job = Job::new("j".into(), "J".into(), vec![PathBuf::from("/tmp")]).unwrap();
+        // The root only has to be absolute, and `/tmp` is not on Windows.
+        let mut job = Job::new("j".into(), "J".into(), vec![std::env::temp_dir()]).unwrap();
         let mut mismatched = target;
         mismatched.recipe = Some("another-recipe".into());
         job.targets = vec![mismatched];

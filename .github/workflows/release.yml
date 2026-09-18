@@ -163,7 +163,22 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: cargo packager --release --formats "${{ matrix.formats }}" --out-dir dist
+        # Apple's secure timestamp service answers every signature, and when it
+        # does not, `codesign` fails with "A timestamp was expected but was not
+        # found" after a fifteen-second wait. That killed the 0.6.9 build at
+        # minute seventy-four, on the twelfth of a dozen bundled dylibs, with
+        # every test already green. Signing is idempotent — it replaces the
+        # signature it finds — so the step earns two more tries before the
+        # release is called off.
+        run: |
+          for attempt in 1 2 3; do
+            if cargo packager --release --formats "${{ matrix.formats }}" --out-dir dist; then
+              exit 0
+            fi
+            echo "::warning::packaging attempt $attempt failed; retrying in 60s"
+            sleep 60
+          done
+          exit 1
 
       - name: Give macOS updates unique names
         if: runner.os == 'macOS'
