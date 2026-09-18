@@ -130,6 +130,11 @@ pub struct JobTarget {
     pub id: String,
     pub name: String,
     pub recipe: Option<String>,
+    /// The recipe as it stood when this target was added. Editing or deleting
+    /// the preset afterwards cannot change what this job delivers, and a job
+    /// carried to another machine delivers the same bytes there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_snapshot: Option<crate::recipe::Recipe>,
     pub out: std::path::PathBuf,
 }
 
@@ -425,6 +430,18 @@ impl Job {
                 .is_some_and(|recipe| recipe.trim().is_empty())
             {
                 return Err(format!("target {:?} names an empty recipe", target.id));
+            }
+            // A pin has to be a real recipe, and the one this target names. A
+            // snapshot under another id would deliver something the row does
+            // not say.
+            if let Some(snapshot) = &target.recipe_snapshot {
+                snapshot.validate()?;
+                if target.recipe.as_deref() != Some(snapshot.id.as_str()) {
+                    return Err(format!(
+                        "target {:?} pins a recipe snapshot that is not the recipe it names",
+                        target.id
+                    ));
+                }
             }
             // Namespaces stay relative and dot-free, like every stored run
             // path: an absolute or escaping `out` would pin one machine's
@@ -1121,6 +1138,18 @@ pub fn prepare_targets(
         .map(|target| {
             let recipe = match target.recipe.as_deref() {
                 None => None,
+                // The pinned copy wins over the library. A job that was reviewed
+                // with one recipe keeps delivering it, whatever the preset of
+                // that name says now — and it still delivers on a machine whose
+                // library never had it.
+                Some(id)
+                    if target
+                        .recipe_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.id == id) =>
+                {
+                    target.recipe_snapshot.clone()
+                }
                 Some(id) => Some(
                     recipes
                         .iter()
@@ -1815,6 +1844,7 @@ mod tests {
             id: "web".into(),
             name: "Web".into(),
             recipe: None,
+            recipe_snapshot: None,
             out: PathBuf::from("nested/out"),
         }];
         let mut portable = targeted.to_portable(&root).unwrap();
@@ -1897,11 +1927,51 @@ mod tests {
         assert!(missing.contains("night"), "the refusal names it: {missing}");
     }
 
+    /// A pinned recipe is the job's contract. Editing the preset of that name
+    /// afterwards, or opening the job where no such preset exists, must not
+    /// change what the target delivers.
+    #[test]
+    fn a_pinned_recipe_snapshot_outlives_the_library_it_came_from() {
+        let mut pinned = crate::recipe::Recipe::builtins()[0].clone();
+        pinned.quality = crate::recipe::RecipeQuality::Lossy(42.);
+        let mut target = target(&pinned.id, Some(&pinned.id), "web");
+        target.recipe_snapshot = Some(pinned.clone());
+
+        // The library now holds something else entirely under that id.
+        let mut edited = crate::recipe::Recipe::builtins()[0].clone();
+        edited.quality = crate::recipe::RecipeQuality::Lossy(95.);
+        let prepared = prepare_targets(std::slice::from_ref(&target), &[edited])
+            .expect("a pinned target prepares");
+        assert_eq!(
+            prepared[0].recipe.as_ref().map(|recipe| recipe.quality),
+            Some(crate::recipe::RecipeQuality::Lossy(42.)),
+            "the pin delivers, not the edit"
+        );
+
+        // And an empty library is no obstacle at all.
+        let prepared =
+            prepare_targets(std::slice::from_ref(&target), &[]).expect("the pin needs no library");
+        assert_eq!(
+            prepared[0].recipe.as_ref().map(|recipe| recipe.id.clone()),
+            Some(pinned.id)
+        );
+
+        // A pin under another name is refused: the row would say one thing and
+        // deliver another.
+        let mut job = Job::new("j".into(), "J".into(), vec![PathBuf::from("/tmp")]).unwrap();
+        let mut mismatched = target;
+        mismatched.recipe = Some("another-recipe".into());
+        job.targets = vec![mismatched];
+        let error = job.validate().expect_err("a mismatched pin is refused");
+        assert!(error.contains("pins a recipe snapshot"), "{error}");
+    }
+
     fn target(id: &str, recipe: Option<&str>, out: &str) -> JobTarget {
         JobTarget {
             id: id.into(),
             name: id.into(),
             recipe: recipe.map(str::to_string),
+            recipe_snapshot: None,
             out: PathBuf::from(out),
         }
     }

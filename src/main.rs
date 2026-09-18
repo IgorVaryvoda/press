@@ -104,7 +104,8 @@ const HELP: &str = concat!(
     "  press convert <PATH> [OPTIONS]\n",
     "  press restore <PATH>\n",
     "  press plan --root <PATH> --output <DIR> --plan <FILE> [OPTIONS]\n",
-    "  press execute <FILE> --root <PATH> --output <DIR> (--continue-unstarted|--retry-failed|--cancel)\n",
+    "  press execute <FILE> --root <PATH> --output <DIR>\n",
+    "      (--continue-unstarted|--retry-failed|--cancel|--reinstate-cancelled)\n",
     "  press reconcile <FILE> --root <PATH> --output <DIR>\n",
     "  press handoff <FILE>\n",
     "  press check <FILE_OR_FOLDER> --requirements-file <FILE> [--json]\n",
@@ -146,6 +147,7 @@ const HELP: &str = concat!(
     "  --continue-unstarted      Execute only unstarted saved-plan items\n",
     "  --retry-failed            Execute only failed saved-plan items\n",
     "  --cancel                  Mark unstarted saved-plan items cancelled\n",
+    "  --reinstate-cancelled     Put cancelled saved-plan items back, write nothing\n",
     "  --target <recipe>=<dir>    Convert once more with a saved recipe into\n",
     "                            its own folder; repeatable, convert or plan\n",
     "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
@@ -286,6 +288,7 @@ struct Args {
     continue_unstarted: bool,
     retry_failed: bool,
     cancel: bool,
+    reinstate_cancelled: bool,
     unknown: Vec<String>,
     /// A preset file resolved as the recipe base. Explicit flags override it
     /// field by field; the window never reads it implicitly.
@@ -353,6 +356,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut dry_run = false;
     let mut continue_unstarted = false;
     let mut retry_failed = false;
+    let mut reinstate_cancelled = false;
     let mut cancel = false;
     let mut unknown = Vec::new();
     let mut conversion_option = false;
@@ -537,6 +541,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 dry_run = true;
             }
             "--continue-unstarted" => continue_unstarted = true,
+            "--reinstate-cancelled" => reinstate_cancelled = true,
             "--retry-failed" => retry_failed = true,
             "--cancel" => cancel = true,
             "--target" => {
@@ -641,6 +646,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             continue_unstarted,
             retry_failed,
             cancel,
+            reinstate_cancelled,
             preset: None,
             preset_overrides: Vec::new(),
             unknown,
@@ -866,18 +872,32 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     {
         return Err("saved plan execution uses the settings and mappings in the plan".into());
     }
-    if command == Command::Reconcile && (continue_unstarted || retry_failed || cancel) {
+    if command == Command::Reconcile
+        && (continue_unstarted || retry_failed || cancel || reinstate_cancelled)
+    {
         return Err("reconcile does not execute items".into());
     }
     if command == Command::Execute
-        && u8::from(continue_unstarted) + u8::from(retry_failed) + u8::from(cancel) != 1
+        && u8::from(continue_unstarted)
+            + u8::from(retry_failed)
+            + u8::from(cancel)
+            + u8::from(reinstate_cancelled)
+            != 1
     {
         return Err(
-            "execute needs exactly one of --continue-unstarted, --retry-failed or --cancel".into(),
+            "execute needs exactly one of --continue-unstarted, --retry-failed, --cancel or \
+             --reinstate-cancelled"
+                .into(),
         );
     }
     if command == Command::Plan
-        && (replace || skip_existing || dry_run || continue_unstarted || retry_failed || cancel)
+        && (replace
+            || skip_existing
+            || dry_run
+            || continue_unstarted
+            || retry_failed
+            || cancel
+            || reinstate_cancelled)
     {
         return Err("plan saves a snapshot; execution flags need execute".into());
     }
@@ -992,6 +1012,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             if continue_unstarted
                 || retry_failed
                 || cancel
+                || reinstate_cancelled
                 || plan_root.is_some()
                 || plan_file.is_some()
             {
@@ -1035,6 +1056,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         continue_unstarted,
         retry_failed,
         cancel,
+        reinstate_cancelled,
         preset,
         preset_overrides,
         unknown,
@@ -2408,6 +2430,8 @@ fn convert_targets(
             id: spec.recipe.clone(),
             name: spec.recipe.clone(),
             recipe: Some(spec.recipe.clone()),
+            // A command-line target resolves its recipe for this run only.
+            recipe_snapshot: None,
             out: spec.out.clone(),
         })
         .collect();
@@ -2597,6 +2621,8 @@ fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, Strin
             id: target.recipe.clone(),
             name: target.recipe.clone(),
             recipe: Some(target.recipe.clone()),
+            // A command-line target resolves its recipe for this run only.
+            recipe_snapshot: None,
             out: target.out.clone(),
         })
         .collect();
@@ -2780,6 +2806,8 @@ fn saved_plan_headless(args: &Args) -> i32 {
                     saved_plan::ExecutionMode::RetryFailed
                 } else if args.cancel {
                     saved_plan::ExecutionMode::Cancel
+                } else if args.reinstate_cancelled {
+                    saved_plan::ExecutionMode::ReinstateCancelled
                 } else {
                     unreachable!("parser requires an execution mode")
                 };

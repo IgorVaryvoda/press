@@ -3362,3 +3362,102 @@ fn a_saved_plan_binds_to_another_layout_and_still_refuses_a_stranger_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Cancelling is a decision about work, and a decision you cannot take back is
+/// a trap: before this, a cancelled item was eligible for no mode at all and the
+/// only way out was deleting the run state by hand. Reinstating writes nothing
+/// and puts the item back where cancelling found it.
+#[test]
+fn a_cancelled_saved_plan_item_can_be_put_back_and_finished() {
+    let (dir, _source_root, output, source, output_root, plan) =
+        saved_plan_fixture("saved-reinstate");
+    assert_eq!(
+        create_saved_plan(&source, &output_root, &plan)
+            .status
+            .code(),
+        Some(0)
+    );
+    let cancelled = execute_saved_plan(&plan, &source, &output_root, "--cancel");
+    assert_eq!(cancelled.status.code(), Some(1), "{}", stderr(&cancelled));
+    assert_eq!(stdout_json(&cancelled)["counts"]["cancelled"], 1);
+
+    // A continue leaves it alone: cancelled is a decision, not a pause.
+    let ignored = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(ignored.status.code(), Some(1), "{}", stderr(&ignored));
+    assert_eq!(stdout_json(&ignored)["counts"]["cancelled"], 1);
+    assert!(!output.join("shot.webp").exists());
+
+    let reinstated = execute_saved_plan(&plan, &source, &output_root, "--reinstate-cancelled");
+    assert_eq!(reinstated.status.code(), Some(1), "{}", stderr(&reinstated));
+    let report = stdout_json(&reinstated);
+    assert_eq!(report["counts"]["cancelled"], 0);
+    assert_eq!(report["counts"]["unstarted"], 1);
+    assert_eq!(report["items"][0]["status"], "unstarted");
+    assert!(
+        !output.join("shot.webp").exists(),
+        "putting an item back encodes nothing"
+    );
+
+    let finished = execute_saved_plan(&plan, &source, &output_root, "--continue-unstarted");
+    assert_eq!(finished.status.code(), Some(0), "{}", stderr(&finished));
+    let report = stdout_json(&finished);
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["counts"]["written"], 1);
+    assert!(output.join("shot.webp").is_file());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `execute` takes exactly one mode, and the new one is refused everywhere the
+/// other three are.
+#[test]
+fn reinstating_is_a_mode_of_its_own() {
+    let (dir, _source_root, _output, source, output_root, plan) =
+        saved_plan_fixture("saved-reinstate-flags");
+    assert_eq!(
+        create_saved_plan(&source, &output_root, &plan)
+            .status
+            .code(),
+        Some(0)
+    );
+    for arguments in [
+        vec![
+            "execute".to_string(),
+            plan.clone(),
+            "--root".into(),
+            source.clone(),
+            "--output".into(),
+            output_root.clone(),
+            "--reinstate-cancelled".into(),
+            "--continue-unstarted".into(),
+            "--json".into(),
+        ],
+        vec![
+            "reconcile".to_string(),
+            plan.clone(),
+            "--root".into(),
+            source.clone(),
+            "--output".into(),
+            output_root.clone(),
+            "--reinstate-cancelled".into(),
+            "--json".into(),
+        ],
+        vec![
+            "plan".to_string(),
+            "--root".into(),
+            source,
+            "--output".into(),
+            output_root,
+            "--plan".into(),
+            plan,
+            "--reinstate-cancelled".into(),
+            "--json".into(),
+        ],
+    ] {
+        assert_eq!(
+            run_owned(&arguments).status.code(),
+            Some(2),
+            "{arguments:?} is refused"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
