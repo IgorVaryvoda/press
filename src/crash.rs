@@ -485,6 +485,14 @@ mod tests {
 
     fn prompt_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
         cx.update(crate::init_theme);
+        // The dialog slides into place over a quarter second of wall clock,
+        // which `advance_clock` does not move, and `debug_bounds` draws the
+        // next frame right after handing back the previous one's geometry. Real
+        // time spent between the last paint and the measurement — one `.exists()`
+        // stat on a slow filesystem is enough — leaves the recorded point behind
+        // a button that has since slid past it. Settled animations make the
+        // measured geometry the geometry the click is dispatched against.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let harness = cx.new(|_| PromptHarness);
             Root::new(harness, window, cx)

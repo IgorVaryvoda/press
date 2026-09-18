@@ -1,0 +1,5 @@
+# The ImageGuide handoff fixture is a byte-exact contract shared with the
+# producer, and the consumer test compares the file it imports against the
+# bytes and SHA-256 the producer landed. Keep it LF on every platform so a
+# checkout cannot rewrite the trailing newline to CRLF and change its hash.
+tests/fixtures/press-handoff.json text eol=lf

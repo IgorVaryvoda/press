@@ -941,12 +941,30 @@ fn relative_name(root: &Path, path: &Path) -> Result<String, String> {
     } else {
         path
     };
-    if relative.to_string_lossy().contains('\\') {
-        return Err("receipt paths containing backslashes are unsupported".into());
-    }
     crate::output::normal_relative(relative)
         .map_err(|error| format!("unsafe receipt path: {error}"))?;
-    Ok(relative.to_string_lossy().replace('\\', "/"))
+    // A receipt is read on a machine that is not this one, so it spells nesting
+    // the one portable way. `normal_relative` has already refused anything but
+    // plain components, and joining those with a slash changes the spelling,
+    // not the identity: on Windows the separator was never part of a name. A
+    // backslash inside a component is different — unix lets a file be called
+    // `a\b.png`, and `a/b.png` would name a file that does not exist — so that
+    // stays refused, as does a name this build cannot spell exactly.
+    let mut name = String::new();
+    for component in relative.components() {
+        let part = component
+            .as_os_str()
+            .to_str()
+            .ok_or("receipt paths must be valid UTF-8 names")?;
+        if part.contains('\\') {
+            return Err("receipt paths containing backslashes are unsupported".into());
+        }
+        if !name.is_empty() {
+            name.push('/');
+        }
+        name.push_str(part);
+    }
+    Ok(name)
 }
 
 fn resolve_under_root(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -1551,6 +1569,11 @@ mod tests {
         assert!(error.contains("outside"), "{error}");
     }
 
+    /// Only unix can hold this file: on Windows a backslash separates
+    /// components and never belongs to a name, so the same spelling there is
+    /// the nested path `a/b.png`, which `nested_receipt_names_use_slashes`
+    /// covers.
+    #[cfg(unix)]
     #[test]
     fn rejects_a_literal_backslash_in_a_receipt_path() {
         let root = tempfile::tempdir().unwrap();
@@ -1574,6 +1597,112 @@ mod tests {
         )
         .expect_err("portable receipt paths must not retarget a literal filename");
         assert!(error.contains("backslashes"), "{error}");
+    }
+
+    #[test]
+    fn nested_receipt_names_use_slashes_whatever_the_platform_separator_is() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("optimized").join("web");
+        std::fs::create_dir_all(&nested).unwrap();
+        let present = nested.join("shot.png");
+        ImageBuffer::<Rgb<u8>, _>::from_pixel(2, 2, Rgb([7, 8, 9]))
+            .save(&present)
+            .unwrap();
+        let pack = snapshot(vec![rule(
+            "bytes",
+            true,
+            Constraint::Bytes {
+                min: Some(1),
+                max: None,
+            },
+        )]);
+        let receipt = inspect_outputs_at(
+            root.path(),
+            &[
+                OutputRef {
+                    source: None,
+                    output: present,
+                    processing: None,
+                },
+                OutputRef {
+                    source: None,
+                    output: root.path().join("optimized").join("web").join("gone.png"),
+                    processing: None,
+                },
+            ],
+            &pack,
+            "2026-09-08",
+        )
+        .expect("a nested output names itself relative to its root");
+
+        assert_eq!(receipt.outputs[0].output, "optimized/web/shot.png");
+        // A file that was never written still has to name itself the same way,
+        // or the receipt would spell one absence differently from a presence.
+        assert_eq!(receipt.outputs[1].output, "optimized/web/gone.png");
+        let report = render_report(&receipt);
+        assert!(report.contains("optimized/web/shot.png"), "{report}");
+        assert!(report.contains("optimized/web/gone.png"), "{report}");
+        assert!(!report.contains('\\'), "{report}");
+        assert!(!report.contains(root.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn a_receipt_path_still_refuses_to_leave_its_root() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = snapshot(vec![rule(
+            "bytes",
+            true,
+            Constraint::Bytes {
+                min: Some(1),
+                max: None,
+            },
+        )]);
+        for escape in ["../outside.png", "optimized/../../outside.png"] {
+            let error = inspect_outputs_at(
+                root.path(),
+                &[OutputRef {
+                    source: None,
+                    output: PathBuf::from(escape),
+                    processing: None,
+                }],
+                &pack,
+                "2026-09-08",
+            )
+            .expect_err("a receipt path must stay under its root");
+            assert!(error.contains("unsafe receipt path"), "{escape}: {error}");
+        }
+    }
+
+    /// A name unix allows but no receipt can spell. Replacing the bytes it
+    /// cannot decode would rename the file in the report, so it is refused
+    /// instead.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_receipt_path_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let pack = snapshot(vec![rule(
+            "bytes",
+            true,
+            Constraint::Bytes {
+                min: Some(1),
+                max: None,
+            },
+        )]);
+        let name = std::ffi::OsStr::from_bytes(b"broken\xff.png");
+        let error = inspect_outputs_at(
+            root.path(),
+            &[OutputRef {
+                source: None,
+                output: PathBuf::from(name),
+                processing: None,
+            }],
+            &pack,
+            "2026-09-08",
+        )
+        .expect_err("a receipt cannot name what it cannot spell");
+        assert!(error.contains("UTF-8"), "{error}");
     }
 
     #[test]
