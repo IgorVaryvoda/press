@@ -456,6 +456,7 @@ impl Audit {
             .map(Entry::name)
             .unwrap_or_else(|| "Select one image to run".into());
         let chosen = self.studio_tool;
+        let preview = index.and_then(|index| self.thumbs.get(&index).cloned());
         let prompt = self.studio_prompt_text(cx);
         let prompt_missing = chosen.needs_prompt() && prompt.is_empty();
         let has_key = self.studio_key.is_some();
@@ -524,6 +525,24 @@ impl Audit {
                                  Studio and brings the result back here.",
                             ),
                     )
+                    // The picture the operation will act on, the way the local
+                    // models' rail shows it. The panel named the file in small
+                    // grey type at its foot and left 400px of nothing above it,
+                    // which is also where the narrowed selection went unsaid.
+                    .children(preview.map(|image| {
+                        div()
+                            .debug_selector(|| "studio-preview".into())
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .py_2()
+                            .mb_1()
+                            .rounded_md()
+                            .bg(cx.theme().background)
+                            .overflow_hidden()
+                            .child(img(image).max_w_full().max_h(px(140.)))
+                    }))
                     .children(studio::TOOLS.iter().copied().map(|tool| {
                         Button::new(gpui_kit::SharedString::from(format!(
                             "studio-tool-{}",

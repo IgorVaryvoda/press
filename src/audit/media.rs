@@ -50,36 +50,49 @@ pub(super) fn image_context_menu(
     let result = audit.clone();
     let convert = audit.clone();
     let ai_operations = audit;
+    // Iconed like every other menu in the window. The two comparisons share one
+    // glyph on purpose: they are the same act of looking, and their labels are
+    // what say which pair each puts on screen.
     let menu = menu
-        .item(PopupMenuItem::new("Preview").on_click(move |_, _, cx| {
-            if let Some(audit) = preview.upgrade() {
-                audit.update(cx, |audit, cx| audit.open_preview(index, cx));
-            }
-        }))
+        .item(
+            PopupMenuItem::new("Preview")
+                .icon(IconName::Eye)
+                .on_click(move |_, _, cx| {
+                    if let Some(audit) = preview.upgrade() {
+                        audit.update(cx, |audit, cx| audit.open_preview(index, cx));
+                    }
+                }),
+        )
         // Both of these open the same split view, and "Compare" against "See
         // converted result" left it to the reader to work out which one wrote a
         // file. Each says which pair it puts on screen.
         .item(
-            PopupMenuItem::new("Compare with these settings").on_click(move |_, _, cx| {
-                if let Some(audit) = compare.upgrade() {
-                    audit.update(cx, |audit, cx| audit.open_compare(index, cx));
-                }
-            }),
+            PopupMenuItem::new("Compare with these settings")
+                .icon(IconName::Inspector)
+                .on_click(move |_, _, cx| {
+                    if let Some(audit) = compare.upgrade() {
+                        audit.update(cx, |audit, cx| audit.open_compare(index, cx));
+                    }
+                }),
         );
     let menu = if has_result {
         menu.item(
-            PopupMenuItem::new("Compare the converted file").on_click(move |_, _, cx| {
-                if let Some(audit) = result.upgrade() {
-                    audit.update(cx, |audit, cx| audit.open_result(index, cx));
-                }
-            }),
+            PopupMenuItem::new("Compare the converted file")
+                .icon(IconName::Inspector)
+                .on_click(move |_, _, cx| {
+                    if let Some(audit) = result.upgrade() {
+                        audit.update(cx, |audit, cx| audit.open_result(index, cx));
+                    }
+                }),
         )
     } else {
         menu
     };
     menu.separator()
         .item(
+            // The glyphs the bar already gives these two verbs.
             PopupMenuItem::new("Convert this image")
+                .icon(IconName::Replace)
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     if let Some(audit) = convert.upgrade() {
@@ -89,6 +102,7 @@ pub(super) fn image_context_menu(
         )
         .item(
             PopupMenuItem::new("AI operations…")
+                .icon(IconName::Bot)
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     if let Some(audit) = ai_operations.upgrade() {
