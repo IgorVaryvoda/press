@@ -2937,8 +2937,12 @@ fn pointer_checkbox_audit(
         AuditHarness { audit: built }
     });
     let audit = harness.read_with(cx, |harness, _| harness.audit.clone());
-    // Both rows are already ticked: opening the folder did that.
-    audit.update(cx, |audit, _| audit.estimate = Some((123, 2, 0)));
+    // These tests are about what one tick does to a fully ticked folder, which
+    // is now an explicit act: opening a folder ticks nothing.
+    audit.update(cx, |audit, cx| {
+        audit.toggle_select_all(cx);
+        audit.estimate = Some((123, 2, 0));
+    });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     (audit, cx)
 }
@@ -3803,7 +3807,7 @@ fn multiple_images_offer_the_matching_studio_batch_tool(cx: &mut TestAppContext)
         ),
     ] {
         audit.update(cx, |audit, cx| {
-            audit.select_all_visible();
+            audit.toggle_select_all(cx);
             audit.open_rail(Rail::Convert, cx);
         });
         cx.run_until_parked();
@@ -4592,9 +4596,10 @@ fn folder_navigation_is_shallow_and_replaces_the_file_selection(cx: &mut TestApp
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.root, child.clone());
         assert_eq!(audit.entries.len(), 1);
-        // The new folder's own row is ticked; the tick from the old folder is gone
-        // rather than carried over.
-        assert_eq!(audit.selected, HashSet::from([0]));
+        // The tick from the old folder is gone rather than carried over onto a
+        // row that happens to share its index, and the new folder ticks nothing
+        // of its own.
+        assert!(audit.selected.is_empty());
         assert_eq!(audit.recent_folders.first(), Some(&audit.root));
     });
     audit.update(cx, |audit, cx| audit.request_path(empty.clone(), cx));
@@ -5404,7 +5409,13 @@ fn convertible_audit(
         Root::new(audit, window, cx).bg(cx.theme().background)
     });
     let audit = built.expect("the audit is built for the production Root");
-    audit.update(cx, |audit, _| {
+    // A folder opens with nothing ticked, so a test about converting has to say
+    // what it converts. These tests were all written against a full selection.
+    audit.update(cx, |audit, cx| {
+        assert!(audit.selected.is_empty(), "a fresh folder ticks nothing");
+        // Through the header control itself, so the estimate this selection
+        // deserves is scheduled exactly as it is for a person.
+        audit.toggle_select_all(cx);
         assert_eq!(audit.selected.len(), count);
         audit.rail = Rail::Convert;
     });
@@ -7112,8 +7123,12 @@ fn a_quality_change_reuses_the_sampled_decodes_and_a_max_edge_change_replaces_th
     });
 }
 
+/// Opening a folder commits to nothing. Converting is a decision about
+/// particular images, and a list that arrives pre-ticked invites the button to
+/// be pressed before the list has been read. The header checkbox is one click
+/// away when the whole folder is what was meant.
 #[gpui_kit::test]
-fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContext) {
+fn opening_a_folder_ticks_nothing_until_somebody_chooses(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-open", 3);
     let (audit, cx) = finding_audit(cx);
 
@@ -7122,13 +7137,28 @@ fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContex
 
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.entries.len(), 3);
+        assert!(audit.selected.is_empty(), "nothing is ticked on arrival");
+        assert_eq!(audit.target_count(), 0);
+        assert_eq!(audit.conversion_action_label(), "Select images to convert");
+        assert!(
+            audit.estimate.is_none(),
+            "nothing is selected, so there is nothing to project"
+        );
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.toggle_select_all(cx);
+    });
+    settle_estimate(cx);
+
+    audit.read_with(cx, |audit, _| {
         assert_eq!(audit.selected.len(), audit.entries.len());
         assert_eq!(audit.target_count(), 3);
         assert!(
             audit
                 .estimate
                 .is_some_and(|(projected, counted, _)| projected > 0 && counted > 0),
-            "an untouched folder already projects what a run would write"
+            "one click on the header projects what a run would write"
         );
         assert_eq!(
             audit.conversion_action_label(),
@@ -7138,8 +7168,11 @@ fn opening_a_folder_ticks_every_row_and_projects_a_saving(cx: &mut TestAppContex
     std::fs::remove_dir_all(root).expect("the fixture folder is removed");
 }
 
+/// A remote-only scope hides every local row. Select-all after the next folder
+/// opens has to reach the rows the reset brought back, not the empty list the
+/// scope was showing on the way through.
 #[gpui_kit::test]
-fn a_sirv_scope_still_leaves_the_next_folder_ticked(cx: &mut TestAppContext) {
+fn select_all_after_a_sirv_scope_reaches_the_restored_rows(cx: &mut TestAppContext) {
     let root = photo_fixture("select-all-scope", 3);
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, _| {
@@ -7153,6 +7186,10 @@ fn a_sirv_scope_still_leaves_the_next_folder_ticked(cx: &mut TestAppContext) {
 
     audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
     cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        assert!(audit.selected.is_empty(), "the new folder ticks nothing");
+        audit.toggle_select_all(cx);
+    });
 
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.sirv_scope, None);
@@ -7171,6 +7208,7 @@ fn unticking_a_row_narrows_the_conversion_targets(cx: &mut TestAppContext) {
     audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
     cx.run_until_parked();
     audit.update(cx, |audit, cx| {
+        audit.toggle_select_all(cx);
         let dropped = audit.visible[0];
         audit.selected.remove(&dropped);
         audit.selection_changed(cx);
@@ -7198,24 +7236,35 @@ fn an_empty_folder_still_asks_for_a_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn opening_another_folder_replaces_the_selection(cx: &mut TestAppContext) {
+fn opening_another_folder_clears_the_selection(cx: &mut TestAppContext) {
     let first = photo_fixture("select-all-first", 3);
     let second = photo_fixture("select-all-second", 2);
     let (audit, cx) = finding_audit(cx);
 
     audit.update(cx, |audit, cx| audit.request_path(first.clone(), cx));
     cx.run_until_parked();
+    audit.update(cx, |audit, cx| {
+        audit.toggle_select_all(cx);
+    });
     audit.read_with(cx, |audit, _| assert_eq!(audit.selected.len(), 3));
 
     audit.update(cx, |audit, cx| audit.request_path(second.clone(), cx));
     cx.run_until_parked();
     audit.read_with(cx, |audit, _| {
         assert_eq!(audit.entries.len(), 2);
-        assert_eq!(
-            audit.selected,
-            HashSet::from([0, 1]),
-            "the new folder's rows are ticked and the old folder's are gone"
+        assert!(
+            audit.selected.is_empty(),
+            "the old folder's ticks are gone and the new folder asks again"
         );
+        assert_eq!(audit.target_count(), 0);
+    });
+
+    // And the new folder's own select-all reaches its own rows.
+    audit.update(cx, |audit, cx| {
+        audit.toggle_select_all(cx);
+    });
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, HashSet::from([0, 1]));
         assert_eq!(audit.target_count(), 2);
     });
     std::fs::remove_dir_all(first).expect("the fixture folder is removed");
@@ -9745,4 +9794,25 @@ fn regenerating_a_target_converts_only_what_it_owes(cx: &mut TestAppContext) {
         "the image nobody edited was not written again"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A ticked checkbox has to look ticked. Every control that fills itself when
+/// it is on — checkbox, radio, switch, tab — reads the token set, and this app
+/// had only told the colour set: the fill stayed the stock white while the tick
+/// drawn on it was white too, so a selected row showed a blank white square.
+#[gpui_kit::test]
+fn a_ticked_control_fills_with_the_apps_blue_and_not_its_tick_colour(cx: &mut TestAppContext) {
+    cx.update(init_theme);
+    cx.update(|cx| {
+        let theme = gpui_kit::component::Theme::global(cx);
+        let fill = gpui_kit::Hsla::from(theme.tokens.primary);
+        assert_eq!(
+            fill, theme.primary,
+            "the token set fills with the same blue the colour set names"
+        );
+        assert_ne!(
+            fill, theme.primary_foreground,
+            "the tick is drawn in a colour the fill does not hide"
+        );
+    });
 }
