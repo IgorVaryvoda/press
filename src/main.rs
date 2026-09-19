@@ -4462,6 +4462,15 @@ fn init_theme(cx: &mut App) {
     theme.font_family = "SF Pro Text".into();
     theme.mono_font_family = "Fira Code".into();
     theme.mono_font_size = px(12.);
+
+    // Toasts land in the list's lower-left corner. The library puts them top
+    // right, which in this window is the table header, the first rows, the
+    // panel's title, its destination line and its replace switch — a run's
+    // failure covered the very results it was reporting, and an error stays up
+    // until it is dismissed. The bottom margin clears the status bar and the
+    // floating bar so a message never lands on a control.
+    theme.notification.placement = gpui_kit::Anchor::BottomLeft;
+    theme.notification.margins.bottom = px(audit::BAR_CLEARANCE + 16.);
 }
 
 /// Everything the window needs to open. A struct rather than nine positional

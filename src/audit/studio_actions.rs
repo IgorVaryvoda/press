@@ -514,7 +514,15 @@ impl Audit {
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .pb_1()
-                            .child("Uses hosted AI and brings the image back here."),
+                            // Says the word. This is the one place in Press
+                            // where an image leaves the computer, and "uses
+                            // hosted AI" left the reader to work that out. It
+                            // also names the one-image rule, which is why
+                            // opening this tool narrows the selection.
+                            .child(
+                                "Runs on one image at a time. Sends a copy of it to Sirv AI \
+                                 Studio and brings the result back here.",
+                            ),
                     )
                     .children(studio::TOOLS.iter().copied().map(|tool| {
                         Button::new(gpui_kit::SharedString::from(format!(

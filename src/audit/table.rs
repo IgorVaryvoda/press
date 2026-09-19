@@ -49,12 +49,32 @@ pub(super) struct AuditTable {
     /// Weak, because the audit owns the table state, which owns this.
     audit: gpui_kit::WeakEntity<Audit>,
     columns: Vec<TableColumn>,
+    /// Every column in display order, the hidden ones included. `columns` is
+    /// this list narrowed to what the current width and the current run show,
+    /// so a column that drops out and comes back returns to its own place.
+    /// A drag edits this list too, which is what makes the drag outlive a
+    /// resize.
+    order: Vec<TableColumn>,
     /// Width for the name column, recomputed from the window so the fixed columns
     /// do not leave an empty strip on the right. Columns here take a width, not a
     /// share, so somebody has to do the arithmetic.
     name_width: f32,
     compact: bool,
 }
+
+/// The display order every width starts from.
+const COLUMN_ORDER: [TableColumn; 10] = [
+    TableColumn::Tick,
+    TableColumn::Thumb,
+    TableColumn::Name,
+    TableColumn::Format,
+    TableColumn::Pixels,
+    TableColumn::Density,
+    TableColumn::Weight,
+    TableColumn::Sync,
+    TableColumn::Result,
+    TableColumn::Options,
+];
 
 /// The columns, in display order. `Column` is what the audit sorts by; this adds the
 /// ones that carry no sortable value of their own.
@@ -233,6 +253,7 @@ impl AuditTable {
             name_width: W_NAME_MIN,
             compact: false,
             columns: Vec::new(),
+            order: COLUMN_ORDER.to_vec(),
         };
         table.set_viewport_width(
             f32::from(window.viewport_size().width),
@@ -255,21 +276,24 @@ impl AuditTable {
         show_result: bool,
         show_sync: bool,
     ) {
-        let (compact, name_width, next) = Self::layout(width, prefs, show_result, show_sync);
-        let mut columns: Vec<_> = self
-            .columns
-            .iter()
-            .copied()
-            .filter(|column| next.contains(column))
-            .collect();
-        for column in next {
-            if !columns.contains(&column) {
-                columns.push(column);
-            }
-        }
+        let (compact, name_width, mut next) = Self::layout(width, prefs, show_result, show_sync);
+        // Ordered by the full list, which holds the columns this width hides as
+        // well as the ones it shows. Keeping the last order and appending
+        // whatever was missing from it moved a returning column to the end: one
+        // conversion put the gutter in the middle of the table and left "before"
+        // and "after" at opposite ends of the row, and each later resize
+        // shuffled it again.
+        next.sort_by_key(|column| self.position(*column));
         self.compact = compact;
         self.name_width = name_width;
-        self.columns = columns;
+        self.columns = next;
+    }
+
+    fn position(&self, column: TableColumn) -> usize {
+        self.order
+            .iter()
+            .position(|held| *held == column)
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -483,6 +507,15 @@ impl TableDelegate for AuditTable {
         let Some(audit) = self.audit.upgrade() else {
             return menu;
         };
+        // Put the cursor on the row the menu belongs to. Right-clicking left
+        // the cursor wherever it was, so a menu of five verbs opened over a
+        // list of ticked rows with nothing saying which one it would act on.
+        audit.update(cx, |audit, cx| {
+            if audit.cursor != row_ix && row_ix < audit.visible.len() {
+                audit.cursor = row_ix;
+                cx.notify();
+            }
+        });
         let state = audit.read(cx);
         let Some(index) = state.entry_at(row_ix) else {
             return menu;
@@ -508,6 +541,16 @@ impl TableDelegate for AuditTable {
         }
         let column = self.columns.remove(col_ix);
         self.columns.insert(to_ix, column);
+        // Mirror the drag into the full order, so it also holds at the widths
+        // that hide some of these columns. The column goes immediately before
+        // whatever now follows it; last among the visible ones means last.
+        self.order.retain(|held| *held != column);
+        let at = self
+            .columns
+            .get(to_ix + 1)
+            .and_then(|follower| self.order.iter().position(|held| held == follower))
+            .unwrap_or(self.order.len());
+        self.order.insert(at, column);
     }
 
     fn render_td(
@@ -617,9 +660,30 @@ impl TableDelegate for AuditTable {
                 // heavy and mislabelled, and both are worth saying.
                 let heavy = Finding::Heavy.holds(entry);
                 let lies = entry.extension_lies();
+                // A replace run moved this original into the backup mirror and
+                // gave its place to the output, which carries the new format's
+                // extension. The row went on naming a path that is no longer
+                // there, and the name column is how anyone finds the file.
+                // Keyed on the destination the run actually used, not on the
+                // switch's position now: flipping the switch after a run into
+                // `optimized/` renamed every row to an output that had never
+                // taken an original's place.
+                let written = matches!(
+                    audit.conversion_destination.as_ref(),
+                    Some((Output::Replace, _))
+                )
+                .then(|| audit.result_paths.get(&index))
+                .flatten();
+                let label = match written {
+                    Some(path) => path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| entry_label(&audit.root, audit.show_parent(), entry)),
+                    None => entry_label(&audit.root, audit.show_parent(), entry),
+                };
                 // The full path on hover: the ellipsis eats the tail, and the
                 // tail is where the files of one export batch differ.
-                let hover = entry.path.display().to_string();
+                let hover = written.unwrap_or(&entry.path).display().to_string();
                 div()
                     .w_full()
                     .flex()
@@ -637,7 +701,7 @@ impl TableDelegate for AuditTable {
                             .tooltip(move |window, cx| {
                                 Tooltip::new(hover.clone()).build(window, cx)
                             })
-                            .child(entry_label(&audit.root, audit.show_parent(), entry)),
+                            .child(label),
                     )
                     // One lane at the cell's right edge, so a column of
                     // findings scans; after the name, each landed wherever
@@ -925,8 +989,14 @@ pub(super) fn failure_badge(
         .debug_selector(move || format!("failed-{index}"))
         .flex()
         .items_center()
+        .justify_end()
         .gap_1()
         .min_w_0()
+        // Bounded to the cell when it carries the reason. Sized to its contents
+        // inside a cell that aligns to the right, a long reason overflowed to
+        // the left and the cell clipped the start of it: the row lost the red
+        // "failed" and printed the tail of a sentence, which named nothing.
+        .when(room_for_reason, |badge| badge.w_full())
         .tooltip(move |window, cx| Tooltip::new(hover.clone()).build(window, cx))
         .child(
             div()

@@ -219,7 +219,7 @@ impl Audit {
                                         Button::new(("tile-compare", index))
                                             .small()
                                             .label("Compare")
-                                            .tooltip("Open the before-and-after comparison")
+                                            .tooltip("Compare this image with the current settings")
                                             .disabled(self.converting)
                                             .on_click(cx.listener(move |audit, _, _, cx| {
                                                 cx.stop_propagation();
@@ -293,6 +293,33 @@ impl Audit {
                                 }
                             }),
                     )
+                    // The same verdict the list's Result column gives, in the
+                    // same three colours. A tile printed the two byte figures
+                    // and left the reader to divide them.
+                    .children(self.results.get(&index).map(|converted| {
+                        let grew = *converted > entry.bytes;
+                        let percent = entry.bytes.saturating_sub(*converted) as f32
+                            / entry.bytes.max(1) as f32
+                            * 100.;
+                        let unchanged = !grew && percent < 0.5;
+                        div()
+                            .flex_shrink_0()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if grew {
+                                cx.theme().yellow
+                            } else if unchanged {
+                                cx.theme().muted_foreground
+                            } else {
+                                cx.theme().green
+                            })
+                            .child(if grew {
+                                "larger".to_string()
+                            } else if unchanged {
+                                "0%".to_string()
+                            } else {
+                                format!("−{percent:.0}%")
+                            })
+                    }))
                     // The same word the list uses. A tile showing `0.14 B/px`
                     // asked you to know the bands by heart, and it was taking
                     // the room the file size needed to print in full.

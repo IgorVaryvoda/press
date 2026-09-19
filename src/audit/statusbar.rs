@@ -110,6 +110,15 @@ impl Audit {
                 .unwrap_or_else(|| self.target_count());
             return format!("{done} of {total} converting");
         }
+        // A run's failures outlive the selection that started it, and that
+        // selection is still ticked when the run ends. Printed only when
+        // nothing was ticked, the count was never shown at the one moment it
+        // described.
+        let failed = match self.failures.len() {
+            0 => String::new(),
+            1 => "1 failed".to_string(),
+            failed => format!("{failed} failed"),
+        };
         if self.target_count() > 0 {
             // The plan used to be replaced by the count, so the destination
             // disappeared at exactly the moment a run was about to use it —
@@ -118,13 +127,16 @@ impl Audit {
                 1 => "1 selected".to_string(),
                 selected => format!("{selected} selected"),
             };
-            return format!("{selected} · {}", self.output_plan());
+            let plan = self.output_plan();
+            let parts = [failed.as_str(), selected.as_str(), plan.as_str()];
+            return parts
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
         }
-        if !self.failures.is_empty() {
-            return match self.failures.len() {
-                1 => "1 failed".to_string(),
-                failed => format!("{failed} failed"),
-            };
+        if !failed.is_empty() {
+            return failed;
         }
         self.output_plan()
     }

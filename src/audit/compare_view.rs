@@ -861,7 +861,7 @@ impl Audit {
                             .small()
                             .primary()
                             .label("Compare")
-                            .tooltip("Build a before-and-after comparison")
+                            .tooltip("Compare this image with the current settings")
                             .disabled(entry.is_none())
                             .on_click(cx.listener(move |audit, _, _, cx| {
                                 audit.open_compare(index, cx);

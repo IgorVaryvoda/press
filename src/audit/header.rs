@@ -27,8 +27,10 @@ impl Audit {
         }
         // Information, not a warning: a previous run's output sitting in
         // optimized/ is normal life, and a yellow banner made it look like
-        // something had gone wrong.
-        if self.existing_output > 0 {
+        // something had gone wrong. Named only while it is the destination —
+        // the count is taken at scan time, and after a switch to replace mode
+        // or a chosen folder it described somewhere the next run will not write.
+        if self.existing_output > 0 && self.output == Output::Optimized {
             // "2 files in optimized/" read as two files converted this time.
             warnings.push_str(&match self.existing_output {
                 1 => format!(" · {}/ already holds 1 file", scan::OUTPUT_DIR),

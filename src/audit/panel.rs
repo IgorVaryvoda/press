@@ -21,7 +21,7 @@ pub(super) const RAIL_SNAP: f32 = 60.;
 /// offset and 46px height, plus a gap. Without the room the bar covers the
 /// last row; without the gap the list's cut-off bottom row meets the bar's
 /// top edge and reads as hidden under it rather than as the viewport's end.
-pub(super) const BAR_CLEARANCE: f32 = 72.;
+pub(crate) const BAR_CLEARANCE: f32 = 72.;
 
 /// Below this much room, the three secondary verbs drop to icons. The bar has
 /// to fit the list it floats over, and at the minimum window with the panel
@@ -46,10 +46,20 @@ pub(super) fn active_preset(format: Format, quality: Quality, edge: MaxEdge) -> 
 /// What the summary calls a run that has ended. A run the user stopped kept every
 /// file it wrote, so it says how far it got: the files it never started are not
 /// failures, and the ones it finished are as real as any other result.
-pub(super) fn conversion_result_state(stopped_total: Option<usize>, converted: usize) -> String {
-    match stopped_total {
-        Some(total) => format!("STOPPED · {converted} OF {total} CONVERTED"),
-        None => "COMPLETED · ACTUAL RESULT".into(),
+///
+/// A run that finished with failures is not simply "COMPLETED". Its totals count
+/// only the files that landed, and saying so in green over a number that quietly
+/// left one out is the one reading the row underneath cannot correct.
+pub(super) fn conversion_result_state(
+    stopped_total: Option<usize>,
+    converted: usize,
+    failed: usize,
+) -> String {
+    match (stopped_total, failed) {
+        (Some(total), _) => format!("STOPPED · {converted} OF {total} CONVERTED"),
+        (None, 0) => "COMPLETED · ACTUAL RESULT".into(),
+        (None, 1) => "COMPLETED · 1 FAILED".into(),
+        (None, failed) => format!("COMPLETED · {failed} FAILED"),
     }
 }
 
@@ -102,12 +112,15 @@ impl Audit {
                         (width < BAR_READOUT_WIDTH && !self.converting)
                             .then(|| self.bar_select_all(cx)),
                     )
-                    // The panel carries this, and the panel can be closed. With
-                    // it closed there was no way at all to the files the run had
+                    // The Convert panel carries this, and it is only there while
+                    // that panel is the open one. Closed, or showing another
+                    // tool, there was no way at all to the files the run had
                     // just written.
                     .children(
-                        (!self.sidebar_open && !self.results.is_empty() && !self.converting).then(
-                            || {
+                        ((!self.sidebar_open || self.rail != Rail::Convert)
+                            && !self.results.is_empty()
+                            && !self.converting)
+                            .then(|| {
                                 div().debug_selector(|| "bar-reveal".into()).child(
                                     Button::new("bar-reveal")
                                         .small()
@@ -119,8 +132,7 @@ impl Audit {
                                             cx.listener(|audit, _, _, cx| audit.reveal_output(cx)),
                                         ),
                                 )
-                            },
-                        ),
+                            }),
                     )
                     .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border))
                     .child(
@@ -451,7 +463,10 @@ impl Audit {
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .children((tab != Rail::None).then(|| {
+            // Headed in every state, the chooser included. Without a title the
+            // chooser was 320 unlabelled pixels holding four buttons, and
+            // nothing on screen said what the column was.
+            .child(
                 div()
                     .flex()
                     .items_center()
@@ -459,7 +474,7 @@ impl Audit {
                     .flex_shrink_0()
                     .h(px(48.))
                     .px_3()
-                    .child(
+                    .children((tab != Rail::None).then(|| {
                         div().debug_selector(|| "tools-back".into()).child(
                             Button::new("tools-back")
                                 .small()
@@ -474,17 +489,17 @@ impl Audit {
                                         cx.notify();
                                     }
                                 })),
-                        ),
-                    )
+                        )
+                    }))
                     .child(
                         div()
                             .font_family("SF Pro Display")
                             .text_size(px(14.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(cx.theme().foreground)
-                            .child(title),
-                    )
-            }))
+                            .child(if tab == Rail::None { "Tools" } else { title }),
+                    ),
+            )
             .child(body)
             .child(
                 // The grab edge. Drag it to size the panel; drag it past the
@@ -517,58 +532,105 @@ impl Audit {
             .flex_1()
             .min_h_0()
             .child(
+                // Relative and exactly as tall as the settings, so the
+                // scrollbar rides them and stops at the footer.
                 div()
-                    .id("rail-settings")
-                    .debug_selector(|| "rail-settings".into())
+                    .relative()
                     .flex()
-                    .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.rail_scroll)
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    // Where the output lands, said once and always. Every other
-                    // number in this rail is about size; this one is about the
-                    // question people actually ask before pressing Convert.
-                    .child(self.destination_row(cx))
-                    // Preset and controls share the sidebar's inset.
                     .child(
                         div()
-                            .debug_selector(|| "transform-card".into())
+                            .id("rail-settings")
+                            .debug_selector(|| "rail-settings".into())
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .child(self.preset_row(cx))
-                            .child(div().debug_selector(|| "format-setting".into()).child(
-                                self.panel_setting(
-                                    "Format",
-                                    self.format_group(cx).small().outline().compact().w_full(),
-                                    cx,
-                                ),
-                            ))
-                            .child(self.panel_quality(cx))
-                            .child(div().debug_selector(|| "max-size-setting".into()).child(
-                                self.panel_setting("Max size", self.resize_control(cx), cx),
-                            )),
+                            .flex_1()
+                            .min_h_0()
+                            // Definite, so a long line of prose wraps inside the
+                            // panel instead of deciding how wide the panel's own
+                            // controls are.
+                            .w_full()
+                            .min_w_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.rail_scroll)
+                            .gap_3()
+                            .px_4()
+                            .py_2()
+                            // Where the output lands, said once and always. Every other
+                            // number in this rail is about size; this one is about the
+                            // question people actually ask before pressing Convert.
+                            .child(self.destination_row(cx))
+                            // Preset and controls share the sidebar's inset.
+                            .child(
+                                div()
+                                    .debug_selector(|| "transform-card".into())
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(self.preset_row(cx))
+                                    .child(
+                                        div().debug_selector(|| "format-setting".into()).child(
+                                            self.panel_setting(
+                                                "Format",
+                                                self.format_group(cx)
+                                                    .small()
+                                                    .outline()
+                                                    .compact()
+                                                    .w_full(),
+                                                cx,
+                                            ),
+                                        ),
+                                    )
+                                    .child(self.panel_quality(cx))
+                                    .child(
+                                        div().debug_selector(|| "max-size-setting".into()).child(
+                                            self.panel_setting(
+                                                "Max size",
+                                                self.resize_control(cx),
+                                                cx,
+                                            ),
+                                        ),
+                                    ),
+                            )
+                            .children((!self.recipes_skipped.is_empty()).then(|| {
+                                div()
+                                    .debug_selector(|| "recipes-skipped".into())
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} preset files unreadable",
+                                        self.recipes_skipped.len()
+                                    ))
+                            }))
+                            .child(self.sets_section(cx))
+                            // Last in the rail on purpose: the imported-report card
+                            // above has to fit whole on the narrowest window, and a
+                            // section between it and the settings pushes it off.
+                            .child(self.handoff_section(cx))
+                            .child(self.plan_section(cx)),
                     )
-                    .children((!self.recipes_skipped.is_empty()).then(|| {
+                    // The settings are taller than the panel as soon as a section
+                    // is open, and the only sign of it was a button sliced in half
+                    // by the footer's top edge.
+                    .child(
                         div()
-                            .debug_selector(|| "recipes-skipped".into())
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} preset files unreadable",
-                                self.recipes_skipped.len()
-                            ))
-                    }))
-                    .child(self.sets_section(cx))
-                    // Last in the rail on purpose: the imported-report card
-                    // above has to fit whole on the narrowest window, and a
-                    // section between it and the settings pushes it off.
-                    .child(self.handoff_section(cx))
-                    .child(self.plan_section(cx)),
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(Scrollbar::width())
+                            .debug_selector(|| "rail-scrollbar".into())
+                            .child(
+                                // Always, like the gallery's: a bar that only
+                                // appears once you already scrolled cannot tell
+                                // you there is more to scroll to.
+                                Scrollbar::vertical(&self.rail_scroll)
+                                    .id("rail-scrollbar")
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout(),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -1534,6 +1596,20 @@ impl Audit {
                     .as_ref()
                     .map(|draft| self.job_export_preview_row(draft, cx)),
             )
+            // Opened, the section is six controls of vocabulary nobody has met:
+            // target, product, SKU, delivery. One sentence says what the whole
+            // thing is for before any of them.
+            .children(open.then(|| {
+                div()
+                    .debug_selector(|| "sets-explainer".into())
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Group this folder's images by product, and give each group the \
+                         settings and destinations its pictures need. Conversion works \
+                         without any of this.",
+                    )
+            }))
             .children(open.then(|| {
                 div()
                     .flex()
@@ -1549,7 +1625,7 @@ impl Audit {
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .debug_selector(|| "sets-target".into())
-                            .child(format!("Target: {}", self.job_target_label())),
+                            .child(format!("Settings: {}", self.job_target_label())),
                     )
                     .child(
                         Button::new("sets-target-current")
@@ -2241,9 +2317,15 @@ impl Audit {
             let percent = delta as f32 / before.max(1) as f32 * 100.;
             (
                 Some((
-                    conversion_result_state(self.stopped_run, self.results.len()),
+                    conversion_result_state(
+                        self.stopped_run,
+                        self.results.len(),
+                        self.failures.len(),
+                    ),
                     if self.stopped_run.is_some() {
                         cx.theme().muted_foreground
+                    } else if !self.failures.is_empty() {
+                        cx.theme().yellow
                     } else {
                         cx.theme().green
                     },

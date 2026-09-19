@@ -181,3 +181,30 @@ sessions learn.
   stacked cell lines an explicit `line_height`. `DataTable::stripe(true)` also
   paints striped filler rows below the last real row; Press draws its own zebra
   in `render_tr` instead.
+| 2026-09-19 | self | A fresh session does not inherit Hyprland's environment, so `hyprctl` failed with "HYPRLAND_INSTANCE_SIGNATURE not set" and the app launched with no window | Export `HYPRLAND_INSTANCE_SIGNATURE=$(/bin/ls /run/user/1000/hypr/)` and `WAYLAND_DISPLAY=wayland-1` in every Bash call that launches or drives the app |
+- 2026-09-19: Second UI audit (round two) on `fix/ui-audit-20260919`. The 22
+  round-one fixes all held. The worst new finding is pre-existing: `browse`
+  receives `self.output.root(&path)` (mod.rs ~1593), which for `Output::Replace`
+  is the audited folder itself, and `scan::input_root` (scan.rs:958) refuses a
+  root inside the output. So while replace mode is on, every rescan fails —
+  Restore originals, re-opening the folder from the tree, and the subfolder
+  toggle — and the stale results stay on screen. `browser_output_root` is a
+  different value and does not feed the scan.
+- 2026-09-19: `AuditTable::set_viewport_width` (table.rs ~259) keeps the previous
+  column order and appends only new columns, so each layout change permutes the
+  header. After a run the Options gutter lands mid-table and Result drifts away
+  from File size. Second audit fixture: `/home/igor/.cache/press-audit2/shop`
+  (adds `tiny-noise.jpg`, which grows on re-encode, and an `optimized/
+  product-01.webp/` directory that forces exactly one conversion failure).
+| 2026-09-19 | user | Drove the app on the live Hyprland desktop for a verification pass, stealing the pointer and focus while the user was working | Capture in headless gamescope instead. `/tmp/press-shot.py` (same machinery as `scripts/ux-eval`: `gamescope --backend headless`, `xdotool --window <xid>` on the nested X display, one `gst-launch-1.0 pipewiresrc` frame) takes `--size`, `--fixture`, `--arg` and repeatable `--do 'click X Y' / 'key ...' / 'type ...' / 'wait N'`, so a verification pass needs no entry in the tracked `ux/scenarios.json` and never touches the user's session |
+- 2026-09-19: Round-two fixes. Two lessons beyond the findings themselves:
+  a child with `.w_full()` inside the rail's content-sized `flex_col` made the
+  whole panel lay out wider than its 320px and every control ran off the edge —
+  put the width constraint on the scrolling container (`rail-settings`), not on
+  the prose. And the replace-mode row rename must key on
+  `conversion_destination`, not on `self.output`: flipping the switch after an
+  `optimized/` run renamed every row to an output that had never taken an
+  original's place. Both only showed up in a real capture; the suite was green.
+- 2026-09-19: Not bugs, checked and dropped: "Save changes" on a built-in preset
+  IS disabled (it reads dim only when zoomed); the toast stack's collapsed peek
+  at a bottom anchor is the library's intended stacking, not an overlap.

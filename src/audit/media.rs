@@ -56,14 +56,19 @@ pub(super) fn image_context_menu(
                 audit.update(cx, |audit, cx| audit.open_preview(index, cx));
             }
         }))
-        .item(PopupMenuItem::new("Compare").on_click(move |_, _, cx| {
-            if let Some(audit) = compare.upgrade() {
-                audit.update(cx, |audit, cx| audit.open_compare(index, cx));
-            }
-        }));
+        // Both of these open the same split view, and "Compare" against "See
+        // converted result" left it to the reader to work out which one wrote a
+        // file. Each says which pair it puts on screen.
+        .item(
+            PopupMenuItem::new("Compare with these settings").on_click(move |_, _, cx| {
+                if let Some(audit) = compare.upgrade() {
+                    audit.update(cx, |audit, cx| audit.open_compare(index, cx));
+                }
+            }),
+        );
     let menu = if has_result {
         menu.item(
-            PopupMenuItem::new("See converted result").on_click(move |_, _, cx| {
+            PopupMenuItem::new("Compare the converted file").on_click(move |_, _, cx| {
                 if let Some(audit) = result.upgrade() {
                     audit.update(cx, |audit, cx| audit.open_result(index, cx));
                 }

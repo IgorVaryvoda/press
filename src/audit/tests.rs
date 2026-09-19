@@ -3567,9 +3567,17 @@ fn the_tool_chooser_opens_operations_and_returns_without_collapsing(cx: &mut Tes
         cx.simulate_resize(size(px(width), px(height)));
         cx.run_until_parked();
         let rail = cx.debug_bounds("rail").unwrap();
+        // Centred in the chooser, which now sits under the panel's title rather
+        // than filling the panel: an unheaded column of four buttons said
+        // nothing about what the column was.
+        let chooser = cx.debug_bounds("tool-chooser").unwrap();
         let convert = cx.debug_bounds("tool-convert").unwrap();
         let last = cx.debug_bounds("tool-studio").unwrap();
-        assert_eq!(convert.top() - rail.top(), rail.bottom() - last.bottom());
+        assert_eq!(
+            convert.top() - chooser.top(),
+            chooser.bottom() - last.bottom()
+        );
+        assert!(chooser.top() > rail.top(), "the chooser is headed");
         assert_eq!(
             convert.left() - rail.left(),
             rail.right() - convert.right() + px(1.)
@@ -3765,6 +3773,50 @@ fn toggling_a_column_reaches_the_table(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(!columns(cx).contains(&TableColumn::Density));
+}
+
+/// A column the width or the run takes away comes back where it belongs. The
+/// delegate used to keep whatever order it last had and append the returning
+/// column: one conversion put the gutter in the middle of the header and left
+/// "before" and "after" at opposite ends of the row, and every later resize
+/// shuffled it again.
+#[gpui_kit::test]
+fn a_column_that_comes_back_returns_to_its_own_place(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let table = audit
+        .read_with(cx, |audit, _| audit.table.clone())
+        .expect("audit owns its table");
+
+    table.update(cx, |table, _| {
+        let prefs = ColumnPrefs::default();
+        let delegate = table.delegate_mut();
+        delegate.set_viewport_width(1440., prefs, false, false);
+        let plain = delegate.columns_for_test().to_vec();
+
+        // A run adds the outcome column, and the panel narrows the table enough
+        // to drop every optional one.
+        delegate.set_viewport_width(1440., prefs, true, false);
+        let with_result = delegate.columns_for_test().to_vec();
+        assert_eq!(
+            with_result.last(),
+            Some(&TableColumn::Options),
+            "the gutter stays at the edge it is a gutter for"
+        );
+        let at = |columns: &[TableColumn], column| {
+            columns.iter().position(|held| *held == column).unwrap()
+        };
+        assert!(
+            at(&with_result, TableColumn::Result) > at(&with_result, TableColumn::Weight),
+            "the outcome reads after the size it came from"
+        );
+
+        delegate.set_viewport_width(560., prefs, true, false);
+        delegate.set_viewport_width(1440., prefs, true, false);
+        assert_eq!(delegate.columns_for_test(), with_result);
+
+        delegate.set_viewport_width(1440., prefs, false, false);
+        assert_eq!(delegate.columns_for_test(), plain);
+    });
 }
 
 #[gpui_kit::test]
@@ -4358,6 +4410,35 @@ fn opening_a_nested_folder_lists_every_folder_it_opened(cx: &mut TestAppContext)
         );
     });
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
+fn replacing_originals_lets_the_folder_be_read_again(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-replace-rescan");
+    write_png(&root, "one.png");
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert_eq!(audit.entries.len(), 1));
+
+    // Restoring the originals, toggling subfolders and clicking the open folder
+    // all read it again. The scanner refuses a root that sits inside the output
+    // tree, and replace mode used to answer that the folder was its own output:
+    // every one of those failed, and the window went on showing the run they
+    // had just undone. The second file only appears if the walk actually ran.
+    write_png(&root, "two.png");
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, root);
+        assert_eq!(audit.entries.len(), 2, "the folder is readable in place");
+        assert_eq!(audit.output, Output::Replace);
+    });
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[gpui_kit::test]
@@ -6803,12 +6884,27 @@ fn job_stale_sources_select_for_regeneration(cx: &mut TestAppContext) {
 
 #[test]
 fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
-    let stopped = panel::conversion_result_state(Some(36), 12);
+    let stopped = panel::conversion_result_state(Some(36), 12, 0);
     assert_eq!(stopped, "STOPPED · 12 OF 36 CONVERTED");
     assert!(!stopped.contains("FAILED"));
     assert_eq!(
-        panel::conversion_result_state(None, 36),
+        panel::conversion_result_state(None, 36, 0),
         "COMPLETED · ACTUAL RESULT"
+    );
+    // A run that finished with failures says so where its totals are: those
+    // totals count only the files that landed.
+    assert_eq!(
+        panel::conversion_result_state(None, 35, 1),
+        "COMPLETED · 1 FAILED"
+    );
+    assert_eq!(
+        panel::conversion_result_state(None, 30, 6),
+        "COMPLETED · 6 FAILED"
+    );
+    // A stop is still a stop, however many files it could not write.
+    assert_eq!(
+        panel::conversion_result_state(Some(36), 12, 3),
+        "STOPPED · 12 OF 36 CONVERTED"
     );
 }
 
@@ -7825,6 +7921,18 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
             audit.savings_note(),
             Some("· 400 B written, 60% saved".to_string())
         );
+
+        // A run's failures are reported while its selection is still ticked,
+        // which is exactly when they happen. The count used to wait for an
+        // empty selection and so was never shown at all.
+        audit
+            .failures
+            .insert(1, "the output folder is read-only".into());
+        assert_eq!(
+            audit.status_right(),
+            "1 failed · 2 selected · WEBP lossless → optimized/"
+        );
+        audit.failures.clear();
         audit.clear_results();
         audit.estimate = None;
 

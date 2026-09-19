@@ -66,6 +66,24 @@ impl Output {
         }
     }
 
+    /// The tree Press writes and must never read back as input, for a given
+    /// audited root.
+    ///
+    /// This is `root` for every mode but `Replace`, where the outputs take the
+    /// originals' names inside the audited folder itself — that is the whole
+    /// point of the mode. Answering `root` there told the scanner the folder was
+    /// its own output, so it refused to open it: restoring the originals,
+    /// re-opening the folder from the tree and the subfolder toggle all failed
+    /// while the switch was on, and the window went on showing a run that had
+    /// been undone. What replace mode adds to the folder is the originals
+    /// backup, so that is the tree it must not read.
+    pub fn boundary(&self, audited: &Path) -> PathBuf {
+        match self {
+            Output::Replace => audited.join(crate::scan::BACKUP_DIR),
+            output => output.root(audited),
+        }
+    }
+
     /// Establish the selected output boundary without creating a path or file.
     pub fn context(&self, audited: &Path) -> Result<crate::output::Context, String> {
         let working_directory = std::env::current_dir().map_err(|error| error.to_string())?;

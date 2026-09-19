@@ -12,6 +12,7 @@ mod job_actions;
 mod local_ai_actions;
 mod media;
 mod panel;
+pub(crate) use panel::BAR_CLEARANCE;
 mod plan_actions;
 mod recipe_actions;
 mod sirv_actions;
@@ -1110,15 +1111,10 @@ fn navigation_path(path: PathBuf) -> PathBuf {
 }
 
 /// The tree the folder browser hides, because Press writes it rather than
-/// reads it. Replace mode writes into the audited folder itself, and calling
-/// that the output tree deleted the open folder, its subfolders and the
-/// selected node from the sidebar. What replace mode actually adds to the
-/// folder is the originals backup, so that is the boundary it hides.
+/// reads it. The same boundary the scanner refuses as input, spelled the way
+/// the browser navigates.
 fn output_identity(output: &Output, root: &Path) -> PathBuf {
-    match output {
-        Output::Replace => navigation_path(root.join(scan::BACKUP_DIR)),
-        output => navigation_path(output.root(root)),
-    }
+    navigation_path(output.boundary(root))
 }
 
 impl Audit {
@@ -1412,6 +1408,12 @@ impl Audit {
         self.selected.clear();
         self.marquee = None;
         self.selection_bounds.borrow_mut().clear();
+        // Reading the folder again drops the run it no longer describes. Said
+        // out loud when the folder has not changed — a subfolder toggle or a
+        // restore then took a screen full of results away with nothing to
+        // explain where they went. Opening a different folder needs no notice:
+        // the whole list changed in front of you.
+        let dropped_results = !root_changed && !self.results.is_empty();
         self.clear_results();
         self.completed_outputs.clear();
         // Provenance belongs to the folder that produced it. `clear_results`
@@ -1466,6 +1468,15 @@ impl Audit {
         // checkbox takes the whole folder in one click when that is the intent.
         self.refresh_target_summary();
         self.schedule_estimate(cx);
+        if dropped_results {
+            self.notify_success(
+                "results-dropped",
+                "Read the folder again",
+                "The last run's results are gone from the list. The files it wrote are still \
+                 in the folder.",
+                cx,
+            );
+        }
         cx.notify();
 
         if single {
@@ -1590,7 +1601,7 @@ impl Audit {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string()),
         );
-        let output_root = self.output.root(&path);
+        let output_root = self.output.boundary(&path);
         let requested = path.clone();
         let include_subfolders = self.include_subfolders;
         cx.notify();
@@ -1760,7 +1771,7 @@ impl Audit {
         self.scan_found = None;
         self.scanning = Some(format!("{} folders", paths.len()));
         let folder_count = paths.len();
-        let output_root = self.output.root(&root);
+        let output_root = self.output.boundary(&root);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
