@@ -662,6 +662,8 @@ pub(crate) struct Audit {
     gallery_scroll: UniformListScrollHandle,
     /// The settings rail scrolls the review card into view when export opens.
     rail_scroll: ScrollHandle,
+    /// The comparison's output strip, so opening an output reveals its tile.
+    result_strip_scroll: ScrollHandle,
     /// The column count laid out last frame. `None` deliberately leaves initial layout alone.
     gallery_columns: Option<usize>,
     /// Bands GPUI asked the virtualised gallery to render this frame.
@@ -1107,8 +1109,16 @@ fn navigation_path(path: PathBuf) -> PathBuf {
         .unwrap_or(path)
 }
 
+/// The tree the folder browser hides, because Press writes it rather than
+/// reads it. Replace mode writes into the audited folder itself, and calling
+/// that the output tree deleted the open folder, its subfolders and the
+/// selected node from the sidebar. What replace mode actually adds to the
+/// folder is the originals backup, so that is the boundary it hides.
 fn output_identity(output: &Output, root: &Path) -> PathBuf {
-    navigation_path(output.root(root))
+    match output {
+        Output::Replace => navigation_path(root.join(scan::BACKUP_DIR)),
+        output => navigation_path(output.root(root)),
+    }
 }
 
 impl Audit {
@@ -2523,6 +2533,7 @@ pub(crate) fn build_audit(
             grid,
             gallery_scroll: UniformListScrollHandle::new(),
             rail_scroll: ScrollHandle::new(),
+            result_strip_scroll: ScrollHandle::new(),
             gallery_columns: None,
             gallery_visible: 0..0,
             estimate: None,

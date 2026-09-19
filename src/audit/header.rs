@@ -67,7 +67,7 @@ impl Audit {
 
     /// Keyboard shortcuts for the image list.
     pub(super) fn shortcuts_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        const SHORTCUTS: [(&str, &str); 9] = [
+        const SHORTCUTS: [(&str, &str); 11] = [
             ("↑ ↓ ← →", "Move between images"),
             ("PgUp PgDn Home End", "Jump through the list"),
             ("Shift + move", "Extend the selection"),
@@ -75,7 +75,9 @@ impl Audit {
             ("Enter", "Preview image"),
             ("Ctrl/⌘ + A", "Select everything shown"),
             ("Ctrl/⌘ + K", "Focus the filter box"),
-            ("Ctrl/⌘ + ,", "Open settings"),
+            ("Ctrl/⌘ + Enter", "Open the Convert panel"),
+            ("Ctrl/⌘ + ,", "Open the Sirv account"),
+            ("?", "Show this list"),
             ("Esc", "Close dialogs, then clear the selection"),
         ];
         div()
@@ -144,7 +146,10 @@ impl Audit {
                 div()
                     .absolute()
                     .inset_0()
-                    .bg(cx.theme().background.opacity(0.55))
+                    // The same scrim the settings panel uses. At 0.55 this one
+                    // left the table legible under the card, so two dialogs in
+                    // one app dimmed the window by two different amounts.
+                    .bg(cx.theme().background.opacity(0.82))
                     .debug_selector(|| "shortcuts-backdrop".into())
                     .on_mouse_down(
                         gpui_kit::MouseButton::Left,
@@ -371,7 +376,11 @@ impl Audit {
                                     menu
                                 })
                                 .item(
-                                    PopupMenuItem::new("Settings…")
+                                    // Named for what it opens. Called "Settings…"
+                                    // it promised the output folder, the format
+                                    // and the columns, and delivered two Sirv
+                                    // credential fields.
+                                    PopupMenuItem::new("Sirv account…")
                                         .icon(IconName::Settings)
                                         .on_click(move |_, window, cx| {
                                             if let Some(audit) = settings.upgrade() {
@@ -435,9 +444,11 @@ impl Audit {
                     .child(div().min_w_0().overflow_hidden().child(breadcrumbs)),
             )
             // The box narrows the list; erasing its text widens it back out.
-            // There is no Clear button: it sat dimmed for most of the audit's
-            // life and duplicated what backspace already does. Narrower below
-            // 900px, where the path needs the room more than the filter does.
+            // `cleanable` puts the cross inside the field and only while there
+            // is text to clear — the objection to the old Clear button was that
+            // it sat dimmed for most of the audit's life, not that the list
+            // needed no way out of a filter that matches nothing. Narrower
+            // below 900px, where the path needs the room more than the filter.
             .child(
                 div()
                     .w(px(if width < 900. { 205. } else { 242. }))
@@ -448,6 +459,7 @@ impl Audit {
                         div().flex_1().min_w_0().child(
                             Input::new(&self.filter_input)
                                 .small()
+                                .cleanable(true)
                                 .disabled(self.converting)
                                 .prefix(IconName::Search),
                         ),

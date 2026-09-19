@@ -104,7 +104,11 @@ impl Output {
         match self {
             Output::Optimized => format!("{}/", crate::scan::OUTPUT_DIR),
             Output::Folder(path) => path.display().to_string(),
-            Output::Replace => "beside the originals".to_string(),
+            // Named for what it does, not for where the bytes land. "beside the
+            // originals" is what `optimized/` does; said of replace mode it
+            // made the one destructive destination read as the safe one, in
+            // the rail and in the status bar's plan line alike.
+            Output::Replace => "this folder, replacing originals".to_string(),
         }
     }
 }

@@ -4,11 +4,14 @@ use super::toolbar::segment;
 use super::*;
 use table::{failure_badge, finding_chip};
 
+/// The same words the list columns and the column picker use. The gallery used
+/// to call the pixel count "Pixels" and the density "Bytes/pixel", so switching
+/// view renamed two of the five things you can sort by.
 const GALLERY_SORTS: [(Column, &str); 5] = [
     (Column::Name, "Name"),
     (Column::Format, "Format"),
-    (Column::Pixels, "Pixels"),
-    (Column::Density, "Bytes/pixel"),
+    (Column::Pixels, "Size"),
+    (Column::Density, "Bytes per pixel"),
     (Column::Weight, "File size"),
 ];
 
@@ -174,41 +177,57 @@ impl Audit {
                                     })),
                             ),
                     )
-                    .when(entry.extension_lies(), |slot| {
-                        slot.child(
-                            div().absolute().bottom(px(4.)).left(px(4.)).child(
-                                div()
-                                    .px_1()
-                                    .rounded_sm()
-                                    .bg(cx.theme().background.opacity(0.9))
-                                    .text_size(px(10.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(cx.theme().yellow)
-                                    .child(format!(
-                                        "actual {} ≠ extension",
-                                        format_name(entry.format)
-                                    )),
-                            ),
-                        )
-                    })
+                    // One row owns the bottom of the picture. Both of these used
+                    // to be positioned into the same band from opposite sides,
+                    // and on a narrow tile the button was painted over the
+                    // badge, hiding the word "extension".
                     .child(
                         div()
                             .absolute()
                             .bottom(px(4.))
+                            .left(px(4.))
                             .right(px(4.))
-                            .debug_selector(move || format!("grid-compare-{index}"))
+                            .flex()
+                            .items_end()
+                            .justify_between()
+                            .gap_1()
+                            .when(entry.extension_lies(), |slot| {
+                                slot.child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(cx.theme().background.opacity(0.9))
+                                        .text_size(px(10.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(cx.theme().yellow)
+                                        .child(format!(
+                                            "actual {} ≠ extension",
+                                            format_name(entry.format)
+                                        )),
+                                )
+                            })
                             .child(
-                                Button::new(("tile-compare", index))
-                                    .small()
-                                    .label("Compare")
-                                    .tooltip("Open the before-and-after comparison")
-                                    .disabled(self.converting)
-                                    .on_click(cx.listener(move |audit, _, _, cx| {
-                                        cx.stop_propagation();
-                                        if !audit.converting {
-                                            audit.open_compare(index, cx);
-                                        }
-                                    })),
+                                div()
+                                    .flex_shrink_0()
+                                    .ml_auto()
+                                    .debug_selector(move || format!("grid-compare-{index}"))
+                                    .child(
+                                        Button::new(("tile-compare", index))
+                                            .small()
+                                            .label("Compare")
+                                            .tooltip("Open the before-and-after comparison")
+                                            .disabled(self.converting)
+                                            .on_click(cx.listener(move |audit, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if !audit.converting {
+                                                    audit.open_compare(index, cx);
+                                                }
+                                            })),
+                                    ),
                             ),
                     )
                     // The same word the table's Sirv column uses. The gallery used to
@@ -253,19 +272,26 @@ impl Audit {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{}×{} · {}",
-                                entry.width,
-                                entry.height,
-                                match self.results.get(&index) {
-                                    Some(bytes) => format!(
-                                        "{} → {}",
-                                        format_bytes(entry.bytes),
-                                        format_bytes(*bytes)
-                                    ),
-                                    None => format_bytes(entry.bytes),
+                            // A converted tile prints before → after and drops
+                            // the pixel count. All three plus a finding chip
+                            // did not fit a 168px tile, and the ellipsis fell
+                            // on the new size, which is the one thing the run
+                            // was for.
+                            .child(match self.results.get(&index) {
+                                Some(bytes) => format!(
+                                    "{} → {}",
+                                    format_bytes(entry.bytes),
+                                    format_bytes(*bytes)
+                                ),
+                                None => {
+                                    format!(
+                                        "{}×{} · {}",
+                                        entry.width,
+                                        entry.height,
+                                        format_bytes(entry.bytes)
+                                    )
                                 }
-                            )),
+                            }),
                     )
                     // The same word the list uses. A tile showing `0.14 B/px`
                     // asked you to know the bands by heart, and it was taking

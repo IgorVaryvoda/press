@@ -94,7 +94,14 @@ impl Audit {
                         ))),
                         path: "/".into(),
                         needs_credentials: true,
-                        nodes: Some(Err("No Sirv credentials are saved.".into())),
+                        // Not an error: nobody has set this up yet. Phrased as
+                        // a failure, with a Retry beside it, the first click on
+                        // Sirv reported a fault the user had not caused and
+                        // could not clear by retrying.
+                        nodes: Some(Err(
+                            "Press has no Sirv keys yet. Add them to browse your Sirv folders."
+                                .into(),
+                        )),
                         generation: 0,
                         session,
                         focused: false,

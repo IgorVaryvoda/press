@@ -127,7 +127,14 @@ impl Audit {
             } else {
                 "outputs"
             };
-            return format!("Replace {scope} {} {output}", self.format.display());
+            // "Overwrite", not "Replace": the rail's own switch is called
+            // "Replace originals in place", and the two sat 500px apart
+            // meaning opposite things. Without "selected" the longer verb
+            // still fits the panel it sits in.
+            return format!(
+                "Overwrite {target_count} {} {output}",
+                self.format.display()
+            );
         }
         format!("Convert {scope} to {}", self.format.display())
     }

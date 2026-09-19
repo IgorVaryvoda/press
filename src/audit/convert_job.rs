@@ -662,13 +662,12 @@ impl Audit {
                             audit.notify_success("conversion", "Conversion complete", summary, cx);
                         }
                     }
-                    // A finished run has produced something to look at, and
-                    // until now the app said so in a column and left you to
-                    // find it. Open it. A stopped run is a request to stop,
-                    // not a request to be taken somewhere.
-                    if !stopped && let Some(first) = audit.result_rows().first().copied() {
-                        audit.open_result(first, cx);
-                    }
+                    // The list stays. Taking the window to a full-screen
+                    // comparison of the first output hid the very report the
+                    // run had just produced: the per-file column, the totals in
+                    // the panel and the way to the output folder. The panel's
+                    // "Compare results" opens the same view, when it is asked
+                    // for.
                 }
                 cx.notify();
             });

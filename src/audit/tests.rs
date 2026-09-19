@@ -2398,7 +2398,9 @@ fn replace_label() -> &'static str {
     if cfg!(windows) {
         "Convert 2 selected to WEBP"
     } else {
-        "Replace 2 selected WEBP outputs"
+        // "Overwrite", not "Replace": the rail's switch owns that word for
+        // replacing the originals, and this one overwrites earlier outputs.
+        "Overwrite 2 WEBP outputs"
     }
 }
 
@@ -4309,6 +4311,75 @@ fn a_failed_tree_listing_can_be_retried(cx: &mut TestAppContext) {
     audit.read_with(cx, |audit, _| {
         assert!(audit.tree_loaded.contains(&missing));
         assert_eq!(audit.tree_children.get(&missing), Some(&vec![child]));
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
+fn opening_a_nested_folder_lists_every_folder_it_opened(cx: &mut TestAppContext) {
+    let home = browser::home_dir().unwrap_or_else(std::env::temp_dir);
+    let base = scan_fixture_in(&home, "folder-ancestors");
+    let middle = base.join("middle");
+    let leaf = middle.join("leaf");
+    let sibling = middle.join("sibling");
+    std::fs::create_dir_all(&leaf).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    write_png(&leaf, "one.png");
+    let (audit, cx) = finding_audit(cx);
+
+    // The window anchors the tree at Home whenever the folder is under it, and
+    // then expands its way down to the folder that was opened.
+    audit.update(cx, |audit, cx| {
+        audit.tree_anchor = home.clone();
+        audit.tree_loaded.insert(home.clone());
+        audit.tree_children.insert(home.clone(), vec![base.clone()]);
+        audit.request_path(leaf.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.root, leaf);
+        // Every expanded ancestor is listed. Without the listing each one keeps
+        // a "Loading…" row that never resolves, and shows the single child on
+        // the way down instead of everything it holds.
+        for ancestor in [&base, &middle] {
+            assert!(
+                audit.tree_loaded.contains(ancestor),
+                "{} was expanded without being listed",
+                ancestor.display()
+            );
+        }
+        assert!(
+            audit
+                .tree_children
+                .get(&middle)
+                .is_some_and(|children| children.contains(&sibling)),
+            "the open folder's sibling is reachable from the tree"
+        );
+    });
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
+fn replacing_originals_keeps_the_open_folder_in_the_tree(cx: &mut TestAppContext) {
+    let root = scan_fixture("folder-replace-tree");
+    let child = root.join("archive");
+    std::fs::create_dir_all(&child).unwrap();
+    let (audit, cx) = finding_audit(cx);
+
+    audit.update(cx, |audit, cx| audit.request_path(root.clone(), cx));
+    cx.run_until_parked();
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    cx.run_until_parked();
+
+    audit.read_with(cx, |audit, _| {
+        // Replace mode writes into the audited folder. Hiding "the output tree"
+        // then deleted the folder being audited, its subfolders and the
+        // selected node from the browser.
+        assert_eq!(audit.browser_output_root, root.join(scan::BACKUP_DIR));
+        assert!(audit.tree_paths.values().any(|path| path == &root));
+        assert!(audit.tree_paths.values().any(|path| path == &child));
+        assert_eq!(audit.status_folder_count(), Some(1));
     });
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -7731,6 +7802,30 @@ fn the_new_header_and_bar_facts_agree(cx: &mut TestAppContext) {
             audit.savings_note(),
             Some("· 2 refused at these settings".to_string())
         );
+
+        // The destination stays beside the selection count. It used to be
+        // replaced by it, so the one thing a run is about to do went unsaid at
+        // the moment it mattered.
+        assert_eq!(
+            audit.status_right(),
+            "2 selected · WEBP lossless → optimized/"
+        );
+        audit.output = Output::Replace;
+        assert_eq!(
+            audit.status_right(),
+            "2 selected · WEBP lossless → this folder, replacing originals"
+        );
+        audit.output = Output::Optimized;
+
+        // A finished run outranks the estimate of it: the bar printed an "≈"
+        // projection beside bytes that were already on disk.
+        audit.estimate = Some((160, 2, 0));
+        audit.record_result(0, Format::WebP, 400, PathBuf::from("/tmp/a.webp"));
+        assert_eq!(
+            audit.savings_note(),
+            Some("· 400 B written, 60% saved".to_string())
+        );
+        audit.clear_results();
         audit.estimate = None;
 
         audit.heavy = 0;

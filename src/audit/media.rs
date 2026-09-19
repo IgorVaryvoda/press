@@ -280,8 +280,15 @@ impl Audit {
         });
         // The strip is about to show these; ask for their thumbnails now rather
         // than when each tile paints, which is too late to be useful.
-        for row in self.strip_rows(index) {
+        let rows = self.strip_rows(index);
+        for row in rows.iter().copied() {
             self.request_thumb(row, cx);
+        }
+        // And keep the open one inside it. The strip scrolls, and a run of
+        // thirteen outputs left the tile you were looking at past its right
+        // edge with nothing on screen saying so.
+        if let Some(position) = rows.iter().position(|row| *row == index) {
+            self.result_strip_scroll.scroll_to_item(position);
         }
         cx.notify();
 

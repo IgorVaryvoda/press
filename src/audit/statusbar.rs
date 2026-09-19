@@ -26,7 +26,7 @@ impl Audit {
     /// Folders behind the current list. A dropped batch names its count
     /// directly; a browsed folder counts the child folders the list can enter,
     /// leaving out the output folder nobody browses into.
-    fn status_folder_count(&self) -> Option<usize> {
+    pub(super) fn status_folder_count(&self) -> Option<usize> {
         if let Some(count) = self.batch_folders {
             return Some(count);
         }
@@ -100,27 +100,38 @@ impl Audit {
 
     /// The bar pinned to the window foot. One fixed height in every state, so
     /// the list above never moves when the selection or the run state changes.
-    pub(super) fn status_bar(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let left = self.status_line(count);
-        let right = if self.converting {
+    /// The right half of the bar: the run, the selection, the failures, or the
+    /// plan — and the plan beside the selection, never instead of it.
+    pub(super) fn status_right(&self) -> String {
+        if self.converting {
             let done = self.results.len() + self.failures.len();
             let total = self
                 .active_target_count
                 .unwrap_or_else(|| self.target_count());
-            format!("{done} of {total} converting")
-        } else if self.target_count() > 0 {
-            match self.target_count() {
+            return format!("{done} of {total} converting");
+        }
+        if self.target_count() > 0 {
+            // The plan used to be replaced by the count, so the destination
+            // disappeared at exactly the moment a run was about to use it —
+            // including the one that replaces the originals.
+            let selected = match self.target_count() {
                 1 => "1 selected".to_string(),
                 selected => format!("{selected} selected"),
-            }
-        } else if !self.failures.is_empty() {
-            match self.failures.len() {
+            };
+            return format!("{selected} · {}", self.output_plan());
+        }
+        if !self.failures.is_empty() {
+            return match self.failures.len() {
                 1 => "1 failed".to_string(),
                 failed => format!("{failed} failed"),
-            }
-        } else {
-            self.output_plan()
-        };
+            };
+        }
+        self.output_plan()
+    }
+
+    pub(super) fn status_bar(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let left = self.status_line(count);
+        let right = self.status_right();
         div()
             .debug_selector(|| "status-bar".into())
             .flex()
@@ -207,6 +218,10 @@ impl Audit {
             Button::new("findings-menu")
                 .small()
                 .icon(IconName::TriangleAlert)
+                // The count, not a bare triangle. On its own the icon named
+                // neither what it held nor how much of it, and the only place
+                // that said so was a tooltip.
+                .label(total.to_string())
                 .tooltip(format!(
                     "Findings ({total}): {summary} — narrow the list to one finding"
                 ))

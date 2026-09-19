@@ -219,6 +219,7 @@ impl Audit {
             self.tree_expanded.clear();
         }
 
+        let mut opened = Vec::new();
         if let Ok(relative) = root.strip_prefix(&self.tree_anchor) {
             let mut parent = self.tree_anchor.clone();
             for component in relative.components() {
@@ -227,19 +228,31 @@ impl Audit {
                 if !siblings.contains(&child) {
                     siblings.push(child.clone());
                 }
-                self.tree_expanded.insert(parent);
+                self.tree_expanded.insert(parent.clone());
+                opened.push(parent);
                 parent = child;
             }
+        }
+        // Expanding a folder is a promise to read it. These ancestors are
+        // expanded to reveal the open folder, so without the listing each one
+        // keeps a "Loading…" placeholder for the life of the window and shows
+        // the single child on the path where the folder holds twenty.
+        for ancestor in opened {
+            self.load_tree_children(ancestor, cx);
         }
         self.tree_children.insert(root.clone(), folders);
         self.tree_loaded.insert(root.clone());
         self.tree_loading.remove(&root);
         self.tree_expanded.insert(root.clone());
         self.rebuild_tree(cx);
-        // The strip above the list is gone, so the tree is the only way back
-        // to a sibling. Put the open folder in the middle of it on every
-        // navigation rather than leaving the scroll where the last folder was.
-        let current: gpui_kit::SharedString = tree_id(&root).into();
+        self.reveal_open_folder(cx);
+    }
+
+    /// The strip above the list is gone, so the tree is the only way back to a
+    /// sibling. Put the open folder in the middle of it on every navigation
+    /// rather than leaving the scroll where the last folder was.
+    fn reveal_open_folder(&mut self, cx: &mut Context<Self>) {
+        let current: gpui_kit::SharedString = tree_id(&self.root).into();
         self.tree_state.update(cx, |state, cx| {
             state.reveal_item(&current, ScrollStrategy::Center, cx);
         });
@@ -326,7 +339,7 @@ impl Audit {
                 match folders {
                     Ok(folders) => {
                         audit.tree_loaded.insert(requested.clone());
-                        audit.tree_children.insert(requested, folders);
+                        audit.tree_children.insert(requested.clone(), folders);
                     }
                     Err(error) => {
                         audit.tree_expanded.remove(&requested);
@@ -339,6 +352,13 @@ impl Audit {
                     }
                 }
                 audit.rebuild_tree_preserving_selection(cx);
+                // A listing that contains the open folder adds rows above it,
+                // so wherever the tree was scrolled to is no longer where the
+                // open folder is. Expanding anything else leaves the scroll
+                // alone, because the user asked for that one.
+                if audit.root.starts_with(&requested) {
+                    audit.reveal_open_folder(cx);
+                }
                 cx.notify();
             });
         })

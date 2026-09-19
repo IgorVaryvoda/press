@@ -636,9 +636,14 @@ impl Audit {
             .bottom(px(COMPARE_FOOT))
             .flex()
             .justify_center()
+            // The strip is 980px wide at most and the window can be 760. Without
+            // the inset it ran under both window edges, so the first and last
+            // tiles were cut by the screen rather than by the strip.
+            .px_3()
             .child(
                 div()
                     .id("result-strip-scroll")
+                    .track_scroll(&self.result_strip_scroll)
                     .h(px(RESULT_STRIP_HEIGHT))
                     .flex()
                     .items_center()
@@ -712,15 +717,24 @@ impl Audit {
                                     .child(name),
                             )
                             .children(saving.map(|percent| {
+                                // The same three outcomes the list's Result
+                                // column names, in the same colours: a saving
+                                // that rounds to nothing is not a saving, and
+                                // "−0%" in green claimed one.
+                                let unchanged = (-0.5..0.5).contains(&percent);
                                 div()
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .text_size(px(10.))
-                                    .text_color(if percent >= 0. {
+                                    .text_color(if unchanged {
+                                        cx.theme().muted_foreground
+                                    } else if percent > 0. {
                                         cx.theme().green
                                     } else {
                                         cx.theme().yellow
                                     })
-                                    .child(if percent >= 0. {
+                                    .child(if unchanged {
+                                        "0%".to_string()
+                                    } else if percent > 0. {
                                         format!("−{percent:.0}%")
                                     } else {
                                         format!("+{:.0}%", -percent)
@@ -894,7 +908,11 @@ impl Audit {
                                 .small()
                                 .primary()
                                 .icon(IconName::FolderOpen)
-                                .when(labelled, |button| button.label("Show in folder"))
+                                // Labelled at every width. This is the way to
+                                // the files the run just wrote, and a bare
+                                // folder glyph beside a bare compress glyph
+                                // asked the narrow window to guess which.
+                                .label("Show in folder")
                                 .tooltip("Open the output folder in the file manager")
                                 .on_click(
                                     cx.listener(|audit, _, _, cx| {
@@ -932,7 +950,9 @@ impl Audit {
                             .children(local_ai::available().then(|| {
                                 self.compare_local_ai(
                                     "compare-remove-background",
-                                    IconName::Frame,
+                                    // The same glyphs the bar and the tool
+                                    // chooser use for these two.
+                                    Icon::default().path("icons/studio/background-removal.svg"),
                                     "Remove background",
                                     local_ai::Tool::RemoveBackground,
                                     index,
@@ -945,7 +965,7 @@ impl Audit {
                             .children(local_ai::available().then(|| {
                                 self.compare_local_ai(
                                     "compare-upscale",
-                                    IconName::Maximize,
+                                    Icon::default().path("icons/studio/upscale.svg"),
                                     "Upscale 4×",
                                     local_ai::Tool::Upscale,
                                     index,
@@ -973,7 +993,7 @@ impl Audit {
     fn compare_local_ai(
         &self,
         id: &'static str,
-        icon: IconName,
+        icon: Icon,
         label: &'static str,
         tool: local_ai::Tool,
         index: usize,

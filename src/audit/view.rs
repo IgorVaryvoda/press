@@ -391,10 +391,17 @@ impl Audit {
                     div()
                         .debug_selector(|| "sirv-error".into())
                         .text_size(px(12.))
-                        .text_color(cx.theme().yellow)
+                        .text_color(if browser.needs_credentials {
+                            cx.theme().muted_foreground
+                        } else {
+                            cx.theme().yellow
+                        })
                         .child(message.clone()),
                 )
-                .child(
+                // Retrying a listing that failed is worth offering. Retrying
+                // one that never started, because there are no keys, only
+                // fails again; the row below already offers "Set up Sirv…".
+                .children((!browser.needs_credentials).then(|| {
                     // This branch only renders once a listing has landed, so no
                     // listing is ever in flight under it and the button stays live.
                     div().debug_selector(|| "sirv-retry".into()).child(
@@ -408,8 +415,8 @@ impl Audit {
                                 }
                                 cx.notify();
                             })),
-                    ),
-                )
+                    )
+                }))
                 .into_any_element(),
             Some(Ok(nodes)) => {
                 // The filter narrows what is already on screen; it never lists
@@ -1155,6 +1162,17 @@ impl Audit {
                             window.focus(&audit.filter_input.read(cx).focus_handle(cx), cx);
                         }
                         "space" => audit.toggle_cursor_selection(cx),
+                        // The keyboard reached everything except the thing the
+                        // folder was opened for. It opens the panel rather than
+                        // starting the run, exactly like the bar's own button:
+                        // committing a replace run stays a deliberate click.
+                        "enter"
+                            if (event.keystroke.modifiers.control
+                                || event.keystroke.modifiers.platform)
+                                && !audit.converting =>
+                        {
+                            audit.open_rail(Rail::Convert, cx);
+                        }
                         "?" => {
                             audit.shortcuts_open = true;
                             cx.notify();
@@ -1509,7 +1527,11 @@ impl Audit {
                     .size_full()
                     .overflow_hidden()
                     .on_prepaint(move |bounds, _, _| surface.set(bounds))
-                    .child(DataTable::new(table).stripe(true).bordered(false))
+                    // The zebra is drawn per row in `render_tr`, not by the
+                    // library: its own `stripe` fills the space below the last
+                    // file with striped blank rows, and a folder of thirteen
+                    // images then looked like a folder of thirty.
+                    .child(DataTable::new(table).stripe(false).bordered(false))
                     .children(self.marquee_overlay(cx))
                     .into_any_element()
             } else {

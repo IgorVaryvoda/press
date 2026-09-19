@@ -8,6 +8,7 @@ sessions learn.
 | Date | Source | What went wrong | What to do instead |
 |------|--------|-----------------|--------------------|
 | 2026-08-31 | self | `ls` is aliased (eza) and rejects `--icons` when given odd args in non-interactive fish | Use `/bin/ls` in Bash tool calls |
+| 2026-09-19 | self | `ydotool mousemove --absolute` saturates at the layout corner on this host (pointer acceleration), so every scripted click missed | Place the pointer with `hyprctl dispatch movecursor <global-x> <global-y>`, then `ydotool click 0xC0`. Read the window origin from `hyprctl clients -j` after every resize: Hyprland re-centres a floating window, so a stale grim region captures the desktop |
 
 ## Notes
 - 2026-08-31: AGENTS.md drifted: it says `main.rs` holds the whole Audit UI
@@ -154,3 +155,29 @@ sessions learn.
   (the control a person clicks), not to restore the behaviour. `grim` captures
   this Hyprland session fine — the napkin's "no pixels" note is about the
   nested gamescope path, not the live desktop.
+- 2026-09-19: UI audit run. `./scripts/ux-eval capture <scenario> --fixture <dir>
+  --allow-external-fixture --skip-build --binary target/debug/press` works with the
+  debug binary; no release build needed. Two caveats: `--fixture` overrides a
+  scenario's own launch (so `empty-start` must run without it), and the scripted
+  clicks in `conversion-result`, `filter-no-results` and `local-ai-upscale` are
+  stale — they hit nothing in the current layout, and the capture then shows the
+  plain audit list rather than the state the scenario names. Drive interactive
+  states on the live Hyprland desktop instead.
+- 2026-09-19: Audit fixture that exercises the real list:
+  `/home/igor/.cache/press-ux-audit/shop` (13 images, Pillow noise + Lanczos
+  upsamples, one transparent PNG, one PNG named `.jpg`, one long filename, an
+  `archive/` subfolder). Light `docs` images cannot show chips, truncation or the
+  stacked result column.
+- 2026-09-19: UI audit fixes landed on `fix/ui-audit-20260919`. Two root causes
+  worth remembering: `install_tree_page` expanded every ancestor of the opened
+  folder without listing it, so each kept a permanent "Loading…" child and hid
+  its siblings; and `Output::Replace.root(audited) == audited`, so treating the
+  output tree as "hidden" deleted the open folder from the browser. Any new
+  ancestor listing must re-`reveal_open_folder`, because rows arriving above the
+  open folder move it out of view.
+- 2026-09-19: gpui-component table cells are `py_1` inside a 36px row, so a
+  stacked two-line cell has 28px. Two 11px lines at the default line height
+  measure ~31 and the table's `overflow_hidden` clips the second one. Give
+  stacked cell lines an explicit `line_height`. `DataTable::stripe(true)` also
+  paints striped filler rows below the last real row; Press draws its own zebra
+  in `render_tr` instead.

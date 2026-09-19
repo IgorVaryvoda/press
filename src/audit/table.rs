@@ -446,6 +446,12 @@ impl TableDelegate for AuditTable {
             .relative()
             .border_1()
             .border_color(gpui_kit::transparent_black())
+            // Press draws the zebra, so it stops at the last file. The
+            // library's own stripe kept painting alternating blank rows all
+            // the way to the action bar.
+            .when(entry.is_some() && !row_ix.is_multiple_of(2), |row| {
+                row.bg(cx.theme().table_even)
+            })
             .when(ticked, |row| row.bg(cx.theme().list_active))
             // The same accent the sidebar puts on the current folder: a grey
             // outline was one more grey among the zebra and the hover.
@@ -635,10 +641,13 @@ impl TableDelegate for AuditTable {
                     )
                     // One lane at the cell's right edge, so a column of
                     // findings scans; after the name, each landed wherever
-                    // its name happened to end.
+                    // its name happened to end. The padding keeps the lane off
+                    // the next column, which on a wide window made the chips
+                    // read as part of Format.
                     .child(
                         div()
                             .ml_auto()
+                            .pr_2()
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -729,9 +738,11 @@ impl TableDelegate for AuditTable {
             TableColumn::Options => div().into_any_element(),
             TableColumn::Result => div()
                 .flex()
-                .when(narrow_result, |result| {
-                    result.flex_col().items_end().gap_0p5()
-                })
+                // Two lines inside one row: the cell owns 28 of the row's 36
+                // pixels once the table's own padding is taken, so both lines
+                // carry an explicit line height. Left to the default the pair
+                // measured about 31 and the table clipped the percentage.
+                .when(narrow_result, |result| result.flex_col().items_end())
                 .when(!narrow_result, |result| result.items_center().gap_2())
                 .justify_end()
                 .whitespace_nowrap()
@@ -748,10 +759,16 @@ impl TableDelegate for AuditTable {
                     // A file that grew is a real outcome, not a rounding error:
                     // re-encoding an already-optimal JPEG usually costs bytes.
                     let grew = *converted > entry.bytes;
+                    // A saving that rounds to nothing is not a saving. "−0%" in
+                    // the saving green claimed a win for a file that came back
+                    // the same size, which is what a transparent PNG does when
+                    // transparency forces lossless.
+                    let unchanged = !grew && percent < 0.5;
                     slot.child(
                         div()
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_size(px(if narrow_result { 11. } else { 12. }))
+                            .when(narrow_result, |line| line.line_height(px(13.)))
                             .text_color(cx.theme().muted_foreground)
                             .child(result_size_text(entry.bytes, *converted, narrow_result)),
                     )
@@ -763,15 +780,25 @@ impl TableDelegate for AuditTable {
                         div()
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_size(px(if narrow_result { 11. } else { 12. }))
+                            .when(narrow_result, |line| line.line_height(px(13.)))
                             .font_weight(FontWeight::MEDIUM)
                             .whitespace_nowrap()
                             .text_color(if grew {
                                 cx.theme().yellow
+                            } else if unchanged {
+                                cx.theme().muted_foreground
                             } else {
                                 cx.theme().green
                             })
+                            // Spelled out where the stacked cell gives it a
+                            // line of its own; beside the size, in a 112px
+                            // column, the words pushed the size out of view.
                             .child(if grew {
                                 "larger".to_string()
+                            } else if unchanged && narrow_result {
+                                "no change".to_string()
+                            } else if unchanged {
+                                "0%".to_string()
                             } else {
                                 format!("−{percent:.0}%")
                             }),
@@ -818,10 +845,12 @@ impl TableDelegate for AuditTable {
                 div()
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
+                    // Names the control that does it. The sentence used to ask
+                    // for a clear the window did not offer.
                     .child(if filter.is_empty() {
                         String::new()
                     } else {
-                        format!("Clear the filter to show all {total} images.")
+                        format!("Clear the filter box to show all {total} images.")
                     }),
             )
     }

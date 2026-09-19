@@ -96,15 +96,42 @@ impl Audit {
                     .shadow_lg()
                     .block_mouse_except_scroll()
                     .children((width >= BAR_READOUT_WIDTH).then(|| self.bar_readout(cx)))
+                    // The readout goes at the narrow end, but the bulk tick
+                    // does not go with it.
                     .children(
-                        (width >= BAR_READOUT_WIDTH)
-                            .then(|| div().w(px(1.)).h(px(20.)).bg(cx.theme().border)),
+                        (width < BAR_READOUT_WIDTH && !self.converting)
+                            .then(|| self.bar_select_all(cx)),
                     )
+                    // The panel carries this, and the panel can be closed. With
+                    // it closed there was no way at all to the files the run had
+                    // just written.
+                    .children(
+                        (!self.sidebar_open && !self.results.is_empty() && !self.converting).then(
+                            || {
+                                div().debug_selector(|| "bar-reveal".into()).child(
+                                    Button::new("bar-reveal")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::FolderOpen)
+                                        .when(labelled, |button| button.label("Show output"))
+                                        .tooltip("Open the folder this run wrote to")
+                                        .on_click(
+                                            cx.listener(|audit, _, _, cx| audit.reveal_output(cx)),
+                                        ),
+                                )
+                            },
+                        ),
+                    )
+                    .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border))
                     .child(
                         Button::new("rail-convert")
                             .small()
                             .icon(IconName::Replace)
-                            .label("Convert")
+                            // The ellipsis is the promise this button keeps: it
+                            // opens the Convert panel, where the blue button
+                            // commits. Called "Convert" beside a selection
+                            // count it read as the button that converts.
+                            .label("Convert…")
                             .tooltip("Choose a format and quality, then convert")
                             .outline()
                             .selected(self.rail == Rail::Convert)
@@ -118,7 +145,11 @@ impl Audit {
                         self.local_ai_action(
                             "rail-remove-background",
                             Rail::RemoveBackground,
-                            IconName::Frame,
+                            // The glyphs the tool chooser already uses for
+                            // these two. Below 720px the bar drops its labels,
+                            // and a generic frame and a generic arrow-out left
+                            // two icons nobody could tell apart.
+                            Icon::default().path("icons/studio/background-removal.svg"),
                             "Remove background",
                             local_ai::Tool::RemoveBackground,
                             single,
@@ -131,7 +162,7 @@ impl Audit {
                         self.local_ai_action(
                             "rail-upscale",
                             Rail::Upscale,
-                            IconName::Maximize,
+                            Icon::default().path("icons/studio/upscale.svg"),
                             "Upscale 4×",
                             local_ai::Tool::Upscale,
                             single,
@@ -147,6 +178,20 @@ impl Audit {
     /// carries the same numbers, but the decision happens here, next to the
     /// verbs, so the readout earns its width by answering it.
     pub(super) fn savings_note(&self) -> Option<String> {
+        // A finished run outranks the estimate of it. The bar went on printing
+        // "≈14.2 MB output" beside a run that had already written exactly that,
+        // which read as a second run still to come.
+        if !self.results.is_empty() && !self.converting {
+            let (before, after) = self.converted_totals();
+            let growth = after > before;
+            let percent = before.abs_diff(after) as f32 / before.max(1) as f32 * 100.;
+            return Some(format!(
+                "· {} written, {:.0}% {}",
+                format_bytes(after),
+                percent,
+                if growth { "larger" } else { "saved" },
+            ));
+        }
         let (projected, counted, refused) = self.estimate?;
         if counted == 0 && refused > 0 {
             return Some(format!("· {refused} refused at these settings"));
@@ -215,18 +260,12 @@ impl Audit {
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .whitespace_nowrap()
-                        .child("to analyse"),
+                        // The same sentence the closed Convert rail ends on.
+                        // "to analyse" named work nobody does here: the list is
+                        // already the audit, and these verbs convert.
+                        .child("to convert"),
                 )
-                .child(
-                    div().debug_selector(|| "bar-select-all".into()).child(
-                        Button::new("bar-select-all")
-                            .small()
-                            .ghost()
-                            .label("Select all")
-                            .disabled(self.converting)
-                            .on_click(cx.listener(|audit, _, _, cx| audit.toggle_select_all(cx))),
-                    ),
-                );
+                .child(self.bar_select_all(cx));
         }
         row.child(
             div()
@@ -246,7 +285,14 @@ impl Audit {
                 .whitespace_nowrap()
                 .child(note)
         }))
-        .child(
+        .child(self.bar_select_all(cx))
+    }
+
+    /// Ticking everything is the one control the bar keeps at every width. The
+    /// narrow bar used to drop it with the readout and keep two unlabelled
+    /// icons, which left the header tick as the only way to select a folder.
+    fn bar_select_all(&self, cx: &Context<Self>) -> impl IntoElement {
+        div().debug_selector(|| "bar-select-all".into()).child(
             Button::new("bar-select-all")
                 .small()
                 .ghost()
@@ -266,7 +312,7 @@ impl Audit {
         &self,
         id: &'static str,
         rail: Rail,
-        icon: IconName,
+        icon: Icon,
         label: &'static str,
         tool: local_ai::Tool,
         single: Option<usize>,
@@ -309,7 +355,10 @@ impl Audit {
             .small()
             .outline()
             .icon(icon)
-            .when(labelled, |button| button.label(label))
+            // The ellipsis, like Convert's: this opens the tool's panel, and
+            // the panel's own button commits. The tooltips keep the plain
+            // label, because they describe the work rather than the click.
+            .when(labelled, |button| button.label(format!("{label}…")))
             .tooltip(tooltip)
             .selected(self.rail == rail)
             .loading(running)
@@ -549,12 +598,14 @@ impl Audit {
                     ("background removal", studio::BATCH_BACKGROUND_REMOVAL_URL)
                 }
             };
+            // Top-aligned, like every other rail. Centred in a `flex_1` column
+            // this left roughly 300px of nothing under the title before the
+            // first word, which read as a panel that had failed to load.
             return div()
                 .debug_selector(|| "local-ai-batch-handoff".into())
                 .flex()
                 .flex_col()
                 .flex_1()
-                .justify_center()
                 .gap_3()
                 .p_4()
                 .text_sm()
@@ -565,31 +616,29 @@ impl Audit {
                 )
                 .child(format!(
                     "Press runs {operation} on one image at a time. \
-                     Use Sirv AI Studio to process multiple images together."
+                     Select one image to run it on this computer."
                 ))
+                // The local route reads first and the hosted one is the
+                // alternative, not the primary. Press is the local tool; a
+                // blue Studio button as the only thing to click said the
+                // opposite.
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Opens in your browser. Sign in and add your images there; Press does not upload this selection."),
+                        .child("Or process the whole selection in Sirv AI Studio. It opens in your browser. Sign in and add your images there; Press does not upload this selection."),
                 )
                 .child(
                     div()
                         .debug_selector(|| "open-studio-batch".into())
                         .child(
                             Button::new("open-studio-batch")
-                                .primary()
+                                .outline()
                                 .w_full()
                                 .icon(IconName::ExternalLink)
                                 .label("Open in Sirv AI Studio")
                                 .on_click(move |_, _, cx| cx.open_url(url)),
                         ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Or select one image to process it locally."),
                 )
                 .into_any_element();
         }
@@ -2354,6 +2403,27 @@ impl Audit {
             })
             .when(!self.results.is_empty() && !self.converting, |block| {
                 block
+                    // The run no longer takes the window to the comparison on
+                    // its own, so the way there is a button on the result it
+                    // belongs to.
+                    .children(self.result_rows().first().copied().map(|first| {
+                        div().debug_selector(|| "conversion-compare".into()).child(
+                            Button::new("conversion-compare")
+                                .outline()
+                                .small()
+                                .w_full()
+                                .icon(IconName::Eye)
+                                .label("Compare results")
+                                .tooltip(
+                                    "Open the before-and-after comparison of what this run wrote",
+                                )
+                                .on_click(
+                                    cx.listener(move |audit, _, _, cx| {
+                                        audit.open_result(first, cx)
+                                    }),
+                                ),
+                        )
+                    }))
                     .children((self.published_results.is_empty()).then(|| {
                         // Element ids never reach `debug_bounds`: the wrapper
                         // is the selector contract the tests assert on.
