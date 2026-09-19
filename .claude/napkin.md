@@ -141,3 +141,16 @@ sessions learn.
   our code. The packaging step now retries three times (signing is idempotent,
   it replaces the signature it finds). Re-run the failed job when it happens
   again; the assets already built are not lost.
+| 2026-09-19 | self | `pkill -f 'target/debug/press'` killed the Bash tool's own wrapper shell, because the wrapper's command line contains that pattern (exit 144, no output) | Kill the app by exact name (`pkill -x press`) or by PID; never `pkill -f` on a string your own command contains |
+- 2026-09-19: Checked checkboxes looked blank because `init_theme` set the
+  colour set but never `theme.tokens.primary`. Checkbox, radio, switch and tab
+  fill from the TOKEN set and draw their glyph in `primary_foreground`: stock
+  white fill plus the app's white tick = an empty white square. Set
+  `tokens.primary{,_hover,_active,_foreground}` beside the colour set; a test
+  pins the two halves together.
+- 2026-09-19: Folders no longer open fully ticked. Removing the two
+  `select_all_visible()` calls broke 58 tests, all of which assumed a pre-ticked
+  folder; the fix is for the test harnesses to tick through `toggle_select_all`
+  (the control a person clicks), not to restore the behaviour. `grim` captures
+  this Hyprland session fine — the napkin's "no pixels" note is about the
+  nested gamescope path, not the live desktop.

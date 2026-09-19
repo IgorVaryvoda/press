@@ -231,15 +231,6 @@ impl Audit {
         }
     }
 
-    /// A freshly installed folder opens fully ticked. The savings projection and the
-    /// Convert button both read the selection, so an untouched folder would otherwise
-    /// show a greyed button and no number until the user guessed they must tick rows.
-    /// Narrowing is the explicit act: untick a row, or use the select-all control.
-    pub(super) fn select_all_visible(&mut self) {
-        self.selected = self.visible.iter().copied().collect();
-        self.refresh_target_summary();
-    }
-
     pub(super) fn refresh_target_summary(&mut self) {
         (self.selected_target_count, self.selected_target_bytes) = self
             .visible

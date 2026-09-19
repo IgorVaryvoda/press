@@ -4443,6 +4443,14 @@ fn init_theme(cx: &mut App) {
     theme.tokens.button_primary_hover = hover.into();
     theme.tokens.button_primary_active = active.into();
     theme.tokens.button_primary_foreground = gpui_kit::white().into();
+    // Every control that fills itself when it is on — checkbox, radio, switch,
+    // tab — reads the token set, not `theme.primary`. Left stock, a ticked
+    // checkbox painted itself white and then drew a white tick on it: a blank
+    // white square, which is why a selected row never looked selected.
+    theme.tokens.primary = base.into();
+    theme.tokens.primary_hover = hover.into();
+    theme.tokens.primary_active = active.into();
+    theme.tokens.primary_foreground = gpui_kit::white().into();
 
     // The two findings share one amber, and saved bytes are the one green.
     theme.yellow = gpui_kit::Hsla::from(gpui_kit::rgb(0xe0b054));

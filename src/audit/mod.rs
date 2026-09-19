@@ -1450,10 +1450,11 @@ impl Audit {
                 self.refresh_sirv_counts();
             }
         }
-        // Last, because retiring a pairing resets the Sirv scope and refreshes the
-        // list again. Ticking before that would tick the rows a stale scope was
-        // still hiding, and open the folder with nothing selected.
-        self.select_all_visible();
+        // A folder opens with nothing ticked. Converting is a decision about
+        // particular images, and a list that arrives pre-committed invites a
+        // person to press the button before they have looked at it. The header
+        // checkbox takes the whole folder in one click when that is the intent.
+        self.refresh_target_summary();
         self.schedule_estimate(cx);
         cx.notify();
 
@@ -2588,7 +2589,7 @@ pub(crate) fn build_audit(
             shortcuts_open: false,
         };
         audit.refresh_visible();
-        audit.select_all_visible();
+        audit.refresh_target_summary();
         audit.schedule_estimate(cx);
         audit.seed_tree_for_current_folder(cx);
         if open_single {
