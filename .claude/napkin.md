@@ -208,3 +208,10 @@ sessions learn.
 - 2026-09-19: Not bugs, checked and dropped: "Save changes" on a built-in preset
   IS disabled (it reads dim only when zoomed); the toast stack's collapsed peek
   at a bottom anchor is the library's intended stacking, not an overlap.
+- 2026-09-19: Released v0.7.0 from main 5ac41d0 (two rounds of UI audit fixes:
+  d7ac68d, ebe21cc, eda8f78). Followed the napkin's own gate this time — pushed
+  main, waited for all three CI OSes green (run 35441369100, 1h4m; macOS is the
+  long pole at ~60 min), and only then bumped, tagged and pushed. Release run
+  35444451833 was green on all five package jobs in 1h40m; the macOS Intel job
+  alone took ~100 min and the timestamp retry added in v0.6.9 held. All 16
+  assets published, `latest.json` serves v0.7.0.
