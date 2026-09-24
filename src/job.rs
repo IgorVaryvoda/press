@@ -2277,6 +2277,7 @@ mod tests {
                 .expect("the run records"),
             ],
             rejected: Vec::new(),
+            ..Default::default()
         };
         let mut job = job();
         job.source_roots = vec![root.clone()];
