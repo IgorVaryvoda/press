@@ -557,6 +557,11 @@ fn is_executable(tool: &Path) -> bool {
 /// cache like any other decode.
 #[cfg(target_os = "macos")]
 fn read_quicklook_thumb(path: &Path, edge: u32) -> Option<RgbaImage> {
+    // Quick Look given a path with nothing behind it still starts its generator
+    // and holds a slow worker for the full wait. A missing file is simply a miss.
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return None;
+    }
     if os_store_skips(path) {
         return None;
     }
