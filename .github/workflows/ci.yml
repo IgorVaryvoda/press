@@ -29,6 +29,9 @@ jobs:
   build:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A hang should fail within ninety minutes, not run out GitHub's six-hour
+    # default cap; cold builds on every platform still need the headroom.
+    timeout-minutes: 90
     strategy:
       # One platform failing should not hide the state of the others.
       fail-fast: false
