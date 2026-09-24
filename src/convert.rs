@@ -1054,6 +1054,25 @@ pub(crate) fn path_key(path: &Path) -> String {
         .join("/")
 }
 
+/// Whether two spellings name one file on this filesystem. Keys are lowercased,
+/// so a key match alone cannot tell `Photo.webp` from its case twin on Linux.
+/// Unix asks the filesystem (device and inode). Elsewhere std has no stable
+/// file identity, and NTFS is case-insensitive by default, so a key match is
+/// taken as the same file.
+#[cfg(unix)]
+fn same_file(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(left: &Path, right: &Path) -> bool {
+    path_key(left) == path_key(right)
+}
+
 /// Where a converted file goes: the same layout as the source, rooted at `out_dir`,
 /// with the selected extension. Keeping the tree means a folder of albums stays a
 /// folder of albums.
@@ -1141,7 +1160,14 @@ pub fn plan_outputs(
     let replace = destination.backups.is_some();
     let mut taken: HashSet<String> = HashSet::new();
     let key = path_key;
-    let originals: HashSet<String> = audited.iter().map(|path| key(path)).collect();
+    // Every audited path under each key, not just whether the key is taken. A
+    // key match alone cannot tell a source from its case twin on a case-sensitive
+    // disk, so `own_name` below has to look at the actual paths sharing a key.
+    let mut originals: std::collections::HashMap<String, Vec<&Path>> =
+        std::collections::HashMap::new();
+    for path in audited {
+        originals.entry(key(path)).or_default().push(path.as_path());
+    }
     // One pass over the manifest instead of one reverse scan per candidate. The
     // old code answered the same question per source with a linear search plus
     // a stat; on a large folder that is O(N*M) path keys. Newest record wins,
@@ -1194,9 +1220,16 @@ pub fn plan_outputs(
         let mine = mine_keys[index].as_str();
         let plain = output_path(root, source, out_dir, format);
         // In replace mode a WebP converted to WebP writes its own name back. That
-        // is not destruction: the original moves into the backup first.
-        let own_name = replace && key(&plain) == key(source);
-        if originals.contains(&key(&plain)) && !own_name {
+        // is not destruction: the original moves into the backup first. But a
+        // case twin on a case-sensitive disk shares the key without being the
+        // source, so its own name only holds if every audited path under that
+        // key is the source itself.
+        let own_name = replace
+            && key(&plain) == key(source)
+            && originals
+                .get(&key(&plain))
+                .is_none_or(|paths| paths.iter().all(|path| *path == source.as_path()));
+        if originals.contains_key(&key(&plain)) && !own_name {
             continue;
         }
         // A name somebody else's run owns is renamed around like any other taken
@@ -1221,7 +1254,7 @@ pub fn plan_outputs(
             let candidate = parent
                 .join(format!("{stem}-{extension}{suffix}"))
                 .with_extension(plain.extension().unwrap_or_default());
-            if originals.contains(&key(&candidate)) || claimed(&candidate, mine) {
+            if originals.contains_key(&key(&candidate)) || claimed(&candidate, mine) {
                 continue;
             }
             if taken.insert(key(&candidate)) {
@@ -1451,7 +1484,13 @@ fn output_guard(
     source_identity: &crate::manifest::SourceIdentity,
     recording: &Recording,
 ) -> Result<(bool, Option<crate::manifest::FileIdentity>), Failure> {
-    let same_name = recording.backup.is_some() && path_key(source) == path_key(written);
+    // A key match alone cannot tell `source` from its case twin on a
+    // case-sensitive disk. Nothing standing at `written` is as good a sign as
+    // `source` standing there itself; either way there is no other file to
+    // destroy.
+    let same_name = recording.backup.is_some()
+        && path_key(source) == path_key(written)
+        && (written.symlink_metadata().is_err() || same_file(source, written));
     if same_name {
         return Ok((true, None));
     }
@@ -1509,6 +1548,12 @@ fn output_guard(
             .symlink_metadata()
             .is_ok()
         {
+            return Err(Failure::OutputChanged);
+        }
+        // In replace mode the destination is the folder of originals itself. A
+        // file there that no run recorded is somebody's original, never a stale
+        // output, whatever its timestamp says.
+        if recording.backup.is_some() {
             return Err(Failure::OutputChanged);
         }
         // Before manifests existed, headless runs used the source/output
@@ -3663,6 +3708,204 @@ pub(crate) mod tests {
             recorded.outputs[0].output_bytes,
             std::fs::metadata(&written).unwrap().len(),
             "the record measures the file that landed"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Whether `dir` tells `a` from `A`. Tests of case-only collisions are
+    /// meaningless on a folder that cannot hold both names.
+    fn case_sensitive(dir: &Path) -> bool {
+        let probe = dir.join("case-probe");
+        std::fs::write(&probe, b"x").unwrap();
+        let sensitive = !dir.join("CASE-PROBE").exists();
+        let _ = std::fs::remove_file(&probe);
+        sensitive
+    }
+
+    #[test]
+    fn a_case_twin_is_not_the_sources_own_name() {
+        let dir = temp_dir("case-twin-own-name");
+        if !case_sensitive(&dir) {
+            // Case-insensitive filesystems (default macOS APFS) cannot hold
+            // `Photo.WEBP` and `Photo.webp` as two files, so this collision
+            // cannot occur here; Linux CI carries the real coverage.
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let source = dir.join("Photo.WEBP");
+        std::fs::write(
+            &source,
+            encode(&photo(32, 32), Format::WebP, Quality::lossy(80.), None).unwrap(),
+        )
+        .unwrap();
+        let distinct = dir.join("Photo.webp");
+        std::fs::write(&distinct, b"somebody else").unwrap();
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let sources = [source.clone()];
+        let audited = [source.clone(), distinct.clone()];
+        let planned = super::plan_outputs(&dir, &sources, &audited, &destination, Format::WebP);
+
+        assert_ne!(planned[0], Ok(dir.join("Photo.webp")));
+        if let Ok(written) = &planned[0] {
+            let backup = destination
+                .backup(&dir, &source)
+                .expect("replace mode names a backup");
+            let _ = convert_recorded(
+                &dir,
+                &dir,
+                &source,
+                written,
+                Some(&backup),
+                Quality::lossy(80.),
+            );
+        }
+        assert_eq!(std::fs::read(&distinct).unwrap(), b"somebody else");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_case_twin_missing_from_the_audit_is_still_refused() {
+        let dir = temp_dir("case-twin-missing-from-audit");
+        if !case_sensitive(&dir) {
+            // See `a_case_twin_is_not_the_sources_own_name`: this collision cannot
+            // occur on a case-insensitive disk.
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let source = dir.join("Photo.WEBP");
+        std::fs::write(
+            &source,
+            encode(&photo(32, 32), Format::WebP, Quality::lossy(80.), None).unwrap(),
+        )
+        .unwrap();
+        let distinct = dir.join("Photo.webp");
+        std::fs::write(&distinct, b"somebody else").unwrap();
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let backup = destination
+            .backup(&dir, &source)
+            .expect("replace mode names a backup");
+        let written = dir.join("Photo.webp");
+
+        // Simulates a file the scan couldn't read: it never reaches `audited`, so
+        // only `output_guard`'s own-name check stands between it and the write.
+        let result = convert_recorded(
+            &dir,
+            &dir,
+            &source,
+            &written,
+            Some(&backup),
+            Quality::lossy(80.),
+        );
+
+        assert_eq!(result, Err(Failure::OutputChanged));
+        assert_eq!(std::fs::read(&distinct).unwrap(), b"somebody else");
+        assert!(source.is_file(), "the source is still at its own name");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_case_only_rename_on_its_own_still_writes() {
+        let dir = temp_dir("case-only-rename-on-its-own");
+        if !case_sensitive(&dir) {
+            // See `a_case_twin_is_not_the_sources_own_name`: nothing to prove
+            // separately from that test when the disk cannot hold two spellings.
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let source = dir.join("Photo.WEBP");
+        let original = encode(&photo(32, 32), Format::WebP, Quality::lossy(80.), None).unwrap();
+        std::fs::write(&source, &original).unwrap();
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let sources = [source.clone()];
+        let planned = super::plan_outputs(&dir, &sources, &sources, &destination, Format::WebP);
+        assert_eq!(planned, [Ok(dir.join("Photo.webp"))]);
+        let written = planned[0].clone().unwrap();
+        let backup = destination
+            .backup(&dir, &source)
+            .expect("replace mode names a backup");
+
+        let converted = convert_recorded(
+            &dir,
+            &dir,
+            &source,
+            &written,
+            Some(&backup),
+            Quality::lossy(80.),
+        );
+        assert!(
+            converted.is_ok(),
+            "a source that converts back to its own name under a different case still writes"
+        );
+        assert_eq!(std::fs::read(&backup.path).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_mode_never_recycles_an_unrecorded_older_file() {
+        let dir = temp_dir("replace-never-recycles-unrecorded-older");
+        let source = dir.join("photo.png");
+        photo(64, 64).save(&source).unwrap();
+        let written = dir.join("photo.webp");
+        std::fs::write(&written, b"not an image").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&written)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .unwrap();
+
+        let backups = crate::manifest::backup_root(&dir);
+        let destination = replace_run(&dir, &backups);
+        let backup = destination
+            .backup(&dir, &source)
+            .expect("replace mode names a backup");
+
+        // No manifest exists yet, and the destination predates the source, which
+        // is exactly the pre-manifest legacy case `output_guard` otherwise
+        // recycles. In replace mode the destination is the folder of originals
+        // itself, so that legacy rule must not apply here.
+        let result = convert_recorded(
+            &dir,
+            &dir,
+            &source,
+            &written,
+            Some(&backup),
+            Quality::lossy(80.),
+        );
+
+        assert_eq!(result, Err(Failure::OutputChanged));
+        assert_eq!(std::fs::read(&written).unwrap(), b"not an image");
+        assert!(source.is_file(), "the source is still at its own name");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_optimized_folder_keeps_its_legacy_timestamp_rule() {
+        let dir = temp_dir("optimized-keeps-legacy-timestamp-rule");
+        let out = dir.join(crate::scan::OUTPUT_DIR);
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("photo.png");
+        photo(64, 64).save(&source).unwrap();
+        let written = out.join("photo.webp");
+        std::fs::write(&written, b"not an image").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&written)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .unwrap();
+
+        let converted = convert_recorded(&dir, &out, &source, &written, None, Quality::lossy(80.));
+
+        assert!(
+            converted.is_ok(),
+            "a stale unrecorded output in optimized/ is still recycled"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
