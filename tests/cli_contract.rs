@@ -498,6 +498,39 @@ fn replace_and_restore_round_trip_through_the_cli() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A restore that cannot put a file back still has to say so, by name, and
+/// leave everything exactly where it was: the blocking file untouched and the
+/// backup still parked in the mirror for a retry once the slot is clear.
+#[test]
+fn restore_that_cannot_finish_exits_1_and_names_the_file() {
+    let dir = workdir("restore-blocked");
+    let original = std::fs::read(photo(&dir, "shot.png")).expect("the fixture reads back");
+    let target = dir.to_string_lossy().into_owned();
+    assert_exit(&run(&["convert", &target, "--replace"]), 0, "replace");
+    let blocker = b"not the original".to_vec();
+    std::fs::write(dir.join("shot.png"), &blocker).expect("a new file blocks the slot");
+    let restored = run(&["restore", &target]);
+    assert_exit(&restored, 1, "a blocked restore");
+    let message = stderr(&restored);
+    assert!(message.contains("shot"), "{message}");
+    assert!(
+        message.contains("something else is already at"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("shot.png")).expect("the blocker reads back"),
+        blocker,
+        "the blocking file is untouched"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("press-originals").join("shot.png"))
+            .expect("the original is still parked in the mirror"),
+        original,
+        "the backup still holds the original bytes"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The same round trip through the other spelling. The audited root, the output
 /// context, the collision keys and the backup mirror have to be one namespace,
 /// or the run refuses every file as outside the output folder.

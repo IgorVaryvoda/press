@@ -15,9 +15,11 @@
 //!
 //! A line that does not parse is stepped over rather than trusted, and it is not
 //! necessarily the last one: a full disk or a network share that does not honour
-//! `O_APPEND` atomically can leave a half-written line with whole records after it.
-//! Each append starts a fresh line of its own if the file does not already end on
-//! one, so a torn line can only ever swallow itself.
+//! `O_APPEND` atomically can leave a half-written line with whole records after it,
+//! or tear one mid-character. Each append starts a fresh line of its own if the
+//! file does not already end on one, and reading splits the file into lines before
+//! decoding any of them, so a torn line — UTF-8 or JSON — can only ever swallow
+//! itself.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -162,6 +164,11 @@ pub struct Manifest {
     /// whatever folder it was in — a download, a shared drive — so a line saying
     /// `../../.ssh/id_rsa` is a file this app must refuse rather than delete.
     pub rejected: Vec<Rejected>,
+    /// Non-blank lines that were not valid UTF-8 or not a `Record` at all, kept
+    /// verbatim. They are evidence — the only trace of whatever a torn write or a
+    /// hand edit left behind — so a rewrite puts them back rather than dropping
+    /// them.
+    pub unparsed: Vec<Vec<u8>>,
 }
 
 /// A line that was refused, and the line itself: it is the only evidence of what
@@ -366,20 +373,47 @@ pub fn path(output_root: &Path) -> PathBuf {
     output_root.join(NAME)
 }
 
-/// A missing or unreadable manifest reads as an empty one, and so does a line
-/// that is not a record: a run killed mid-write leaves one torn line, always the
-/// last, and losing it must not cost the four hundred before it.
+/// A missing manifest reads as an empty one. Used by planning code (`convert.rs`,
+/// `saved_plan.rs`) that wants best-effort history and would rather under-report
+/// than fail a run over a manifest it merely could not finish reading.
+///
+/// Anything that *acts* on what it reads — deletes, moves, or otherwise treats
+/// the manifest as authoritative — must call `read` instead: this function turns
+/// a read error into the same empty result as "never converted here", and
+/// `restore` deleting an empty-looking manifest it actually failed to read is
+/// the bug this module exists to not repeat.
 pub fn load(output_root: &Path) -> Manifest {
-    let mut manifest = Manifest::default();
-    let Ok(text) = std::fs::read_to_string(path(output_root)) else {
-        return manifest;
+    read(output_root).unwrap_or_default()
+}
+
+/// Read the manifest, telling "nothing here yet" apart from "something is here
+/// and could not be read." The two look the same to an eye that only counts
+/// records, but they are not the same fact: an empty result must be safe to
+/// delete over, and an unreadable file must not be.
+///
+/// The file is read whole as bytes, then split into lines and decoded one at a
+/// time, so neither a read error nor a byte torn mid-character anywhere in the
+/// file can cost more than the line it sits in.
+pub fn read(output_root: &Path) -> Result<Manifest, String> {
+    let bytes = match std::fs::read(path(output_root)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Manifest::default());
+        }
+        Err(error) => return Err(format!("{NAME} could not be read: {error}")),
     };
+    let mut manifest = Manifest::default();
     let mut voided = std::collections::HashSet::new();
-    for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<Record>(line) else {
+        let Ok(text) = std::str::from_utf8(line) else {
+            manifest.unparsed.push(line.to_vec());
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<Record>(text) else {
+            manifest.unparsed.push(line.to_vec());
             continue;
         };
         if record.void {
@@ -388,7 +422,7 @@ pub fn load(output_root: &Path) -> Manifest {
         }
         match untrusted(&record) {
             Some(reason) => manifest.rejected.push(Rejected {
-                line: line.to_string(),
+                line: text.to_string(),
                 reason: format!("{NAME} line {} ({reason})", index + 1),
             }),
             None => manifest.outputs.push(record),
@@ -399,7 +433,7 @@ pub fn load(output_root: &Path) -> Manifest {
     manifest
         .outputs
         .retain(|record| !voided.contains(&record.identity()));
-    manifest
+    Ok(manifest)
 }
 
 /// Why a record must not be acted on. Every path in it is joined onto a root and
@@ -473,10 +507,16 @@ fn unterminated(path: &Path) -> bool {
 }
 
 /// Rewrite the file with the records that are left, and with every line the undo
-/// refused to act on: those lines are the only evidence of what was claimed here,
-/// and dropping them would quietly erase the thing being reported. Only `restore`
-/// rewrites, and it goes through the same stage-and-rename as any output.
-fn save(root: &Path, records: &[Record], rejected: &[Rejected]) -> Result<(), String> {
+/// refused to act on or could not even parse: those lines are the only evidence
+/// of what was claimed here, and dropping them would quietly erase the thing
+/// being reported. Only `restore` rewrites, and it goes through the same
+/// stage-and-rename as any output.
+fn save(
+    root: &Path,
+    records: &[Record],
+    rejected: &[Rejected],
+    unparsed: &[Vec<u8>],
+) -> Result<(), String> {
     let mut encoded = Vec::new();
     for record in records {
         serde_json::to_writer(&mut encoded, record).map_err(|error| error.to_string())?;
@@ -484,6 +524,10 @@ fn save(root: &Path, records: &[Record], rejected: &[Rejected]) -> Result<(), St
     }
     for line in rejected {
         encoded.extend_from_slice(line.line.as_bytes());
+        encoded.push(b'\n');
+    }
+    for line in unparsed {
+        encoded.extend_from_slice(line);
         encoded.push(b'\n');
     }
     crate::convert::write_output(root, &path(root), &encoded).map_err(|failure| {
@@ -506,7 +550,22 @@ pub struct Restore {
 /// then delete the original that was meant to survive.
 pub fn restore(root: &Path) -> Restore {
     let backups = backup_root(root);
-    let loaded = load(root);
+    // Computed once: every backup-bearing record shares the same mirror, so a
+    // symlinked or missing-as-a-directory mirror fails all of them the same way
+    // rather than being re-stated (and re-raced) per record.
+    let backups_unsafe = unsafe_backup_root(&backups);
+    let loaded = match read(root) {
+        Ok(loaded) => loaded,
+        // An unreadable manifest is not an empty one. Acting on it — even just
+        // deleting it as "nothing to restore" — would erase the only map from
+        // the backups on disk to the files they belong under.
+        Err(message) => {
+            return Restore {
+                restored: Vec::new(),
+                failures: vec![message],
+            };
+        }
+    };
     let mut restored = Vec::new();
     let mut failures: Vec<String> = loaded
         .rejected
@@ -534,7 +593,23 @@ pub fn restore(root: &Path) -> Restore {
             kept.push(record.clone());
             continue;
         };
-        match restore_one(&from, &output, &original, record, &backups) {
+        if let Some(reason) = &backups_unsafe {
+            failures.push(format!("{} ({reason})", record.output.display()));
+            kept.push(record.clone());
+            continue;
+        }
+        // The folder a manifest line names came with the audited tree, which is
+        // untrusted below the root the user chose: a symlink standing in for any
+        // folder on these paths could send the move somewhere else entirely.
+        if let Err(reason) = plain_folders(&backups, &from)
+            .and_then(|()| plain_folders(root, &original))
+            .and_then(|()| plain_folders(root, &output))
+        {
+            failures.push(format!("{} ({reason})", record.output.display()));
+            kept.push(record.clone());
+            continue;
+        }
+        match restore_one(root, &from, &output, &original, record, &backups) {
             Ok(Some(original)) => restored.push(original),
             // Already back where it belongs, so the record has nothing left to say.
             Ok(None) => {}
@@ -546,10 +621,10 @@ pub fn restore(root: &Path) -> Restore {
     }
 
     kept.reverse();
-    let saved = if kept.is_empty() && loaded.rejected.is_empty() {
+    let saved = if kept.is_empty() && loaded.rejected.is_empty() && loaded.unparsed.is_empty() {
         remove_if_present(&path(root))
     } else {
-        save(root, &kept, &loaded.rejected)
+        save(root, &kept, &loaded.rejected, &loaded.unparsed)
     };
     if let Err(message) = saved {
         failures.push(format!("{NAME} ({message})"));
@@ -560,7 +635,72 @@ pub fn restore(root: &Path) -> Restore {
     Restore { restored, failures }
 }
 
+/// Whether a folder on disk is safe to walk through: a plain directory, not a
+/// symlink or (on Windows) a junction standing in for one.
+fn unsafe_folder(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the backup mirror itself is safe to act through, checked directly
+/// because `plain_folders` only walks the levels *below* the base it is given
+/// and this is that base. The write side creates this folder fresh under the
+/// audited root; a symlink or junction standing in for it did not come from a
+/// run this app made — it came with the folder.
+fn unsafe_backup_root(backups: &Path) -> Option<String> {
+    let metadata = backups.symlink_metadata().ok()?;
+    unsafe_folder(&metadata).then(|| format!("{} is not a plain folder", backups.display()))
+}
+
+/// Every folder from `base` down to `path`'s parent must be a plain directory.
+/// `base` is trusted (the folder the user chose); everything under it came with
+/// the folder, so a symlink or junction there could point anywhere.
+/// Missing levels are fine here — only existing ones are checked, and the walk
+/// stops as soon as one is missing, because nothing below a folder that does
+/// not exist yet can already be a symlink.
+fn plain_folders(base: &Path, path: &Path) -> Result<(), String> {
+    let Ok(relative) = path.strip_prefix(base) else {
+        return Err(format!(
+            "{} is not under {}",
+            path.display(),
+            base.display()
+        ));
+    };
+    let Some(parent) = relative.parent() else {
+        return Ok(());
+    };
+    let mut ancestor = base.to_path_buf();
+    for component in parent.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(format!(
+                "{} is not a plain folder",
+                ancestor.join(component.as_os_str()).display()
+            ));
+        };
+        ancestor.push(part);
+        match ancestor.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(format!("{} is not a plain folder", ancestor.display())),
+            Ok(metadata) if unsafe_folder(&metadata) => {
+                return Err(format!("{} is not a plain folder", ancestor.display()));
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn restore_one(
+    root: &Path,
     backup: &Path,
     output: &Path,
     original: &Path,
@@ -592,13 +732,61 @@ fn restore_one(
     }
     remove_output(output, record)?;
     if let Some(parent) = original.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("{} could not be recreated: {error}", parent.display()))?;
+        ensure_plain_parents(root, parent)?;
     }
     std::fs::rename(backup, original)
         .map_err(|error| format!("could not move it back: {error}"))?;
     prune_empty(backup.parent(), backups);
     Ok(Some(original.to_path_buf()))
+}
+
+/// Create `parent` under `root` one level at a time, checking each level before
+/// creating the next and again right after. `create_dir_all` would build a
+/// missing chain through whatever its parents currently resolve to; this walk
+/// refuses a symlink at any level instead of walking through it, the same shape
+/// as `convert.rs::ensure_directory` on the write side.
+fn ensure_plain_parents(root: &Path, parent: &Path) -> Result<(), String> {
+    let Ok(relative) = parent.strip_prefix(root) else {
+        return Err(format!(
+            "{} is not under {}",
+            parent.display(),
+            root.display()
+        ));
+    };
+    let mut ancestor = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(format!(
+                "{} is not a plain folder",
+                ancestor.join(component.as_os_str()).display()
+            ));
+        };
+        ancestor.push(part);
+        match ancestor.symlink_metadata() {
+            Ok(metadata) if unsafe_folder(&metadata) => {
+                return Err(format!("{} is not a plain folder", ancestor.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&ancestor).map_err(|error| {
+                    format!("{} could not be recreated: {error}", ancestor.display())
+                })?;
+                let metadata = ancestor.symlink_metadata().map_err(|error| {
+                    format!("{} could not be checked: {error}", ancestor.display())
+                })?;
+                if unsafe_folder(&metadata) {
+                    return Err(format!("{} is not a plain folder", ancestor.display()));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{} could not be checked: {error}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove the file the run installed, and only that file. A different size or a
@@ -954,5 +1142,298 @@ mod tests {
         assert_eq!(load(&dir).outputs.len(), 0, "both records are spent");
         assert!(!backups.exists(), "the emptied mirror does not linger");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One replace-mode conversion, staged and installed the way `convert.rs`
+    /// really does it: `name` moves into the backup mirror, `output_name` takes
+    /// its place, and a record describing the move is appended. Returns the
+    /// original's bytes so a test can tell a genuine restore from a lookalike.
+    fn replace_one(dir: &Path, name: &str, output_name: &str) -> Vec<u8> {
+        let backups = backup_root(dir);
+        std::fs::create_dir_all(&backups).expect("the backup mirror is created");
+        let original_bytes = vec![9u8; 24];
+        std::fs::write(dir.join(name), &original_bytes).expect("the original is written");
+        let staged = dir.join(format!("staged-{output_name}"));
+        std::fs::write(&staged, vec![5u8; 40]).expect("the run stages its output");
+        let record = stamp()
+            .record(
+                (dir, dir),
+                &dir.join(name),
+                &dir.join(output_name),
+                &staged,
+                Some(&backups.join(name)),
+            )
+            .expect("plain relative paths record");
+        std::fs::rename(dir.join(name), backups.join(name)).expect("the original moves aside");
+        std::fs::rename(&staged, dir.join(output_name)).expect("the output installs");
+        append_record(dir, &record).expect("the record appends");
+        original_bytes
+    }
+
+    #[test]
+    fn a_restore_blocked_by_a_new_file_keeps_its_record() {
+        let dir = test_dir("blocked");
+        replace_one(&dir, "photo.png", "photo.webp");
+        let blocker = vec![3u8; 5];
+        std::fs::write(dir.join("photo.png"), &blocker).expect("a new file lands on the slot");
+        let restored = restore(&dir);
+        assert_eq!(restored.failures.len(), 1, "{:?}", restored.failures);
+        assert!(
+            restored.failures[0].contains("something else is already at"),
+            "{}",
+            restored.failures[0]
+        );
+        assert!(restored.restored.is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("photo.png")).expect("the blocker reads back"),
+            blocker,
+            "the blocking file is untouched"
+        );
+        assert!(
+            dir.join("photo.webp").is_file(),
+            "the output stays until the slot is free"
+        );
+        assert_eq!(
+            load(&dir).outputs.len(),
+            1,
+            "the record survives for a retry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_backup_with_the_original_present_is_already_restored() {
+        let dir = test_dir("already-restored");
+        let original_bytes = replace_one(&dir, "photo.png", "photo.webp");
+        let backups = backup_root(&dir);
+        // Somebody already put the original back by hand: the backup is gone
+        // and the original is sitting under its own name again.
+        std::fs::rename(backups.join("photo.png"), dir.join("photo.png"))
+            .expect("the hand restore moves the original back");
+        let restored = restore(&dir);
+        assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+        assert_eq!(
+            std::fs::read(dir.join("photo.png")).expect("the original is still there"),
+            original_bytes
+        );
+        assert!(
+            load(&dir).outputs.is_empty(),
+            "the record has nothing left to say"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_backup_and_missing_original_is_named() {
+        let dir = test_dir("both-missing");
+        replace_one(&dir, "photo.png", "photo.webp");
+        let backups = backup_root(&dir);
+        std::fs::remove_file(backups.join("photo.png")).expect("the backup is lost");
+        let restored = restore(&dir);
+        assert_eq!(restored.failures.len(), 1, "{:?}", restored.failures);
+        assert!(
+            restored.failures[0].contains("its original is no longer at"),
+            "{}",
+            restored.failures[0]
+        );
+        assert!(restored.restored.is_empty());
+        assert_eq!(
+            load(&dir).outputs.len(),
+            1,
+            "the record survives for a retry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partial_restore_leaves_only_the_failures_for_a_retry() {
+        let dir = test_dir("partial");
+        replace_one(&dir, "one.png", "one.webp");
+        replace_one(&dir, "two.png", "two.webp");
+        let blocker = vec![4u8; 6];
+        std::fs::write(dir.join("one.png"), &blocker).expect("one slot is blocked");
+        let first = restore(&dir);
+        assert_eq!(first.failures.len(), 1, "{:?}", first.failures);
+        assert_eq!(first.restored.len(), 1, "{:?}", first.restored);
+        assert_eq!(
+            load(&dir).outputs.len(),
+            1,
+            "only the blocked record remains"
+        );
+        std::fs::remove_file(dir.join("one.png")).expect("the blocker is cleared");
+        let second = restore(&dir);
+        assert!(second.failures.is_empty(), "{:?}", second.failures);
+        assert_eq!(second.restored.len(), 1, "{:?}", second.restored);
+        assert!(load(&dir).outputs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_torn_mid_character_costs_only_itself() {
+        let dir = test_dir("torn-utf8");
+        append_record(&dir, &record("one.png", "one.webp", None, 1)).expect("append");
+        append_record(&dir, &record("two.png", "two.webp", None, 2)).expect("append");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path(&dir))
+            .expect("the manifest opens")
+            .write_all(b"{\"source\":\"caf\xC3")
+            .expect("the torn line is written");
+        // A fresh append always starts its own line, so the torn line above
+        // cannot swallow this one even though it never got a trailing newline.
+        append_record(&dir, &record("three.png", "three.webp", None, 3)).expect("append");
+        let loaded = load(&dir);
+        assert_eq!(loaded.outputs.len(), 3, "{:?}", loaded.outputs);
+        let read = read(&dir).expect("a readable file with one bad line is still Ok");
+        assert_eq!(read.unparsed.len(), 1, "{:?}", read.unparsed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_keeps_a_manifest_it_could_not_parse() {
+        let dir = test_dir("invalid-utf8-only");
+        let bytes: &[u8] = b"\xFF\xFE\n";
+        std::fs::write(path(&dir), bytes).expect("the hostile manifest is written");
+        let _ = restore(&dir);
+        assert_eq!(
+            std::fs::read(path(&dir)).expect("the manifest is still there"),
+            bytes,
+            "a line that never parsed is put back exactly as it was, not dropped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_reports_a_manifest_it_could_not_read() {
+        let dir = test_dir("manifest-is-a-directory");
+        std::fs::create_dir(path(&dir)).expect("a directory sits where the manifest belongs");
+        let restored = restore(&dir);
+        assert_eq!(restored.failures.len(), 1, "{:?}", restored.failures);
+        assert!(
+            restored.failures[0].contains(NAME),
+            "{}",
+            restored.failures[0]
+        );
+        assert!(
+            path(&dir).is_dir(),
+            "a manifest restore could not even read is left exactly as it was"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_a_symlinked_subfolder() {
+        let dir = test_dir("symlinked-subfolder");
+        let elsewhere = test_dir("symlinked-subfolder-elsewhere");
+        let backups = backup_root(&dir);
+        std::fs::create_dir_all(backups.join("sub")).expect("the mirror subfolder exists");
+        std::os::unix::fs::symlink(&elsewhere, dir.join("sub"))
+            .expect("the root gets a symlinked subfolder");
+        let backup_bytes = vec![6u8; 12];
+        std::fs::write(backups.join("sub/x.png"), &backup_bytes)
+            .expect("a real backup sits in the mirror");
+        append_record(&dir, &record("sub/x.png", "x.webp", Some("sub/x.png"), 1)).expect("append");
+        let restored = restore(&dir);
+        assert_eq!(restored.failures.len(), 1, "{:?}", restored.failures);
+        assert!(
+            restored.failures[0].contains("is not a plain folder"),
+            "{}",
+            restored.failures[0]
+        );
+        assert!(
+            !elsewhere.join("x.png").exists(),
+            "nothing lands through the symlinked subfolder"
+        );
+        assert!(
+            backups.join("sub/x.png").is_file(),
+            "the backup stays in the mirror"
+        );
+        assert_eq!(
+            load(&dir).outputs.len(),
+            1,
+            "the record is kept for a retry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_a_symlinked_backup_mirror() {
+        let dir = test_dir("symlinked-mirror");
+        let elsewhere = test_dir("symlinked-mirror-elsewhere");
+        let secret_bytes = vec![7u8; 9];
+        std::fs::write(elsewhere.join("secret.png"), &secret_bytes)
+            .expect("the outside file exists");
+        std::os::unix::fs::symlink(&elsewhere, backup_root(&dir))
+            .expect("the mirror itself is a symlink");
+        append_record(
+            &dir,
+            &record("secret.png", "secret.webp", Some("secret.png"), 1),
+        )
+        .expect("append");
+        let restored = restore(&dir);
+        assert_eq!(restored.failures.len(), 1, "{:?}", restored.failures);
+        assert!(
+            restored.failures[0].contains("is not a plain folder"),
+            "{}",
+            restored.failures[0]
+        );
+        assert_eq!(
+            std::fs::read(elsewhere.join("secret.png")).expect("the outside file is untouched"),
+            secret_bytes
+        );
+        assert!(
+            !dir.join("secret.png").exists(),
+            "nothing arrives through the symlinked mirror"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_to_delete_an_output_through_a_symlink() {
+        let dir = test_dir("symlinked-output");
+        let elsewhere = test_dir("symlinked-output-elsewhere");
+        let backups = backup_root(&dir);
+        std::fs::create_dir_all(&backups).expect("the backup mirror is created");
+        std::os::unix::fs::symlink(&elsewhere, dir.join("sub"))
+            .expect("the root gets a symlinked subfolder");
+        let output_bytes = vec![8u8; 20];
+        std::fs::write(elsewhere.join("out.webp"), &output_bytes)
+            .expect("the real output sits outside the root");
+        let backup_bytes = vec![2u8; 14];
+        std::fs::write(backups.join("x.png"), &backup_bytes)
+            .expect("a real backup sits in the mirror");
+        let installed = stamp()
+            .record(
+                (&dir, &dir),
+                &dir.join("x.png"),
+                &dir.join("sub/out.webp"),
+                &elsewhere.join("out.webp"),
+                Some(&backups.join("x.png")),
+            )
+            .expect("plain relative paths record");
+        append_record(&dir, &installed).expect("append");
+        let restored = restore(&dir);
+        assert_eq!(restored.failures.len(), 1, "{:?}", restored.failures);
+        assert!(
+            restored.failures[0].contains("is not a plain folder"),
+            "{}",
+            restored.failures[0]
+        );
+        assert_eq!(
+            std::fs::read(elsewhere.join("out.webp")).expect("the outside output is untouched"),
+            output_bytes
+        );
+        assert!(
+            backups.join("x.png").is_file(),
+            "the backup stays in the mirror"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 }
