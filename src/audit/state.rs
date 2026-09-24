@@ -3,11 +3,19 @@
 use super::*;
 
 impl Audit {
+    /// Something is moving or overwriting the folder's files right now: a
+    /// conversion (replace mode moves originals), a restore, or a Sirv transfer.
+    /// Only one may run, or two of them act on the same names at once.
+    pub(super) fn files_in_motion(&self) -> bool {
+        self.converting || self.restoring || self.sirv_busy()
+    }
+
     /// Applying can exit the process on Windows, so guard before installation too.
     #[cfg(any(test, feature = "updater"))]
     pub(crate) fn update_can_restart(&self) -> bool {
         !self.scan_blocks_delivery()
             && !self.converting
+            && !self.restoring
             && !self.local_ai_busy()
             && !self.studio_busy()
             && self.sirv_job.as_ref().is_none_or(|job| job.finished)

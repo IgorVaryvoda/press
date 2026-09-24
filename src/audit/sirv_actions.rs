@@ -555,7 +555,11 @@ impl Audit {
     }
 
     pub(super) fn run_pull(&mut self, differing: bool, cx: &mut Context<Self>) {
-        if self.batch_folders.is_some() || self.scan_blocks_delivery() {
+        if self.batch_folders.is_some()
+            || self.scan_blocks_delivery()
+            || self.converting
+            || self.restoring
+        {
             return;
         }
         let Some(pairing) = &self.sirv_pairing else {
@@ -652,7 +656,12 @@ impl Audit {
                             false
                         };
                         if acknowledged {
-                            audit.request_path(audit.root.clone(), cx);
+                            // Only if this window still owns the folder the stop
+                            // landed on: a newer navigation must not be cancelled
+                            // by a rescan of the folder it just left.
+                            if audit.root == root && audit.scanning.is_none() {
+                                audit.request_path(root.clone(), cx);
+                            }
                             cx.notify();
                         }
                     })
@@ -746,8 +755,12 @@ impl Audit {
                         audit.clear_error("sirv-transfer", cx);
                     }
                     // The pulled files belong in the table: a full rescan, through
-                    // the same path a folder change takes.
-                    audit.request_path(audit.root.clone(), cx);
+                    // the same path a folder change takes — but only if nothing
+                    // newer already owns the dataset (another navigation, or its
+                    // own scan already running).
+                    if audit.root == root && audit.scanning.is_none() {
+                        audit.request_path(root.clone(), cx);
+                    }
                     cx.notify();
                 }
             })
@@ -768,7 +781,11 @@ impl Audit {
     }
 
     pub(super) fn run_push(&mut self, accept: sirv::SyncState, cx: &mut Context<Self>) {
-        if self.batch_folders.is_some() || self.scan_blocks_delivery() {
+        if self.batch_folders.is_some()
+            || self.scan_blocks_delivery()
+            || self.converting
+            || self.restoring
+        {
             return;
         }
         let Some(pairing) = &self.sirv_pairing else {
@@ -798,7 +815,7 @@ impl Audit {
         completion: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
-        if self.scan_blocks_delivery() {
+        if self.scan_blocks_delivery() || self.converting || self.restoring {
             return;
         }
         let Some(pairing) = &self.sirv_pairing else {

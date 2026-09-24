@@ -304,7 +304,7 @@ impl Audit {
         rows: Option<Vec<usize>>,
         cx: &mut Context<Self>,
     ) {
-        if self.converting
+        if self.files_in_motion()
             || self.local_ai_busy()
             || self.studio_busy()
             || self.plan_busy()

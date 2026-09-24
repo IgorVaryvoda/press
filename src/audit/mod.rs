@@ -540,6 +540,10 @@ pub(crate) struct Audit {
     /// dataset changes and after a run, never during a render, and it survives a
     /// restart because the record does.
     restorable: usize,
+    /// A restore is moving files right now. Set before the background move
+    /// starts and cleared first in the landing, so a stalled landing can
+    /// never leave the button wedged disabled.
+    restoring: bool,
     /// Source and output bytes for `results`. Conversion progress redraws often,
     /// so rebuilding these totals from every completed row would get slower as
     /// the job advances.
@@ -1964,22 +1968,34 @@ impl Audit {
     /// makes the report truthful: the files that came back are named, and so are
     /// the ones that could not.
     pub(super) fn restore_originals(&mut self, cx: &mut Context<Self>) {
-        if self.converting || self.restorable == 0 {
+        if self.files_in_motion()
+            || self.plan_busy()
+            || self.scan_blocks_delivery()
+            || self.restorable == 0
+        {
             return;
         }
         self.clear_error("restore", cx);
+        self.restoring = true;
+        cx.notify();
         let root = self.root.clone();
+        let dataset = self.dataset_generation;
         cx.spawn(async move |this, cx| {
             let (restored, restorable) = cx
                 .background_executor()
-                .spawn(async move {
-                    let restored = crate::manifest::restore(&root);
-                    let restorable = crate::manifest::restorable(&root);
-                    (restored, restorable)
+                .spawn({
+                    let root = root.clone();
+                    async move {
+                        let restored = crate::manifest::restore(&root);
+                        let restorable = crate::manifest::restorable(&root);
+                        (restored, restorable)
+                    }
                 })
                 .await;
             let _ = this.update(cx, |audit, cx| {
-                audit.restorable = restorable;
+                // Cleared first and unconditionally: an early return anywhere
+                // below can never leave the button wedged disabled.
+                audit.restoring = false;
                 if restored.failures.is_empty() {
                     audit.notify_success(
                         "restore",
@@ -1987,12 +2003,7 @@ impl Audit {
                         format!(
                             "{} put back: {}",
                             restored.restored.len(),
-                            named(
-                                restored
-                                    .restored
-                                    .iter()
-                                    .map(|path| entry_name(&audit.root, path))
-                            )
+                            named(restored.restored.iter().map(|path| entry_name(&root, path)))
                         ),
                         cx,
                     );
@@ -2009,10 +2020,19 @@ impl Audit {
                         cx,
                     );
                 }
+                // A newer folder already owns the dataset: its own undo count is on
+                // screen, and this stale run's recount must not overwrite it or
+                // cancel whatever scan that folder is running.
+                if audit.dataset_generation != dataset || audit.root != root {
+                    cx.notify();
+                    return;
+                }
+                audit.restorable = restorable;
                 // The folder is not what the list is showing any more: the outputs
                 // are gone and the originals are back under their own names.
-                let root = audit.root.clone();
-                audit.request_folder(root, cx);
+                if audit.scanning.is_none() {
+                    audit.request_folder(root.clone(), cx);
+                }
                 cx.notify();
             });
         })
@@ -2574,6 +2594,7 @@ pub(crate) fn build_audit(
             conversion_destination: None,
             latest_output_root: None,
             restorable,
+            restoring: false,
             converted_totals: (0, 0),
             converting: false,
             #[cfg(feature = "updater")]

@@ -5703,6 +5703,92 @@ fn a_stale_conversion_does_not_overwrite_restorable(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A restore moves files back under their own names; a conversion in flight
+/// (replace mode moves files too) must never race it over the same names.
+#[gpui_kit::test]
+fn restore_refuses_to_start_while_a_conversion_is_running(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    let root = audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.restorable, 3,
+            "the run finished and left something to undo"
+        );
+        audit.root.clone()
+    });
+    // A second run in flight, simulated directly: `files_in_motion` must see it
+    // and refuse the restore rather than move files a conversion still owns.
+    audit.update(cx, |audit, _| audit.converting = true);
+    audit.update(cx, |audit, cx| audit.restore_originals(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(!audit.restoring, "a running conversion refuses the restore");
+        assert_eq!(audit.restorable, 3, "nothing moved while the guard held");
+    });
+    audit.update(cx, |audit, _| audit.converting = false);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The same guard, the other direction: a restore moving files back must block
+/// a new conversion rather than let it write over a move still in progress.
+#[gpui_kit::test]
+fn a_conversion_refuses_to_start_while_a_restore_is_running(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.results.is_empty(),
+            "the first run left something behind"
+        );
+    });
+    // A restore in flight, simulated directly: the selection from the first run
+    // is still ticked, so a real second run would otherwise start cleanly.
+    audit.update(cx, |audit, _| audit.restoring = true);
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.converting,
+            "a running restore refuses a new conversion"
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A restore that lands after its folder is gone belongs to the old dataset:
+/// its trailing recount must not become the new folder's undo count, mirroring
+/// the same rule a stale conversion already keeps.
+#[gpui_kit::test]
+fn a_stale_restore_does_not_overwrite_a_newer_folders_restorable(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    audit.update(cx, |audit, cx| audit.restore_originals(cx));
+    // A new folder opens while the restore's background move is in flight. Its
+    // own undo count is already on screen; the in-flight restore now belongs to
+    // the old dataset.
+    audit.update(cx, |audit, _| {
+        audit.dataset_generation = audit.dataset_generation.wrapping_add(1);
+        audit.restorable = 9;
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            audit.restorable, 9,
+            "the stale restore moved three originals back, but its recount must not land here"
+        );
+        assert!(
+            !audit.restoring,
+            "the landing always clears the flag, stale or not"
+        );
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[gpui_kit::test]
 fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
     // Three windows of files, so a stop taken at the first batch of results still

@@ -269,7 +269,7 @@ impl Audit {
     /// Run, continue or repair the open plan. Every mode binds the same two
     /// roots the plan was saved against and reports what the engine recorded.
     pub(super) fn run_plan(&mut self, mode: Option<ExecutionMode>, cx: &mut Context<Self>) {
-        if self.converting || self.plan_busy() {
+        if self.converting || self.plan_busy() || self.restoring || self.sirv_busy() {
             return;
         }
         let Some(work) = self.plan_work.as_ref() else {

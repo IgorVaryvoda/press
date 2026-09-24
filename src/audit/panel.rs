@@ -82,7 +82,9 @@ impl Audit {
         let busy = self.converting
             || self.local_ai_busy()
             || self.studio_busy()
-            || self.scan_blocks_delivery();
+            || self.scan_blocks_delivery()
+            || self.restoring
+            || self.sirv_busy();
 
         div()
             .absolute()
@@ -2584,13 +2586,18 @@ impl Audit {
                             .outline()
                             .small()
                             .w_full()
-                            .label("Restore originals")
+                            .label(if self.restoring {
+                                "Restoring…"
+                            } else {
+                                "Restore originals"
+                            })
                             .tooltip(format!(
                                 "Move {} original{} back out of {}/ and remove what replaced them",
                                 self.restorable,
                                 if self.restorable == 1 { "" } else { "s" },
                                 crate::scan::BACKUP_DIR
                             ))
+                            .disabled(self.files_in_motion() || self.scan_blocks_delivery())
                             .on_click(cx.listener(|audit, _, _, cx| audit.restore_originals(cx))),
                     ),
                 )
@@ -2609,7 +2616,9 @@ impl Audit {
                         self.converting
                             || self.scanning.is_some()
                             || target_count == 0
-                            || self.keep_format_overwrites_sources(),
+                            || self.keep_format_overwrites_sources()
+                            || self.restoring
+                            || self.sirv_busy(),
                     )
                     .on_click(cx.listener(|audit, _, _, cx| audit.start_conversion(cx))),
             )
