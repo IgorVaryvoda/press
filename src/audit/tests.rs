@@ -5789,6 +5789,121 @@ fn a_stale_restore_does_not_overwrite_a_newer_folders_restorable(cx: &mut TestAp
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A double-click on Restore: the second call must be a no-op, not a second
+/// background move racing the first over the same backups.
+#[gpui_kit::test]
+fn restore_originals_ignores_a_second_call_while_already_restoring(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, cx| audit.use_replace_output(cx));
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert_eq!(audit.restorable, 3));
+
+    // The first click, simulated directly: `restoring` is set synchronously
+    // before its background move lands, exactly as `restore_originals` leaves
+    // it between the click and the landing.
+    audit.update(cx, |audit, _| audit.restoring = true);
+    audit.update(cx, |audit, cx| audit.restore_originals(cx));
+    // If the guard let a second move start, parking here would run its
+    // landing and clear the flag for real; nothing should be scheduled.
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.restoring,
+            "no landing ran to clear the flag; a second call must not start one either"
+        );
+        assert_eq!(
+            audit.restorable, 3,
+            "a refused second call never touches the count"
+        );
+    });
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    audit.update(cx, |audit, _| audit.restoring = false);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A running Sirv transfer moves or overwrites files too: it must block a new
+/// conversion and a restore exactly as a conversion blocks a restore.
+#[gpui_kit::test]
+fn a_sirv_transfer_blocks_conversion_and_restore(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, _| {
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Push,
+            done: 3,
+            total: 100,
+            failed: 0,
+            failures: Vec::new(),
+            current: None,
+            finished: false,
+            stopping: false,
+            generation: audit.sirv_generation,
+        });
+    });
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.converting,
+            "a running Sirv transfer refuses a conversion"
+        );
+    });
+
+    audit.update(cx, |audit, _| audit.restorable = 1);
+    audit.update(cx, |audit, cx| audit.restore_originals(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            !audit.restoring,
+            "a running Sirv transfer refuses a restore"
+        );
+    });
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A conversion moves or overwrites files too (replace mode moves originals):
+/// it must block both directions of Sirv transfer. The unguarded push at the
+/// end is the control — without it, an empty plan would pass the guarded
+/// assertions for the wrong reason.
+#[gpui_kit::test]
+fn a_conversion_blocks_sirv_pull_and_push(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(3, cx);
+    audit.update(cx, |audit, _| audit.sirv_pairing = Some(test_pairing()));
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.converting, "the conversion is in flight, unparked");
+    });
+
+    audit.update(cx, |audit, cx| {
+        audit.run_push(sirv::SyncState::OnlyLocal, cx)
+    });
+    audit.update(cx, |audit, cx| audit.run_pull(false, cx));
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.sirv_job.is_none(),
+            "a running conversion refuses both push and pull"
+        );
+    });
+
+    // Control: the same push, once nothing blocks it, does start a job — so
+    // the guarded assertion above is proven by the guard, not by an empty plan.
+    audit.update(cx, |audit, _| audit.converting = false);
+    audit.update(cx, |audit, cx| {
+        audit.run_push(sirv::SyncState::OnlyLocal, cx)
+    });
+    audit.read_with(cx, |audit, _| {
+        assert!(
+            audit.sirv_job.is_some(),
+            "the same push starts a job once the conversion is gone"
+        );
+    });
+
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[gpui_kit::test]
 fn stopping_a_conversion_keeps_every_file_it_already_wrote(cx: &mut TestAppContext) {
     // Three windows of files, so a stop taken at the first batch of results still
