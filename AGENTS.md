@@ -79,7 +79,20 @@ CI runs the same gates with `--locked --features updater` (see `.github/workflow
 
 - `src/main.rs` — entry point, window lifecycle, theme (`init_theme`), CLI parsing (`parse_args`/`parse_args_from`), headless verb dispatch (`convert_headless`, `restore`, ...). Black-box CLI tests live in `tests/cli_contract.rs`, `tests/studio_cli.rs` and `tests/headless_output.rs`, not here.
 - `src/audit/` — the entire `Audit` UI (25 files). Files an editor most often needs: `mod.rs` (`Audit` struct, `build_audit`, dataset install, restore), `view.rs` (`impl Render for Audit`), `table.rs` (`AuditTable`, `impl TableDelegate`), `gallery.rs`, `panel.rs` (right rail, convert/restore buttons), `convert_job.rs`, `sirv_actions.rs`, `media.rs` (thumbnail scheduling), `state.rs` (selection/sort/filter), `tests.rs` (UI tests).
-- `src/output.rs`, `src/job.rs`, `src/recipe.rs`, `src/saved_plan.rs`, `src/requirements.rs`, `src/handoff.rs`, `src/supplier.rs`, `src/studio.rs`/`src/studio_ledger.rs`, `src/sirv.rs`, `src/local_ai.rs`, `src/update.rs`, `src/crash.rs` — the modules the rest of this file doesn't cover: destination proof, background job records, saved recipes/plans, requirements checks, handoff packaging, supplier-portal integration, Studio state and its ledger, Sirv upload, local-AI captioning, self-update (`updater` feature), and crash reporting, respectively.
+- The modules the rest of this file doesn't cover, one phrase each from its own `//!` header:
+  - `src/output.rs` — lexical and canonical boundaries for conversion output.
+  - `src/job.rs` — local product-set jobs: which files belong to which product views.
+  - `src/recipe.rs` — personal recipes: one versioned, strictly parsed model for a conversion recipe.
+  - `src/saved_plan.rs` — portable, local conversion plans and their restartable receipts.
+  - `src/requirements.rs` — bounded, local requirement snapshots and actual-output receipts.
+  - `src/handoff.rs` — ImageGuide report import: a validated pending task, nothing else.
+  - `src/supplier.rs` — supplier submission state: durable attempts against a resolved assignment.
+  - `src/studio.rs` — direct Sirv Studio image processing.
+  - `src/studio_ledger.rs` — quoted hosted work, the client side of paid Studio operations (fixture-backed; the server contract doesn't exist yet).
+  - `src/sirv.rs` — Sirv REST access for folder sync (push/pull).
+  - `src/local_ai.rs` — local background removal and upscaling through one small vision.cpp runtime.
+  - `src/update.rs` — checks for and installs signed releases (`updater` feature; no module doc, see `check`/`relaunch`).
+  - `src/crash.rs` — local crash reports that stay on the device until the user shares one.
 - `src/scan.rs` — `Scan`/`Entry`, header-only walk, `OUTPUT_DIR`.
 - `src/convert.rs` — `Format`/`Quality`/`MaxEdge`, `plan_outputs`, `convert_to`, `write_output`/`write_recorded`, `workers`.
 - `src/compare.rs` — `Key`/`Pair`, `build`.
