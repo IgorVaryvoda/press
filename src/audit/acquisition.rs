@@ -26,17 +26,48 @@ fn result_key(root: &Path, entry: &Entry, output: &Path) -> Option<String> {
     })
 }
 
+/// What publishing the originals does with each converted row. Sirv encodes
+/// on delivery, so a master published as-is avoids a second lossy encode.
+/// A remote copy of the same size is linked, not uploaded again; a copy of a
+/// different size is someone's other master and is never overwritten here.
+#[derive(Debug, PartialEq)]
+enum OriginalPlan {
+    Upload(String),
+    Link(String),
+    Differs(String),
+}
+
+fn original_plan(
+    root: &Path,
+    entry: &Entry,
+    files: &HashMap<String, sirv::Node>,
+) -> Option<OriginalPlan> {
+    let key = sirv::relative_key(root, &entry.path)?;
+    Some(match sirv::classify(entry.bytes, files.get(&key)) {
+        sirv::SyncState::OnlyLocal => OriginalPlan::Upload(key),
+        sirv::SyncState::SameSize => OriginalPlan::Link(key),
+        sirv::SyncState::DifferentSize => OriginalPlan::Differs(key),
+    })
+}
+
 impl Audit {
+    /// Originals unless replace mode moved them into the backup folder: there
+    /// the file at the source path is the converted one.
+    pub(super) fn publish_uploads_originals(&self) -> bool {
+        self.publish_originals && !matches!(self.conversion_destination, Some((Output::Replace, _)))
+    }
+
     pub(super) fn publish_waiting(&self) -> Option<String> {
-        self.sirv_pairing
-            .as_ref()
-            .and_then(|pairing| match &pairing.cdn_host {
-                CdnHost::Loading => Some("Finding the Sirv CDN host…".into()),
-                CdnHost::Failed(message) => {
-                    Some(format!("Could not find the Sirv CDN host: {message}"))
-                }
-                CdnHost::Ready(_) => None,
-            })
+        let pairing = self.sirv_pairing.as_ref()?;
+        match &pairing.cdn_host {
+            CdnHost::Loading => return Some("Finding the Sirv CDN host…".into()),
+            CdnHost::Failed(message) => {
+                return Some(format!("Could not find the Sirv CDN host: {message}"));
+            }
+            CdnHost::Ready(_) => {}
+        }
+        (self.publish_uploads_originals() && !matches!(pairing.files, Listing::Ready(_)))
+            .then(|| "Listing the paired Sirv folder…".into())
     }
 
     pub(super) fn publish_results(&mut self, cx: &mut Context<Self>) {
@@ -47,26 +78,70 @@ impl Audit {
             self.open_sirv_browser(cx);
             return;
         }
+        let originals = self.publish_uploads_originals();
         let Some(pairing) = &self.sirv_pairing else {
             return;
         };
         let CdnHost::Ready(host) = &pairing.cdn_host else {
             return;
         };
+        let files = match &pairing.files {
+            Listing::Ready(files) => Some(files),
+            _ if originals => return,
+            _ => None,
+        };
+        let mut rows = self.result_paths.iter().collect::<Vec<_>>();
+        rows.sort_by_key(|(index, _)| **index);
         let mut plan = Vec::new();
         let mut urls = Vec::new();
-        for (index, output) in &self.result_paths {
+        let mut differs = Vec::new();
+        for (index, output) in rows {
             let Some(entry) = self.entries.get(*index) else {
                 continue;
             };
-            let Some(key) = result_key(&self.root, entry, output) else {
-                continue;
+            let (key, upload) = match files.filter(|_| originals) {
+                Some(files) => match original_plan(&self.root, entry, files) {
+                    Some(OriginalPlan::Upload(key)) => (key, Some(entry.path.clone())),
+                    Some(OriginalPlan::Link(key)) => (key, None),
+                    Some(OriginalPlan::Differs(key)) => {
+                        differs.push(key);
+                        continue;
+                    }
+                    None => continue,
+                },
+                None => {
+                    let Some(key) = result_key(&self.root, entry, output) else {
+                        continue;
+                    };
+                    (key, Some(output.clone()))
+                }
             };
             let Ok(url) = sirv::public_url(host, &remote_path(&pairing.dir, &key)) else {
                 continue;
             };
-            plan.push((key, output.clone()));
+            if let Some(path) = upload {
+                plan.push((key, path));
+            }
             urls.push(url);
+        }
+        if !differs.is_empty() {
+            self.notify_error(
+                "sirv-publish",
+                "Some originals were not published",
+                format!(
+                    "Sirv holds a different file under the same name: {}. Compare them in the Sirv bar first.",
+                    differs.join(", ")
+                ),
+                cx,
+            );
+        }
+        if plan.is_empty() {
+            // Everything is already on Sirv: nothing to upload, only links.
+            if !urls.is_empty() {
+                self.published_results = urls;
+                cx.notify();
+            }
+            return;
         }
         self.run_upload_plan(plan, SirvJobKind::Publish, Some(urls), cx);
     }
@@ -91,5 +166,38 @@ mod tests {
         let image = image_embed("https://demo.sirv.com/a.jpg");
         assert!(image.contains("srcset="));
         assert!(image.contains("loading=\"lazy\""));
+    }
+
+    #[test]
+    fn originals_upload_when_missing_link_when_equal_and_never_overwrite() {
+        let root = Path::new("/shop");
+        let entry = |name: &str, bytes: u64| Entry {
+            path: root.join(name),
+            format: image::ImageFormat::Jpeg.into(),
+            width: 1,
+            height: 1,
+            bytes,
+        };
+        let node = |size: u64| {
+            serde_json::from_str::<sirv::Node>(&format!(r#"{{"filename":"x","size":{size}}}"#))
+                .unwrap()
+        };
+        let files: HashMap<String, sirv::Node> = [
+            ("same.jpg".to_string(), node(100)),
+            ("sub/differs.jpg".to_string(), node(7)),
+        ]
+        .into();
+        assert_eq!(
+            original_plan(root, &entry("new.jpg", 100), &files),
+            Some(OriginalPlan::Upload("new.jpg".into()))
+        );
+        assert_eq!(
+            original_plan(root, &entry("same.jpg", 100), &files),
+            Some(OriginalPlan::Link("same.jpg".into()))
+        );
+        assert_eq!(
+            original_plan(root, &entry("sub/differs.jpg", 100), &files),
+            Some(OriginalPlan::Differs("sub/differs.jpg".into()))
+        );
     }
 }

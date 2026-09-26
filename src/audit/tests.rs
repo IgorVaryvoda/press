@@ -8271,6 +8271,8 @@ fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext)
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("conversion-publish").is_some());
+    assert!(cx.debug_bounds("conversion-publish-originals").is_some());
+    audit.read_with(cx, |audit, _| assert!(audit.publish_uploads_originals()));
     audit.update(cx, |audit, cx| {
         audit.published_results = vec!["https://demo.sirv.com/a.webp".into()];
         cx.notify();
@@ -8278,6 +8280,54 @@ fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext)
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("conversion-copy-embed").is_some());
     assert!(cx.debug_bounds("conversion-publish").is_none());
+    assert!(cx.debug_bounds("conversion-publish-originals").is_none());
+}
+
+fn delivery_pairing(files: &[(&str, u64)]) -> SirvPairing {
+    SirvPairing {
+        dir: "/photos".into(),
+        files: Listing::Ready(
+            files
+                .iter()
+                .map(|(key, size)| {
+                    (
+                        key.to_string(),
+                        sirv::Node {
+                            filename: format!("/photos/{key}"),
+                            size: *size,
+                            is_directory: false,
+                            kind: None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        ..test_pairing()
+    }
+}
+
+#[gpui_kit::test]
+fn publishing_originals_links_equal_files_and_never_overwrites_different_ones(
+    cx: &mut TestAppContext,
+) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        // photo.jpg is on Sirv at the same size; screenshot.png is not.
+        audit.sirv_pairing = Some(delivery_pairing(&[
+            ("photo.jpg", 100_000),
+            ("screenshot.png", 7),
+        ]));
+        audit.record_result(0, Format::WebP, 500, PathBuf::from("/tmp/photo.webp"));
+        audit.record_result(1, Format::WebP, 500, PathBuf::from("/tmp/screenshot.webp"));
+        audit.publish_results(cx);
+        // Nothing to upload, so no transfer starts: the equal file is linked
+        // under its own name, and the different one is left alone.
+        assert!(audit.sirv_job.is_none());
+        assert_eq!(
+            audit.published_results,
+            ["https://test.sirv.com/photos/photo.jpg"]
+        );
+    });
 }
 
 #[gpui_kit::test]

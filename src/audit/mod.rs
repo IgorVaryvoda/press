@@ -756,6 +756,10 @@ pub(crate) struct Audit {
     /// Files whose extension disagrees with their contents, also fixed for a scan.
     mislabelled: usize,
     published_results: Vec<String>,
+    /// Publish uploads the sources rather than the converted files. Session
+    /// only, on by default: Sirv encodes on delivery, so a converted file
+    /// published there is compressed twice.
+    publish_originals: bool,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -2475,6 +2479,7 @@ pub(crate) fn build_audit(
             heavy,
             mislabelled,
             published_results: Vec::new(),
+            publish_originals: true,
             studio_job: None,
             studio_tool: studio::Tool::default(),
             studio_key,
