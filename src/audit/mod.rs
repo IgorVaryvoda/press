@@ -589,6 +589,9 @@ pub(crate) struct Audit {
     studio_prompt: gpui_kit::Entity<InputState>,
     studio_key_checking: bool,
     studio_status: Option<(bool, String)>,
+    /// The key's balance as Studio last reported it: read when the key is
+    /// saved, when the rail opens and after each paid request, never per frame.
+    studio_credits: Option<f64>,
     /// A local result that opened the Studio rail. Kept with its source row so key
     /// setup or prompt editing does not silently switch the job back to the original.
     studio_source: Option<(usize, PathBuf)>,
@@ -1027,7 +1030,8 @@ enum StudioJobState {
     Preparing,
     AwaitingConfirmation(studio::PreparedUpload),
     Running,
-    Done(PathBuf),
+    /// The written result and the credits Studio says it charged.
+    Done(PathBuf, Option<f64>),
     Failed(String),
 }
 
@@ -2478,6 +2482,7 @@ pub(crate) fn build_audit(
             studio_prompt,
             studio_key_checking: false,
             studio_status: None,
+            studio_credits: None,
             studio_source: None,
             selected_target_count: 0,
             selected_target_bytes: 0,

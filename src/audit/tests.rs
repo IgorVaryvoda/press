@@ -2507,7 +2507,7 @@ fn an_update_never_restarts_during_file_writes(cx: &mut TestAppContext) {
         });
         assert!(!audit.update_can_restart());
         audit.studio_job.as_mut().unwrap().state =
-            StudioJobState::Done(PathBuf::from("optimized/photo-studio-2x.png"));
+            StudioJobState::Done(PathBuf::from("optimized/photo-studio-2x.png"), None);
         assert!(audit.update_can_restart());
     });
 }

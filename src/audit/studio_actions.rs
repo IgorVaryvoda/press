@@ -40,9 +40,12 @@ impl StudioJob {
                     self.source_name
                 )
             }
-            StudioJobState::Done(path) => format!(
-                "AI result saved {}",
-                path.strip_prefix(root).unwrap_or(path).display()
+            StudioJobState::Done(path, credits_used) => format!(
+                "AI result saved {}{}",
+                path.strip_prefix(root).unwrap_or(path).display(),
+                credits_used
+                    .map(|used| format!(" · {} credits used", studio::format_credits(used)))
+                    .unwrap_or_default()
             ),
             StudioJobState::Failed(message) => {
                 format!(
@@ -140,18 +143,19 @@ impl Audit {
                 .spawn({
                     let key = key.clone();
                     async move {
-                        studio::verify_key(&key)?;
+                        let account = studio::verify_key(&key)?;
                         studio::save_key(&key)?;
-                        Ok::<_, String>(key)
+                        Ok::<_, String>((key, account))
                     }
                 })
                 .await;
             let _ = this.update(cx, |audit, cx| {
                 audit.studio_key_checking = false;
                 match checked {
-                    Ok(key) => {
+                    Ok((key, account)) => {
                         audit.clear_error("studio-key", cx);
                         audit.studio_key = Some(key);
+                        audit.studio_credits = account.credits;
                         audit.studio_status = Some((true, "AI API key verified and saved".into()));
                     }
                     Err(message) => {
@@ -165,12 +169,43 @@ impl Audit {
         .detach();
     }
 
+    /// Re-read the balance in the background. A result for a key that was
+    /// forgotten or replaced meanwhile is dropped; a failed read clears the
+    /// number rather than leave an old one on screen.
+    pub(super) fn refresh_studio_credits(&mut self, cx: &mut Context<Self>) {
+        // Tests never reach the production host with a key from the real config.
+        if cfg!(test) {
+            return;
+        }
+        let Some(key) = self.studio_key.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let account = cx
+                .background_executor()
+                .spawn({
+                    let key = key.clone();
+                    async move { studio::verify_key(&key) }
+                })
+                .await;
+            let _ = this.update(cx, |audit, cx| {
+                if audit.studio_key.as_deref() != Some(key.as_str()) {
+                    return;
+                }
+                audit.studio_credits = account.ok().and_then(|account| account.credits);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn forget_studio_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_error("studio-key", cx);
         match studio::forget_key() {
             Ok(()) => {
                 self.clear_error("studio-key", cx);
                 self.studio_key = None;
+                self.studio_credits = None;
                 self.studio_status = Some((true, "AI API key forgotten on this computer".into()));
                 self.studio_key_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
@@ -402,15 +437,17 @@ impl Audit {
                 ) {
                     return;
                 }
+                // Success or failure, the balance may have moved.
+                audit.refresh_studio_credits(cx);
                 match result {
-                    Ok(path) => {
+                    Ok((path, credits_used)) => {
                         audit.clear_error("studio-job", cx);
                         audit.existing_output = audit.existing_output.saturating_add(1);
                         audit.latest_output_root = Some(landing_out_dir.clone());
                         let Some(job) = audit.studio_job.as_mut() else {
                             return;
                         };
-                        job.state = StudioJobState::Done(path.clone());
+                        job.state = StudioJobState::Done(path.clone(), credits_used);
                         let Some(job) = audit.studio_job.as_ref() else {
                             return;
                         };
@@ -621,7 +658,13 @@ impl Audit {
                                 .pt_1()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Key saved on this computer"),
+                                .child(match self.studio_credits {
+                                    Some(credits) => format!(
+                                        "Key saved on this computer · {} credits",
+                                        studio::format_credits(credits)
+                                    ),
+                                    None => "Key saved on this computer".into(),
+                                }),
                         )
                     })
                     .when(!has_key, |panel| {

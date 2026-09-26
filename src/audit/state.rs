@@ -260,6 +260,7 @@ impl Audit {
 
     /// Choosing an operation opens its settings in the sidebar.
     pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
+        self.studio_rail_opening(rail, cx);
         self.rail = rail;
         self.sidebar_open = true;
         self.browser_overlay = false;
@@ -282,9 +283,18 @@ impl Audit {
         }
         self.studio_source = written.map(|path| (index, path));
         self.compare = None;
+        self.studio_rail_opening(Rail::Studio, cx);
         self.rail = Rail::Studio;
         self.sidebar_open = true;
         self.selection_changed(cx);
+    }
+
+    /// The balance is worth a request only when the Studio rail comes into
+    /// view, not on every click inside it.
+    fn studio_rail_opening(&mut self, rail: Rail, cx: &mut Context<Self>) {
+        if rail == Rail::Studio && !(self.sidebar_open && self.rail == Rail::Studio) {
+            self.refresh_studio_credits(cx);
+        }
     }
 
     /// Toggle the sidebar without losing the chosen tool. Never hide Stop mid-run.
