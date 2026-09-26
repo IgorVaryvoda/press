@@ -217,8 +217,12 @@ sessions learn.
   with no params came back AVIF), so `?s=N&scale.option=noup` + a browser
   Accept header measures what a visitor gets. `plans/` is gitignored: plan
   README edits stay local; tracked status goes in `docs/`. The Studio key in
-  `~/.config/imageguide/studio` on this host is invalid (401), so live
-  balance checks need a fresh key.
+  `~/.config/imageguide/studio` on this host is a dev.sirv.studio key
+  (production says 401). Debug builds take `PRESS_STUDIO_API=https://dev.sirv.studio`;
+  the private ux-eval copy copies that key into its sandbox with
+  `PRESS_EVAL_STUDIO=1`. Direct Python calls to dev need `User-Agent: node`.
+  Dev `/me` `credits` (91817) and a run's `credits_remaining` (94985.9)
+  disagree: two wallets; ask Studio which one pays before trusting either.
 - 2026-09-26: Headless capture without `/tmp/press-shot.py`: copy
   `scripts/ux-eval` to /tmp, hardcode `ROOT` and point `SCENARIOS_PATH` at a
   temp JSON, then `capture <name> --fixture <copy> --allow-external-fixture
