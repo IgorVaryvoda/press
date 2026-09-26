@@ -168,25 +168,6 @@ impl Audit {
                                     cx.listener(|audit, _, _, cx| audit.walk_sirv_pairing(cx)),
                                 ),
                         )
-                        .child({
-                            let checking = self.sirv_delivery_running();
-                            let host_ready = matches!(pairing.cdn_host, CdnHost::Ready(_));
-                            Button::new("sirv-check-delivery")
-                                .small()
-                                .ghost()
-                                .label(if checking { "Stop check" } else { "Check delivery" })
-                                .tooltip(
-                                    "Ask the Sirv CDN what a browser receives for each same-size file at the current max edge",
-                                )
-                                .disabled(!checking && (busy || !ready || !host_ready))
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    if audit.sirv_delivery_running() {
-                                        audit.stop_sirv_delivery(cx);
-                                    } else {
-                                        audit.check_sirv_delivery(cx);
-                                    }
-                                }))
-                        })
                         .child(
                             Button::new("sirv-change-pair")
                                 .small()
@@ -264,6 +245,25 @@ impl Audit {
                                 .disabled(busy || to_pull == 0)
                                 .on_click(cx.listener(|audit, _, _, cx| audit.start_pull(cx))),
                         )
+                        .child({
+                            let checking = self.sirv_delivery_running();
+                            let host_ready = matches!(pairing.cdn_host, CdnHost::Ready(_));
+                            Button::new("sirv-check-delivery")
+                                .small()
+                                .ghost()
+                                .label(if checking { "Stop check" } else { "Check delivery" })
+                                .tooltip(
+                                    "Ask the Sirv CDN what a browser receives for each same-size file at the current max edge",
+                                )
+                                .disabled(!checking && (busy || !ready || !host_ready))
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    if audit.sirv_delivery_running() {
+                                        audit.stop_sirv_delivery(cx);
+                                    } else {
+                                        audit.check_sirv_delivery(cx);
+                                    }
+                                }))
+                        })
                         .when(changed > 0, |row| {
                             row.child(
                                 Button::new("sirv-push-changed-audit")
@@ -359,26 +359,25 @@ impl Audit {
             .as_ref()
             .filter(|job| !job.finished)
             .map(|job| format!("Checking Sirv delivery {} of {}…", job.done, job.total));
-        let summary = self
-            .sirv_delivery_summary()
-            .map(|summary| {
-                let edge = self
-                    .max_edge
-                    .0
-                    .map(|edge| format!(" at {edge}px"))
-                    .unwrap_or_default();
-                let converted = summary
-                    .converted
-                    .map(|bytes| format!(" · Press output {}", format_bytes(bytes)))
-                    .unwrap_or_default();
-                format!(
-                    "Sirv delivery for {} files{edge}: {} on disk → {} sent to a browser as {}{converted}",
-                    summary.count,
-                    format_bytes(summary.on_disk),
-                    format_bytes(summary.served),
-                    summary.formats,
-                )
-            });
+        let summary = self.sirv_delivery_summary().map(|summary| {
+            let edge = self
+                .max_edge
+                .0
+                .map(|edge| format!(" at {edge}px"))
+                .unwrap_or_default();
+            let converted = summary
+                .converted
+                .map(|bytes| format!(" · Press output {}", format_bytes(bytes)))
+                .unwrap_or_default();
+            format!(
+                "Sirv delivery for {} {}{edge}: {} on disk → {} sent to a browser as {}{converted}",
+                summary.count,
+                if summary.count == 1 { "file" } else { "files" },
+                format_bytes(summary.on_disk),
+                format_bytes(summary.served),
+                summary.formats,
+            )
+        });
         match (progress, summary) {
             (Some(progress), Some(summary)) => Some(format!("{progress} {summary}")),
             (progress, summary) => progress.or(summary),
