@@ -139,6 +139,13 @@ struct Processed {
     credits_used: Option<f64>,
 }
 
+#[derive(Deserialize)]
+struct Described {
+    alt_text: String,
+    #[serde(default)]
+    credits_used: Option<f64>,
+}
+
 /// What `/api/zapier/me` says about the key's account. Optional so a server
 /// that stops sending the balance still verifies the key.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -270,6 +277,24 @@ impl Client {
             .map_err(|error| format!("Studio returned an invalid image response: {error}"))
     }
 
+    fn alt_text(&self, image_url: &str) -> Result<(String, Option<f64>), String> {
+        let response = self
+            .agent
+            .post(&format!("{}/api/zapier/alt-text", self.api))
+            .set("Authorization", &self.authorization())
+            .timeout(PROCESS_TIMEOUT)
+            .send_json(serde_json::json!({ "image_url": image_url, "detail_level": "caption" }))
+            .map_err(studio_error("alt text"))?;
+        let described = response
+            .into_json::<Described>()
+            .map_err(|error| format!("Studio returned an invalid alt text response: {error}"))?;
+        let alt = described.alt_text.trim();
+        if alt.is_empty() {
+            return Err("Studio returned empty alt text".into());
+        }
+        Ok((alt.to_string(), described.credits_used))
+    }
+
     fn download(&self, url: &str) -> Result<Vec<u8>, String> {
         if !result_url_allowed(url) {
             return Err("Studio returned an unsafe result URL".into());
@@ -295,6 +320,12 @@ impl Client {
 /// Verifies the key and reads its account's credit balance in one request.
 pub fn verify_key(key: &str) -> Result<Account, String> {
     Client::new(API, key)?.verify()
+}
+
+/// Alt text for one public image URL, and the credits Studio charged for it.
+/// Studio fetches the URL itself, so nothing leaves this computer here.
+pub fn alt_text(key: &str, image_url: &str) -> Result<(String, Option<f64>), String> {
+    Client::new(API, key)?.alt_text(image_url)
 }
 
 #[cfg(test)]
@@ -1076,6 +1107,34 @@ mod tests {
         assert_eq!(format_credits(120.0), "120");
         assert_eq!(format_credits(0.5), "0.5");
         assert_eq!(format_credits(2.25), "2.2");
+    }
+
+    #[test]
+    fn alt_text_sends_the_public_url_and_returns_the_charge() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for body in [
+                &br#"{"id":"z1","alt_text":"  A red chair on a white floor. ","credits_used":1}"#[..],
+                br#"{"id":"z2","alt_text":"   "}"#,
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let text = String::from_utf8_lossy(&read_request(&mut stream)).into_owned();
+                assert!(text.starts_with("POST /api/zapier/alt-text "));
+                assert!(text.contains("\"image_url\":\"https://demo.sirv.com/a.jpg\""));
+                respond(stream, "application/json", body);
+            }
+        });
+        let client = Client::new(&api, "sk_live_test").unwrap();
+        assert_eq!(
+            client.alt_text("https://demo.sirv.com/a.jpg").unwrap(),
+            ("A red chair on a white floor.".to_string(), Some(1.0))
+        );
+        assert_eq!(
+            client.alt_text("https://demo.sirv.com/a.jpg").unwrap_err(),
+            "Studio returned empty alt text"
+        );
+        server.join().unwrap();
     }
 
     #[test]

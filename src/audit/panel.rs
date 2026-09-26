@@ -2594,6 +2594,59 @@ impl Audit {
                                     ),
                             )
                     }))
+                    .children((!self.published_results.is_empty()).then(|| {
+                        let running = self.alt_text_running();
+                        let pending = self.alt_text_pending();
+                        let has_key = self.studio_key.is_some();
+                        div()
+                            .debug_selector(|| "conversion-alt-text".into())
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .when(running || pending > 0, |block| {
+                                block.child(
+                                    Button::new("conversion-alt-text")
+                                        .outline()
+                                        .small()
+                                        .w_full()
+                                        .label(if running {
+                                            "Stop alt text".to_string()
+                                        } else {
+                                            format!("Write alt text for {pending} with Studio")
+                                        })
+                                        .tooltip(if has_key {
+                                            "Studio reads each published Sirv URL and writes its alt text. Each image uses Studio credits."
+                                        } else {
+                                            "Save an AI API key in AI operations first"
+                                        })
+                                        .disabled(!running && !has_key)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            if audit.alt_text_running() {
+                                                audit.stop_alt_text(cx);
+                                            } else {
+                                                audit.write_alt_text(cx);
+                                            }
+                                        })),
+                                )
+                            })
+                            .when_some(self.alt_text_status(), |block, status| {
+                                block.child(
+                                    div()
+                                        .debug_selector(|| "conversion-alt-text-status".into())
+                                        .text_size(px(11.))
+                                        .text_color(if self
+                                            .alt_job
+                                            .as_ref()
+                                            .is_some_and(|job| job.failure.is_some())
+                                        {
+                                            cx.theme().yellow
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        })
+                                        .child(status),
+                                )
+                            })
+                    }))
                     .child(
                         Button::new("reveal")
                             .outline()

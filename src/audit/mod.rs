@@ -756,6 +756,10 @@ pub(crate) struct Audit {
     /// Files whose extension disagrees with their contents, also fixed for a scan.
     mislabelled: usize,
     published_results: Vec<String>,
+    /// Alt text Studio wrote for published URLs, keyed by URL, so the embeds
+    /// stop saying `alt=""`.
+    published_alts: HashMap<String, String>,
+    alt_job: Option<AltJob>,
     /// Publish uploads the sources rather than the converted files. Session
     /// only, on by default: Sirv encodes on delivery, so a converted file
     /// published there is compressed twice.
@@ -1042,6 +1046,17 @@ enum StudioJobState {
     /// The written result and the credits Studio says it charged.
     Done(PathBuf, Option<f64>),
     Failed(String),
+}
+
+/// Alt text for published URLs, one paid request at a time. The flag is the
+/// job's identity: a result lands only on the job that asked for it.
+struct AltJob {
+    done: usize,
+    total: usize,
+    credits_used: f64,
+    failure: Option<String>,
+    finished: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct DeliverySummary {
@@ -2508,6 +2523,8 @@ pub(crate) fn build_audit(
             heavy,
             mislabelled,
             published_results: Vec::new(),
+            published_alts: HashMap::new(),
+            alt_job: None,
             publish_originals: true,
             sirv_delivery: HashMap::new(),
             sirv_delivery_job: None,

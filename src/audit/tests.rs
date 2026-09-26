@@ -8281,6 +8281,27 @@ fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext)
     assert!(cx.debug_bounds("conversion-copy-embed").is_some());
     assert!(cx.debug_bounds("conversion-publish").is_none());
     assert!(cx.debug_bounds("conversion-publish-originals").is_none());
+    assert!(cx.debug_bounds("conversion-alt-text").is_some());
+
+    // New results retire the old alt text and stop a job still writing it.
+    audit.update(cx, |audit, _| {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        audit
+            .published_alts
+            .insert("https://demo.sirv.com/a.webp".into(), "A chair".into());
+        audit.alt_job = Some(AltJob {
+            done: 0,
+            total: 1,
+            credits_used: 0.,
+            failure: None,
+            finished: false,
+            cancelled: cancelled.clone(),
+        });
+        audit.clear_results();
+        assert!(audit.published_alts.is_empty());
+        assert!(audit.alt_job.is_none());
+        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+    });
 }
 
 fn delivery_pairing(files: &[(&str, u64)]) -> SirvPairing {

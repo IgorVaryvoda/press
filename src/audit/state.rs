@@ -164,6 +164,11 @@ impl Audit {
         self.stopped_run = None;
         self.converted_totals = (0, 0);
         self.published_results.clear();
+        self.published_alts.clear();
+        if let Some(job) = self.alt_job.take() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         // The failures go with the results. "JPEG cannot keep transparency" is a fact
         // about the run that said it, not about the same folder aimed at WebP, and a
         // badge left over from settings nobody is using any more is a lie.

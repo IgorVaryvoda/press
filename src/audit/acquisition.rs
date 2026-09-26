@@ -2,10 +2,19 @@
 
 use super::*;
 
-pub(super) fn image_embed(url: &str) -> String {
+pub(super) fn image_embed(url: &str, alt: &str) -> String {
+    let alt = html_attribute(alt);
     format!(
-        "<img src=\"{url}?w=1280\" srcset=\"{url}?w=640 640w, {url}?w=1280 1280w, {url}?w=1920 1920w\" sizes=\"100vw\" loading=\"lazy\" alt=\"\">"
+        "<img src=\"{url}?w=1280\" srcset=\"{url}?w=640 640w, {url}?w=1280 1280w, {url}?w=1920 1920w\" sizes=\"100vw\" loading=\"lazy\" alt=\"{alt}\">"
     )
+}
+
+/// Alt text is model output: it must not be able to close the attribute.
+fn html_attribute(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn remote_path(dir: &str, key: &str) -> String {
@@ -150,10 +159,153 @@ impl Audit {
         let text = self
             .published_results
             .iter()
-            .map(|url| image_embed(url))
+            .map(|url| image_embed(url, self.published_alts.get(url).map_or("", String::as_str)))
             .collect::<Vec<_>>()
             .join("\n");
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+    }
+
+    /// Published URLs that still need alt text.
+    pub(super) fn alt_text_pending(&self) -> usize {
+        self.published_results
+            .iter()
+            .filter(|url| !self.published_alts.contains_key(*url))
+            .count()
+    }
+
+    pub(super) fn alt_text_running(&self) -> bool {
+        self.alt_job.as_ref().is_some_and(|job| !job.finished)
+    }
+
+    /// Stop the running alt text job at the next image.
+    pub(super) fn stop_alt_text(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.alt_job.as_ref() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        cx.notify();
+    }
+
+    /// Ask Studio for alt text for every published URL that lacks it, one paid
+    /// request at a time. Studio fetches the public Sirv URL, so no image
+    /// leaves this computer here. The first failure stops the job: a missing
+    /// credit or a refused key would fail every later request the same way,
+    /// and the next click retries only what is still missing.
+    pub(super) fn write_alt_text(&mut self, cx: &mut Context<Self>) {
+        if self.alt_text_running() {
+            return;
+        }
+        let Some(key) = self.studio_key.clone() else {
+            return;
+        };
+        let urls = self
+            .published_results
+            .iter()
+            .filter(|url| !self.published_alts.contains_key(*url))
+            .cloned()
+            .collect::<Vec<_>>();
+        if urls.is_empty() {
+            return;
+        }
+        self.clear_error("alt-text", cx);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.alt_job = Some(AltJob {
+            done: 0,
+            total: urls.len(),
+            credits_used: 0.,
+            failure: None,
+            finished: false,
+            cancelled: cancelled.clone(),
+        });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let owns = |audit: &Audit| {
+                audit
+                    .alt_job
+                    .as_ref()
+                    .is_some_and(|job| Arc::ptr_eq(&job.cancelled, &cancelled))
+            };
+            for url in urls {
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let key = key.clone();
+                        let url = url.clone();
+                        // A published original can be a 10 MB PNG. The model
+                        // needs a picture, not the master, so Sirv sends a
+                        // small JPEG any fetcher can decode.
+                        async move { studio::alt_text(&key, &format!("{url}?w=1024&format=jpg")) }
+                    })
+                    .await;
+                let failed = this
+                    .update(cx, |audit, cx| {
+                        if !owns(audit) {
+                            return true;
+                        }
+                        let Some(job) = audit.alt_job.as_mut() else {
+                            return true;
+                        };
+                        job.done += 1;
+                        let failed = match result {
+                            Ok((alt, used)) => {
+                                job.credits_used += used.unwrap_or(0.);
+                                audit.published_alts.insert(url, alt);
+                                false
+                            }
+                            Err(message) => {
+                                let name = url.rsplit('/').next().unwrap_or(&url).to_string();
+                                job.failure = Some(format!("{name}: {message}"));
+                                true
+                            }
+                        };
+                        cx.notify();
+                        failed
+                    })
+                    .unwrap_or(true);
+                if failed {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |audit, cx| {
+                if !owns(audit) {
+                    return;
+                }
+                let Some(job) = audit.alt_job.as_mut() else {
+                    return;
+                };
+                job.finished = true;
+                if let Some(failure) = job.failure.clone() {
+                    audit.notify_error("alt-text", "Alt text stopped", failure, cx);
+                }
+                audit.refresh_studio_credits(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// One line for under the alt text button while or after a job runs.
+    pub(super) fn alt_text_status(&self) -> Option<String> {
+        let job = self.alt_job.as_ref()?;
+        let spent = if job.credits_used > 0. {
+            format!(
+                " · {} credits used",
+                studio::format_credits(job.credits_used)
+            )
+        } else {
+            String::new()
+        };
+        Some(match (&job.failure, job.finished) {
+            (Some(failure), _) => {
+                format!("Alt text {} of {}{spent} · {failure}", job.done, job.total)
+            }
+            (None, false) => format!("Writing alt text {} of {}…{spent}", job.done, job.total),
+            (None, true) => format!("Alt text written for {} of {}{spent}", job.done, job.total),
+        })
     }
 }
 
@@ -163,9 +315,19 @@ mod tests {
 
     #[test]
     fn image_embeds_are_responsive_and_lazy_loaded() {
-        let image = image_embed("https://demo.sirv.com/a.jpg");
+        let image = image_embed("https://demo.sirv.com/a.jpg", "");
         assert!(image.contains("srcset="));
         assert!(image.contains("loading=\"lazy\""));
+        assert!(image.contains("alt=\"\""));
+    }
+
+    #[test]
+    fn model_alt_text_cannot_break_out_of_the_attribute() {
+        let image = image_embed(
+            "https://demo.sirv.com/a.jpg",
+            r#"A "red" chair <b> & a lamp"#,
+        );
+        assert!(image.ends_with(r#"alt="A &quot;red&quot; chair &lt;b&gt; &amp; a lamp">"#));
     }
 
     #[test]
