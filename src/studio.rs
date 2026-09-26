@@ -165,14 +165,16 @@ pub struct Account {
     pub credits: Option<f64>,
 }
 
-/// Credits as Studio counts them: whole numbers without a decimal point,
-/// fractions to one place.
+/// Credits as Studio counts them, with their noun: whole numbers without a
+/// decimal point, fractions to one place, and "1 credit" in the singular.
 pub fn format_credits(credits: f64) -> String {
-    if credits.fract() == 0.0 {
+    let number = if credits.fract() == 0.0 {
         format!("{credits:.0}")
     } else {
         format!("{credits:.1}")
-    }
+    };
+    let noun = if number == "1" { "credit" } else { "credits" };
+    format!("{number} {noun}")
 }
 
 /// The bytes Studio will receive. A prepared copy exists only in memory and is
@@ -1114,10 +1116,11 @@ mod tests {
     }
 
     #[test]
-    fn credits_print_whole_numbers_without_a_decimal_point() {
-        assert_eq!(format_credits(120.0), "120");
-        assert_eq!(format_credits(0.5), "0.5");
-        assert_eq!(format_credits(2.25), "2.2");
+    fn credits_print_whole_numbers_plainly_and_one_credit_singular() {
+        assert_eq!(format_credits(120.0), "120 credits");
+        assert_eq!(format_credits(1.0), "1 credit");
+        assert_eq!(format_credits(0.5), "0.5 credits");
+        assert_eq!(format_credits(2.25), "2.2 credits");
     }
 
     #[test]

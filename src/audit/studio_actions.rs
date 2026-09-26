@@ -44,7 +44,7 @@ impl StudioJob {
                 "AI result saved {}{}",
                 path.strip_prefix(root).unwrap_or(path).display(),
                 credits_used
-                    .map(|used| format!(" · {} credits used", studio::format_credits(used)))
+                    .map(|used| format!(" · {} used", studio::format_credits(used)))
                     .unwrap_or_default()
             ),
             StudioJobState::Failed(message) => {
@@ -659,10 +659,10 @@ impl Audit {
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(match self.studio_credits {
-                                    Some(credits) => format!(
-                                        "Key saved on this computer · {} credits",
-                                        studio::format_credits(credits)
-                                    ),
+                                    // The row above already says the key is saved.
+                                    Some(credits) => {
+                                        format!("{} available", studio::format_credits(credits))
+                                    }
                                     None => "Key saved on this computer".into(),
                                 }),
                         )

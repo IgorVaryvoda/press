@@ -292,10 +292,7 @@ impl Audit {
     pub(super) fn alt_text_status(&self) -> Option<String> {
         let job = self.alt_job.as_ref()?;
         let spent = if job.credits_used > 0. {
-            format!(
-                " · {} credits used",
-                studio::format_credits(job.credits_used)
-            )
+            format!(" · {} used", studio::format_credits(job.credits_used))
         } else {
             String::new()
         };
