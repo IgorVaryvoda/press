@@ -16,6 +16,17 @@ use crate::{convert, scan, settings, sirv};
 // user's image bytes, so the host has to be the one the key belongs to; the
 // tests reach their own loopback server through `process_with_api` instead.
 const API: &str = "https://www.sirv.studio";
+
+/// The Studio this process talks to. Debug builds honour `PRESS_STUDIO_API`
+/// so a developer can run the window against dev with a dev key; release
+/// builds ignore it, so a shipped key never leaves for another host.
+fn api() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(api) = std::env::var("PRESS_STUDIO_API") {
+        return api;
+    }
+    API.to_string()
+}
 pub const API_KEYS_URL: &str = "https://www.sirv.studio/settings/api?utm_source=press&utm_medium=desktop&utm_campaign=studio-api-key";
 pub const BATCH_BACKGROUND_REMOVAL_URL: &str =
     "https://www.sirv.studio/tools/batch-background-removal?utm_source=press&utm_medium=desktop";
@@ -319,13 +330,13 @@ impl Client {
 
 /// Verifies the key and reads its account's credit balance in one request.
 pub fn verify_key(key: &str) -> Result<Account, String> {
-    Client::new(API, key)?.verify()
+    Client::new(&api(), key)?.verify()
 }
 
 /// Alt text for one public image URL, and the credits Studio charged for it.
 /// Studio fetches the URL itself, so nothing leaves this computer here.
 pub fn alt_text(key: &str, image_url: &str) -> Result<(String, Option<f64>), String> {
-    Client::new(API, key)?.alt_text(image_url)
+    Client::new(&api(), key)?.alt_text(image_url)
 }
 
 #[cfg(test)]
@@ -370,7 +381,7 @@ pub fn process_prepared(
     cancelled: &AtomicBool,
 ) -> Result<(PathBuf, Option<f64>), String> {
     process_prepared_with_api(
-        API,
+        &api(),
         key,
         root,
         out_dir,
