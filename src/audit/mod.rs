@@ -760,6 +760,11 @@ pub(crate) struct Audit {
     /// only, on by default: Sirv encodes on delivery, so a converted file
     /// published there is compressed twice.
     publish_originals: bool,
+    /// What the Sirv CDN would send a browser for paired files, by relative
+    /// key. Each answer keeps the remote size and edge it was measured for,
+    /// so a changed file or a new max edge hides it instead of showing it.
+    sirv_delivery: HashMap<String, DeliveryCheck>,
+    sirv_delivery_job: Option<DeliveryJob>,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -1037,6 +1042,30 @@ enum StudioJobState {
     /// The written result and the credits Studio says it charged.
     Done(PathBuf, Option<f64>),
     Failed(String),
+}
+
+struct DeliverySummary {
+    count: usize,
+    on_disk: u64,
+    served: u64,
+    formats: String,
+    converted: Option<u64>,
+}
+
+struct DeliveryCheck {
+    remote_size: u64,
+    edge: Option<u32>,
+    delivered: sirv::Delivered,
+}
+
+/// HEAD requests against the public CDN, one at a time. The flag is the
+/// job's identity: a result lands only on the job that asked for it.
+struct DeliveryJob {
+    done: usize,
+    total: usize,
+    failure: Option<String>,
+    finished: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct StudioJob {
@@ -2480,6 +2509,8 @@ pub(crate) fn build_audit(
             mislabelled,
             published_results: Vec::new(),
             publish_originals: true,
+            sirv_delivery: HashMap::new(),
+            sirv_delivery_job: None,
             studio_job: None,
             studio_tool: studio::Tool::default(),
             studio_key,

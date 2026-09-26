@@ -263,6 +263,7 @@ impl Audit {
         self.clear_error("sirv-browser", cx);
         // A transfer aimed at the old pairing must not outlive it, same rule as unpair.
         self.cancel_sirv_transfer();
+        self.forget_sirv_delivery();
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = Some(SirvPairing {
             dir,
@@ -374,6 +375,7 @@ impl Audit {
         for scope in ["sirv-browser", "sirv-listing", "sirv-transfer"] {
             self.clear_error(scope, cx);
         }
+        self.forget_sirv_delivery();
         self.sirv_pairing_generation = self.sirv_pairing_generation.wrapping_add(1);
         self.sirv_pairing = None;
         self.sirv_counts = None;
@@ -407,6 +409,201 @@ impl Audit {
     /// so the file in flight finishes and nothing after it starts. The job
     /// stays busy until the loop acknowledges, preventing another transfer
     /// from racing that last file.
+    fn forget_sirv_delivery(&mut self) {
+        self.sirv_delivery.clear();
+        if let Some(job) = self.sirv_delivery_job.take() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    pub(super) fn sirv_delivery_running(&self) -> bool {
+        self.sirv_delivery_job
+            .as_ref()
+            .is_some_and(|job| !job.finished)
+    }
+
+    /// Visible rows whose file is on Sirv at the same size, with their keys
+    /// and remote sizes: the only rows where Sirv's delivery answers for the
+    /// local file.
+    pub(super) fn sirv_delivery_targets(&self) -> Vec<(usize, String, u64)> {
+        let Some(Listing::Ready(files)) = self.sirv_pairing.as_ref().map(|pairing| &pairing.files)
+        else {
+            return Vec::new();
+        };
+        self.visible
+            .iter()
+            .filter_map(|&index| {
+                let entry = self.entries.get(index)?;
+                let key = sirv::relative_key(&self.root, &entry.path)?;
+                let node = files.get(&key)?;
+                (sirv::classify(entry.bytes, Some(node)) == sirv::SyncState::SameSize)
+                    .then_some((index, key, node.size))
+            })
+            .collect()
+    }
+
+    /// The answer for one row, if it still holds: same remote size, same edge.
+    pub(super) fn sirv_delivered(&self, entry: &Entry) -> Option<&sirv::Delivered> {
+        let Listing::Ready(files) = &self.sirv_pairing.as_ref()?.files else {
+            return None;
+        };
+        let key = sirv::relative_key(&self.root, &entry.path)?;
+        let check = self.sirv_delivery.get(&key)?;
+        (files.get(&key)?.size == check.remote_size && check.edge == self.max_edge.0)
+            .then_some(&check.delivered)
+    }
+
+    /// Totals for the bar: files answered, their bytes on disk, what Sirv
+    /// sends for them, the formats it chose, and what this session's
+    /// conversion wrote for the same rows when it wrote all of them.
+    pub(super) fn sirv_delivery_summary(&self) -> Option<DeliverySummary> {
+        if self.sirv_delivery.is_empty() {
+            return None;
+        }
+        let mut formats = std::collections::BTreeSet::new();
+        let mut count = 0;
+        let mut on_disk = 0;
+        let mut served = 0;
+        let mut converted = Some(0u64);
+        for &index in &self.visible {
+            let Some(entry) = self.entries.get(index) else {
+                continue;
+            };
+            let Some(delivered) = self.sirv_delivered(entry) else {
+                continue;
+            };
+            count += 1;
+            on_disk += entry.bytes;
+            served += delivered.bytes;
+            formats.insert(delivered.format.as_str());
+            converted = converted
+                .zip(self.results.get(&index))
+                .map(|(sum, bytes)| sum + bytes);
+        }
+        (count > 0).then(|| DeliverySummary {
+            count,
+            on_disk,
+            served,
+            formats: formats.into_iter().collect::<Vec<_>>().join("/"),
+            converted,
+        })
+    }
+
+    pub(super) fn stop_sirv_delivery(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.sirv_delivery_job.as_ref() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        cx.notify();
+    }
+
+    /// Ask the public CDN what it would send a browser for each paired row,
+    /// at the current max edge. Anonymous HEAD requests: no credits, no
+    /// credentials, nothing uploaded.
+    // ponytail: one request at a time; run a few in parallel if large folders feel slow.
+    pub(super) fn check_sirv_delivery(&mut self, cx: &mut Context<Self>) {
+        if self.sirv_delivery_running() {
+            return;
+        }
+        let Some(CdnHost::Ready(host)) =
+            self.sirv_pairing.as_ref().map(|pairing| &pairing.cdn_host)
+        else {
+            return;
+        };
+        let host = host.clone();
+        let Some(dir) = self
+            .sirv_pairing
+            .as_ref()
+            .map(|pairing| pairing.dir.clone())
+        else {
+            return;
+        };
+        let edge = self.max_edge.0;
+        let targets = self.sirv_delivery_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.clear_error("sirv-delivery", cx);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.sirv_delivery_job = Some(DeliveryJob {
+            done: 0,
+            total: targets.len(),
+            failure: None,
+            finished: false,
+            cancelled: cancelled.clone(),
+        });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let owns = |audit: &Audit| {
+                audit
+                    .sirv_delivery_job
+                    .as_ref()
+                    .is_some_and(|job| Arc::ptr_eq(&job.cancelled, &cancelled))
+            };
+            for (_, key, remote_size) in targets {
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let url = sirv::public_url(&host, &format!("{}/{key}", dir.trim_end_matches('/')))
+                    .map(|url| url + &sirv::delivery_query(edge));
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { url.and_then(|url| sirv::delivered(&url)) })
+                    .await;
+                let failed = this
+                    .update(cx, |audit, cx| {
+                        if !owns(audit) {
+                            return true;
+                        }
+                        let failed = match result {
+                            Ok(delivered) => {
+                                audit.sirv_delivery.insert(
+                                    key,
+                                    DeliveryCheck {
+                                        remote_size,
+                                        edge,
+                                        delivered,
+                                    },
+                                );
+                                None
+                            }
+                            Err(error) => Some(format!("{key}: {error}")),
+                        };
+                        let Some(job) = audit.sirv_delivery_job.as_mut() else {
+                            return true;
+                        };
+                        job.done += 1;
+                        let stop = failed.is_some();
+                        if failed.is_some() {
+                            job.failure = failed;
+                        }
+                        cx.notify();
+                        stop
+                    })
+                    .unwrap_or(true);
+                if failed {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |audit, cx| {
+                if !owns(audit) {
+                    return;
+                }
+                let Some(job) = audit.sirv_delivery_job.as_mut() else {
+                    return;
+                };
+                job.finished = true;
+                if let Some(failure) = job.failure.clone() {
+                    audit.notify_error("sirv-delivery", "Sirv delivery check stopped", failure, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn cancel_sirv_transfer(&mut self) {
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         if let Some(job) = self.sirv_job.as_mut()

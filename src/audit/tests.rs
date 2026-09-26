@@ -8331,6 +8331,65 @@ fn publishing_originals_links_equal_files_and_never_overwrites_different_ones(
 }
 
 #[gpui_kit::test]
+fn a_delivery_answer_holds_only_for_the_file_size_and_edge_it_measured(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(delivery_pairing(&[
+            ("photo.jpg", 100_000),
+            ("screenshot.png", 7),
+        ]));
+        audit.refresh_sirv_counts();
+        // Only the same-size file is worth asking the CDN about.
+        let targets = audit.sirv_delivery_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].1, "photo.jpg");
+
+        audit.sirv_delivery.insert(
+            "photo.jpg".into(),
+            DeliveryCheck {
+                remote_size: 100_000,
+                edge: None,
+                delivered: sirv::Delivered {
+                    bytes: 20_000,
+                    format: "AVIF".into(),
+                },
+            },
+        );
+        let photo = audit.entries[0].clone();
+        assert_eq!(audit.sirv_delivered(&photo).map(|d| d.bytes), Some(20_000));
+        let summary = audit.sirv_delivery_summary().unwrap();
+        assert_eq!(
+            (summary.count, summary.on_disk, summary.served),
+            (1, 100_000, 20_000)
+        );
+        assert_eq!(summary.formats, "AVIF");
+        assert_eq!(summary.converted, None);
+        audit.record_result(0, Format::WebP, 30_000, PathBuf::from("/tmp/photo.webp"));
+        assert_eq!(
+            audit.sirv_delivery_summary().unwrap().converted,
+            Some(30_000)
+        );
+
+        audit.max_edge = MaxEdge(Some(1600));
+        assert!(audit.sirv_delivered(&photo).is_none());
+        audit.max_edge = MaxEdge::FULL;
+
+        audit.sirv_pairing = Some(delivery_pairing(&[("photo.jpg", 99_999)]));
+        assert!(audit.sirv_delivered(&photo).is_none());
+
+        audit.sirv_pairing = Some(delivery_pairing(&[("photo.jpg", 100_000)]));
+        assert!(audit.sirv_delivered(&photo).is_some());
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("sirv-delivery-line").is_some());
+    audit.update(cx, |audit, cx| {
+        audit.unpair_sirv(cx);
+        assert!(audit.sirv_delivery.is_empty());
+    });
+}
+
+#[gpui_kit::test]
 fn keyboard_help_renders_and_owns_list_input(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     for grid in [false, true] {

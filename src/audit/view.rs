@@ -168,6 +168,25 @@ impl Audit {
                                     cx.listener(|audit, _, _, cx| audit.walk_sirv_pairing(cx)),
                                 ),
                         )
+                        .child({
+                            let checking = self.sirv_delivery_running();
+                            let host_ready = matches!(pairing.cdn_host, CdnHost::Ready(_));
+                            Button::new("sirv-check-delivery")
+                                .small()
+                                .ghost()
+                                .label(if checking { "Stop check" } else { "Check delivery" })
+                                .tooltip(
+                                    "Ask the Sirv CDN what a browser receives for each same-size file at the current max edge",
+                                )
+                                .disabled(!checking && (busy || !ready || !host_ready))
+                                .on_click(cx.listener(|audit, _, _, cx| {
+                                    if audit.sirv_delivery_running() {
+                                        audit.stop_sirv_delivery(cx);
+                                    } else {
+                                        audit.check_sirv_delivery(cx);
+                                    }
+                                }))
+                        })
                         .child(
                             Button::new("sirv-change-pair")
                                 .small()
@@ -303,6 +322,16 @@ impl Audit {
                             )
                         }),
                 )
+                .when_some(self.sirv_delivery_line(), |bar, line| {
+                    bar.child(
+                        div()
+                            .debug_selector(|| "sirv-delivery-line".into())
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(line),
+                    )
+                })
                 .when_some(job_line, |bar, line| {
                     bar.child(
                         div()
@@ -320,6 +349,40 @@ impl Audit {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// The delivery check in one sentence: progress while it runs, then what
+    /// Sirv sends against what is on disk and what this run wrote.
+    fn sirv_delivery_line(&self) -> Option<String> {
+        let progress = self
+            .sirv_delivery_job
+            .as_ref()
+            .filter(|job| !job.finished)
+            .map(|job| format!("Checking Sirv delivery {} of {}…", job.done, job.total));
+        let summary = self
+            .sirv_delivery_summary()
+            .map(|summary| {
+                let edge = self
+                    .max_edge
+                    .0
+                    .map(|edge| format!(" at {edge}px"))
+                    .unwrap_or_default();
+                let converted = summary
+                    .converted
+                    .map(|bytes| format!(" · Press output {}", format_bytes(bytes)))
+                    .unwrap_or_default();
+                format!(
+                    "Sirv delivery for {} files{edge}: {} on disk → {} sent to a browser as {}{converted}",
+                    summary.count,
+                    format_bytes(summary.on_disk),
+                    format_bytes(summary.served),
+                    summary.formats,
+                )
+            });
+        match (progress, summary) {
+            (Some(progress), Some(summary)) => Some(format!("{progress} {summary}")),
+            (progress, summary) => progress.or(summary),
+        }
     }
 
     fn sirv_remote_only_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {

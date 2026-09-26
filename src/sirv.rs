@@ -152,6 +152,54 @@ pub fn public_url(cdn_host: &str, remote_filename: &str) -> Result<String, Error
     Ok(format!("https://{cdn_host}/{path}"))
 }
 
+/// What the CDN sends a current browser for one public URL: the bytes on the
+/// wire and the format Sirv chose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delivered {
+    pub bytes: u64,
+    pub format: String,
+}
+
+/// The query that asks Sirv for what Press's max edge would write: the longest
+/// side scaled down to `edge`, never up. No edge, no query: Sirv's own default.
+pub fn delivery_query(edge: Option<u32>) -> String {
+    edge.map(|edge| format!("?s={edge}&scale.option=noup"))
+        .unwrap_or_default()
+}
+
+/// A browser's image `Accept` header. Sirv negotiates the format from it, so
+/// this is what makes the answer AVIF or WebP rather than the stored JPEG.
+const BROWSER_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+/// Ask the public CDN, with a HEAD request, how many bytes it would deliver.
+/// No credentials: this is exactly what a visitor's browser would be sent.
+pub fn delivered(url: &str) -> Result<Delivered, Error> {
+    let response = ureq::AgentBuilder::new()
+        .timeout(TIMEOUT)
+        .build()
+        .head(url)
+        .set("Accept", BROWSER_ACCEPT)
+        .call()
+        .map_err(sirv_error("delivery check"))?;
+    let bytes = response
+        .header("Content-Length")
+        .and_then(|length| length.trim().parse::<u64>().ok())
+        .ok_or_else(|| Error {
+            status: 0,
+            message: "the CDN did not say how large the image is".into(),
+        })?;
+    let format = response
+        .header("Content-Type")
+        .and_then(|kind| kind.split(';').next())
+        .map(|kind| {
+            kind.trim()
+                .trim_start_matches("image/")
+                .to_ascii_uppercase()
+        })
+        .unwrap_or_default();
+    Ok(Delivered { bytes, format })
+}
+
 /// Where a person with no Sirv account starts. The credentials form is the
 /// only door into sync, so it has to name the way in as well as the way through.
 pub const SIGNUP_URL: &str =
@@ -966,6 +1014,48 @@ mod tests {
                 return String::from_utf8(request).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn a_delivery_check_asks_like_a_browser_and_reads_the_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/shop/a.jpg{}",
+            listener.local_addr().unwrap(),
+            delivery_query(Some(1600))
+        );
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            assert!(head.starts_with("HEAD /shop/a.jpg?s=1600&scale.option=noup "));
+            assert!(head.contains("Accept: image/avif,image/webp"));
+            assert!(!head.contains("Authorization"));
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/avif\r\nContent-Length: 47165\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            delivered(&url).unwrap(),
+            Delivered {
+                bytes: 47165,
+                format: "AVIF".into()
+            }
+        );
+        server.join().unwrap();
+        assert_eq!(delivery_query(None), "");
     }
 
     #[test]

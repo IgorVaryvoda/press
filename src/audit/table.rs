@@ -790,13 +790,28 @@ impl TableDelegate for AuditTable {
                 let Some((label, colour)) = audit.sync_label(entry, cx) else {
                     return div().into_any_element();
                 };
+                // A checked row adds what the CDN sends a browser. Stacked
+                // lines carry an explicit height: the cell has 28px.
+                let delivered = audit
+                    .sirv_delivered(entry)
+                    .map(|delivered| format!("→ {}", format_bytes(delivered.bytes)));
                 div()
                     .flex()
-                    .items_center()
+                    .flex_col()
+                    .justify_center()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_size(px(11.))
+                    .line_height(px(13.))
                     .text_color(colour)
                     .child(label)
+                    .when_some(delivered, |cell, delivered| {
+                        cell.child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_nowrap()
+                                .child(delivered),
+                        )
+                    })
                     .into_any_element()
             }
             TableColumn::Options => div().into_any_element(),
