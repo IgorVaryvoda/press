@@ -208,6 +208,32 @@ sessions learn.
 - 2026-09-19: Not bugs, checked and dropped: "Save changes" on a built-in preset
   IS disabled (it reads dim only when zoomed); the toast stack's collapsed peek
   at a bottom anchor is the library's intended stacking, not an overlap.
+- 2026-09-26: Sirv/Studio integration items 1-5 (credits, publish originals,
+  CDN delivery check, alt text, batch-API evaluation). Facts worth keeping:
+  Press talks to Studio only through `/api/zapier/*` (source in
+  `~/Projects/ai-image-tools/src/start/routes/api/zapier/`); direct routes
+  return `credits_used`, `/me` returns `credits`. The Sirv CDN answers HEAD
+  with `content-length`/`content-type` and re-encodes every request (a JPEG
+  with no params came back AVIF), so `?s=N&scale.option=noup` + a browser
+  Accept header measures what a visitor gets. `plans/` is gitignored: plan
+  README edits stay local; tracked status goes in `docs/`. The Studio key in
+  `~/.config/imageguide/studio` on this host is invalid (401), so live
+  balance checks need a fresh key.
+- 2026-09-26: Headless capture without `/tmp/press-shot.py`: copy
+  `scripts/ux-eval` to /tmp, hardcode `ROOT` and point `SCENARIOS_PATH` at a
+  temp JSON, then `capture <name> --fixture <copy> --allow-external-fixture
+  --skip-build --binary target/debug/press --output-root /tmp/...`. Waits cap
+  at 30 s per step; chain two for a debug-build conversion. At 1100×720 the
+  Convert commit button is at (938, 662) after `ctrl+a`.
+| 2026-09-26 | self | Ran `<binary> --list` over every `target/debug/deps/press-*` to find the test binary; one was the app, which took `--list` as a folder and opened a window on the user's live desktop | Get the test binary from `cargo test --bin press --no-run` (its `Executable` line). Never run an unknown `press-*` binary outside headless gamescope |
+| 2026-09-26 | self | `updates_wait_for_download_and_apply_and_keep_dismissed_state` failed ~1 in 3 runs; looked like my change | Something on this host sends `HEAD /` (Host: localhost:PORT) to new listening ports of processes whose cwd is this repo. Same binary from `/tmp` fails 0/12, from the repo 2/12; gamescope does not isolate it. Run that test from `/tmp`, and read the request before blaming a diff |
+- 2026-09-26: Live Sirv proof in headless gamescope: the private ux-eval
+  copy copies `~/.config/imageguide/sirv` into its temp config when
+  `PRESS_EVAL_SIRV=1`. Sirv folder `/Image Editor Backup 202310111041` holds
+  one image (`marta.jpg`, 172483 B); a local folder holding its API-downloaded
+  bytes pairs as "same size", so delivery checks and Publish-originals run
+  with no upload. Clicks at 1100×720: Sirv header (107,20), that folder
+  center(-60,+28), Pair center(-85,+72).
 - 2026-09-19: Released v0.7.0 from main 5ac41d0 (two rounds of UI audit fixes:
   d7ac68d, ebe21cc, eda8f78). Followed the napkin's own gate this time — pushed
   main, waited for all three CI OSes green (run 35441369100, 1h4m; macOS is the
