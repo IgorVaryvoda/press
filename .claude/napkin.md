@@ -245,3 +245,46 @@ sessions learn.
   35444451833 was green on all five package jobs in 1h40m; the macOS Intel job
   alone took ~100 min and the timestamp retry added in v0.6.9 held. All 16
   assets published, `latest.json` serves v0.7.0.
+- 2026-09-30: Header is now GNOME Files style: menu, sidebar toggle, Back and
+  Forward (`history-back`/`history-forward`, Alt+←/→, mouse side buttons), a
+  `path-bar` pill with `crumb-N` items, then Sirv, filter, view, rail toggle.
+  Sirv is no longer left-anchored: the two Sirv scenarios click (-410, 20),
+  which hits it at 760, 1100 and 1440. History moves in `install_dataset`,
+  keyed by `history_step`, so a folder that fails to open costs no history.
+  `/tmp/press-shot.py out.png WxH <fixture> '<json actions>'` wraps
+  `ux-eval`'s `capture_frame` for one-off headless shots.
+- 2026-09-30: Sirv split view (`sirv-split`): `sirv_rows` is built in
+  `refresh_sirv_counts`, merged by key, because `sirv_local_presence` can lag
+  a transfer and put one file on both the local and remote-only lists. Paired,
+  the header Sirv button toggles the split; its label is always "Sirv", so
+  (-410, 20) hits it paired or not. "Change Sirv folder…" is in the bar's `⋯`. Live proof
+  fixture: `~/.cache/press-sync-demo` + Sirv `/Image Editor Backup 202310111041`;
+  `PRESS_SHOT_SIRV=1 /tmp/press-shot.py` copies the real Sirv keys into the
+  sandbox. Pulling `marta.jpg` there turns its row green.
+| 2026-09-30 | user | Shipped a read-only split view and a four-row Sirv bar; user: "cluttered as fuck", "no action can be performed" | A comparison view must act on what it shows (per-row arrow + ticked-row footer). Keep a status bar to one line; secondary verbs go behind `⋯`. Check the bar at the narrowest real layout (list mode, Convert panel open) before calling it done |
+- 2026-09-30: Split view ticks are `sirv_selected` (keys). They survive the
+  rescan and re-walk after a transfer (pruned in `refresh_sirv_counts`); only
+  pair, unpair and new credentials clear them. xdotool clicks 0.25 s apart can
+  merge; put a 1 s wait between scripted row ticks.
+- 2026-09-30: Sirv audit round. Pairings persist in `<config>/imageguide/
+  sirv-pairs` (`remote<TAB>local`), restored on launch and on folder open;
+  window tests never touch it (`remember_pairing_unless_test`,
+  `restore_sirv_pairing` is a no-op under `cfg!(test)`). Sync classification
+  uses `sirv::paired_key` (no key for subfolder files, the listing is one
+  level); `relative_key` stays only for publishing results. A pull adds files
+  in place (`adopt_pulled_entry`), never a rescan: a rescan cancels Studio,
+  local AI and plan runs. Plain Push stats each file (`Client::exists`, Sirv
+  answers 404 for absent) before uploading. `/tmp/press-shot.py` takes
+  `"button": 3` for right-clicks and `PRESS_SHOT_PAIR` to seed a pairing.
+| 2026-09-30 | self | Renamed the sync words to "in sync / different" to match the bar; a test (`sirv_size_evidence_words_name_only_sizes`) guards a deliberate rule that size equality is evidence, never "synced" | Size-based states say "same size" / "different size" everywhere, bar count included. Grep tests for the words before renaming user-facing vocabulary |
+- 2026-09-30: Sirv to "10/10" round. Deep pairing: `sirv::walk_remote` lists
+  subfolders when the dataset has them (`SirvPairing.deep` follows
+  `dataset_subfolders`; `sync_sirv_depth` re-walks after the subfolder rescan).
+  `sirv::compared_folder` is the one rule for which folders both sides compare
+  (dot, press-originals, packages anywhere; optimized/ at the top) and
+  `paired_key(root, path, deep)` applies it locally. Presence is a size map, so
+  non-image files both sides hold get rows; counts derive from rows. CDN
+  previews: `?w=48&h=48&scale.option=fit&format=jpg` (Sirv returns ~0.6 KB
+  JPEG). Live test used Sirv `/press-test` (created, verified, deleted):
+  upload, stat-before-upload refusal, Replace on Sirv/here, nested upload,
+  download all passed. `/tmp/sirvapi.py {mkdir,ls,upload,rm}` drives the API.
