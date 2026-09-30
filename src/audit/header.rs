@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// A crumb whose parent is the filesystem root, which already draws as `/`.
+fn crumbs_after_root(path: &Path) -> bool {
+    path.parent()
+        .is_some_and(|parent| parent.parent().is_none())
+}
+
 impl Audit {
     /// What a scan left out. The status bar owns the folder totals, so this
     /// renders there, muted after the counts; empty when nothing was skipped,
@@ -69,12 +75,13 @@ impl Audit {
 
     /// Keyboard shortcuts for the image list.
     pub(super) fn shortcuts_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        const SHORTCUTS: [(&str, &str); 11] = [
+        const SHORTCUTS: [(&str, &str); 12] = [
             ("↑ ↓ ← →", "Move between images"),
             ("PgUp PgDn Home End", "Jump through the list"),
             ("Shift + move", "Extend the selection"),
             ("Space", "Tick the row"),
             ("Enter", "Preview image"),
+            ("Alt + ← →", "Go back or forward a folder"),
             ("Ctrl/⌘ + A", "Select everything shown"),
             ("Ctrl/⌘ + K", "Focus the filter box"),
             ("Ctrl/⌘ + Enter", "Open the Convert panel"),
@@ -202,22 +209,119 @@ impl Audit {
             breadcrumb_parts.drain(..breadcrumb_parts.len() - breadcrumb_limit);
         }
         let last_breadcrumb = breadcrumb_parts.len().saturating_sub(1);
-        let breadcrumbs = Breadcrumb::new().children(breadcrumb_parts.into_iter().enumerate().map(
-            |(index, (label, path))| {
-                let disabled = index == last_breadcrumb || self.converting;
-                let mut item = BreadcrumbItem::new(label).disabled(disabled);
-                if !disabled {
-                    let source = breadcrumb_source.clone();
-                    item = item.on_click(move |_, _, cx| {
-                        if let Some(audit) = source.upgrade() {
-                            let path = path.clone();
-                            audit.update(cx, |audit, cx| audit.request_path(path, cx));
-                        }
-                    });
-                }
-                item
-            },
-        ));
+        let home = browser::home_dir();
+        // A path bar in the GNOME Files manner: one field the width of the
+        // header, the open folder in bold at its end, and every folder above it
+        // one click away. `/` between crumbs, because a chevron there read as a
+        // disclosure arrow.
+        let mut crumbs = Vec::new();
+        for (index, (label, path)) in breadcrumb_parts.into_iter().enumerate() {
+            // The filesystem root is itself spelled `/`; a separator after it
+            // read as `/ /`.
+            if index > 0 && !crumbs_after_root(&path) {
+                crumbs.push(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("/")
+                        .into_any_element(),
+                );
+            }
+            let current = index == last_breadcrumb;
+            let is_home = home.as_deref() == Some(path.as_path());
+            let source = breadcrumb_source.clone();
+            crumbs.push(
+                div()
+                    .id(("crumb", index))
+                    .debug_selector(move || format!("crumb-{index}"))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .h(px(24.))
+                    .px_2()
+                    .rounded(px(5.))
+                    .min_w_0()
+                    // The open folder keeps its name; ancestors give way first.
+                    .when(current, |crumb| {
+                        crumb
+                            .flex_shrink_0()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .when(!current, |crumb| {
+                        crumb.text_color(cx.theme().muted_foreground)
+                    })
+                    .when(is_home, |crumb| {
+                        crumb.child(Icon::default().path("icons/house.svg").size_3p5())
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(label),
+                    )
+                    .when(!current && !self.converting, |crumb| {
+                        crumb
+                            .cursor_pointer()
+                            .hover(|crumb| {
+                                crumb
+                                    .bg(cx.theme().secondary_hover)
+                                    .text_color(cx.theme().foreground)
+                            })
+                            .on_click(move |_, _, cx| {
+                                if let Some(audit) = source.upgrade() {
+                                    let path = path.clone();
+                                    audit.update(cx, |audit, cx| audit.request_path(path, cx));
+                                }
+                            })
+                    })
+                    .into_any_element(),
+            );
+        }
+        let path_bar = div()
+            .debug_selector(|| "path-bar".into())
+            .flex()
+            .items_center()
+            .flex_1()
+            .min_w_0()
+            .h(px(30.))
+            .px_1()
+            .gap_0p5()
+            .overflow_hidden()
+            .rounded_md()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_sm()
+            .children(crumbs);
+        let history = |id: &'static str, forward: bool, cx: &mut Context<Self>| {
+            div()
+                .flex_shrink_0()
+                .debug_selector(move || id.into())
+                .child(
+                    Button::new(id)
+                        .small()
+                        .ghost()
+                        .icon(if forward {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronLeft
+                        })
+                        .tooltip(if forward {
+                            "Forward (Alt+Right)"
+                        } else {
+                            "Back (Alt+Left)"
+                        })
+                        .disabled(!self.can_step_history(forward))
+                        .on_click(
+                            cx.listener(move |audit, _, _, cx| audit.step_history(forward, cx)),
+                        ),
+                )
+        };
+        let back = history("history-back", false, cx);
+        let forward = history("history-forward", true, cx);
         let source_menu = cx.entity().downgrade();
         let reveal_source = source_menu.clone();
         let reveal_root = self.root.clone();
@@ -229,24 +333,12 @@ impl Audit {
         let open_disabled = self.converting;
         let scope_checked = self.include_subfolders;
         let scope_disabled = self.converting || self.single_file;
-        // The label carries the state: paired, it names the remote folder.
-        // A tint on the same word did not say "paired" to anyone.
-        let sirv_label = match &self.sirv_pairing {
-            Some(pairing) => {
-                let name = pairing
-                    .dir
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("");
-                let name = if name.is_empty() { "/" } else { name };
-                if name.chars().count() > 18 {
-                    format!("Sirv · {}…", name.chars().take(17).collect::<String>())
-                } else {
-                    format!("Sirv · {name}")
-                }
-            }
-            None => "Sirv".to_string(),
+        // Paired, the Sirv bar under the header names both folders, so the
+        // button stays one short word and the path keeps its room; the
+        // selected state and the tooltip say which folder it is.
+        let sirv_tip = match &self.sirv_pairing {
+            Some(pairing) => format!("Compare with Sirv:{}", pairing.dir),
+            None => "Pair a Sirv folder with this local folder".to_string(),
         };
         // Keep pairing visible beside the source path.
         let sirv = div().debug_selector(|| "sirv-pair-header".into()).child(
@@ -254,21 +346,25 @@ impl Audit {
                 .small()
                 .ghost()
                 .icon(IconName::Globe)
-                .label(sirv_label)
-                .tooltip(if self.sirv_pairing.is_some() {
-                    "Paired with Sirv — see status below the header"
-                } else {
-                    "Pair a Sirv folder with this local folder"
-                })
+                .label("Sirv")
+                .tooltip(sirv_tip)
                 .selected(self.sirv_pairing.is_some())
                 .disabled(sirv_disabled)
-                .on_click(cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx))),
+                // Paired, the button opens what the pairing is for: the two
+                // folders compared. Changing the folder stays in the Sirv bar.
+                .on_click(cx.listener(|audit, _, _, cx| {
+                    if audit.sirv_pairing.is_some() {
+                        audit.toggle_sirv_split(cx);
+                    } else {
+                        audit.open_sirv_browser(cx);
+                    }
+                })),
         );
         div()
             .debug_selector(|| "audit-header".into())
             .flex()
             .items_center()
-            .gap_2()
+            .gap_3()
             .px_3()
             .py_1p5()
             .overflow_hidden()
@@ -439,12 +535,12 @@ impl Audit {
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .min_w_0()
-                    .child(sirv)
-                    .child(div().min_w_0().overflow_hidden().child(breadcrumbs)),
+                    .flex_shrink_0()
+                    .child(back)
+                    .child(forward),
             )
+            .child(path_bar)
+            .child(div().flex_shrink_0().child(sirv))
             // The box narrows the list; erasing its text widens it back out.
             // `cleanable` puts the cross inside the field and only while there
             // is text to clear — the objection to the old Clear button was that

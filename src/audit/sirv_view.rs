@@ -8,6 +8,7 @@ impl Audit {
         label: &'static str,
         input: gpui_kit::Entity<InputState>,
         secret: bool,
+        disabled: bool,
         cx: &Context<Self>,
     ) -> gpui_kit::Div {
         div()
@@ -22,9 +23,14 @@ impl Audit {
                     .text_color(cx.theme().muted_foreground)
                     .child(label),
             )
-            .child(Input::new(&input).small().when(secret, |field| {
-                field.content_type(InputContentType::Password).mask_toggle()
-            }))
+            .child(
+                Input::new(&input)
+                    .small()
+                    .disabled(disabled)
+                    .when(secret, |field| {
+                        field.content_type(InputContentType::Password).mask_toggle()
+                    }),
+            )
     }
 
     /// A section heading plus its status line, if one has anything to say.
@@ -46,6 +52,7 @@ impl Audit {
         let Some(panel) = self.settings_panel.as_ref() else {
             return div().into_any_element();
         };
+        let checking = panel.checking;
         let can_save = credentials_complete(
             &panel.client_id.read(cx).value(),
             &panel.client_secret.read(cx).value(),
@@ -88,12 +95,14 @@ impl Audit {
                 "Client ID",
                 panel.client_id.clone(),
                 false,
+                checking,
                 cx,
             ))
             .child(Self::settings_row(
                 "Client secret",
                 panel.client_secret.clone(),
                 true,
+                checking,
                 cx,
             ))
             // Without these two, the form is a wall: it asks for keys and says
@@ -143,8 +152,13 @@ impl Audit {
                                 Button::new("settings-save")
                                     .primary()
                                     .small()
-                                    .label("Save credentials")
-                                    .disabled(!can_save)
+                                    .label(if checking {
+                                        "Checking…"
+                                    } else {
+                                        "Save credentials"
+                                    })
+                                    .loading(checking)
+                                    .disabled(!can_save || checking)
                                     .on_click(
                                         cx.listener(|audit, _, _, cx| audit.save_sirv_settings(cx)),
                                     ),

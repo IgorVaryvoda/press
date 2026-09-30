@@ -120,6 +120,45 @@ impl Audit {
         cx.notify();
     }
 
+    pub(super) fn can_step_history(&self, forward: bool) -> bool {
+        let stack = if forward {
+            &self.history_forward
+        } else {
+            &self.history_back
+        };
+        !stack.is_empty() && !self.converting && !self.update_is_applying()
+    }
+
+    /// Back returns to the folder this one was opened from; Forward undoes a
+    /// Back. A folder deleted since it was left drops out of the history rather
+    /// than blocking every step behind it.
+    pub(super) fn step_history(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if !self.can_step_history(forward) {
+            return;
+        }
+        let stack = if forward {
+            &mut self.history_forward
+        } else {
+            &mut self.history_back
+        };
+        let Some(target) = stack.last().cloned() else {
+            return;
+        };
+        if !target.is_dir() {
+            stack.pop();
+            self.notify_error(
+                "open-image",
+                "Folder is unavailable",
+                format!("{} no longer exists.", target.display()),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.history_step = Some((target.clone(), forward));
+        self.request_path(target, cx);
+    }
+
     pub(super) fn breadcrumb_parts(&self) -> Vec<(String, PathBuf)> {
         if self.root.as_os_str().is_empty() {
             return Vec::new();

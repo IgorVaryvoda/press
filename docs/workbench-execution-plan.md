@@ -224,6 +224,29 @@ blocked on the confirmed Studio ledger/provider contract. No bulk auto-retry or
 sponsorship on legacy direct-call paths meanwhile; a discard is not automatically
 free and a timeout never authorizes a paid rerun.
 
+**2026-09-26 check of the Studio batch API** (`ai-image-tools` at `d2779fbbc1`,
+`/api/zapier/batch/{remove-bg,upscale,alt-text}` and `batch/status/$jobId`)
+against the quote/accept/settle table in
+[connected services](studio-connected-services.md#quote-execution-and-charge-lifecycle):
+
+| Step | Batch API today | Verdict |
+| --- | --- | --- |
+| Resolve | Key, org, tier batch-size limit, URL safety per image | Present |
+| Quote | `estimated_credits` returns only in the response that already queued the job | Missing: no quote before acceptance |
+| Confirm | No client attempt ID or idempotency key; a retried POST queues a second job | Missing |
+| Accept | Durable credit reservation (`creditBillingMode: durable`) at job creation | Present |
+| Process | Server job ID and `poll_url`; status reports `credits_used` and `credits_remaining` | Present |
+| Settle | Unused reservation refunds in reverse debit order | Present |
+| Cancel | No cancel route | Missing |
+| Failures | Each failed item reads "Processing failed for this item" | Missing: the reason is not named |
+
+Press therefore keeps its one-image direct calls and does not adopt the batch
+API for paid runs. The missing server work is a quote route, an idempotency key on
+batch creation, a cancel route and named item errors; record it in the Studio
+repository before this row changes. The direct routes already return
+`credits_used`, and `/api/zapier/me` returns the balance: Press shows both
+since 2026-09-26, without predicting a price it cannot read from Studio.
+
 C2 is an explicit own-workspace save/share journey on canonical Studio assets.
 Status: deferred until shared work is needed and canonical services support it.
 Retailer scope and personal workspace stay distinct; no desktop PIM required.

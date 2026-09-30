@@ -53,7 +53,6 @@ use crate::{Launch, compare, convert, local_ai, scan, settings, sirv, studio, th
 use futures::StreamExt;
 use futures::future::select_all;
 use gpui_kit::component::alert::Alert;
-use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState};
@@ -396,6 +395,14 @@ pub(crate) struct Audit {
     folders: Vec<PathBuf>,
     /// File-manager shortcuts, newest first and bounded by settings.
     recent_folders: Vec<PathBuf>,
+    /// Folders behind and ahead of this one, as a file manager's Back and
+    /// Forward see them. The last element is the next step.
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
+    /// A Back or Forward request in flight: where it goes and which way. The
+    /// stacks move only when that folder lands, so a folder that fails to open
+    /// costs no history.
+    history_step: Option<(PathBuf, bool)>,
     /// The narrow/work-panel form of the folder browser is an overlay.
     browser_overlay: bool,
     /// Explicitly hidden at widths that otherwise show the folder sidebar.
@@ -593,6 +600,9 @@ pub(crate) struct Audit {
     studio_prompt: gpui_kit::Entity<InputState>,
     studio_key_checking: bool,
     studio_status: Option<(bool, String)>,
+    /// The key's balance as Studio last reported it: read when the key is
+    /// saved, when the rail opens and after each paid request, never per frame.
+    studio_credits: Option<f64>,
     /// A local result that opened the Studio rail. Kept with its source row so key
     /// setup or prompt editing does not silently switch the job back to the original.
     studio_source: Option<(usize, PathBuf)>,
@@ -609,9 +619,28 @@ pub(crate) struct Audit {
     /// Names in the paired listing that have no local file. They cannot use `visible`,
     /// whose indices deliberately refer only to immutable local entries.
     sirv_remote_only: Vec<String>,
+    /// Every file on either side of the pairing, local and remote aligned by key,
+    /// for the side-by-side view. Rebuilt with the counts.
+    sirv_rows: Vec<SyncRow>,
+    /// The paired folder shown side by side instead of as the audit list.
+    sirv_split: bool,
+    /// Rows ticked in the split view, by key: what its footer acts on.
+    sirv_selected: HashSet<String>,
+    /// The keyboard's row in the split view, as a position among the rows
+    /// shown, and the list scroll that keeps it in sight.
+    sirv_split_cursor: usize,
+    sirv_split_scroll: UniformListScrollHandle,
+    /// Entries whose thumbnails the split view drew this frame.
+    split_thumb_wanted: HashSet<usize>,
+    /// CDN previews of Sirv's side, by key. `None` is a fetch that failed and
+    /// is not asked again; `sirv_thumbs_loading` bounds the requests in flight.
+    sirv_thumbs: HashMap<String, Option<Arc<RenderImage>>>,
+    sirv_thumbs_loading: HashSet<String>,
+    /// Bumped by each walk; a preview asked for under an older one is dropped.
+    sirv_thumbs_epoch: u64,
     /// A snapshot from the last listing, patched by completed pulls. A file made
     /// by hand between listings stays stale until the next one, like the remote map.
-    sirv_local_presence: HashSet<String>,
+    sirv_local_presence: HashMap<String, u64>,
     /// A running or finished Sirv transfer, shown in the notices line.
     sirv_job: Option<SirvJob>,
     /// The destructive transfer awaiting its second click.
@@ -757,6 +786,19 @@ pub(crate) struct Audit {
     /// Files whose extension disagrees with their contents, also fixed for a scan.
     mislabelled: usize,
     published_results: Vec<String>,
+    /// Alt text Studio wrote for published URLs, keyed by URL, so the embeds
+    /// stop saying `alt=""`.
+    published_alts: HashMap<String, String>,
+    alt_job: Option<AltJob>,
+    /// Publish uploads the sources rather than the converted files. Session
+    /// only, on by default: Sirv encodes on delivery, so a converted file
+    /// published there is compressed twice.
+    publish_originals: bool,
+    /// What the Sirv CDN would send a browser for paired files, by relative
+    /// key. Each answer keeps the remote size and edge it was measured for,
+    /// so a changed file or a new max edge hides it instead of showing it.
+    sirv_delivery: HashMap<String, DeliveryCheck>,
+    sirv_delivery_job: Option<DeliveryJob>,
     /// The visible part of a non-empty selection. Cached because the output panel
     /// is rebuilt by cursor, thumbnail and comparison interaction.
     selected_target_count: usize,
@@ -855,6 +897,10 @@ enum CdnHost {
 
 struct SirvPairing {
     dir: String,
+    /// The listing went through subfolders, so nested files have keys. Follows
+    /// the list's own scope: a subfolder the local list does not show was not
+    /// walked on Sirv either.
+    deep: bool,
     files: Listing,
     cdn_host: CdnHost,
     client: Arc<parking_lot::Mutex<sirv::Client>>,
@@ -872,6 +918,47 @@ enum SirvJobKind {
     PushChanged,
     /// Publish converted results under optimized/.
     Publish,
+}
+
+/// One file in the side-by-side view: its key and its byte size on each side.
+#[derive(Clone, Debug, PartialEq)]
+struct SyncRow {
+    key: String,
+    local: Option<u64>,
+    remote: Option<u64>,
+    /// The scanned image behind the local side, for its thumbnail and menu.
+    entry: Option<usize>,
+}
+
+/// How one row of the split view stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitState {
+    InSync,
+    Different,
+    OnlyLocal,
+    OnlyRemote,
+}
+
+impl SyncRow {
+    fn state(&self) -> SplitState {
+        match (self.local, self.remote) {
+            (Some(local), Some(remote)) if local == remote => SplitState::InSync,
+            (Some(_), Some(_)) => SplitState::Different,
+            (Some(_), None) => SplitState::OnlyLocal,
+            _ => SplitState::OnlyRemote,
+        }
+    }
+
+    /// Whether a reconciliation filter keeps this row. The same three
+    /// categories the audit list narrows to, so a filter means one thing.
+    fn in_scope(&self, scope: Option<SirvScope>) -> bool {
+        match scope {
+            None => true,
+            Some(SirvScope::OnlyLocal) => self.state() == SplitState::OnlyLocal,
+            Some(SirvScope::OnlyRemote) => self.state() == SplitState::OnlyRemote,
+            Some(SirvScope::Changed) => self.state() == SplitState::Different,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -893,6 +980,9 @@ struct SirvJob {
     finished: bool,
     /// A stop has been requested; the in-flight file still has to acknowledge it.
     stopping: bool,
+    /// The Stop button asked, rather than a rescan or new keys: only then does
+    /// the report say "before Stop".
+    stopped_by_user: bool,
     /// The transfer generation this job belongs to. Unpairing or opening another
     /// folder bumps `sirv_generation`, and the loop stops at its next file rather
     /// than uploading the rest of a folder nobody is paired to any more.
@@ -931,6 +1021,10 @@ struct SettingsPanel {
     /// in the first field, so Tab and a click into another field both came undone the
     /// moment a save or a status message redrew the audit.
     focused: bool,
+    /// Save asked Sirv for a token and is waiting on the answer.
+    checking: bool,
+    /// Opened from the pairing dialog's "Set up Sirv…": good keys go back there.
+    then_browse: bool,
 }
 
 fn credentials_complete(client_id: &str, client_secret: &str) -> bool {
@@ -1031,8 +1125,44 @@ enum StudioJobState {
     Preparing,
     AwaitingConfirmation(studio::PreparedUpload),
     Running,
-    Done(PathBuf),
+    /// The written result and the credits Studio says it charged.
+    Done(PathBuf, Option<f64>),
     Failed(String),
+}
+
+/// Alt text for published URLs, one paid request at a time. The flag is the
+/// job's identity: a result lands only on the job that asked for it.
+struct AltJob {
+    done: usize,
+    total: usize,
+    credits_used: f64,
+    failure: Option<String>,
+    finished: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct DeliverySummary {
+    count: usize,
+    on_disk: u64,
+    served: u64,
+    formats: String,
+    converted: Option<u64>,
+}
+
+struct DeliveryCheck {
+    remote_size: u64,
+    edge: Option<u32>,
+    delivered: sirv::Delivered,
+}
+
+/// HEAD requests against the public CDN, one at a time. The flag is the
+/// job's identity: a result lands only on the job that asked for it.
+struct DeliveryJob {
+    done: usize,
+    total: usize,
+    failure: Option<String>,
+    finished: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct StudioJob {
@@ -1276,6 +1406,24 @@ impl Audit {
         cx: &mut Context<Self>,
     ) {
         let root_changed = self.root != root;
+        let step = self.history_step.take();
+        if root_changed && !self.root.as_os_str().is_empty() {
+            let left = self.root.clone();
+            match step {
+                Some((target, false)) if target == root => {
+                    self.history_back.pop();
+                    self.history_forward.push(left);
+                }
+                Some((target, true)) if target == root => {
+                    self.history_forward.pop();
+                    self.history_back.push(left);
+                }
+                _ => {
+                    self.history_back.push(left);
+                    self.history_forward.clear();
+                }
+            }
+        }
         self.dataset_generation = self.dataset_generation.wrapping_add(1);
         self.estimate_generation = self.estimate_generation.wrapping_add(1);
         self.estimate = None;
@@ -1452,7 +1600,8 @@ impl Audit {
                 self.output = Output::Optimized;
                 self.browser_output_root = output_identity(&self.output, &self.root);
             }
-            self.unpair_sirv(cx);
+            self.drop_sirv_pairing(cx);
+            self.restore_sirv_pairing(cx);
         } else {
             self.cancel_sirv_transfer();
             if let Some(pairing) = self.sirv_pairing.as_mut() {
@@ -1460,6 +1609,7 @@ impl Audit {
                 pairing.files = Listing::Walking;
                 self.sirv_counts = None;
                 self.sirv_remote_only.clear();
+                self.sirv_rows.clear();
                 self.refresh_visible();
                 self.walk_sirv_pairing(cx);
             } else {
@@ -1664,6 +1814,7 @@ impl Audit {
                             audit.dataset_subfolders = true;
                             audit.refresh_visible();
                         }
+                        audit.sync_sirv_depth(cx);
                     }
                     Some(Err(error)) => {
                         audit.include_subfolders = audit.dataset_subfolders;
@@ -1798,7 +1949,7 @@ impl Audit {
                         audit.install_dataset(scanned, root, false, Some(batch_size), window, cx);
                         audit.batch_folders = Some(folder_count);
                         if audit.sirv_pairing.is_some() {
-                            audit.unpair_sirv(cx);
+                            audit.drop_sirv_pairing(cx);
                         }
                         audit.refresh_visible();
                         audit.browser_overlay = false;
@@ -2138,11 +2289,12 @@ fn sirv_push_plan(
     entries: &[scan::Entry],
     files: &HashMap<String, sirv::Node>,
     accept: sirv::SyncState,
+    deep: bool,
 ) -> Vec<(String, PathBuf)> {
     entries
         .iter()
         .filter_map(|entry| {
-            let key = sirv::relative_key(root, &entry.path)?;
+            let key = sirv::paired_key(root, &entry.path, deep)?;
             (sirv::classify(entry.bytes, files.get(&key)) == accept)
                 .then(|| (key, entry.path.clone()))
         })
@@ -2472,6 +2624,9 @@ pub(crate) fn build_audit(
             batch_folders: None,
             folders: Vec::new(),
             recent_folders,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            history_step: None,
             browser_overlay: false,
             browser_collapsed: false,
             folder_filter_input,
@@ -2491,6 +2646,11 @@ pub(crate) fn build_audit(
             heavy,
             mislabelled,
             published_results: Vec::new(),
+            published_alts: HashMap::new(),
+            alt_job: None,
+            publish_originals: true,
+            sirv_delivery: HashMap::new(),
+            sirv_delivery_job: None,
             studio_job: None,
             studio_tool: studio::Tool::default(),
             studio_key,
@@ -2498,6 +2658,7 @@ pub(crate) fn build_audit(
             studio_prompt,
             studio_key_checking: false,
             studio_status: None,
+            studio_credits: None,
             studio_source: None,
             selected_target_count: 0,
             selected_target_bytes: 0,
@@ -2612,7 +2773,16 @@ pub(crate) fn build_audit(
             sirv_counts: None,
             sirv_scope: None,
             sirv_remote_only: Vec::new(),
-            sirv_local_presence: HashSet::new(),
+            sirv_rows: Vec::new(),
+            sirv_split: false,
+            sirv_selected: HashSet::new(),
+            sirv_split_cursor: 0,
+            sirv_split_scroll: UniformListScrollHandle::new(),
+            split_thumb_wanted: HashSet::new(),
+            sirv_thumbs: HashMap::new(),
+            sirv_thumbs_loading: HashSet::new(),
+            sirv_thumbs_epoch: 0,
+            sirv_local_presence: HashMap::new(),
             sirv_job: None,
             sirv_confirm: None,
             sirv_generation: 0,
@@ -2635,6 +2805,7 @@ pub(crate) fn build_audit(
         audit.refresh_target_summary();
         audit.schedule_estimate(cx);
         audit.seed_tree_for_current_folder(cx);
+        audit.restore_sirv_pairing(cx);
         if open_single {
             audit.open_preview(0, cx);
         }

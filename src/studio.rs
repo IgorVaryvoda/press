@@ -16,6 +16,17 @@ use crate::{convert, scan, settings, sirv};
 // user's image bytes, so the host has to be the one the key belongs to; the
 // tests reach their own loopback server through `process_with_api` instead.
 const API: &str = "https://www.sirv.studio";
+
+/// The Studio this process talks to. Debug builds honour `PRESS_STUDIO_API`
+/// so a developer can run the window against dev with a dev key; release
+/// builds ignore it, so a shipped key never leaves for another host.
+fn api() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(api) = std::env::var("PRESS_STUDIO_API") {
+        return api;
+    }
+    API.to_string()
+}
 pub const API_KEYS_URL: &str = "https://www.sirv.studio/settings/api?utm_source=press&utm_medium=desktop&utm_campaign=studio-api-key";
 pub const BATCH_BACKGROUND_REMOVAL_URL: &str =
     "https://www.sirv.studio/tools/batch-background-removal?utm_source=press&utm_medium=desktop";
@@ -135,6 +146,35 @@ struct Uploaded {
 #[derive(Deserialize)]
 struct Processed {
     image_url: String,
+    #[serde(default)]
+    credits_used: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct Described {
+    alt_text: String,
+    #[serde(default)]
+    credits_used: Option<f64>,
+}
+
+/// What `/api/zapier/me` says about the key's account. Optional so a server
+/// that stops sending the balance still verifies the key.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Account {
+    #[serde(default)]
+    pub credits: Option<f64>,
+}
+
+/// Credits as Studio counts them, with their noun: whole numbers without a
+/// decimal point, fractions to one place, and "1 credit" in the singular.
+pub fn format_credits(credits: f64) -> String {
+    let number = if credits.fract() == 0.0 {
+        format!("{credits:.0}")
+    } else {
+        format!("{credits:.1}")
+    };
+    let noun = if number == "1" { "credit" } else { "credits" };
+    format!("{number} {noun}")
 }
 
 /// The bytes Studio will receive. A prepared copy exists only in memory and is
@@ -185,13 +225,14 @@ impl Client {
         format!("Bearer {}", self.key)
     }
 
-    fn verify(&self) -> Result<(), String> {
+    fn verify(&self) -> Result<Account, String> {
         self.agent
             .get(&format!("{}/api/zapier/me", self.api))
             .set("Authorization", &self.authorization())
             .call()
-            .map(|_| ())
-            .map_err(studio_error("verify key"))
+            .map_err(studio_error("verify key"))?
+            .into_json::<Account>()
+            .map_err(|error| format!("Studio returned an invalid account response: {error}"))
     }
 
     fn upload(&self, upload: &PreparedUpload) -> Result<String, String> {
@@ -230,7 +271,12 @@ impl Client {
             .map_err(|error| format!("Studio returned an invalid upload response: {error}"))
     }
 
-    fn process(&self, tool: Tool, image_url: &str, prompt: &str) -> Result<String, String> {
+    fn process(
+        &self,
+        tool: Tool,
+        image_url: &str,
+        prompt: &str,
+    ) -> Result<(String, Option<f64>), String> {
         let response = self
             .agent
             .post(&format!("{}/api/zapier/{}", self.api, tool.endpoint()))
@@ -240,8 +286,26 @@ impl Client {
             .map_err(studio_error(tool.label()))?;
         response
             .into_json::<Processed>()
-            .map(|processed| processed.image_url)
+            .map(|processed| (processed.image_url, processed.credits_used))
             .map_err(|error| format!("Studio returned an invalid image response: {error}"))
+    }
+
+    fn alt_text(&self, image_url: &str) -> Result<(String, Option<f64>), String> {
+        let response = self
+            .agent
+            .post(&format!("{}/api/zapier/alt-text", self.api))
+            .set("Authorization", &self.authorization())
+            .timeout(PROCESS_TIMEOUT)
+            .send_json(serde_json::json!({ "image_url": image_url, "detail_level": "caption" }))
+            .map_err(studio_error("alt text"))?;
+        let described = response
+            .into_json::<Described>()
+            .map_err(|error| format!("Studio returned an invalid alt text response: {error}"))?;
+        let alt = described.alt_text.trim();
+        if alt.is_empty() {
+            return Err("Studio returned empty alt text".into());
+        }
+        Ok((alt.to_string(), described.credits_used))
     }
 
     fn download(&self, url: &str) -> Result<Vec<u8>, String> {
@@ -266,8 +330,15 @@ impl Client {
     }
 }
 
-pub fn verify_key(key: &str) -> Result<(), String> {
-    Client::new(API, key)?.verify()
+/// Verifies the key and reads its account's credit balance in one request.
+pub fn verify_key(key: &str) -> Result<Account, String> {
+    Client::new(&api(), key)?.verify()
+}
+
+/// Alt text for one public image URL, and the credits Studio charged for it.
+/// Studio fetches the URL itself, so nothing leaves this computer here.
+pub fn alt_text(key: &str, image_url: &str) -> Result<(String, Option<f64>), String> {
+    Client::new(&api(), key)?.alt_text(image_url)
 }
 
 #[cfg(test)]
@@ -282,7 +353,7 @@ fn process_with_api(
     tool: Tool,
     prompt: &str,
     cancelled: &AtomicBool,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<f64>), String> {
     let upload = match prepare_upload(source, cancelled)? {
         Preflight::Ready(upload) => upload,
         Preflight::NeedsConfirmation(upload) => upload,
@@ -310,9 +381,9 @@ pub fn process_prepared(
     tool: Tool,
     prompt: &str,
     cancelled: &AtomicBool,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<f64>), String> {
     process_prepared_with_api(
-        API,
+        &api(),
         key,
         root,
         out_dir,
@@ -335,7 +406,7 @@ fn process_prepared_with_api(
     tool: Tool,
     prompt: &str,
     cancelled: &AtomicBool,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<f64>), String> {
     check_cancelled(cancelled)?;
     if tool.needs_prompt() && prompt.trim().is_empty() {
         return Err(format!("{} needs a prompt", tool.label()));
@@ -343,7 +414,7 @@ fn process_prepared_with_api(
     let client = Client::new(api, key)?;
     let uploaded = client.upload(upload)?;
     check_cancelled(cancelled)?;
-    let result_url = client.process(tool, &uploaded, prompt.trim())?;
+    let (result_url, credits_used) = client.process(tool, &uploaded, prompt.trim())?;
     check_cancelled(cancelled)?;
     let bytes = client.download(&result_url)?;
     check_cancelled(cancelled)?;
@@ -359,7 +430,7 @@ fn process_prepared_with_api(
         Some(reason) => format!("the Studio result was not written: {reason}"),
         None => "could not safely write the Studio result".to_string(),
     })?;
-    Ok(written)
+    Ok((written, credits_used))
 }
 
 /// Build the smallest truthful upload path: accepted bytes pass through unchanged;
@@ -903,7 +974,7 @@ mod tests {
         assert!(text.starts_with("POST /api/zapier/replace-bg "));
         assert!(text.contains("Authorization: Bearer sk_live_test"));
         assert!(text.contains("\"prompt\":\"clean white studio\""));
-        let body = format!("{{\"image_url\":\"{server_api}/result.png\"}}");
+        let body = format!("{{\"image_url\":\"{server_api}/result.png\",\"credits_used\":4}}");
         respond(stream, "application/json", body.as_bytes());
 
         let (mut stream, _) = listener.accept().unwrap();
@@ -939,7 +1010,7 @@ mod tests {
         let output_source = root.join("photo.png");
         let source = root.join("optimized/photo.webp");
         std::fs::write(&source, png()).unwrap();
-        let written = process_with_api(
+        let (written, credits_used) = process_with_api(
             &api,
             "sk_live_test",
             &root,
@@ -956,6 +1027,7 @@ mod tests {
             written,
             root.join("optimized/photo-studio-background-replaced.png")
         );
+        assert_eq!(credits_used, Some(4.0));
         assert_eq!(std::fs::read(&written).unwrap(), output);
         server.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();
@@ -990,7 +1062,7 @@ mod tests {
         let context = crate::settings::Output::Folder(outside.clone())
             .context(&root)
             .expect("a folder outside the root establishes");
-        let written = process_with_api(
+        let (written, _) = process_with_api(
             &api,
             "sk_live_test",
             &root,
@@ -1014,6 +1086,69 @@ mod tests {
         );
         server.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_account_check_reads_credits_and_tolerates_their_absence() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for body in [
+                &br#"{"id":"u1","email":"a@b.c","credits":120.5,"tier":"pro"}"#[..],
+                br#"{"id":"u1"}"#,
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let text = String::from_utf8_lossy(&read_request(&mut stream)).into_owned();
+                assert!(text.starts_with("GET /api/zapier/me "));
+                assert!(text.contains("Authorization: Bearer sk_live_test"));
+                respond(stream, "application/json", body);
+            }
+        });
+        let client = Client::new(&api, "sk_live_test").unwrap();
+        assert_eq!(
+            client.verify().unwrap(),
+            Account {
+                credits: Some(120.5)
+            }
+        );
+        assert_eq!(client.verify().unwrap(), Account::default());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn credits_print_whole_numbers_plainly_and_one_credit_singular() {
+        assert_eq!(format_credits(120.0), "120 credits");
+        assert_eq!(format_credits(1.0), "1 credit");
+        assert_eq!(format_credits(0.5), "0.5 credits");
+        assert_eq!(format_credits(2.25), "2.2 credits");
+    }
+
+    #[test]
+    fn alt_text_sends_the_public_url_and_returns_the_charge() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for body in [
+                &br#"{"id":"z1","alt_text":"  A red chair on a white floor. ","credits_used":1}"#[..],
+                br#"{"id":"z2","alt_text":"   "}"#,
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let text = String::from_utf8_lossy(&read_request(&mut stream)).into_owned();
+                assert!(text.starts_with("POST /api/zapier/alt-text "));
+                assert!(text.contains("\"image_url\":\"https://demo.sirv.com/a.jpg\""));
+                respond(stream, "application/json", body);
+            }
+        });
+        let client = Client::new(&api, "sk_live_test").unwrap();
+        assert_eq!(
+            client.alt_text("https://demo.sirv.com/a.jpg").unwrap(),
+            ("A red chair on a white floor.".to_string(), Some(1.0))
+        );
+        assert_eq!(
+            client.alt_text("https://demo.sirv.com/a.jpg").unwrap_err(),
+            "Studio returned empty alt text"
+        );
+        server.join().unwrap();
     }
 
     #[test]

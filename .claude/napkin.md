@@ -208,6 +208,36 @@ sessions learn.
 - 2026-09-19: Not bugs, checked and dropped: "Save changes" on a built-in preset
   IS disabled (it reads dim only when zoomed); the toast stack's collapsed peek
   at a bottom anchor is the library's intended stacking, not an overlap.
+- 2026-09-26: Sirv/Studio integration items 1-5 (credits, publish originals,
+  CDN delivery check, alt text, batch-API evaluation). Facts worth keeping:
+  Press talks to Studio only through `/api/zapier/*` (source in
+  `~/Projects/ai-image-tools/src/start/routes/api/zapier/`); direct routes
+  return `credits_used`, `/me` returns `credits`. The Sirv CDN answers HEAD
+  with `content-length`/`content-type` and re-encodes every request (a JPEG
+  with no params came back AVIF), so `?s=N&scale.option=noup` + a browser
+  Accept header measures what a visitor gets. `plans/` is gitignored: plan
+  README edits stay local; tracked status goes in `docs/`. The Studio key in
+  `~/.config/imageguide/studio` on this host is a dev.sirv.studio key
+  (production says 401). Debug builds take `PRESS_STUDIO_API=https://dev.sirv.studio`;
+  the private ux-eval copy copies that key into its sandbox with
+  `PRESS_EVAL_STUDIO=1`. Direct Python calls to dev need `User-Agent: node`.
+  Dev `/me` `credits` (91817) and a run's `credits_remaining` (94985.9)
+  disagree: two wallets; ask Studio which one pays before trusting either.
+- 2026-09-26: Headless capture without `/tmp/press-shot.py`: copy
+  `scripts/ux-eval` to /tmp, hardcode `ROOT` and point `SCENARIOS_PATH` at a
+  temp JSON, then `capture <name> --fixture <copy> --allow-external-fixture
+  --skip-build --binary target/debug/press --output-root /tmp/...`. Waits cap
+  at 30 s per step; chain two for a debug-build conversion. At 1100×720 the
+  Convert commit button is at (938, 662) after `ctrl+a`.
+| 2026-09-26 | self | Ran `<binary> --list` over every `target/debug/deps/press-*` to find the test binary; one was the app, which took `--list` as a folder and opened a window on the user's live desktop | Get the test binary from `cargo test --bin press --no-run` (its `Executable` line). Never run an unknown `press-*` binary outside headless gamescope |
+| 2026-09-26 | self | `updates_wait_for_download_and_apply_and_keep_dismissed_state` failed ~1 in 3 runs; looked like my change | Something on this host sends `HEAD /` (Host: localhost:PORT) to new listening ports of processes whose cwd is this repo. Same binary from `/tmp` fails 0/12, from the repo 2/12; gamescope does not isolate it. Run that test from `/tmp`, and read the request before blaming a diff |
+- 2026-09-26: Live Sirv proof in headless gamescope: the private ux-eval
+  copy copies `~/.config/imageguide/sirv` into its temp config when
+  `PRESS_EVAL_SIRV=1`. Sirv folder `/Image Editor Backup 202310111041` holds
+  one image (`marta.jpg`, 172483 B); a local folder holding its API-downloaded
+  bytes pairs as "same size", so delivery checks and Publish-originals run
+  with no upload. Clicks at 1100×720: Sirv header (107,20), that folder
+  center(-60,+28), Pair center(-85,+72).
 - 2026-09-19: Released v0.7.0 from main 5ac41d0 (two rounds of UI audit fixes:
   d7ac68d, ebe21cc, eda8f78). Followed the napkin's own gate this time — pushed
   main, waited for all three CI OSes green (run 35441369100, 1h4m; macOS is the
@@ -215,3 +245,46 @@ sessions learn.
   35444451833 was green on all five package jobs in 1h40m; the macOS Intel job
   alone took ~100 min and the timestamp retry added in v0.6.9 held. All 16
   assets published, `latest.json` serves v0.7.0.
+- 2026-09-30: Header is now GNOME Files style: menu, sidebar toggle, Back and
+  Forward (`history-back`/`history-forward`, Alt+←/→, mouse side buttons), a
+  `path-bar` pill with `crumb-N` items, then Sirv, filter, view, rail toggle.
+  Sirv is no longer left-anchored: the two Sirv scenarios click (-410, 20),
+  which hits it at 760, 1100 and 1440. History moves in `install_dataset`,
+  keyed by `history_step`, so a folder that fails to open costs no history.
+  `/tmp/press-shot.py out.png WxH <fixture> '<json actions>'` wraps
+  `ux-eval`'s `capture_frame` for one-off headless shots.
+- 2026-09-30: Sirv split view (`sirv-split`): `sirv_rows` is built in
+  `refresh_sirv_counts`, merged by key, because `sirv_local_presence` can lag
+  a transfer and put one file on both the local and remote-only lists. Paired,
+  the header Sirv button toggles the split; its label is always "Sirv", so
+  (-410, 20) hits it paired or not. "Change Sirv folder…" is in the bar's `⋯`. Live proof
+  fixture: `~/.cache/press-sync-demo` + Sirv `/Image Editor Backup 202310111041`;
+  `PRESS_SHOT_SIRV=1 /tmp/press-shot.py` copies the real Sirv keys into the
+  sandbox. Pulling `marta.jpg` there turns its row green.
+| 2026-09-30 | user | Shipped a read-only split view and a four-row Sirv bar; user: "cluttered as fuck", "no action can be performed" | A comparison view must act on what it shows (per-row arrow + ticked-row footer). Keep a status bar to one line; secondary verbs go behind `⋯`. Check the bar at the narrowest real layout (list mode, Convert panel open) before calling it done |
+- 2026-09-30: Split view ticks are `sirv_selected` (keys). They survive the
+  rescan and re-walk after a transfer (pruned in `refresh_sirv_counts`); only
+  pair, unpair and new credentials clear them. xdotool clicks 0.25 s apart can
+  merge; put a 1 s wait between scripted row ticks.
+- 2026-09-30: Sirv audit round. Pairings persist in `<config>/imageguide/
+  sirv-pairs` (`remote<TAB>local`), restored on launch and on folder open;
+  window tests never touch it (`remember_pairing_unless_test`,
+  `restore_sirv_pairing` is a no-op under `cfg!(test)`). Sync classification
+  uses `sirv::paired_key` (no key for subfolder files, the listing is one
+  level); `relative_key` stays only for publishing results. A pull adds files
+  in place (`adopt_pulled_entry`), never a rescan: a rescan cancels Studio,
+  local AI and plan runs. Plain Push stats each file (`Client::exists`, Sirv
+  answers 404 for absent) before uploading. `/tmp/press-shot.py` takes
+  `"button": 3` for right-clicks and `PRESS_SHOT_PAIR` to seed a pairing.
+| 2026-09-30 | self | Renamed the sync words to "in sync / different" to match the bar; a test (`sirv_size_evidence_words_name_only_sizes`) guards a deliberate rule that size equality is evidence, never "synced" | Size-based states say "same size" / "different size" everywhere, bar count included. Grep tests for the words before renaming user-facing vocabulary |
+- 2026-09-30: Sirv to "10/10" round. Deep pairing: `sirv::walk_remote` lists
+  subfolders when the dataset has them (`SirvPairing.deep` follows
+  `dataset_subfolders`; `sync_sirv_depth` re-walks after the subfolder rescan).
+  `sirv::compared_folder` is the one rule for which folders both sides compare
+  (dot, press-originals, packages anywhere; optimized/ at the top) and
+  `paired_key(root, path, deep)` applies it locally. Presence is a size map, so
+  non-image files both sides hold get rows; counts derive from rows. CDN
+  previews: `?w=48&h=48&scale.option=fit&format=jpg` (Sirv returns ~0.6 KB
+  JPEG). Live test used Sirv `/press-test` (created, verified, deleted):
+  upload, stat-before-upload refusal, Replace on Sirv/here, nested upload,
+  download all passed. `/tmp/sirvapi.py {mkdir,ls,upload,rm}` drives the API.

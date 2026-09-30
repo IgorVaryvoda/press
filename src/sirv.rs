@@ -152,6 +152,102 @@ pub fn public_url(cdn_host: &str, remote_filename: &str) -> Result<String, Error
     Ok(format!("https://{cdn_host}/{path}"))
 }
 
+/// What the CDN sends a current browser for one public URL: the bytes on the
+/// wire and the format Sirv chose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delivered {
+    pub bytes: u64,
+    pub format: String,
+}
+
+/// The query that asks Sirv for what Press's max edge would write: the longest
+/// side scaled down to `edge`, never up. No edge, no query: Sirv's own default.
+pub fn delivery_query(edge: Option<u32>) -> String {
+    edge.map(|edge| format!("?s={edge}&scale.option=noup"))
+        .unwrap_or_default()
+}
+
+/// A browser's image `Accept` header. Sirv negotiates the format from it, so
+/// this is what makes the answer AVIF or WebP rather than the stored JPEG.
+const BROWSER_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+/// Ask the public CDN, with a HEAD request, how many bytes it would deliver.
+/// No credentials: this is exactly what a visitor's browser would be sent.
+pub fn delivered(url: &str) -> Result<Delivered, Error> {
+    let response = ureq::AgentBuilder::new()
+        .timeout(TIMEOUT)
+        .build()
+        .head(url)
+        .set("Accept", BROWSER_ACCEPT)
+        .call()
+        .map_err(sirv_error("delivery check"))?;
+    let bytes = response
+        .header("Content-Length")
+        .and_then(|length| length.trim().parse::<u64>().ok())
+        .ok_or_else(|| Error {
+            status: 0,
+            message: "the CDN did not say how large the image is".into(),
+        })?;
+    let format = response
+        .header("Content-Type")
+        .and_then(|kind| kind.split(';').next())
+        .map(|kind| {
+            kind.trim()
+                .trim_start_matches("image/")
+                .to_ascii_uppercase()
+        })
+        .unwrap_or_default();
+    Ok(Delivered { bytes, format })
+}
+
+/// A small preview of a Sirv file, straight from its CDN: a 48px JPEG, so
+/// the split view can show what a file only Sirv holds looks like.
+pub fn preview_url(cdn_host: &str, remote_filename: &str) -> Result<String, Error> {
+    Ok(format!(
+        "{}?w=48&h=48&scale.option=fit&format=jpg",
+        public_url(cdn_host, remote_filename)?
+    ))
+}
+
+/// Whether the CDN can draw `key` as an image at all. Asking for a text file
+/// or a video downloaded up to half a megabyte for nothing.
+pub fn previewable(key: &str) -> bool {
+    let extension = key
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(
+        extension.as_deref(),
+        Some(
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "webp"
+                | "avif"
+                | "gif"
+                | "tif"
+                | "tiff"
+                | "bmp"
+                | "heic"
+                | "jxl"
+                | "psd"
+        )
+    )
+}
+
+/// The preview's bytes, capped: a wrong or hostile response cannot fill memory.
+pub fn preview(url: &str) -> Result<Vec<u8>, Error> {
+    let response = ureq::AgentBuilder::new()
+        .timeout(TIMEOUT)
+        .build()
+        .get(url)
+        .call()
+        .map_err(sirv_error("preview"))?;
+    read_capped(response.into_reader(), 512 * 1024).map_err(|message| Error {
+        status: 0,
+        message: format!("preview body: {message}"),
+    })
+}
+
 /// Where a person with no Sirv account starts. The credentials form is the
 /// only door into sync, so it has to name the way in as well as the way through.
 pub const SIGNUP_URL: &str =
@@ -189,7 +285,8 @@ pub(crate) fn sync_state_word(state: SyncState) -> &'static str {
     match state {
         SyncState::SameSize => "same size",
         SyncState::DifferentSize => "different size",
-        SyncState::OnlyLocal => "new",
+        // The bar's filter word, and no claim about content.
+        SyncState::OnlyLocal => "only here",
     }
 }
 
@@ -207,6 +304,36 @@ pub fn relative_key(root: &Path, path: &Path) -> Option<String> {
         key.push_str(&component.as_os_str().to_string_lossy());
     }
     Some(key)
+}
+
+/// The key a local file has in a pairing. The pairing lists one folder level,
+/// so a file in a subfolder has none: its Sirv twin was never listed. Keyed
+/// anyway, every nested file read as new, and an upload then overwrote
+/// whatever Sirv held under that name without the two-click confirmation.
+///
+/// A deep pairing, listed through its subfolders, keys nested files too.
+pub fn paired_key(root: &Path, path: &Path, deep: bool) -> Option<String> {
+    relative_key(root, path).filter(|key| {
+        let mut folders = key.split('/').rev().skip(1).collect::<Vec<_>>();
+        folders.reverse();
+        folders.is_empty()
+            || deep
+                && folders
+                    .iter()
+                    .enumerate()
+                    .all(|(depth, name)| compared_folder(name, depth == 0))
+    })
+}
+
+/// True when nothing on the way from `root` to `key`, the file included, is
+/// a symlink. A file sent to Sirv is public; a link would send its target.
+pub fn plain_file_below(root: &Path, key: &str) -> bool {
+    let mut path = root.to_path_buf();
+    key.split('/').all(|part| {
+        path.push(part);
+        path.symlink_metadata()
+            .is_ok_and(|meta| !meta.file_type().is_symlink())
+    }) && path.is_file()
 }
 
 /// Strip the paired folder off a remote filename so both sides of the diff
@@ -229,15 +356,69 @@ pub fn unpair_remote(dir: &str, filename: &str) -> Option<String> {
     }
 }
 
-/// Files directly in one paired folder. Folder nodes and nested keys belong to
-/// another shallow page, matching the local browser's one-directory inventory.
-pub(crate) fn direct_remote_files(dir: &str, nodes: Vec<Node>) -> HashMap<String, Node> {
-    nodes
-        .into_iter()
-        .filter(|node| !node.is_folder())
-        .filter_map(|node| unpair_remote(dir, &node.filename).map(|key| (key, node)))
-        .filter(|(key, _)| safe_key(key) && !key.contains('/') && !key.contains('\\'))
-        .collect()
+/// Whether a deep pairing compares what is inside folder `name`, on either
+/// side. One rule for both, so a folder never has files on one side of the
+/// comparison and none on the other: that read as "only here" for ever, and
+/// an upload of it could land on a copy the listing never saw. Dot folders,
+/// the backup folder and packages anywhere; `optimized/` at the top, where
+/// published results live.
+pub(crate) fn compared_folder(name: &str, top: bool) -> bool {
+    !(name.starts_with('.')
+        || name == crate::scan::BACKUP_DIR
+        || (top && name == crate::scan::OUTPUT_DIR)
+        || crate::scan::is_opaque_package(Path::new(name)))
+}
+
+/// Every file of a paired folder, keyed below it. Shallow, only its direct
+/// files, matching the local one-folder list. Deep, the walk enters subfolders
+/// the way the local scan does with "Include subfolders": dot folders and the
+/// backup folder are skipped everywhere, and `optimized/` at the top, where
+/// published results live. `list` reads one folder, `None` when cancelled; the
+/// whole walk shares one entry cap.
+pub(crate) fn walk_remote(
+    dir: &str,
+    deep: bool,
+    mut list: impl FnMut(&str) -> Result<Option<Vec<Node>>, Error>,
+) -> Result<Option<HashMap<String, Node>>, Error> {
+    let dir = dir.trim_end_matches('/');
+    let mut files = HashMap::new();
+    let mut pending = vec![String::new()];
+    let mut entries = 0;
+    while let Some(prefix) = pending.pop() {
+        let folder = if prefix.is_empty() {
+            dir.to_string()
+        } else {
+            format!("{dir}/{prefix}")
+        };
+        let Some(nodes) = list(&folder)? else {
+            return Ok(None);
+        };
+        entries += nodes.len();
+        if entries > LISTING_LIMIT {
+            return Err(listing_limit_error());
+        }
+        for node in nodes {
+            // Only this folder's own children: some accounts list deeper names.
+            let Some(name) = unpair_remote(&folder, &node.filename)
+                .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+            else {
+                continue;
+            };
+            let key = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if node.is_folder() {
+                if deep && compared_folder(&name, prefix.is_empty()) {
+                    pending.push(key);
+                }
+            } else if safe_key(&key) {
+                files.insert(key, node);
+            }
+        }
+    }
+    Ok(Some(files))
 }
 
 /// True when this continuation token has not been seen before in this
@@ -531,6 +712,11 @@ impl Client {
         Ok(issued.token)
     }
 
+    /// Ask for a token and nothing else: the cheapest proof the keys work.
+    pub fn check(&mut self) -> Result<(), Error> {
+        self.fetch_token().map(drop)
+    }
+
     /// Run one authenticated call. A token that expired between check and use
     /// is routine: refresh once and try again rather than surfacing a login
     /// error.
@@ -690,6 +876,30 @@ impl Client {
         })
     }
 
+    /// Whether `filename` is on Sirv now. The listing a push plans from can be
+    /// an hour old; asking just before the upload is what keeps "only here" from
+    /// overwriting a file somebody else put there since.
+    pub fn exists(&mut self, filename: &str) -> Result<bool, Error> {
+        let url = format!(
+            "{}/v2/files/stat?filename={}",
+            self.api,
+            encode_path(filename)
+        );
+        self.authenticated(|client| {
+            let authorization = client.bearer()?;
+            match client
+                .agent
+                .get(&url)
+                .set("Authorization", &authorization)
+                .call()
+            {
+                Ok(_) => Ok(true),
+                Err(ureq::Error::Status(404, _)) => Ok(false),
+                Err(error) => Err(sirv_error("stat")(error)),
+            }
+        })
+    }
+
     /// Put bytes at `filename`, creating nothing on the way — the caller makes
     /// folders explicitly so a partial push is visible in the listing.
     pub fn upload(
@@ -807,6 +1017,69 @@ fn store_path_in(base: impl AsRef<Path>) -> PathBuf {
     // on-disk state alone: an orphaned credentials file reads as "Press forgot
     // my keys", which is worse than a folder whose name is out of date.
     base.as_ref().join("imageguide").join("sirv")
+}
+
+/// Which Sirv folder each local folder is paired with, one `remote<TAB>local`
+/// line per pair. Beside the keys, so a pairing survives a restart the way the
+/// keys do; before this, every launch and every folder change asked for the
+/// same pairing again.
+fn pairings_path() -> Option<PathBuf> {
+    Some(store_path()?.parent()?.join("sirv-pairs"))
+}
+
+/// Tolerant, like every other file Press reads: a line it cannot use is skipped.
+pub fn parse_pairings(text: &str) -> HashMap<PathBuf, String> {
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(remote, local)| remote.starts_with('/') && !local.is_empty())
+        .map(|(remote, local)| (PathBuf::from(local), remote.to_string()))
+        .collect()
+}
+
+pub fn render_pairings(pairings: &HashMap<PathBuf, String>) -> String {
+    let mut lines = pairings
+        .iter()
+        .map(|(local, remote)| format!("{remote}\t{}\n", local.display()))
+        .collect::<Vec<_>>();
+    lines.sort();
+    lines.concat()
+}
+
+pub fn load_pairings() -> HashMap<PathBuf, String> {
+    pairings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| parse_pairings(&text))
+        .unwrap_or_default()
+}
+
+/// `remember_pairing`, except that a test build never touches the real
+/// config: window tests pair and unpair constantly.
+pub fn remember_pairing_unless_test(local: &Path, remote: Option<&str>) -> Result<(), String> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    remember_pairing(local, remote)
+}
+
+/// Remember `local`'s pairing, or forget it with `None`.
+pub fn remember_pairing(local: &Path, remote: Option<&str>) -> Result<(), String> {
+    let path = pairings_path().ok_or("no config directory on this system")?;
+    let mut pairings = load_pairings();
+    match remote {
+        Some(remote) => pairings.insert(local.to_path_buf(), remote.to_string()),
+        None => pairings.remove(local),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.part", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    std::fs::write(&temporary, render_pairings(&pairings)).map_err(|error| error.to_string())?;
+    replace_file(&temporary, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        error.to_string()
+    })
 }
 
 pub fn load_credentials() -> Option<Credentials> {
@@ -966,6 +1239,48 @@ mod tests {
                 return String::from_utf8(request).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn a_delivery_check_asks_like_a_browser_and_reads_the_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/shop/a.jpg{}",
+            listener.local_addr().unwrap(),
+            delivery_query(Some(1600))
+        );
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            assert!(head.starts_with("HEAD /shop/a.jpg?s=1600&scale.option=noup "));
+            assert!(head.contains("Accept: image/avif,image/webp"));
+            assert!(!head.contains("Authorization"));
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/avif\r\nContent-Length: 47165\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            delivered(&url).unwrap(),
+            Delivered {
+                bytes: 47165,
+                format: "AVIF".into()
+            }
+        );
+        server.join().unwrap();
+        assert_eq!(delivery_query(None), "");
     }
 
     #[test]
@@ -1183,7 +1498,7 @@ mod tests {
     fn sirv_size_evidence_words_name_only_sizes() {
         assert_eq!(sync_state_word(SyncState::SameSize), "same size");
         assert_eq!(sync_state_word(SyncState::DifferentSize), "different size");
-        assert_eq!(sync_state_word(SyncState::OnlyLocal), "new");
+        assert_eq!(sync_state_word(SyncState::OnlyLocal), "only here");
         for word in [
             sync_state_word(SyncState::SameSize),
             sync_state_word(SyncState::DifferentSize),
@@ -1202,6 +1517,34 @@ mod tests {
             Some("sub/a.jpg".into())
         );
         assert_eq!(relative_key(root, Path::new("/elsewhere/a.jpg")), None);
+        assert_eq!(
+            paired_key(root, Path::new("/photos/sub/a.jpg"), false),
+            None
+        );
+        assert_eq!(
+            paired_key(root, Path::new("/photos/sub/a.jpg"), true).as_deref(),
+            Some("sub/a.jpg")
+        );
+        assert_eq!(
+            paired_key(root, Path::new("/photos/a.jpg"), false).as_deref(),
+            Some("a.jpg")
+        );
+        // The folders the Sirv walk skips are left out here too.
+        for skipped in [
+            "/photos/.cache/a.jpg",
+            "/photos/optimized/a.jpg",
+            "/photos/sub/press-originals/a.jpg",
+        ] {
+            assert_eq!(
+                paired_key(root, Path::new(skipped), true),
+                None,
+                "{skipped}"
+            );
+        }
+        assert_eq!(
+            paired_key(root, Path::new("/photos/sub/optimized/a.jpg"), true).as_deref(),
+            Some("sub/optimized/a.jpg")
+        );
     }
 
     #[test]
@@ -1222,35 +1565,56 @@ mod tests {
         assert_eq!(unpair_remote("/photos", "/other/a.jpg"), None);
     }
 
+    fn walk_listing(folder: &str) -> Result<Option<Vec<Node>>, Error> {
+        let node = |filename: &str, is_directory: bool| Node {
+            filename: filename.into(),
+            is_directory,
+            kind: None,
+            size: 10,
+        };
+        Ok(Some(match folder {
+            "/photos" => vec![
+                node("direct.jpg", false),
+                node("/photos/sub", true),
+                node(".processed", true),
+                node("optimized", true),
+                node("press-originals", true),
+                // Listed one level too deep by some accounts: not this folder's.
+                node("/photos/sub/stray.jpg", false),
+            ],
+            "/photos/sub" => vec![node("nested.jpg", false), node("deeper", true)],
+            "/photos/sub/deeper" => vec![node("/photos/sub/deeper/leaf.jpg", false)],
+            other => panic!("the walk listed {other}, which it should have skipped"),
+        }))
+    }
+
     #[test]
     fn a_shallow_pairing_keeps_only_direct_remote_files() {
-        let files = direct_remote_files(
-            "/photos",
-            vec![
-                Node {
-                    filename: "direct.jpg".into(),
-                    is_directory: false,
-                    kind: None,
-                    size: 10,
-                },
-                Node {
-                    filename: "/photos/sub".into(),
-                    is_directory: true,
-                    kind: None,
-                    size: 0,
-                },
-                Node {
-                    filename: "/photos/sub/nested.jpg".into(),
-                    is_directory: false,
-                    kind: None,
-                    size: 20,
-                },
-            ],
-        );
-
+        let files = walk_remote("/photos", false, walk_listing)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             files.keys().map(String::as_str).collect::<Vec<_>>(),
             ["direct.jpg"]
+        );
+    }
+
+    #[test]
+    fn a_deep_pairing_walks_subfolders_but_not_hidden_output_or_backup_ones() {
+        let files = walk_remote("/photos/", true, walk_listing)
+            .unwrap()
+            .unwrap();
+        let mut keys = files.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["direct.jpg", "sub/deeper/leaf.jpg", "sub/nested.jpg"]
+        );
+        // A cancelled listing ends the walk without a partial answer.
+        assert!(
+            walk_remote("/photos", true, |_| Ok(None))
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -1310,6 +1674,27 @@ mod tests {
     }
 
     #[test]
+    fn pairings_round_trip_and_skip_junk() {
+        let pairings = HashMap::from([
+            (PathBuf::from("/home/a/shop"), "/Shop images".to_string()),
+            (PathBuf::from("/home/a/with\ttab"), "/x".to_string()),
+        ]);
+        let text = render_pairings(&pairings);
+        let mut back = parse_pairings(&text);
+        // A tab inside the local path survives: only the first tab splits.
+        assert_eq!(
+            back.remove(Path::new("/home/a/with\ttab")).as_deref(),
+            Some("/x")
+        );
+        assert_eq!(
+            back.remove(Path::new("/home/a/shop")).as_deref(),
+            Some("/Shop images")
+        );
+        assert!(back.is_empty());
+        assert!(parse_pairings("garbage\nno-slash\t/local\n/remote\t\n").is_empty());
+    }
+
+    #[test]
     fn an_expired_token_is_refreshed_not_returned() {
         // Fetched 20 minutes ago: outside any fresh window.
         assert!(!token_is_fresh(
@@ -1339,6 +1724,56 @@ mod tests {
 
         assert_eq!(result.unwrap(), "done");
         assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_on_the_way_is_not_a_plain_file() {
+        let root = tempfile::tempdir().unwrap();
+        let secret = tempfile::tempdir().unwrap();
+        std::fs::write(secret.path().join("key"), b"secret").unwrap();
+        std::fs::write(root.path().join("plain.txt"), b"ok").unwrap();
+        std::os::unix::fs::symlink(secret.path().join("key"), root.path().join("link.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(secret.path(), root.path().join("sub")).unwrap();
+        assert!(plain_file_below(root.path(), "plain.txt"));
+        assert!(!plain_file_below(root.path(), "link.txt"));
+        assert!(!plain_file_below(root.path(), "sub/key"));
+        assert!(!plain_file_below(root.path(), "missing.txt"));
+    }
+
+    #[test]
+    fn exists_reads_a_404_as_absent_and_a_200_as_present() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                ("200 OK", r#"{"token":"local","expiresIn":1200}"#),
+                ("200 OK", r#"{"size":5}"#),
+                ("404 Not Found", r#"{"statusCode":404}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_http_request(&mut stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let mut client = Client::with_api(
+            Credentials {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            format!("http://{address}"),
+        );
+
+        assert!(client.exists("/a/there.jpg").unwrap());
+        assert!(!client.exists("/a/gone.jpg").unwrap());
+        server.join().unwrap();
     }
 
     #[test]

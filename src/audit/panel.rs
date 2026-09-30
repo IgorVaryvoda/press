@@ -2509,6 +2509,48 @@ impl Audit {
                         )
                     }))
                     .children((self.published_results.is_empty()).then(|| {
+                        // Replace mode moved the originals into the backup
+                        // folder, so there the switch cannot mean anything.
+                        let replaced =
+                            matches!(self.conversion_destination, Some((Output::Replace, _)));
+                        div()
+                            .debug_selector(|| "conversion-publish-originals".into())
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_size(px(13.))
+                                    .child("Publish originals")
+                                    .child(
+                                        Switch::new("publish-originals")
+                                            .small()
+                                            .checked(self.publish_uploads_originals())
+                                            .accessibility_label("Publish originals")
+                                            .disabled(replaced || self.sirv_busy())
+                                            .on_click(cx.listener(|audit, _, _, cx| {
+                                                audit.publish_originals = !audit.publish_originals;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if replaced {
+                                        "Replace mode moved the originals, so Publish uploads the converted files."
+                                    } else if self.publish_uploads_originals() {
+                                        "Sirv converts and resizes each image on delivery. An original avoids a second lossy encode."
+                                    } else {
+                                        "Uploads the converted files to optimized/. Sirv encodes them again on delivery."
+                                    }),
+                            )
+                    }))
+                    .children((self.published_results.is_empty()).then(|| {
                         // Element ids never reach `debug_bounds`: the wrapper
                         // is the selector contract the tests assert on.
                         let waiting = self.publish_waiting();
@@ -2524,7 +2566,11 @@ impl Audit {
                                     "Connect & publish"
                                 })
                                 .tooltip(waiting.clone().unwrap_or_else(|| {
-                                    "Upload the converted files to optimized/ on Sirv".into()
+                                    if self.publish_uploads_originals() {
+                                        "Upload the originals of the converted files to Sirv".into()
+                                    } else {
+                                        "Upload the converted files to optimized/ on Sirv".into()
+                                    }
                                 }))
                                 .disabled(
                                     self.scan_blocks_delivery()
@@ -2549,6 +2595,59 @@ impl Audit {
                                         cx.listener(|audit, _, _, cx| audit.copy_result_embeds(cx)),
                                     ),
                             )
+                    }))
+                    .children((!self.published_results.is_empty()).then(|| {
+                        let running = self.alt_text_running();
+                        let pending = self.alt_text_pending();
+                        let has_key = self.studio_key.is_some();
+                        div()
+                            .debug_selector(|| "conversion-alt-text".into())
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .when(running || pending > 0, |block| {
+                                block.child(
+                                    Button::new("conversion-alt-text")
+                                        .outline()
+                                        .small()
+                                        .w_full()
+                                        .label(if running {
+                                            "Stop alt text".to_string()
+                                        } else {
+                                            format!("Write alt text for {pending} with Studio")
+                                        })
+                                        .tooltip(if has_key {
+                                            "Studio reads each published Sirv URL and writes its alt text. Each image uses Studio credits."
+                                        } else {
+                                            "Save an AI API key in AI operations first"
+                                        })
+                                        .disabled(!running && !has_key)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            if audit.alt_text_running() {
+                                                audit.stop_alt_text(cx);
+                                            } else {
+                                                audit.write_alt_text(cx);
+                                            }
+                                        })),
+                                )
+                            })
+                            .when_some(self.alt_text_status(), |block, status| {
+                                block.child(
+                                    div()
+                                        .debug_selector(|| "conversion-alt-text-status".into())
+                                        .text_size(px(11.))
+                                        .text_color(if self
+                                            .alt_job
+                                            .as_ref()
+                                            .is_some_and(|job| job.failure.is_some())
+                                        {
+                                            cx.theme().yellow
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        })
+                                        .child(status),
+                                )
+                            })
                     }))
                     .child(
                         Button::new("reveal")

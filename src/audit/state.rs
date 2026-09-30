@@ -172,6 +172,11 @@ impl Audit {
         self.stopped_run = None;
         self.converted_totals = (0, 0);
         self.published_results.clear();
+        self.published_alts.clear();
+        if let Some(job) = self.alt_job.take() {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         // The failures go with the results. "JPEG cannot keep transparency" is a fact
         // about the run that said it, not about the same folder aimed at WebP, and a
         // badge left over from settings nobody is using any more is a lie.
@@ -268,6 +273,7 @@ impl Audit {
 
     /// Choosing an operation opens its settings in the sidebar.
     pub(super) fn open_rail(&mut self, rail: Rail, cx: &mut Context<Self>) {
+        self.studio_rail_opening(rail, cx);
         self.rail = rail;
         self.sidebar_open = true;
         self.browser_overlay = false;
@@ -290,9 +296,18 @@ impl Audit {
         }
         self.studio_source = written.map(|path| (index, path));
         self.compare = None;
+        self.studio_rail_opening(Rail::Studio, cx);
         self.rail = Rail::Studio;
         self.sidebar_open = true;
         self.selection_changed(cx);
+    }
+
+    /// The balance is worth a request only when the Studio rail comes into
+    /// view, not on every click inside it.
+    fn studio_rail_opening(&mut self, rail: Rail, cx: &mut Context<Self>) {
+        if rail == Rail::Studio && !(self.sidebar_open && self.rail == Rail::Studio) {
+            self.refresh_studio_credits(cx);
+        }
     }
 
     /// Toggle the sidebar without losing the chosen tool. Never hide Stop mid-run.
@@ -369,6 +384,10 @@ impl Audit {
                 Listing::Ready(files) => Some(files),
                 Listing::Walking | Listing::Failed => None,
             });
+        let deep = self
+            .sirv_pairing
+            .as_ref()
+            .is_some_and(|pairing| pairing.deep);
         let root = &self.root;
         let show_parent = self.show_parent();
         // One lowercased label per entry, shared by the filter and the Name
@@ -405,7 +424,7 @@ impl Audit {
                     let Some(files) = remote_files else {
                         return false;
                     };
-                    let Some(key) = sirv::relative_key(root, &entry.path) else {
+                    let Some(key) = sirv::paired_key(root, &entry.path, deep) else {
                         return false;
                     };
                     let state = sirv::classify(entry.bytes, files.get(&key));

@@ -65,303 +65,955 @@ pub(super) fn meter(
         .h(px(height))
 }
 
+/// The column between the two sides of the split view, holding the mark that
+/// says how they stand.
+const SPLIT_GUTTER: f32 = 44.;
+/// The split view's tick column.
+const SPLIT_TICK: f32 = 36.;
+/// A split row's thumbnail: small enough for a 32px row, big enough to tell
+/// one product shot from the next.
+const SPLIT_THUMB: f32 = 24.;
+
 impl Audit {
     pub(super) fn sirv_pair_disabled(&self, at_root: bool, listed: bool) -> bool {
         at_root || !listed || self.batch_folders.is_some() || self.scan_blocks_delivery()
     }
 
+    /// The pairing in one line: which two folders, how far apart they are, a
+    /// filter, and the split-view switch. Everything else a pairing can do sits
+    /// behind the `⋯` menu or, in the split view, beside the rows it acts on.
     fn sirv_reconciliation(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let pairing = self.sirv_pairing.as_ref()?;
         let busy =
             self.sirv_busy() || self.scan_blocks_delivery() || self.converting || self.restoring;
         let stopping = self.sirv_job.as_ref().is_some_and(|job| job.stopping);
         let ready = matches!(pairing.files, Listing::Ready(_));
+        let failed = matches!(pairing.files, Listing::Failed);
+        let transferring = self.sirv_busy();
+        // Scanned images the one-level pairing cannot see: they sit in
+        // subfolders. Said, so the count is not read as the whole folder.
+        let nested = self.entries.len().saturating_sub(
+            self.sirv_rows
+                .iter()
+                .filter(|row| row.local.is_some())
+                .count(),
+        );
+        let host_ready = matches!(pairing.cdn_host, CdnHost::Ready(_));
+        let checking = self.sirv_delivery_running();
         let (to_push, changed, to_pull) = self.sirv_counts.unwrap_or((0, 0, 0));
-        let push_changed_confirmed = self.sirv_confirm == Some(SirvJobKind::PushChanged);
-        let pull_changed_confirmed = self.sirv_confirm == Some(SirvJobKind::PullChanged);
+        let synced = self
+            .sirv_rows
+            .iter()
+            .filter(|row| row.state() == SplitState::InSync)
+            .count();
+        let local_name = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.root.display().to_string());
+        let remote_name = match pairing.dir.trim_end_matches('/').rsplit('/').next() {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => "/".to_string(),
+        };
+        let full_pair = format!("{}  ↔  Sirv:{}", self.root.display(), pairing.dir);
 
-        let job_line = self.sirv_job.as_ref().map(|job| {
-            let verb = match job.kind {
-                SirvJobKind::Pull => "Pulling",
-                SirvJobKind::PullChanged => "Taking from Sirv",
-                SirvJobKind::Push => "Pushing",
-                SirvJobKind::PushChanged => "Overwriting on Sirv",
-                SirvJobKind::Publish => "Publishing",
-            };
-            let current = job
-                .current
-                .as_deref()
-                .map(|name| format!(" · {name}"))
-                .unwrap_or_default();
-            let failures = if job.failed == 0 {
-                String::new()
-            } else {
-                let rest = job.failed.saturating_sub(job.failures.len());
-                format!(
-                    " · {} failed: {}{}",
-                    job.failed,
-                    job.failures.join(", "),
-                    if rest == 0 {
-                        String::new()
-                    } else {
-                        format!(" and {rest} more")
+        // Running, or ended short: a clean finish says so in a toast and
+        // leaves the bar.
+        let job_line = self
+            .sirv_job
+            .as_ref()
+            .filter(|job| !job.finished || job.failed > 0)
+            .map(|job| {
+                let verb = match job.kind {
+                    SirvJobKind::Pull => "Downloading",
+                    SirvJobKind::PullChanged => "Replacing local copies",
+                    SirvJobKind::Push => "Uploading",
+                    SirvJobKind::PushChanged => "Replacing on Sirv",
+                    SirvJobKind::Publish => "Publishing",
+                };
+                let current = job
+                    .current
+                    .as_deref()
+                    .map(|name| format!(" · {name}"))
+                    .unwrap_or_default();
+                let failures = if job.failed == 0 {
+                    String::new()
+                } else {
+                    let rest = job.failed.saturating_sub(job.failures.len());
+                    format!(
+                        " · {} failed: {}{}",
+                        job.failed,
+                        job.failures.join(", "),
+                        if rest == 0 {
+                            String::new()
+                        } else {
+                            format!(" and {rest} more")
+                        }
+                    )
+                };
+                if job.total == 0 && !job.finished {
+                    format!("{verb}: getting ready…")
+                } else if job.finished {
+                    format!("{verb}: {} of {} complete{failures}", job.done, job.total)
+                } else if job.stopping {
+                    format!(
+                        "Stopping {verb}: {} of {} complete{current}{failures}",
+                        job.done, job.total
+                    )
+                } else {
+                    format!(
+                        "{verb}: {} of {} complete{current}{failures}",
+                        job.done, job.total
+                    )
+                }
+            });
+
+        let scope_index = match self.sirv_scope {
+            None => 0,
+            Some(SirvScope::OnlyLocal) => 1,
+            Some(SirvScope::Changed) => 2,
+            Some(SirvScope::OnlyRemote) => 3,
+        };
+        let filters = ButtonGroup::new("sirv-filter")
+            .small()
+            .outline()
+            .compact()
+            .children(
+                [
+                    toolbar::segment("sirv-filter-all", "All", scope_index == 0),
+                    toolbar::segment(
+                        "sirv-filter-local",
+                        format!("Only here {to_push}"),
+                        scope_index == 1,
+                    ),
+                    toolbar::segment(
+                        "sirv-filter-changed",
+                        format!("Different {changed}"),
+                        scope_index == 2,
+                    ),
+                    toolbar::segment(
+                        "sirv-filter-remote",
+                        format!("Only on Sirv {to_pull}"),
+                        scope_index == 3,
+                    ),
+                ]
+                .map(|segment| segment.disabled(!ready)),
+            )
+            .on_click(cx.listener(|audit, clicked: &Vec<usize>, _, cx| {
+                let scope = match clicked.first() {
+                    Some(1) => Some(SirvScope::OnlyLocal),
+                    Some(2) => Some(SirvScope::Changed),
+                    Some(3) => Some(SirvScope::OnlyRemote),
+                    _ => None,
+                };
+                audit.choose_sirv_scope(scope, cx);
+            }));
+
+        let menu_source = cx.entity().downgrade();
+        let more = Button::new("sirv-more")
+            .small()
+            .ghost()
+            .icon(IconName::Ellipsis)
+            .tooltip("More Sirv actions")
+            .dropdown_menu(move |menu, _, _| {
+                let item = |label: String,
+                            icon: Option<IconName>,
+                            disabled: bool,
+                            act: fn(&mut Audit, &mut Context<Audit>)| {
+                    let source = menu_source.clone();
+                    let mut item = PopupMenuItem::new(label).disabled(disabled);
+                    if let Some(icon) = icon {
+                        item = item.icon(icon);
                     }
-                )
-            };
-            if job.finished {
-                format!("{verb}: {} of {} complete{failures}", job.done, job.total)
-            } else if job.stopping {
-                format!(
-                    "Stopping {verb}: {} of {} complete{current}{failures}",
-                    job.done, job.total
-                )
-            } else {
-                format!(
-                    "{verb}: {} of {} complete{current}{failures}",
-                    job.done, job.total
-                )
-            }
-        });
+                    item.on_click(move |_, _, cx| {
+                        if let Some(audit) = source.upgrade() {
+                            audit.update(cx, act);
+                        }
+                    })
+                };
+                menu.item(item(
+                    format!("Upload all {to_push} to Sirv"),
+                    Some(IconName::ArrowUp),
+                    busy || to_push == 0,
+                    Audit::start_push,
+                ))
+                .item(item(
+                    format!("Download all {to_pull} here"),
+                    Some(IconName::ArrowDown),
+                    busy || to_pull == 0,
+                    Audit::start_pull,
+                ))
+                .separator()
+                .item(item(
+                    if checking {
+                        "Stop delivery check".into()
+                    } else {
+                        "Check delivery".into()
+                    },
+                    None,
+                    !checking && (busy || !ready || !host_ready),
+                    |audit, cx| {
+                        if audit.sirv_delivery_running() {
+                            audit.stop_sirv_delivery(cx);
+                        } else {
+                            audit.check_sirv_delivery(cx);
+                        }
+                    },
+                ))
+                .item(item(
+                    "Refresh".into(),
+                    None,
+                    busy || !(ready || failed),
+                    Audit::walk_sirv_pairing,
+                ))
+                .item(item(
+                    "Change Sirv folder…".into(),
+                    None,
+                    busy,
+                    Audit::open_sirv_browser,
+                ))
+                .separator()
+                .item(item("Unpair".into(), None, busy, Audit::unpair_sirv))
+            });
+
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let status = |selector: &'static str, line: String, colour: gpui_kit::Hsla| {
+            div()
+                .debug_selector(move || selector.into())
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .font_family(mono.clone())
+                .text_size(px(11.))
+                .text_color(colour)
+                .child(line)
+        };
+        let job_colour = if self.sirv_job.as_ref().is_some_and(|job| job.failed > 0) {
+            cx.theme().yellow
+        } else {
+            muted
+        };
+        let delivery_line = self.sirv_delivery_line();
+        let has_status = transferring || job_line.is_some() || delivery_line.is_some();
 
         Some(
             div()
                 .debug_selector(|| "sirv-reconciliation".into())
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap_1()
                 .px_3()
-                .py_2()
+                .py_1p5()
                 .bg(cx.theme().secondary)
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .child(
                     div()
                         .flex()
-                        .flex_wrap()
                         .items_center()
-                        .gap_2()
+                        .gap_3()
                         .child(
                             div()
-                                .font_family("SF Pro Display")
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(13.))
-                                .child("Paired with Sirv"),
+                                .id("sirv-pair-identity")
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .min_w_0()
+                                .text_size(px(12.))
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(full_pair.clone()).build(window, cx)
+                                })
+                                .child(Icon::new(IconName::Globe).size_3p5().text_color(muted))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(format!("{local_name}  ⇄  {remote_name}")),
+                                ),
                         )
                         .child(
                             div()
-                                .flex_1()
-                                .min_w(px(220.))
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .whitespace_nowrap()
+                                .debug_selector(|| "sirv-in-sync".into())
+                                .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(format!("{}  ↔  Sirv:{}", self.root.display(), pairing.dir)),
+                                .whitespace_nowrap()
+                                .text_size(px(12.))
+                                .text_color(if failed { cx.theme().yellow } else { muted })
+                                .child(match (ready, failed) {
+                                    // "Same size", the table's words, not "in
+                                    // sync": equal bytes are evidence, not proof.
+                                    (true, _) if nested > 0 => format!(
+                                        "{synced} of {} same size · {nested} in subfolders not compared",
+                                        self.sirv_rows.len()
+                                    ),
+                                    (true, _) => format!(
+                                        "{synced} of {} same size",
+                                        self.sirv_rows.len()
+                                    ),
+                                    (_, true) => "Couldn’t list the Sirv folder".to_string(),
+                                    _ => "Listing Sirv…".to_string(),
+                                }),
                         )
-                        .child(
-                            Button::new("sirv-refresh-pair")
-                                .small()
-                                .ghost()
-                                .label(if ready { "Refresh" } else { "Listing…" })
-                                .disabled(busy || !ready)
-                                .on_click(
-                                    cx.listener(|audit, _, _, cx| audit.walk_sirv_pairing(cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("sirv-change-pair")
-                                .small()
-                                .ghost()
-                                .label("Change folder")
-                                .disabled(busy)
-                                .on_click(
-                                    cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("sirv-unpair-audit")
-                                .small()
-                                .ghost()
-                                .label("Unpair")
-                                .disabled(busy)
-                                .on_click(cx.listener(|audit, _, _, cx| audit.unpair_sirv(cx))),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            Button::new("sirv-filter-local")
-                                .small()
-                                .ghost()
-                                .selected(self.sirv_scope == Some(SirvScope::OnlyLocal))
-                                .label(format!("Local only {to_push}"))
-                                .disabled(!ready)
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.set_sirv_scope(SirvScope::OnlyLocal, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("sirv-filter-changed")
-                                .small()
-                                .ghost()
-                                .selected(self.sirv_scope == Some(SirvScope::Changed))
-                                .label(format!("Differing {changed}"))
-                                .disabled(!ready)
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.set_sirv_scope(SirvScope::Changed, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("sirv-filter-remote")
-                                .small()
-                                .ghost()
-                                .selected(self.sirv_scope == Some(SirvScope::OnlyRemote))
-                                .label(format!("Sirv only {to_pull}"))
-                                .disabled(!ready)
-                                .on_click(cx.listener(|audit, _, _, cx| {
-                                    audit.set_sirv_scope(SirvScope::OnlyRemote, cx)
-                                })),
-                        )
-                        .child(div().w(px(1.)).h(px(20.)).bg(cx.theme().border))
-                        .child(
-                            Button::new("sirv-push-audit")
-                                .small()
-                                .outline()
-                                .icon(IconName::ArrowUp)
-                                .label(format!("Push {to_push}"))
-                                .disabled(busy || to_push == 0)
-                                .on_click(cx.listener(|audit, _, _, cx| audit.start_push(cx))),
-                        )
-                        .child(
-                            Button::new("sirv-pull-audit")
-                                .small()
-                                .outline()
-                                .icon(IconName::ArrowDown)
-                                .label(format!("Pull {to_pull}"))
-                                .disabled(busy || to_pull == 0)
-                                .on_click(cx.listener(|audit, _, _, cx| audit.start_pull(cx))),
-                        )
-                        .when(changed > 0, |row| {
+                        .when(failed && !busy, |row| {
                             row.child(
-                                Button::new("sirv-push-changed-audit")
-                                    .small()
-                                    .when(push_changed_confirmed, |button| button.primary())
-                                    .when(!push_changed_confirmed, |button| button.ghost())
-                                    .label(if push_changed_confirmed {
-                                        format!("Really overwrite {changed} on Sirv?")
-                                    } else {
-                                        format!("Overwrite {changed} on Sirv")
-                                    })
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        if audit.sirv_confirm == Some(SirvJobKind::PushChanged) {
-                                            audit.sirv_confirm = None;
-                                            audit.start_push_changed(cx);
-                                        } else {
-                                            audit.sirv_confirm = Some(SirvJobKind::PushChanged);
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("sirv-pull-changed-audit")
-                                    .small()
-                                    .when(pull_changed_confirmed, |button| button.primary())
-                                    .when(!pull_changed_confirmed, |button| button.ghost())
-                                    .label(if pull_changed_confirmed {
-                                        format!("Really replace {changed} local files?")
-                                    } else {
-                                        format!("Take {changed} from Sirv")
-                                    })
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        if audit.sirv_confirm == Some(SirvJobKind::PullChanged) {
-                                            audit.sirv_confirm = None;
-                                            audit.start_pull_changed(cx);
-                                        } else {
-                                            audit.sirv_confirm = Some(SirvJobKind::PullChanged);
-                                            cx.notify();
-                                        }
-                                    })),
+                                Button::new("sirv-retry-listing")
+                                    .xsmall()
+                                    .outline()
+                                    .label("Retry")
+                                    .on_click(
+                                        cx.listener(|audit, _, _, cx| audit.walk_sirv_pairing(cx)),
+                                    ),
                             )
                         })
-                        .when(busy, |row| {
-                            row.child(
-                                Button::new("sirv-stop-audit")
+                        .child(div().flex_1())
+                        .child(div().flex_shrink_0().child(filters))
+                        .child(
+                            div().flex_shrink_0().child(
+                                Button::new("sirv-split-toggle")
                                     .small()
-                                    .outline()
-                                    .label(if stopping { "Stopping…" } else { "Stop" })
-                                    .disabled(stopping)
-                                    .on_click(cx.listener(|audit, _, _, cx| {
-                                        audit.cancel_sirv_transfer();
-                                        cx.notify();
-                                    })),
-                            )
-                        }),
+                                    .ghost()
+                                    .icon(Icon::default().path("icons/columns-2.svg"))
+                                    .selected(self.sirv_split)
+                                    .tooltip(if self.sirv_split {
+                                        "Back to the image list"
+                                    } else {
+                                        "Side by side: this folder and Sirv, file by file"
+                                    })
+                                    .on_click(
+                                        cx.listener(|audit, _, _, cx| audit.toggle_sirv_split(cx)),
+                                    ),
+                            ),
+                        )
+                        .child(div().flex_shrink_0().child(more)),
                 )
-                .when_some(job_line, |bar, line| {
+                .when(has_status, |bar| {
                     bar.child(
                         div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .text_color(
-                                if self.sirv_job.as_ref().is_some_and(|job| job.failed > 0) {
-                                    cx.theme().yellow
-                                } else {
-                                    cx.theme().muted_foreground
-                                },
-                            )
-                            .child(line),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(job_line, |line, text| {
+                                line.child(status("sirv-job-line", text, job_colour))
+                            })
+                            .when_some(delivery_line, |line, text| {
+                                line.child(status("sirv-delivery-line", text, muted))
+                            })
+                            .when(transferring, |line| {
+                                line.child(div().flex_1()).child(
+                                    Button::new("sirv-stop-audit")
+                                        .xsmall()
+                                        .outline()
+                                        .label(if stopping { "Stopping…" } else { "Stop" })
+                                        .disabled(stopping)
+                                        .on_click(cx.listener(|audit, _, _, cx| {
+                                            if let Some(job) = audit.sirv_job.as_mut() {
+                                                job.stopped_by_user = true;
+                                            }
+                                            audit.cancel_sirv_transfer();
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
                     )
                 })
                 .into_any_element(),
         )
     }
 
-    fn sirv_remote_only_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        uniform_list(
-            "sirv-remote-only-list",
-            self.sirv_remote_only.len(),
-            cx.processor(|audit, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .filter_map(|row| audit.sirv_remote_only.get(row))
-                    .map(|key| {
+    /// The delivery check in one sentence: progress while it runs, then what
+    /// Sirv sends against what is on disk and what this run wrote.
+    fn sirv_delivery_line(&self) -> Option<String> {
+        let progress = self
+            .sirv_delivery_job
+            .as_ref()
+            .filter(|job| !job.finished)
+            .map(|job| format!("Checking Sirv delivery {} of {}…", job.done, job.total));
+        let summary = self.sirv_delivery_summary().map(|summary| {
+            let edge = self
+                .max_edge
+                .0
+                .map(|edge| format!(" at {edge}px"))
+                .unwrap_or_default();
+            let converted = summary
+                .converted
+                .map(|bytes| format!(" · Press output {}", format_bytes(bytes)))
+                .unwrap_or_default();
+            format!(
+                "Sirv delivery for {} {}{edge}: {} on disk → {} sent to a browser as {}{converted}",
+                summary.count,
+                if summary.count == 1 { "file" } else { "files" },
+                format_bytes(summary.on_disk),
+                format_bytes(summary.served),
+                summary.formats,
+            )
+        });
+        match (progress, summary) {
+            (Some(progress), Some(summary)) => Some(format!("{progress} {summary}")),
+            (progress, summary) => progress.or(summary),
+        }
+    }
+
+    /// Both sides of the pairing in one list, a row per file: this computer on
+    /// the left, Sirv on the right, and between them how the two stand. A gap
+    /// on one side is the difference, which reads faster than a status word.
+    /// The arrow between the sides copies that one file; ticked rows are
+    /// copied together from the footer.
+    fn sirv_split_view(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // Refilled by the rows drawn this frame; the thumbnail queue reads it
+        // in place of the hidden table's viewport.
+        self.split_thumb_wanted.clear();
+        let Some(pairing) = self.sirv_pairing.as_ref() else {
+            return div().into_any_element();
+        };
+        let rows = self
+            .sirv_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| self.split_shows(row))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let all_ticked = !rows.is_empty()
+            && rows
+                .iter()
+                .all(|&row| self.sirv_selected.contains(&self.sirv_rows[row].key));
+        let local_name = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.root.display().to_string());
+        let heading = |title: &'static str, detail: String, cx: &Context<Self>| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_baseline()
+                .gap_2()
+                .px_3()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(12.))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(detail),
+                )
+        };
+        let header = div()
+            .debug_selector(|| "sirv-split-header".into())
+            .flex()
+            .items_center()
+            .h(px(36.))
+            .flex_shrink_0()
+            .bg(cx.theme().table_head)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .w(px(SPLIT_TICK))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .on_key_down(cx.listener(|_, event, _, cx| {
+                        if is_checkbox_activation_key(event) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        Checkbox::new("sirv-split-all")
+                            .checked(all_ticked)
+                            .disabled(rows.is_empty())
+                            .tooltip("Select every file shown")
+                            .on_click(cx.listener(|audit, _: &bool, _, cx| {
+                                cx.stop_propagation();
+                                audit.toggle_split_rows(cx);
+                            })),
+                    ),
+            )
+            .child(heading("This computer", local_name, cx))
+            .child(div().w(px(SPLIT_GUTTER)).flex_shrink_0())
+            .child(heading("Sirv", pairing.dir.clone(), cx));
+        let body = match &pairing.files {
+            Listing::Walking => Self::split_message("Listing the Sirv folder…", cx),
+            Listing::Failed => Self::split_message("Couldn’t list the Sirv folder.", cx),
+            Listing::Ready(_) if rows.is_empty() => Self::split_message(
+                if self.sirv_rows.is_empty() {
+                    "Both folders are empty."
+                } else {
+                    "No files in this category."
+                },
+                cx,
+            ),
+            Listing::Ready(_) => uniform_list(
+                "sirv-split-list",
+                rows.len(),
+                cx.processor(move |audit, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|shown| rows.get(shown).map(|&row| (shown, row)))
+                        .filter_map(|(shown, row)| {
+                            // Viewport-driven, like the table: only the rows
+                            // on screen ask for a thumbnail.
+                            let shown_row = audit.sirv_rows.get(row)?;
+                            let (entry, state) = (shown_row.entry, shown_row.state());
+                            let remote = shown_row.remote.map(|_| shown_row.key.clone());
+                            if let Some(entry) = entry {
+                                audit.split_thumb_wanted.insert(entry);
+                                audit.request_thumb(entry, cx);
+                            }
+                            // In sync, Sirv's side shows the local thumbnail:
+                            // same bytes, no request.
+                            if state != SplitState::InSync
+                                && let Some(key) = remote
+                            {
+                                audit.request_sirv_thumb(&key, cx);
+                            }
+                            let row = audit.sirv_rows.get(row)?;
+                            Some(audit.split_row(shown, row, cx))
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(&self.sirv_split_scroll)
+            .size_full()
+            .into_any_element(),
+        };
+        div()
+            .debug_selector(|| "sirv-split".into())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(cx.theme().table)
+            .child(header)
+            .child(div().flex_1().min_h_0().child(body))
+            .child(self.split_footer(cx))
+            .into_any_element()
+    }
+
+    fn split_message(message: &'static str, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.))
+            .text_color(cx.theme().muted_foreground)
+            .child(message)
+            .into_any_element()
+    }
+
+    fn split_row(
+        &self,
+        shown: usize,
+        row: &SyncRow,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let state = row.state();
+        let ticked = self.sirv_selected.contains(&row.key);
+        let busy =
+            self.sirv_busy() || self.scan_blocks_delivery() || self.converting || self.restoring;
+        // The same bytes on both sides when in sync, so Sirv's side can show
+        // the local thumbnail; a Sirv-only file has none to show yet.
+        let thumb = row.entry.and_then(|entry| self.thumbs.get(&entry).cloned());
+        // "12.1 KB ≠ 12.1 KB" reads as a bug. When rounding hides the
+        // difference, both sides say their exact bytes.
+        let exact = matches!(
+            (row.local, row.remote),
+            (Some(local), Some(remote))
+                if local != remote && format_bytes(local) == format_bytes(remote)
+        );
+        let size_label = move |bytes: u64| {
+            if exact {
+                format!("{bytes} B")
+            } else {
+                format_bytes(bytes)
+            }
+        };
+        let side = |size: Option<u64>, thumb: Option<Arc<RenderImage>>| {
+            let slot = div()
+                .size(px(SPLIT_THUMB))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .overflow_hidden()
+                .bg(cx.theme().background)
+                .map(|slot| match thumb {
+                    Some(image) => {
+                        slot.child(img(image).max_w(px(SPLIT_THUMB)).max_h(px(SPLIT_THUMB)))
+                    }
+                    None => slot.child(
+                        Icon::new(IconName::File)
+                            .size_3()
+                            .text_color(cx.theme().muted_foreground.opacity(0.45)),
+                    ),
+                });
+            let cell = div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3();
+            match size {
+                // The file is missing here; the tint marks the gap as a gap
+                // rather than a row that failed to draw.
+                None => cell.bg(cx.theme().muted.opacity(0.35)),
+                Some(bytes) => cell
+                    .child(slot)
+                    .child(
                         div()
-                            .flex()
-                            .w_full()
-                            .items_center()
-                            .gap_2()
-                            .h(px(36.))
-                            .px_3()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(
-                                Icon::new(IconName::Globe).text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .child(key.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("only on Sirv"),
-                            )
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .size_full()
-        .into_any_element()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(12.))
+                            .child(row.key.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(size_label(bytes)),
+                    ),
+            }
+        };
+        let right_thumb = if state == SplitState::InSync {
+            thumb.clone()
+        } else {
+            self.sirv_thumbs.get(&row.key).cloned().flatten()
+        };
+        let (left, right) = (side(row.local, thumb), side(row.remote, right_thumb));
+        // The arrow is the action: it points the way the file would go. Only
+        // the two safe copies act on one click; a size mismatch replaces a
+        // file, so it goes through the footer's two-click confirmation.
+        let copy = |toward_sirv: bool, cx: &mut Context<Self>| {
+            let key = row.key.clone();
+            Button::new((
+                if toward_sirv {
+                    "sirv-row-up"
+                } else {
+                    "sirv-row-down"
+                },
+                shown,
+            ))
+            .xsmall()
+            .ghost()
+            .icon(if toward_sirv {
+                IconName::ArrowRight
+            } else {
+                IconName::ArrowLeft
+            })
+            .text_color(cx.theme().blue)
+            .tooltip(if toward_sirv {
+                "Upload to Sirv"
+            } else {
+                "Download to this computer"
+            })
+            .disabled(busy)
+            .on_click(cx.listener(move |audit, _, _, cx| {
+                cx.stop_propagation();
+                let state = if toward_sirv {
+                    SplitState::OnlyLocal
+                } else {
+                    SplitState::OnlyRemote
+                };
+                audit.transfer_split(state, toward_sirv, [key.clone()].into(), cx);
+            }))
+            .into_any_element()
+        };
+        let mark: gpui_kit::AnyElement = match state {
+            SplitState::InSync => Icon::new(IconName::Check)
+                .size_4()
+                .text_color(cx.theme().green)
+                .into_any_element(),
+            SplitState::Different => div()
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().yellow)
+                .child("≠")
+                .into_any_element(),
+            SplitState::OnlyLocal => copy(true, cx),
+            SplitState::OnlyRemote => copy(false, cx),
+        };
+        let key = row.key.clone();
+        let menu = self.split_row_menu(row, cx);
+        div()
+            .id(("sirv-split-row", shown))
+            .flex()
+            .w_full()
+            .h(px(32.))
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .cursor_pointer()
+            .when(ticked, |row| row.bg(cx.theme().list_active))
+            .when(shown == self.sirv_split_cursor, |row| {
+                row.border_1().border_color(cx.theme().list_active_border)
+            })
+            .when(!ticked, |row| {
+                row.hover(|row| row.bg(cx.theme().list_hover))
+            })
+            .on_click(cx.listener(move |audit, _, _, cx| {
+                audit.sirv_split_cursor = shown;
+                audit.toggle_split_row(&key, cx)
+            }))
+            .child(
+                div()
+                    .w(px(SPLIT_TICK))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .on_key_down(cx.listener(|_, event, _, cx| {
+                        if is_checkbox_activation_key(event) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child({
+                        let key = row.key.clone();
+                        Checkbox::new(("sirv-split-tick", shown))
+                            .checked(ticked)
+                            .on_click(cx.listener(move |audit, _: &bool, _, cx| {
+                                cx.stop_propagation();
+                                audit.toggle_split_row(&key, cx);
+                            }))
+                    }),
+            )
+            .child(left)
+            .child(
+                div()
+                    .w(px(SPLIT_GUTTER))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_x_1()
+                    .border_color(cx.theme().border)
+                    .child(mark),
+            )
+            .child(right)
+            .context_menu(menu)
+            .into_any_element()
+    }
+
+    /// Right-click on a split row: look at the file on either side. The copy
+    /// verbs stay on the arrow and the footer; this menu only opens things.
+    fn split_row_menu(
+        &self,
+        row: &SyncRow,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let audit = cx.entity().downgrade();
+        let entry = row.entry;
+        let local = row.local.map(|_| self.root.join(&row.key));
+        let url = self.sirv_pairing.as_ref().and_then(|pairing| {
+            let CdnHost::Ready(host) = &pairing.cdn_host else {
+                return None;
+            };
+            row.remote?;
+            sirv::public_url(host, &format!("{}/{}", pairing.dir, row.key)).ok()
+        });
+        move |menu, _, _| {
+            let mut menu = menu;
+            if let Some(index) = entry {
+                let audit = audit.clone();
+                menu = menu.item(PopupMenuItem::new("Preview").icon(IconName::Eye).on_click(
+                    move |_, _, cx| {
+                        if let Some(audit) = audit.upgrade() {
+                            audit.update(cx, |audit, cx| audit.open_preview(index, cx));
+                        }
+                    },
+                ));
+            }
+            if let Some(url) = url.clone() {
+                let copy = url.clone();
+                menu = menu
+                    .item(
+                        PopupMenuItem::new("Open on Sirv")
+                            .icon(IconName::ExternalLink)
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Copy Sirv link")
+                            .icon(IconName::Copy)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                    copy.clone(),
+                                ))
+                            }),
+                    );
+            }
+            if let Some(path) = local.clone() {
+                let audit = audit.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Show in file manager")
+                        .icon(IconName::FolderOpen)
+                        .on_click(move |_, _, cx| {
+                            if let Some(audit) = audit.upgrade() {
+                                audit.update(cx, |audit, cx| {
+                                    audit.reveal_path(&path, "Couldn’t show the file", cx)
+                                });
+                            }
+                        }),
+                );
+            }
+            menu
+        }
+    }
+
+    /// What the ticked rows can become, one button per direction. With nothing
+    /// ticked the footer says how to tick, rather than showing dead buttons.
+    fn split_footer(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // Transfers wait for a conversion or a restore, which work on the
+        // same files; the buttons say so rather than do nothing.
+        let busy =
+            self.sirv_busy() || self.scan_blocks_delivery() || self.converting || self.restoring;
+        let converting = self.converting;
+        // Counted per frame; the key sets are built only when a button is
+        // clicked, so a select-all over a big folder costs no clones here.
+        let (mut upload, mut download, mut replace) = (0, 0, 0);
+        if !self.sirv_selected.is_empty() {
+            for row in &self.sirv_rows {
+                if self.sirv_selected.contains(&row.key) {
+                    match row.state() {
+                        SplitState::OnlyLocal => upload += 1,
+                        SplitState::OnlyRemote => download += 1,
+                        SplitState::Different => replace += 1,
+                        SplitState::InSync => {}
+                    }
+                }
+            }
+        }
+        let ticked = self.sirv_selected.len();
+        let push_confirm = self.sirv_confirm == Some(SirvJobKind::PushChanged);
+        let pull_confirm = self.sirv_confirm == Some(SirvJobKind::PullChanged);
+        let action = |id: &'static str,
+                      label: String,
+                      icon: Option<IconName>,
+                      primary: bool,
+                      state: SplitState,
+                      toward_sirv: bool,
+                      cx: &mut Context<Self>| {
+            Button::new(id)
+                .small()
+                .when(primary, |button| button.primary())
+                .when(!primary, |button| button.outline())
+                .when_some(icon, |button, icon| button.icon(icon))
+                .label(label)
+                .disabled(busy || (converting && state == SplitState::Different && !toward_sirv))
+                .on_click(cx.listener(move |audit, _, _, cx| {
+                    let keys = audit.split_selected(state);
+                    audit.transfer_split(state, toward_sirv, keys, cx);
+                }))
+        };
+        div()
+            .debug_selector(|| "sirv-split-footer".into())
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(44.))
+            .px_3()
+            .flex_shrink_0()
+            .bg(cx.theme().table_head)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(match ticked {
+                        0 => "Tick files to copy them, or use the arrows".to_string(),
+                        1 => "1 file selected".to_string(),
+                        many => format!("{many} files selected"),
+                    }),
+            )
+            .when(upload > 0, |footer| {
+                footer.child(action(
+                    "sirv-split-upload",
+                    format!("Upload {upload}"),
+                    Some(IconName::ArrowRight),
+                    false,
+                    SplitState::OnlyLocal,
+                    true,
+                    cx,
+                ))
+            })
+            .when(download > 0, |footer| {
+                footer.child(action(
+                    "sirv-split-download",
+                    format!("Download {download}"),
+                    Some(IconName::ArrowLeft),
+                    false,
+                    SplitState::OnlyRemote,
+                    false,
+                    cx,
+                ))
+            })
+            .when(replace > 0, |footer| {
+                footer
+                    .child(action(
+                        "sirv-split-replace-remote",
+                        if push_confirm {
+                            format!("Really replace {replace} on Sirv?")
+                        } else {
+                            format!("Replace {replace} on Sirv")
+                        },
+                        None,
+                        push_confirm,
+                        SplitState::Different,
+                        true,
+                        cx,
+                    ))
+                    .child(action(
+                        "sirv-split-replace-local",
+                        if pull_confirm {
+                            format!("Really replace {replace} here?")
+                        } else {
+                            format!("Replace {replace} here")
+                        },
+                        None,
+                        pull_confirm,
+                        SplitState::Different,
+                        false,
+                        cx,
+                    ))
+            })
+            .when(ticked > 0, |footer| {
+                footer.child(
+                    Button::new("sirv-split-clear")
+                        .small()
+                        .ghost()
+                        .label("Clear")
+                        .on_click(cx.listener(|audit, _, _, cx| {
+                            audit.sirv_selected.clear();
+                            audit.sirv_confirm = None;
+                            cx.notify();
+                        })),
+                )
+            })
+            .into_any_element()
     }
 
     /// The remote-folder browser: credentials and choosing one remote folder.
@@ -423,7 +1075,17 @@ impl Audit {
                 // The filter narrows what is already on screen; it never lists
                 // again, so typing in a folder of hundreds costs no request.
                 let needle = self.sirv_browser_filter.trim().to_lowercase();
-                let total_folders = nodes.iter().filter(|node| node.is_folder()).count();
+                // Sirv keeps its own machinery in dot folders (.Trash,
+                // .processed, .well-known); nobody pairs a photo folder there.
+                let visible_folder = |node: &&sirv::Node| {
+                    node.is_folder()
+                        && !node
+                            .filename
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|name| name.starts_with('.'))
+                };
+                let total_folders = nodes.iter().filter(visible_folder).count();
                 let mut rows: Vec<gpui_kit::AnyElement> = Vec::new();
                 if browser.path != "/" {
                     rows.push(
@@ -432,12 +1094,14 @@ impl Audit {
                             .small()
                             .icon(IconName::ArrowUp)
                             .label("..")
-                            .on_click(cx.listener(|audit, _, _, cx| audit.ascend_sirv(cx)))
+                            .on_click(
+                                cx.listener(|audit, _, window, cx| audit.ascend_sirv(window, cx)),
+                            )
                             .into_any_element(),
                     );
                 }
                 let mut shown: usize = 0;
-                for node in nodes.iter().filter(|node| node.is_folder()) {
+                for node in nodes.iter().filter(visible_folder) {
                     let name = node
                         .filename
                         .rsplit('/')
@@ -459,8 +1123,8 @@ impl Audit {
                                     .small()
                                     .icon(IconName::FolderOpen)
                                     .label(name)
-                                    .on_click(cx.listener(move |audit, _, _, cx| {
-                                        audit.descend_sirv(descend_to.clone(), cx);
+                                    .on_click(cx.listener(move |audit, _, window, cx| {
+                                        audit.descend_sirv(descend_to.clone(), window, cx);
                                     })),
                             )
                             .into_any_element(),
@@ -496,21 +1160,31 @@ impl Audit {
                         div()
                             .debug_selector(|| "sirv-filter".into())
                             .w_full()
-                            .on_key_down(cx.listener(|_, event: &gpui_kit::KeyDownEvent, _, cx| {
-                                let key = event.keystroke.key.as_str();
-                                let modifiers = &event.keystroke.modifiers;
-                                let plain = !modifiers.control
-                                    && !modifiers.platform
-                                    && !modifiers.alt
-                                    && !modifiers.function;
-                                let editing = matches!(key, "backspace" | "delete" | "tab")
-                                    || (plain
-                                        && key.chars().count() == 1
-                                        && key.chars().all(|c| c.is_alphanumeric()));
-                                if key != "escape" && !editing {
-                                    cx.stop_propagation();
-                                }
-                            }))
+                            .on_key_down(cx.listener(
+                                |audit, event: &gpui_kit::KeyDownEvent, window, cx| {
+                                    let key = event.keystroke.key.as_str();
+                                    if key == "enter" {
+                                        if let Some(name) = audit.sirv_browser_match() {
+                                            audit.descend_sirv(name, window, cx);
+                                        }
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    let modifiers = &event.keystroke.modifiers;
+                                    let plain = !modifiers.control
+                                        && !modifiers.platform
+                                        && !modifiers.alt
+                                        && !modifiers.function;
+                                    let editing = matches!(key, "backspace" | "delete" | "tab")
+                                        || (plain && key == "space")
+                                        || (plain
+                                            && key.chars().count() == 1
+                                            && key.chars().all(|c| c.is_alphanumeric()));
+                                    if key != "escape" && !editing {
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
                             .child(
                                 Input::new(&self.sirv_browser_filter_input)
                                     .small()
@@ -593,25 +1267,55 @@ impl Audit {
                                 .on_click(cx.listener(|audit, _, window, cx| {
                                     audit.sirv_browser = None;
                                     audit.open_settings(window, cx);
+                                    // The keys were only ever the way to this
+                                    // dialog, so good ones lead straight back.
+                                    if let Some(panel) = audit.settings_panel.as_mut() {
+                                        panel.then_browse = true;
+                                    }
                                 })),
                         )
                     })
-                    .when(!browser.needs_credentials, |row| {
+                    .when(!browser.needs_credentials && at_root, |row| {
+                        row.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Open the Sirv folder that belongs with this one."),
+                        )
+                    })
+                    .when(!browser.needs_credentials && !at_root, |row| {
+                        let local = self
+                            .root
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let remote = browser
+                            .path
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or_default()
+                            .to_string();
                         row.child(
                             div().debug_selector(|| "sirv-pair".into()).child(
                                 Button::new("sirv-pair")
                                     .primary()
                                     .small()
-                                    .label(if at_root {
-                                        "Open a folder to pair it"
+                                    .label(if local.chars().count() > 24 {
+                                        format!(
+                                            "Pair with {}…",
+                                            local.chars().take(23).collect::<String>()
+                                        )
                                     } else {
-                                        "Pair this folder"
+                                        format!("Pair with {local}")
                                     })
+                                    .tooltip(format!("Keep {remote} on Sirv in step with {local}"))
                                     .disabled(self.sirv_pair_disabled(
                                         at_root,
                                         matches!(browser.nodes, Some(Ok(_))),
                                     ))
                                     .on_click(cx.listener(|audit, _, window, cx| {
+                                        audit.clear_sirv_browser_filter(window, cx);
                                         audit.pair_sirv(cx);
                                         Self::restore_audit_focus(window, cx);
                                     })),
@@ -958,12 +1662,20 @@ impl Render for Audit {
             // The click that opened the browser left focus on the header
             // button it replaced, so Escape had nowhere to land. Same fix as
             // the comparison: take focus next frame, once this tree exists.
+            // Into the filter once there is a listing to filter, so typing a
+            // folder's name finds it; the scrim until then, so Escape works
+            // while it loads. Each new listing takes focus again.
             cx.defer_in(window, |audit, window, cx| {
                 if let Some(browser) = audit.sirv_browser.as_mut()
                     && !browser.focused
                 {
-                    browser.focused = true;
-                    window.focus(&browser.focus, cx);
+                    if matches!(browser.nodes, Some(Ok(_))) {
+                        browser.focused = true;
+                        let filter = audit.sirv_browser_filter_input.read(cx).focus_handle(cx);
+                        window.focus(&filter, cx);
+                    } else {
+                        window.focus(&browser.focus, cx);
+                    }
                 }
             });
             let workspace = self.audit_workspace(count, window, cx);
@@ -1120,6 +1832,17 @@ impl Audit {
                     if audit.text_input_focused(window, cx) {
                         return;
                     }
+                    if audit.sirv_split_shown() && audit.split_key(event, cx) {
+                        return;
+                    }
+                    let modifiers = event.keystroke.modifiers;
+                    if modifiers.alt && !modifiers.shift && !modifiers.control {
+                        match event.keystroke.key.as_str() {
+                            "left" => return audit.step_history(false, cx),
+                            "right" => return audit.step_history(true, cx),
+                            _ => {}
+                        }
+                    }
                     // The filter box swallows its own keys, so these only fire when the
                     // list itself has focus. Shift turns any move into a selection
                     // drag from the anchor.
@@ -1209,6 +1932,15 @@ impl Audit {
                 gpui_kit::MouseButton::Left,
                 cx.listener(|audit, _, _, cx| audit.end_rail_drag(cx)),
             )
+            // The mouse's side buttons, as every file manager reads them.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Back),
+                cx.listener(|audit, _, _, cx| audit.step_history(false, cx)),
+            )
+            .on_mouse_down(
+                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Forward),
+                cx.listener(|audit, _, _, cx| audit.step_history(true, cx)),
+            )
             .child(self.header(window, cx))
             // Audit on the left, the output panel on the right: the working
             // area and the settings column split below one shared header.
@@ -1234,6 +1966,7 @@ impl Audit {
                             .child(self.audit_content(count, window, cx))
                             .children(
                                 (self.sirv_scope != Some(SirvScope::OnlyRemote)
+                                    && !self.sirv_split_shown()
                                     && !self.visible.is_empty())
                                 .then(|| self.action_bar(list_width, cx)),
                             ),
@@ -1330,15 +2063,8 @@ impl Audit {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         self.selection_bounds.borrow_mut().clear();
-        if self.sirv_scope == Some(SirvScope::OnlyRemote) {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .overflow_hidden()
-                .bg(cx.theme().table)
-                .child(self.sirv_remote_only_view(cx))
-                .into_any_element();
+        if self.sirv_split_shown() {
+            return self.sirv_split_view(cx);
         }
         let has_visible_folders = self.has_visible_folders();
         if self.entries.is_empty() && !has_visible_folders {
