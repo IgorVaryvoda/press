@@ -192,6 +192,11 @@ impl Audit {
         {
             return true;
         }
+        // While the comparison is up the table's viewport is not on screen;
+        // the rows the comparison drew are.
+        if self.sirv_split_shown() {
+            return self.split_thumb_wanted.contains(&index);
+        }
         let Some(row) = self.row_of(index) else {
             return false;
         };
@@ -978,10 +983,11 @@ impl Audit {
         entry: &Entry,
         cx: &App,
     ) -> Option<(&'static str, gpui_kit::Hsla)> {
-        let Listing::Ready(files) = &self.sirv_pairing.as_ref()?.files else {
+        let pairing = self.sirv_pairing.as_ref()?;
+        let Listing::Ready(files) = &pairing.files else {
             return None;
         };
-        let key = sirv::relative_key(&self.root, &entry.path)?;
+        let key = sirv::paired_key(&self.root, &entry.path, pairing.deep)?;
         let state = sirv::classify(entry.bytes, files.get(&key));
         let colour = match state {
             sirv::SyncState::SameSize => cx.theme().muted_foreground,

@@ -50,8 +50,9 @@ fn original_plan(
     root: &Path,
     entry: &Entry,
     files: &HashMap<String, sirv::Node>,
+    deep: bool,
 ) -> Option<OriginalPlan> {
-    let key = sirv::relative_key(root, &entry.path)?;
+    let key = sirv::paired_key(root, &entry.path, deep)?;
     Some(match sirv::classify(entry.bytes, files.get(&key)) {
         sirv::SyncState::OnlyLocal => OriginalPlan::Upload(key),
         sirv::SyncState::SameSize => OriginalPlan::Link(key),
@@ -104,19 +105,25 @@ impl Audit {
         let mut plan = Vec::new();
         let mut urls = Vec::new();
         let mut differs = Vec::new();
+        let mut nested = Vec::new();
         for (index, output) in rows {
             let Some(entry) = self.entries.get(*index) else {
                 continue;
             };
             let (key, upload) = match files.filter(|_| originals) {
-                Some(files) => match original_plan(&self.root, entry, files) {
+                Some(files) => match original_plan(&self.root, entry, files, pairing.deep) {
                     Some(OriginalPlan::Upload(key)) => (key, Some(entry.path.clone())),
                     Some(OriginalPlan::Link(key)) => (key, None),
                     Some(OriginalPlan::Differs(key)) => {
                         differs.push(key);
                         continue;
                     }
-                    None => continue,
+                    None => {
+                        if let Some(key) = sirv::relative_key(&self.root, &entry.path) {
+                            nested.push(key);
+                        }
+                        continue;
+                    }
                 },
                 None => {
                     let Some(key) = result_key(&self.root, entry, output) else {
@@ -144,6 +151,17 @@ impl Audit {
                 cx,
             );
         }
+        if !nested.is_empty() {
+            self.notify_error(
+                "sirv-publish-nested",
+                "Some originals were not published",
+                format!(
+                    "The pairing compares one folder level, so files in subfolders stay put: {}.",
+                    named(nested.into_iter())
+                ),
+                cx,
+            );
+        }
         if plan.is_empty() {
             // Everything is already on Sirv: nothing to upload, only links.
             if !urls.is_empty() {
@@ -152,7 +170,9 @@ impl Audit {
             }
             return;
         }
-        self.run_upload_plan(plan, SirvJobKind::Publish, Some(urls), cx);
+        // Originals promise never to replace a file on Sirv; converted
+        // results under optimized/ are meant to be published over.
+        self.run_upload_plan(plan, SirvJobKind::Publish, Some(urls), originals, cx);
     }
 
     pub(super) fn copy_result_embeds(&mut self, cx: &mut Context<Self>) {
@@ -343,20 +363,26 @@ mod tests {
         };
         let files: HashMap<String, sirv::Node> = [
             ("same.jpg".to_string(), node(100)),
-            ("sub/differs.jpg".to_string(), node(7)),
+            ("differs.jpg".to_string(), node(7)),
         ]
         .into();
         assert_eq!(
-            original_plan(root, &entry("new.jpg", 100), &files),
+            original_plan(root, &entry("new.jpg", 100), &files, false),
             Some(OriginalPlan::Upload("new.jpg".into()))
         );
         assert_eq!(
-            original_plan(root, &entry("same.jpg", 100), &files),
+            original_plan(root, &entry("same.jpg", 100), &files, false),
             Some(OriginalPlan::Link("same.jpg".into()))
         );
         assert_eq!(
-            original_plan(root, &entry("sub/differs.jpg", 100), &files),
-            Some(OriginalPlan::Differs("sub/differs.jpg".into()))
+            original_plan(root, &entry("differs.jpg", 100), &files, false),
+            Some(OriginalPlan::Differs("differs.jpg".into()))
+        );
+        // A subfolder is outside the one-level listing, so its file is never
+        // planned: "missing" there only means "not looked for".
+        assert_eq!(
+            original_plan(root, &entry("sub/new.jpg", 100), &files, false),
+            None
         );
     }
 }

@@ -315,6 +315,21 @@ pub(crate) fn fit(width: u32, height: u32, edge: u32) -> (u32, u32) {
     }
 }
 
+/// A drawable thumbnail from encoded bytes, such as a CDN preview.
+///
+/// Capped at 1024px a side: a preview asked for at 48px that claims to be
+/// huge is not decoded.
+pub(crate) fn drawable_from_bytes(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(1024);
+    limits.max_image_height = Some(1024);
+    reader.limits(limits);
+    Some(drawable(reader.decode().ok()?.to_rgba8()))
+}
+
 fn drawable(thumbnail: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![Frame::new(to_bgra(thumbnail))]))
 }

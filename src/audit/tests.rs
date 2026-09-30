@@ -1,7 +1,8 @@
 use super::local_ai_actions::local_ai_landing_applies;
 use super::media::comparison_landing_applies;
 use super::sirv_actions::{
-    browser_landing_applies, remember_failure, transfer_failure, walk_landing_applies,
+    browser_landing_applies, remember_failure, transfer_failure, transfer_success,
+    walk_landing_applies,
 };
 use super::studio_actions::studio_landing_applies;
 use super::*;
@@ -61,6 +62,7 @@ fn photo_fixture(name: &str, count: usize) -> PathBuf {
 fn test_pairing() -> SirvPairing {
     SirvPairing {
         dir: "/paired".into(),
+        deep: false,
         files: Listing::Ready(HashMap::new()),
         cdn_host: CdnHost::Ready("test.sirv.com".into()),
         client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
@@ -1081,6 +1083,7 @@ fn push_plan_lists_only_files_sirv_lacks() {
             &entries,
             &files,
             sirv::SyncState::OnlyLocal,
+            false,
         ),
         [("local.jpg".into(), PathBuf::from("photos/local.jpg"))]
     );
@@ -1119,6 +1122,7 @@ fn the_forced_push_plan_takes_different_size_files_and_leaves_same_size_ones() {
             &entries,
             &files,
             sirv::SyncState::DifferentSize,
+            false,
         ),
         [(
             "different-size.jpg".into(),
@@ -1489,6 +1493,7 @@ fn unpairing_discards_the_job_and_stops_the_loop(cx: &mut TestAppContext) {
             current: None,
             finished: false,
             stopping: false,
+            stopped_by_user: false,
             generation: audit.sirv_generation,
         });
         let running = audit.sirv_generation;
@@ -1518,6 +1523,7 @@ fn repairing_stops_a_running_transfer(cx: &mut TestAppContext) {
             current: None,
             finished: false,
             stopping: false,
+            stopped_by_user: false,
             generation: audit.sirv_generation,
         });
         audit.sirv_browser = Some(SirvBrowser {
@@ -1576,6 +1582,7 @@ fn sirv_jobs_count_every_failure_but_keep_three_examples() {
         current: None,
         finished: true,
         stopping: false,
+        stopped_by_user: false,
         generation: 1,
     };
     assert_eq!(
@@ -1849,6 +1856,7 @@ fn unpairing_clears_the_finished_job(cx: &mut TestAppContext) {
             current: None,
             finished: true,
             stopping: false,
+            stopped_by_user: false,
             generation: audit.sirv_generation,
         });
 
@@ -1893,6 +1901,7 @@ fn sirv_difference_filters_match_their_category_counts(cx: &mut TestAppContext) 
         ]);
         audit.sirv_pairing = Some(SirvPairing {
             dir: "/photos".into(),
+            deep: false,
             files: Listing::Ready(files),
             cdn_host: CdnHost::Ready("test.sirv.com".into()),
             client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
@@ -1902,21 +1911,23 @@ fn sirv_difference_filters_match_their_category_counts(cx: &mut TestAppContext) 
                 },
             ))),
         });
-        audit.sirv_local_presence =
-            HashSet::from(["photo.jpg".to_string(), "screenshot.png".to_string()]);
+        audit.sirv_local_presence = HashMap::from([
+            ("photo.jpg".to_string(), 100_000),
+            ("screenshot.png".to_string(), 7),
+        ]);
         audit.refresh_sirv_counts();
 
         assert_eq!(audit.sirv_counts, Some((1, 1, 1)));
         assert_eq!(audit.sirv_remote_only, ["remote.jpg"]);
 
-        audit.set_sirv_scope(SirvScope::OnlyLocal, cx);
+        audit.choose_sirv_scope(Some(SirvScope::OnlyLocal), cx);
         assert_eq!(audit.entries[audit.visible[0]].name_lossy(), "liar.webp");
-        audit.set_sirv_scope(SirvScope::Changed, cx);
+        audit.choose_sirv_scope(Some(SirvScope::Changed), cx);
         assert_eq!(
             audit.entries[audit.visible[0]].name_lossy(),
             "screenshot.png"
         );
-        audit.set_sirv_scope(SirvScope::OnlyRemote, cx);
+        audit.choose_sirv_scope(Some(SirvScope::OnlyRemote), cx);
         assert!(audit.visible.is_empty());
         assert_eq!(audit.sirv_remote_only, ["remote.jpg"]);
     });
@@ -1934,11 +1945,12 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
         )));
         audit.sirv_pairing = Some(SirvPairing {
             dir: "/photos".into(),
+            deep: false,
             files: Listing::Ready(HashMap::new()),
             cdn_host: CdnHost::Ready("old.sirv.com".into()),
             client: old_client.clone(),
         });
-        audit.sirv_local_presence.insert("old.jpg".into());
+        audit.sirv_local_presence.insert("old.jpg".into(), 1);
         audit.sirv_counts = Some((1, 1, 1));
         audit.sirv_job = Some(SirvJob {
             kind: SirvJobKind::Push,
@@ -1949,6 +1961,7 @@ fn new_credentials_retire_the_old_listing(cx: &mut TestAppContext) {
             current: None,
             finished: false,
             stopping: false,
+            stopped_by_user: false,
             generation: audit.sirv_generation,
         });
         let generation_before = audit.sirv_pairing_generation;
@@ -2025,6 +2038,7 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
     audit.update(cx, |audit, _| {
         audit.sirv_pairing = Some(SirvPairing {
             dir: "/photos".into(),
+            deep: false,
             files: Listing::Ready(HashMap::new()),
             cdn_host: CdnHost::Ready("demo.sirv.com".into()),
             client: Arc::new(parking_lot::Mutex::new(sirv::Client::new(
@@ -2034,7 +2048,7 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
                 },
             ))),
         });
-        audit.sirv_local_presence.insert("a.jpg".into());
+        audit.sirv_local_presence.insert("a.jpg".into(), 1);
     });
 
     cx.update(|window, cx| {
@@ -2474,6 +2488,7 @@ fn an_update_never_restarts_during_file_writes(cx: &mut TestAppContext) {
             current: None,
             finished: false,
             stopping: false,
+            stopped_by_user: false,
             generation: audit.sirv_generation,
         });
         assert!(!audit.update_can_restart());
@@ -2721,6 +2736,45 @@ fn thumbnail_decodes_share_four_slots_and_cap_fallbacks_at_two(cx: &mut TestAppC
         assert_eq!(audit.thumb_queue.len(), THUMB_SLOW_WORKERS);
     });
     cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn rejected_sirv_credentials_keep_the_panel_open_and_say_why(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    let keys = |id: &str| sirv::Credentials {
+        client_id: id.into(),
+        client_secret: "secret".into(),
+    };
+
+    audit.update_in(cx, |audit, window, cx| {
+        audit.open_settings(window, cx);
+        let panel = audit.settings_panel.as_mut().unwrap();
+        panel
+            .client_id
+            .update(cx, |input, cx| input.set_value("id", window, cx));
+        panel
+            .client_secret
+            .update(cx, |input, cx| input.set_value("secret", window, cx));
+        panel.checking = true;
+
+        // An answer about other keys is not an answer about these.
+        audit.finish_sirv_check(keys("other"), Ok(()), window, cx);
+        let panel = audit.settings_panel.as_ref().unwrap();
+        assert!(panel.checking && panel.cdn_status.is_none());
+
+        audit.finish_sirv_check(
+            keys("id"),
+            Err("Sirv rejected the credentials".into()),
+            window,
+            cx,
+        );
+        let panel = audit.settings_panel.as_ref().unwrap();
+        assert!(!panel.checking);
+        assert_eq!(
+            panel.cdn_status,
+            Some((false, "Sirv rejected the credentials".into()))
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -4365,6 +4419,55 @@ fn a_failed_tree_listing_can_be_retried(cx: &mut TestAppContext) {
         assert_eq!(audit.tree_children.get(&missing), Some(&vec![child]));
     });
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
+fn back_and_forward_walk_the_folders_like_a_file_manager(cx: &mut TestAppContext) {
+    let base = scan_fixture("folder-history");
+    let (a, b) = (base.join("a"), base.join("b"));
+    for folder in [&a, &b] {
+        std::fs::create_dir_all(folder).unwrap();
+        write_png(folder, "one.png");
+    }
+    let (audit, cx) = finding_audit(cx);
+    let mut go = |step: &dyn Fn(&mut Audit, &mut Context<Audit>)| {
+        audit.update(cx, |audit, cx| step(audit, cx));
+        cx.run_until_parked();
+        audit.read_with(cx, |audit, _| {
+            (
+                audit.root.clone(),
+                audit.history_back.last().cloned(),
+                audit.history_forward.clone(),
+            )
+        })
+    };
+
+    go(&|audit, cx| audit.request_path(a.clone(), cx));
+    assert_eq!(
+        go(&|audit, cx| audit.request_path(b.clone(), cx)),
+        (b.clone(), Some(a.clone()), vec![])
+    );
+    let (root, _, forward) = go(&|audit, cx| audit.step_history(false, cx));
+    assert_eq!((root, forward), (a.clone(), vec![b.clone()]));
+    assert_eq!(
+        go(&|audit, cx| audit.step_history(true, cx)),
+        (b.clone(), Some(a.clone()), vec![])
+    );
+
+    // A new folder after Back abandons what was ahead, as in any browser.
+    go(&|audit, cx| audit.step_history(false, cx));
+    let (root, back, forward) = go(&|audit, cx| audit.request_path(base.clone(), cx));
+    assert_eq!(
+        (root, back, forward),
+        (base.clone(), Some(a.clone()), vec![])
+    );
+
+    // A folder deleted since it was left drops out instead of blocking Back.
+    std::fs::remove_dir_all(&a).unwrap();
+    let (root, back, _) = go(&|audit, cx| audit.step_history(false, cx));
+    assert_eq!(root, base);
+    assert_ne!(back, Some(a));
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[gpui_kit::test]
@@ -8238,8 +8341,8 @@ fn sirv_filter_box_owns_its_keys(cx: &mut TestAppContext) {
         );
         assert_eq!(
             audit.sirv_browser_filter_input.read(cx).value(),
-            "alp",
-            "the filter box kept the keys it swallowed"
+            "alp ",
+            "the space is text in the box: Sirv folder names have spaces"
         );
     });
 }
@@ -8307,6 +8410,7 @@ fn a_finished_run_offers_publish_from_the_results_block(cx: &mut TestAppContext)
 fn delivery_pairing(files: &[(&str, u64)]) -> SirvPairing {
     SirvPairing {
         dir: "/photos".into(),
+        deep: false,
         files: Listing::Ready(
             files
                 .iter()
@@ -8325,6 +8429,268 @@ fn delivery_pairing(files: &[(&str, u64)]) -> SirvPairing {
         ),
         ..test_pairing()
     }
+}
+
+#[gpui_kit::test]
+fn the_split_view_lines_up_both_sides_and_follows_the_filters(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(delivery_pairing(&[
+            ("photo.jpg", 100_000),
+            ("screenshot.png", 7),
+            ("remote.jpg", 5),
+        ]));
+        audit.refresh_sirv_counts();
+        cx.notify();
+    });
+    let shown = |audit: &Audit| {
+        audit
+            .sirv_rows
+            .iter()
+            .filter(|row| row.in_scope(audit.sirv_scope))
+            .map(|row| (row.key.as_str(), row.local.is_some(), row.remote.is_some()))
+            .map(|(key, local, remote)| format!("{key}:{local}:{remote}"))
+            .collect::<Vec<_>>()
+    };
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(
+            shown(audit),
+            [
+                "liar.webp:true:false",
+                "photo.jpg:true:true",
+                "remote.jpg:false:true",
+                "screenshot.png:true:true"
+            ]
+        );
+    });
+
+    // Paired, the header's Sirv button opens the comparison instead of the browser.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let button = cx.debug_bounds("sirv-pair-header").unwrap();
+    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sirv-split").is_some());
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.sirv_browser.is_none());
+        assert!(
+            !audit.sidebar_open,
+            "the comparison takes the panel's width"
+        );
+    });
+
+    for (scope, expected) in [
+        (SirvScope::Changed, "screenshot.png:true:true"),
+        (SirvScope::OnlyRemote, "remote.jpg:false:true"),
+    ] {
+        audit.update(cx, |audit, cx| {
+            audit.choose_sirv_scope(Some(scope), cx);
+        });
+        audit.read_with(cx, |audit, _| assert_eq!(shown(audit), [expected]));
+    }
+
+    // The header box ticks what the filter shows; each footer button takes only
+    // the ticked rows its direction applies to.
+    audit.update(cx, |audit, cx| {
+        audit.choose_sirv_scope(None, cx);
+        audit.toggle_split_rows(cx);
+        assert_eq!(audit.sirv_selected.len(), 4);
+        assert_eq!(
+            audit.split_selected(SplitState::OnlyLocal),
+            HashSet::from(["liar.webp".to_string()])
+        );
+        assert_eq!(
+            audit.split_selected(SplitState::OnlyRemote),
+            HashSet::from(["remote.jpg".to_string()])
+        );
+        // Replacing a file asks first: one click arms, nothing transfers.
+        let replace = audit.split_selected(SplitState::Different);
+        audit.transfer_split(SplitState::Different, true, replace, cx);
+        assert!(audit.sirv_confirm == Some(SirvJobKind::PushChanged));
+        assert!(audit.sirv_job.is_none());
+        // Changing the selection withdraws the question.
+        audit.toggle_split_row("photo.jpg", cx);
+        assert!(audit.sirv_confirm.is_none());
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sirv-split-footer").is_some());
+
+    audit.update(cx, |audit, cx| audit.toggle_sirv_split(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sirv-split").is_none());
+}
+
+#[test]
+fn a_short_transfer_names_what_it_never_tried() {
+    let job = |done, failed: usize, failures: &[&str]| SirvJob {
+        kind: SirvJobKind::Push,
+        done,
+        total: 20,
+        failed,
+        failures: failures.iter().map(|name| name.to_string()).collect(),
+        current: None,
+        finished: true,
+        stopping: false,
+        stopped_by_user: false,
+        generation: 1,
+    };
+    // Aborted after three refusals at file 5: fifteen were never tried.
+    assert_eq!(
+        transfer_failure(&job(5, 3, &["a", "b", "c"])).map(|(_, message)| message),
+        Some("3 of 20 failed: a, b, c. 15 not tried".into())
+    );
+    // A Stop is not a failure, and says how far it got; a run cut short by
+    // a rescan or new keys does not blame a Stop nobody pressed.
+    assert_eq!(transfer_failure(&job(4, 0, &[])), None);
+    let mut stopped = job(4, 0, &[]);
+    stopped.stopped_by_user = true;
+    assert_eq!(
+        transfer_success(&stopped),
+        Some((
+            "Sirv transfer stopped",
+            "4 files of 20 copied before Stop.".into()
+        ))
+    );
+    assert_eq!(
+        transfer_success(&job(4, 0, &[])).map(|(title, _)| title),
+        Some("Sirv transfer interrupted")
+    );
+    // A folder Sirv would not make fails the run before any file: nothing
+    // "of 20" failed, all 20 were never tried.
+    assert_eq!(
+        transfer_failure(&job(0, 0, &["could not create folder sub"])).map(|(_, message)| message),
+        Some("could not create folder sub. 20 not tried".into())
+    );
+    assert_eq!(
+        transfer_success(&job(20, 0, &[])),
+        Some(("Uploaded to Sirv", "20 files copied to Sirv.".into()))
+    );
+}
+
+#[gpui_kit::test]
+fn the_split_view_answers_the_keyboard_and_the_name_filter(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(delivery_pairing(&[("remote.jpg", 5)]));
+        audit.refresh_sirv_counts();
+        audit.toggle_sirv_split(cx);
+    });
+    cx.run_until_parked();
+    audit.update_in(cx, |audit, window, cx| window.focus(&audit.focus, cx));
+    let keys = |audit: &Audit| {
+        let mut keys = audit.sirv_selected.iter().cloned().collect::<Vec<_>>();
+        keys.sort();
+        keys
+    };
+    let first_two = audit.read_with(cx, |audit, _| {
+        audit
+            .sirv_rows
+            .iter()
+            .take(2)
+            .map(|row| row.key.clone())
+            .collect::<Vec<_>>()
+    });
+
+    cx.simulate_keystrokes("space down space");
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(keys(audit), first_two);
+        // The list behind the comparison kept its own ticks.
+        assert!(audit.selected.is_empty());
+    });
+    cx.simulate_keystrokes("escape");
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_selected.is_empty()));
+
+    // The name box narrows the comparison, and select-all takes only what it shows.
+    audit.update(cx, |audit, cx| {
+        audit.set_filter("remote".into(), cx);
+        audit.toggle_split_rows(cx);
+        assert_eq!(keys(audit), ["remote.jpg"]);
+    });
+}
+
+#[gpui_kit::test]
+fn a_pull_is_busy_from_the_click_so_a_second_one_waits(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(delivery_pairing(&[("remote.jpg", 5), ("other.jpg", 6)]));
+        audit.refresh_sirv_counts();
+        audit.run_pull(false, Some(["remote.jpg".to_string()].into()), cx);
+        // Busy before the plan lands: a second arrow now waits instead of
+        // superseding the first download.
+        assert!(audit.sirv_busy());
+        let first = audit.sirv_generation;
+        audit.run_pull(false, Some(["other.jpg".to_string()].into()), cx);
+        assert_eq!(audit.sirv_generation, first);
+        // Let go before the plan lands, so nothing reaches the network.
+        audit.drop_sirv_pairing(cx);
+    });
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert!(audit.sirv_job.is_none()));
+}
+
+#[gpui_kit::test]
+fn every_file_on_both_sides_has_a_row_and_a_deep_pairing_keys_subfolders(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        let root = audit.root.clone();
+        let mut nested = audit.entries[0].clone();
+        nested.path = root.join("sub/nested.jpg");
+        let nested_bytes = nested.bytes;
+        audit.entries.push(nested);
+        let row = |audit: &Audit, key: &str| {
+            audit
+                .sirv_rows
+                .iter()
+                .find(|row| row.key == key)
+                .map(|row| (row.state(), row.entry.is_some()))
+        };
+
+        // Shallow: the nested image has no key; a text file both sides hold,
+        // which the scan never reads, is still a row, sized from the disk.
+        audit.sirv_pairing = Some(delivery_pairing(&[("notes.txt", 9)]));
+        audit.sirv_local_presence = HashMap::from([("notes.txt".to_string(), 4)]);
+        audit.refresh_sirv_counts();
+        assert_eq!(
+            row(audit, "notes.txt"),
+            Some((SplitState::Different, false))
+        );
+        assert_eq!(row(audit, "sub/nested.jpg"), None);
+        assert_eq!(audit.sirv_counts.map(|(_, changed, _)| changed), Some(1));
+
+        // Deep: the walk went through subfolders, so the nested image compares.
+        let mut deep = delivery_pairing(&[("notes.txt", 9), ("sub/nested.jpg", nested_bytes)]);
+        deep.deep = true;
+        audit.sirv_pairing = Some(deep);
+        audit.refresh_sirv_counts();
+        assert_eq!(
+            row(audit, "sub/nested.jpg"),
+            Some((SplitState::InSync, true))
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_pulled_file_joins_the_list_without_a_rescan(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, _| {
+        let root = audit.root.clone();
+        let count = audit.entries.len();
+        let dataset = audit.dataset_generation;
+        audit.results.insert(0, 123);
+        // A replaced file keeps its row and loses what described the old bytes.
+        let mut replaced = audit.entries[0].clone();
+        replaced.bytes += 1;
+        audit.adopt_pulled_entry(replaced);
+        assert_eq!(audit.entries.len(), count);
+        assert!(!audit.results.contains_key(&0));
+        // A new file goes on the end; nothing already listed moves.
+        let mut added = audit.entries[0].clone();
+        added.path = root.join("pulled-new.jpg");
+        audit.adopt_pulled_entry(added);
+        assert_eq!(audit.entries.len(), count + 1);
+        assert_eq!(audit.entries[count].path, root.join("pulled-new.jpg"));
+        // Same dataset: nothing detached for it was cancelled.
+        assert_eq!(audit.dataset_generation, dataset);
+    });
 }
 
 #[gpui_kit::test]

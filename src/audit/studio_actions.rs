@@ -115,6 +115,7 @@ impl Audit {
             &self.studio_prompt,
             &self.studio_key_input,
             &self.max_edge_input,
+            &self.sirv_browser_filter_input,
         ]
         .iter()
         .any(|input| input.read(cx).focus_handle(cx).is_focused(window))

@@ -376,6 +376,10 @@ impl Audit {
                 Listing::Ready(files) => Some(files),
                 Listing::Walking | Listing::Failed => None,
             });
+        let deep = self
+            .sirv_pairing
+            .as_ref()
+            .is_some_and(|pairing| pairing.deep);
         let root = &self.root;
         let show_parent = self.show_parent();
         // One lowercased label per entry, shared by the filter and the Name
@@ -412,7 +416,7 @@ impl Audit {
                     let Some(files) = remote_files else {
                         return false;
                     };
-                    let Some(key) = sirv::relative_key(root, &entry.path) else {
+                    let Some(key) = sirv::paired_key(root, &entry.path, deep) else {
                         return false;
                     };
                     let state = sirv::classify(entry.bytes, files.get(&key));

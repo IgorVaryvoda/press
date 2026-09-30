@@ -139,7 +139,7 @@ impl ProductionBatchState {
 /// True when this directory is one macOS keeps opaque. Packages are a macOS
 /// concept — on other systems these names are just folders, so they keep being
 /// walked there.
-fn is_opaque_package(path: &Path) -> bool {
+pub(crate) fn is_opaque_package(path: &Path) -> bool {
     if !cfg!(target_os = "macos") {
         return false;
     }
