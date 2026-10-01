@@ -74,31 +74,93 @@ impl Node {
     }
 }
 
-/// An upstream failure with its status and body kept intact. "Sirv said 403"
-/// is debuggable; "request failed" is not.
+/// An upstream failure: the HTTP status, and whatever Sirv said that adds to
+/// it. `status` 0 is a failure before any answer, and `message` then is
+/// already a sentence for a person.
 #[derive(Debug)]
 pub struct Error {
     pub status: u16,
     pub message: String,
 }
 
+/// What a person reads. Every toast, dialog and per-file failure prints an
+/// `Error` through this, so it says what happened and what to do — not the
+/// JSON body, which read as `{"statusCode": 401, "error": "Unauthorized"}`.
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = if self.message.is_empty() {
+            String::new()
+        } else {
+            format!(" Sirv said: {}", self.message)
+        };
         match self.status {
             0 => write!(f, "{}", self.message),
-            401 | 403 => write!(
+            401 => write!(
                 f,
-                "Sirv rejected the credentials ({}): {}",
-                self.status, self.message
+                "Sirv didn’t accept this Client ID and secret. Copy both again from your Sirv \
+                 account (Settings → API)."
             ),
-            404 => write!(f, "not found on Sirv ({}): {}", self.status, self.message),
+            403 => write!(
+                f,
+                "Sirv refused: these API keys aren’t allowed to do this.{detail}"
+            ),
+            404 => write!(
+                f,
+                "Sirv can’t find that file or folder. It may have been moved or deleted."
+            ),
+            413 => write!(f, "The file is too large for Sirv to accept."),
             429 => write!(
                 f,
-                "Sirv is rate limiting this account ({}): {}",
-                self.status, self.message
+                "Sirv is limiting requests from this account. Wait a minute, then try again."
             ),
-            status => write!(f, "Sirv error {status}: {}", self.message),
+            500..=599 => write!(
+                f,
+                "Sirv is having trouble (error {}). Try again in a few minutes.",
+                self.status
+            ),
+            status => write!(f, "Sirv refused the request (error {status}).{detail}"),
         }
+    }
+}
+
+/// The part of an error body worth showing: Sirv's own `message`, when it says
+/// more than the status already does. "Unauthorized" under a 401 does not.
+pub(crate) fn server_message(body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            // Studio puts its sentence in `error`, the Sirv API in `message`.
+            value
+                .get("message")
+                .and_then(|message| message.as_str())
+                .filter(|message| !message.trim().is_empty())
+                .or_else(|| value.get("error")?.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            // A short plain-text body is a sentence; HTML or JSON is not.
+            let body = body.trim();
+            if body.len() <= 160 && !body.starts_with(['{', '[', '<']) {
+                body.to_string()
+            } else {
+                String::new()
+            }
+        });
+    let message = message.trim();
+    let generic = [
+        "unauthorized",
+        "forbidden",
+        "not found",
+        "too many requests",
+        "internal server error",
+        "bad request",
+        "bad gateway",
+        "service unavailable",
+    ];
+    if generic.contains(&message.to_ascii_lowercase().as_str()) {
+        String::new()
+    } else {
+        message.chars().take(200).collect()
     }
 }
 
@@ -961,29 +1023,27 @@ fn token_is_fresh(fetched_at: Instant, lifetime: Duration) -> bool {
     fetched_at.elapsed() < lifetime.saturating_sub(TOKEN_MARGIN)
 }
 
+/// `stage` names the request for a log; a person reads the status, through
+/// `Display`, and whatever Sirv added to it.
 fn sirv_error(stage: &'static str) -> impl Fn(ureq::Error) -> Error {
     move |error| match error {
-        ureq::Error::Status(status, response) => {
-            // Bodies arrive pretty-printed; the first line alone would be a
-            // bare "{". Keep everything, capped.
-            let mut message = response.into_string().unwrap_or_default();
-            message = message.trim().to_string();
-            if message.chars().count() > 200 {
-                message = message.chars().take(200).collect::<String>() + "…";
-            }
+        ureq::Error::Status(status, response) => Error {
+            status,
+            message: server_message(&response.into_string().unwrap_or_default()),
+        },
+        ureq::Error::Transport(transport) => {
+            let cause = transport.to_string();
+            eprintln!("sirv {stage}: {cause}");
+            let timed_out = cause.to_ascii_lowercase().contains("timed out");
             Error {
-                status,
-                message: if message.is_empty() {
-                    stage.to_string()
+                status: 0,
+                message: if timed_out {
+                    "Sirv took too long to answer. Try again.".into()
                 } else {
-                    format!("{stage}: {message}")
+                    "Couldn’t reach Sirv. Check your internet connection.".into()
                 },
             }
         }
-        ureq::Error::Transport(transport) => Error {
-            status: 0,
-            message: format!("{stage}: {transport}"),
-        },
     }
 }
 
@@ -1284,16 +1344,34 @@ mod tests {
     }
 
     #[test]
-    fn a_401_reads_as_a_credentials_problem() {
+    fn a_401_reads_as_a_credentials_problem_without_the_json() {
         let error = Error {
             status: 401,
-            message: "token: {...}".into(),
+            message: server_message(
+                "{\n  \"statusCode\": 401,\n  \"error\": \"Unauthorized\",\n  \"message\": \"Unauthorized\"\n}",
+            ),
         };
+        let shown = error.to_string();
 
+        assert!(shown.starts_with("Sirv didn’t accept this Client ID and secret"));
+        assert!(!shown.contains('{') && !shown.contains("statusCode"));
+    }
+
+    #[test]
+    fn sirvs_own_words_stay_when_they_add_something() {
+        assert_eq!(
+            server_message(r#"{"statusCode":403,"message":"Read-only API client"}"#),
+            "Read-only API client"
+        );
+        assert_eq!(server_message("<html><body>502</body></html>"), "");
+        let error = Error {
+            status: 403,
+            message: "Read-only API client".into(),
+        };
         assert!(
             error
                 .to_string()
-                .starts_with("Sirv rejected the credentials")
+                .ends_with("Sirv said: Read-only API client")
         );
     }
 
@@ -1308,15 +1386,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unmapped_status_keeps_its_code_and_detail() {
+    fn a_server_fault_keeps_its_code_and_says_to_wait() {
         let error = Error {
             status: 500,
             message: "upstream unavailable".into(),
         };
         let message = error.to_string();
 
+        // A server fault is Sirv's, and the person's move is to wait.
         assert!(message.contains("500"));
-        assert!(message.contains("upstream unavailable"));
+        assert!(message.contains("Try again"));
     }
 
     #[test]

@@ -619,35 +619,52 @@ fn studio_error(stage: &'static str) -> impl Fn(ureq::Error) -> String {
                 .unwrap_or_else(|| stage.to_string());
             studio_status_error(stage, status, &body)
         }
-        ureq::Error::Transport(error) => format!("Studio {stage} failed: {error}"),
+        ureq::Error::Transport(error) => {
+            let cause = error.to_string();
+            eprintln!("studio {stage}: {cause}");
+            if cause.to_ascii_lowercase().contains("timed out") {
+                "Sirv Studio took too long to answer. Try again.".into()
+            } else {
+                "Couldn’t reach Sirv Studio. Check your internet connection.".into()
+            }
+        }
     }
 }
 
+/// What a person reads when Studio says no: a sentence per status, plus
+/// Studio's own words when they add something. A bare "Unauthorized" or an
+/// HTML error page used to follow the colon.
 fn studio_status_error(stage: &str, status: u16, body: &str) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
-    let detail = parsed
-        .as_ref()
-        .and_then(|body| {
-            body.get("error")
-                .or_else(|| body.get("message"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| body.to_string());
+    let detail = sirv::server_message(body);
     let code = parsed
         .as_ref()
         .and_then(|body| body.get("code"))
         .and_then(|value| value.as_str());
-    match status {
-        401 => format!("Studio rejected the API key: {detail}"),
-        402 if code == Some("INSUFFICIENT_CREDITS") => {
-            format!("Studio has no credits available: {detail}")
+    let with_detail = |lead: &str| {
+        if detail.is_empty() {
+            format!("{lead}.")
+        } else {
+            format!("{lead}: {detail}")
         }
-        402 => format!("Studio API access failed: {detail}"),
-        403 => format!("Studio API access is not enabled for this workspace: {detail}"),
-        413 => format!("Studio rejected the image as too large: {detail}"),
-        429 => format!("Studio is rate limiting this account: {detail}"),
-        _ => format!("Studio {stage} failed ({status}): {detail}"),
+    };
+    match status {
+        401 => "Sirv Studio didn’t accept this API key. Copy it again from Sirv Studio \
+                (Settings → API)."
+            .into(),
+        402 if code == Some("INSUFFICIENT_CREDITS") => {
+            with_detail("Studio has no credits available")
+        }
+        402 => with_detail("Studio API access failed"),
+        403 => with_detail("Studio API access is not enabled for this workspace"),
+        413 => with_detail("Studio rejected the image as too large"),
+        429 => "Sirv Studio is limiting requests from this account. Wait a minute, then try \
+                again."
+            .into(),
+        500..=599 => {
+            format!("Sirv Studio is having trouble (error {status}). Try again in a few minutes.")
+        }
+        _ => with_detail(&format!("Studio could not {stage} (error {status})")),
     }
 }
 
@@ -1238,5 +1255,12 @@ mod tests {
             r#"{"error":"Insufficient credits. Required: 10, Available: 0","code":"INSUFFICIENT_CREDITS"}"#,
         );
         assert!(credits.starts_with("Studio has no credits available:"));
+
+        // A bare status word or an error page adds nothing a person can use.
+        let key = studio_status_error("upload image", 401, r#"{"error":"Unauthorized"}"#);
+        assert!(key.starts_with("Sirv Studio didn’t accept this API key"));
+        let page =
+            studio_status_error("upload image", 502, "<html><body>Bad gateway</body></html>");
+        assert!(!page.contains('<') && page.contains("Try again"));
     }
 }

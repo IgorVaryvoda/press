@@ -41,7 +41,9 @@ impl Audit {
         match status {
             None => div(),
             Some((ok, message)) => div()
-                .text_size(px(11.))
+                .debug_selector(|| "settings-status".into())
+                .w_full()
+                .text_size(px(12.))
                 .text_color(if ok { cx.theme().green } else { cx.theme().red })
                 .child(message),
         }
@@ -129,41 +131,39 @@ impl Audit {
                             .on_click(|_, _, cx| cx.open_url(sirv::API_KEYS_URL)),
                     ),
             )
+            // Its own line, wrapping: beside the buttons a sentence ran off the
+            // dialog's edge.
+            .child(Self::settings_status(panel.cdn_status.clone(), cx))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(Self::settings_status(panel.cdn_status.clone(), cx))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new("settings-close")
-                                    .ghost()
-                                    .small()
-                                    .label("Close")
-                                    .on_click(cx.listener(|audit, _, window, cx| {
-                                        audit.close_settings(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("settings-save")
-                                    .primary()
-                                    .small()
-                                    .label(if checking {
-                                        "Checking…"
-                                    } else {
-                                        "Save credentials"
-                                    })
-                                    .loading(checking)
-                                    .disabled(!can_save || checking)
-                                    .on_click(
-                                        cx.listener(|audit, _, _, cx| audit.save_sirv_settings(cx)),
-                                    ),
-                            ),
-                    ),
+                div().flex().items_center().justify_end().child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new("settings-close")
+                                .ghost()
+                                .small()
+                                .label("Close")
+                                .on_click(cx.listener(|audit, _, window, cx| {
+                                    audit.close_settings(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("settings-save")
+                                .primary()
+                                .small()
+                                .label(if checking {
+                                    "Checking…"
+                                } else {
+                                    "Save credentials"
+                                })
+                                .loading(checking)
+                                .disabled(!can_save || checking)
+                                .on_click(
+                                    cx.listener(|audit, _, _, cx| audit.save_sirv_settings(cx)),
+                                ),
+                        ),
+                ),
             )
             .into_any_element()
     }
