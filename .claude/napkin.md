@@ -256,8 +256,10 @@ sessions learn.
 - 2026-09-30: Sirv split view (`sirv-split`): `sirv_rows` is built in
   `refresh_sirv_counts`, merged by key, because `sirv_local_presence` can lag
   a transfer and put one file on both the local and remote-only lists. Paired,
-  the header Sirv button toggles the split; its label is always "Sirv", so
-  (-410, 20) hits it paired or not. "Change Sirv folder…" is in the bar's `⋯`. Live proof
+  the header Sirv button exists only while unpaired (it pairs; (-410, 20)
+  hits it at 760/1100/1440). Paired, the view switch reads List | Grid | Sirv
+  and `set_sirv_split` is the one way in or out; at 1100 the Sirv segment is
+  (1030, 22) and Grid (990, 22). "Change Sirv folder…" is in the bar's `⋯`. Live proof
   fixture: `~/.cache/press-sync-demo` + Sirv `/Image Editor Backup 202310111041`;
   `PRESS_SHOT_SIRV=1 /tmp/press-shot.py` copies the real Sirv keys into the
   sandbox. Pulling `marta.jpg` there turns its row green.
@@ -288,3 +290,10 @@ sessions learn.
   JPEG). Live test used Sirv `/press-test` (created, verified, deleted):
   upload, stat-before-upload refusal, Replace on Sirv/here, nested upload,
   download all passed. `/tmp/sirvapi.py {mkdir,ls,upload,rm}` drives the API.
+| 2026-10-01 | user | The split view sat on top of List/Grid and only the Sirv button reached it: clicking Grid "did nothing" and the arrows moved a hidden cursor, so "hotkeys don't work" | A full-content view must be a peer in the view switch, and every other view choice must leave it. Reproduce with the user's own settings + pairing (`PRESS_SHOT_SETTINGS`, `PRESS_SHOT_PAIR`) before guessing |
+- 2026-10-01: Two host flakes under the full parallel suite, both pass alone:
+  `updates_wait_for_download_and_apply_and_keep_dismissed_state` (stray
+  connection to its port; run the binary from /tmp) and
+  `thumbs::tests::an_os_thumbnail_feeds_a_file_another_app_already_drew`
+  ("the store hits"). Rerun before blaming a diff.
+| 2026-10-01 | user | Launched `target/debug/press` for the user to try; on a loaded host (load ~40) each List/Grid/Sirv switch pinned the UI thread ~1 s per burst and read as "frozen". Release build measured 0% for the same clicks | Give the user `target/release/press` (`cargo build --release`, ~9 min cold). Debug builds are for headless captures only. To get a stack from a hung window, start it under `gdb -batch -ex run -ex "thread apply all bt"` (ptrace_scope=1 blocks attaching later; no perf on this host) |
