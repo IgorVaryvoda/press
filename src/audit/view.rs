@@ -372,23 +372,6 @@ impl Audit {
                         })
                         .child(div().flex_1())
                         .child(div().flex_shrink_0().child(filters))
-                        .child(
-                            div().flex_shrink_0().child(
-                                Button::new("sirv-split-toggle")
-                                    .small()
-                                    .ghost()
-                                    .icon(Icon::default().path("icons/columns-2.svg"))
-                                    .selected(self.sirv_split)
-                                    .tooltip(if self.sirv_split {
-                                        "Back to the image list"
-                                    } else {
-                                        "Side by side: this folder and Sirv, file by file"
-                                    })
-                                    .on_click(
-                                        cx.listener(|audit, _, _, cx| audit.toggle_sirv_split(cx)),
-                                    ),
-                            ),
-                        )
                         .child(div().flex_shrink_0().child(more)),
                 )
                 .when(has_status, |bar| {
@@ -741,7 +724,27 @@ impl Audit {
             }))
             .into_any_element()
         };
+        // A transfer touching this row says so in the arrow's place: a spinner
+        // on the file crossing now, a quiet mark on the ones waiting.
+        let crossing = self
+            .sirv_job
+            .as_ref()
+            .filter(|job| !job.finished)
+            .is_some_and(|job| job.current.as_deref() == Some(row.key.as_str()));
+        let waiting = self.sirv_busy() && self.sirv_queued.contains(&row.key);
         let mark: gpui_kit::AnyElement = match state {
+            _ if crossing => div()
+                .debug_selector(move || format!("sirv-row-crossing-{shown}"))
+                .child(Spinner::new().small().color(cx.theme().blue))
+                .into_any_element(),
+            _ if waiting => div()
+                .debug_selector(move || format!("sirv-row-waiting-{shown}"))
+                .child(
+                    Icon::new(IconName::Ellipsis)
+                        .size_4()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .into_any_element(),
             SplitState::InSync => Icon::new(IconName::Check)
                 .size_4()
                 .text_color(cx.theme().green)
@@ -773,10 +776,11 @@ impl Audit {
             .when(!ticked, |row| {
                 row.hover(|row| row.bg(cx.theme().list_hover))
             })
-            .on_click(cx.listener(move |audit, _, _, cx| {
-                audit.sirv_split_cursor = shown;
-                audit.toggle_split_row(&key, cx)
-            }))
+            .on_click(
+                cx.listener(move |audit, event: &gpui_kit::ClickEvent, _, cx| {
+                    audit.click_split_row(shown, &key, event.modifiers().shift, cx)
+                }),
+            )
             .child(
                 div()
                     .w(px(SPLIT_TICK))
@@ -792,9 +796,10 @@ impl Audit {
                         let key = row.key.clone();
                         Checkbox::new(("sirv-split-tick", shown))
                             .checked(ticked)
-                            .on_click(cx.listener(move |audit, _: &bool, _, cx| {
+                            .on_click(cx.listener(move |audit, _: &bool, window, cx| {
                                 cx.stop_propagation();
-                                audit.toggle_split_row(&key, cx);
+                                let shift = window.modifiers().shift;
+                                audit.click_split_row(shown, &key, shift, cx);
                             }))
                     }),
             )

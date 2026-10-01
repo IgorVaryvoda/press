@@ -63,6 +63,7 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::table::{
     Column as TableCol, ColumnSort, DataTable, TableDelegate, TableState,
@@ -626,9 +627,14 @@ pub(crate) struct Audit {
     sirv_split: bool,
     /// Rows ticked in the split view, by key: what its footer acts on.
     sirv_selected: HashSet<String>,
+    /// Keys the running transfer has still to copy, so each row can say it is
+    /// waiting rather than offer an arrow that would do nothing.
+    sirv_queued: HashSet<String>,
     /// The keyboard's row in the split view, as a position among the rows
     /// shown, and the list scroll that keeps it in sight.
     sirv_split_cursor: usize,
+    /// Where a Shift range starts: the last row ticked or unticked on its own.
+    sirv_split_anchor: usize,
     sirv_split_scroll: UniformListScrollHandle,
     /// Entries whose thumbnails the split view drew this frame.
     split_thumb_wanted: HashSet<usize>,
@@ -2776,7 +2782,9 @@ pub(crate) fn build_audit(
             sirv_rows: Vec::new(),
             sirv_split: false,
             sirv_selected: HashSet::new(),
+            sirv_queued: HashSet::new(),
             sirv_split_cursor: 0,
+            sirv_split_anchor: 0,
             sirv_split_scroll: UniformListScrollHandle::new(),
             split_thumb_wanted: HashSet::new(),
             sirv_thumbs: HashMap::new(),

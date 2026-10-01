@@ -8359,25 +8359,18 @@ fn the_unpaired_header_sirv_button_opens_the_browser(cx: &mut TestAppContext) {
 /// Paired, the same header button stays put and reads selected, so the
 /// paired state is visible above the reconciliation strip.
 #[gpui_kit::test]
-fn the_paired_header_sirv_button_stays_visible(cx: &mut TestAppContext) {
+fn a_paired_header_shows_sirv_once_as_a_view(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         audit.sirv_pairing = Some(test_pairing());
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(
-        cx.debug_bounds("sirv-pair-header").is_some(),
-        "the paired header keeps its Sirv control"
-    );
-    // Selected follows the pairing: the button renders selected exactly
-    // when this is set, so asserting the driver asserts the state.
-    audit.read_with(cx, |audit, _| {
-        assert!(
-            audit.sirv_pairing.is_some(),
-            "the paired header button reads selected"
-        )
-    });
+    // The pairing stays in sight through the Sirv bar and the view switch;
+    // the pair button would only say "Sirv" a second time.
+    assert!(cx.debug_bounds("sirv-reconciliation").is_some());
+    assert!(cx.debug_bounds("view-sirv").is_some());
+    assert!(cx.debug_bounds("sirv-pair-header").is_none());
 }
 
 fn sirv_folder(filename: &str) -> sirv::Node {
@@ -8666,9 +8659,9 @@ fn the_split_view_lines_up_both_sides_and_follows_the_filters(cx: &mut TestAppCo
         );
     });
 
-    // Paired, the header's Sirv button opens the comparison instead of the browser.
+    // Paired, the view switch's Sirv segment opens the comparison.
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let button = cx.debug_bounds("sirv-pair-header").unwrap();
+    let button = cx.debug_bounds("view-sirv").unwrap();
     cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("sirv-split").is_some());
@@ -8716,7 +8709,7 @@ fn the_split_view_lines_up_both_sides_and_follows_the_filters(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(cx.debug_bounds("sirv-split-footer").is_some());
 
-    audit.update(cx, |audit, cx| audit.toggle_sirv_split(cx));
+    audit.update(cx, |audit, cx| audit.set_sirv_split(false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("sirv-split").is_none());
 }
@@ -8769,12 +8762,99 @@ fn a_short_transfer_names_what_it_never_tried() {
 }
 
 #[gpui_kit::test]
+fn a_transfer_marks_its_rows_and_shift_ticks_a_range(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(delivery_pairing(&[
+            ("a.jpg", 1),
+            ("b.jpg", 2),
+            ("c.jpg", 3),
+        ]));
+        audit.refresh_sirv_counts();
+        audit.set_sirv_split(true, cx);
+    });
+    cx.run_until_parked();
+    let row_of = |audit: &Audit, key: &str| {
+        audit
+            .sirv_rows
+            .iter()
+            .filter(|row| audit.split_shows(row))
+            .position(|row| row.key == key)
+            .unwrap()
+    };
+
+    // The file crossing now spins; the ones still waiting say so.
+    let (a, b) = audit.update(cx, |audit, cx| {
+        audit.sirv_job = Some(SirvJob {
+            kind: SirvJobKind::Pull,
+            done: 0,
+            total: 2,
+            failed: 0,
+            failures: Vec::new(),
+            current: Some("a.jpg".into()),
+            finished: false,
+            stopping: false,
+            stopped_by_user: false,
+            generation: audit.sirv_generation,
+        });
+        audit.sirv_queued = ["a.jpg".to_string(), "b.jpg".to_string()].into();
+        cx.notify();
+        (row_of(audit, "a.jpg"), row_of(audit, "b.jpg"))
+    });
+    cx.run_until_parked();
+    let crossing: &'static str = format!("sirv-row-crossing-{a}").leak();
+    let waiting: &'static str = format!("sirv-row-waiting-{b}").leak();
+    assert!(cx.debug_bounds(crossing).is_some());
+    assert!(cx.debug_bounds(waiting).is_some());
+
+    // Shift extends from the anchor, as in the list: a plain click on the
+    // first row, a Shift click on the third, ticks all three.
+    audit.update(cx, |audit, cx| {
+        audit.sirv_job = None;
+        audit.click_split_row(0, "a.jpg", false, cx);
+        let third = audit.sirv_rows[2].key.clone();
+        audit.click_split_row(2, &third, true, cx);
+        assert_eq!(audit.sirv_selected.len(), 3);
+    });
+}
+
+#[gpui_kit::test]
+fn list_and_grid_leave_the_sirv_view_and_escape_closes_it(cx: &mut TestAppContext) {
+    let (audit, cx) = finding_audit(cx);
+    audit.update(cx, |audit, cx| {
+        audit.sirv_pairing = Some(delivery_pairing(&[("remote.jpg", 5)]));
+        audit.refresh_sirv_counts();
+        audit.set_sirv_split(true, cx);
+    });
+    cx.run_until_parked();
+    // Paired, the view switch has a third segment, and it is the lit one.
+    assert!(cx.debug_bounds("view-sirv").is_some());
+    assert!(cx.debug_bounds("sirv-split").is_some());
+
+    // Grid is a view like the comparison: choosing it leaves the comparison.
+    let grid = cx.debug_bounds("view-grid").unwrap();
+    cx.simulate_click(grid.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sirv-split").is_none());
+    audit.read_with(cx, |audit, _| assert!(audit.grid && !audit.sirv_split));
+
+    // Back in, Escape with nothing ticked closes it again.
+    let sirv = cx.debug_bounds("view-sirv").unwrap();
+    cx.simulate_click(sirv.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    audit.update_in(cx, |audit, window, cx| window.focus(&audit.focus, cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| assert!(!audit.sirv_split));
+}
+
+#[gpui_kit::test]
 fn the_split_view_answers_the_keyboard_and_the_name_filter(cx: &mut TestAppContext) {
     let (audit, cx) = finding_audit(cx);
     audit.update(cx, |audit, cx| {
         audit.sirv_pairing = Some(delivery_pairing(&[("remote.jpg", 5)]));
         audit.refresh_sirv_counts();
-        audit.toggle_sirv_split(cx);
+        audit.set_sirv_split(true, cx);
     });
     cx.run_until_parked();
     audit.update_in(cx, |audit, window, cx| window.focus(&audit.focus, cx));

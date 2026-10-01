@@ -955,11 +955,14 @@ impl Audit {
 
     /// The split view is a Sirv task, not a conversion one: it takes the
     /// Convert panel's width, as the Sirv-only filter already does.
-    pub(super) fn toggle_sirv_split(&mut self, cx: &mut Context<Self>) {
-        if self.converting {
+    /// The one way in and out of the comparison. It is a view like List and
+    /// Grid, and those two leave it: it used to sit on top of them, so
+    /// clicking Grid changed a list nobody could see.
+    pub(super) fn set_sirv_split(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.converting || self.sirv_split == on {
             return;
         }
-        self.sirv_split = !self.sirv_split;
+        self.sirv_split = on;
         if self.sirv_split {
             self.sidebar_open = false;
         } else if self.sirv_scope == Some(SirvScope::OnlyRemote) {
@@ -1003,6 +1006,7 @@ impl Audit {
             "end" => Some(last),
             "space" if !command => {
                 if let Some(key) = shown.get(cursor) {
+                    self.sirv_split_anchor = cursor;
                     self.toggle_split_row(&key.clone(), cx);
                 }
                 return true;
@@ -1029,16 +1033,64 @@ impl Audit {
                 cx.notify();
                 return true;
             }
+            // Nothing ticked: Escape closes the comparison, back to the list.
+            "escape" => {
+                self.set_sirv_split(false, cx);
+                return true;
+            }
             _ => None,
         };
         let Some(target) = target else {
             return false;
         };
+        // Shift extends the ticks from the anchor, as Shift does in the list.
+        if event.keystroke.modifiers.shift {
+            self.tick_split_range(target, cx);
+        }
         self.sirv_split_cursor = target;
         self.sirv_split_scroll
             .scroll_to_item(target, ScrollStrategy::Nearest);
         cx.notify();
         true
+    }
+
+    /// A click on a split row at position `shown`: Shift ticks the range from
+    /// the anchor, anything else toggles the one row and becomes the anchor.
+    pub(super) fn click_split_row(
+        &mut self,
+        shown: usize,
+        key: &str,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.sirv_split_cursor = shown;
+        if shift {
+            self.tick_split_range(shown, cx);
+        } else {
+            self.sirv_split_anchor = shown;
+            self.toggle_split_row(key, cx);
+        }
+    }
+
+    /// Tick every shown row between the anchor and `to`, both included.
+    /// Ticking only adds, like the list's Shift range: nothing already ticked
+    /// outside the range is lost.
+    fn tick_split_range(&mut self, to: usize, cx: &mut Context<Self>) {
+        let (from, to) = (
+            self.sirv_split_anchor.min(to),
+            self.sirv_split_anchor.max(to),
+        );
+        let keys = self
+            .sirv_rows
+            .iter()
+            .filter(|row| self.split_shows(row))
+            .skip(from)
+            .take(to - from + 1)
+            .map(|row| row.key.clone())
+            .collect::<Vec<_>>();
+        self.sirv_selected.extend(keys);
+        self.sirv_confirm = None;
+        cx.notify();
     }
 
     /// Tick or untick one row of the split view. A pending "really replace?"
@@ -1121,6 +1173,7 @@ impl Audit {
 
     /// The one toast a transfer ends with: what failed, or what was copied.
     pub(super) fn report_transfer(&mut self, cx: &mut Context<Self>) {
+        self.sirv_queued.clear();
         let Some(job) = self.sirv_job.as_ref() else {
             return;
         };
@@ -1180,6 +1233,7 @@ impl Audit {
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         let generation = self.sirv_generation;
         let root = self.root.clone();
+        self.sirv_queued = only.clone().unwrap_or_default();
         // The job exists from the click, not from when the plan lands: until
         // then the window read as idle, and a second arrow clicked meanwhile
         // superseded the first download without a word.
@@ -1217,6 +1271,9 @@ impl Audit {
                         if let Some(only) = &only {
                             plan.retain(|key| only.contains(key));
                         }
+                        // In the comparison's row order, so progress runs down
+                        // the list rather than jumping about it.
+                        plan.sort();
                         plan
                     }
                 })
@@ -1242,6 +1299,7 @@ impl Audit {
                     if let Some(job) = audit.sirv_job.as_mut() {
                         job.total = total;
                     }
+                    audit.sirv_queued = plan.iter().cloned().collect();
                     cx.notify();
                     Some(total)
                 })
@@ -1334,6 +1392,7 @@ impl Audit {
                         && job.generation == generation
                     {
                         job.done = ix + 1;
+                        audit.sirv_queued.remove(key);
                         job.current = None;
                         job.failed = failed;
                         job.failures = failures.clone();
@@ -1475,7 +1534,7 @@ impl Audit {
     /// the same caps, cancellation and named failures.
     pub(super) fn run_upload_plan(
         &mut self,
-        plan: Vec<(String, PathBuf)>,
+        mut plan: Vec<(String, PathBuf)>,
         kind: SirvJobKind,
         completion: Option<Vec<String>>,
         // Uploads that promise not to replace anything ask Sirv first: the
@@ -1498,7 +1557,10 @@ impl Audit {
         self.clear_error("sirv-transfer", cx);
         let dir = pairing.dir.clone();
         let client = pairing.client.clone();
+        // Row order, as for a pull.
+        plan.sort_by(|a, b| a.0.cmp(&b.0));
         let total = plan.len();
+        self.sirv_queued = plan.iter().map(|(key, _)| key.clone()).collect();
         self.sirv_generation = self.sirv_generation.wrapping_add(1);
         let generation = self.sirv_generation;
         self.sirv_job = Some(SirvJob {
@@ -1709,6 +1771,7 @@ impl Audit {
                         && job.generation == generation
                     {
                         job.done = ix + 1;
+                        audit.sirv_queued.remove(key);
                         job.current = None;
                         job.failed = failed;
                         job.failures = failures.clone();

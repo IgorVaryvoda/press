@@ -75,6 +75,19 @@ impl Audit {
 
     /// Keyboard shortcuts for the image list.
     pub(super) fn shortcuts_view(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // The comparison owns the keys while it is up; its card says what they
+        // do there rather than describing a list nobody is looking at.
+        const SIRV_SHORTCUTS: [(&str, &str); 9] = [
+            ("↑ ↓", "Move between files"),
+            ("PgUp PgDn Home End", "Jump through the list"),
+            ("Space", "Tick the file"),
+            ("Ctrl/⌘ + A", "Tick everything shown"),
+            ("Enter", "Preview the local image"),
+            ("Ctrl/⌘ + K", "Focus the filter box"),
+            ("Alt + ← →", "Go back or forward a folder"),
+            ("?", "Show this list"),
+            ("Esc", "Clear the ticks, then back to the list"),
+        ];
         const SHORTCUTS: [(&str, &str); 12] = [
             ("↑ ↓ ← →", "Move between images"),
             ("PgUp PgDn Home End", "Jump through the list"),
@@ -106,30 +119,42 @@ impl Audit {
                     .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground)
-                    .child("Keyboard shortcuts"),
+                    .child(if self.sirv_split_shown() {
+                        "Keyboard shortcuts · Sirv"
+                    } else {
+                        "Keyboard shortcuts"
+                    }),
             )
-            .children(SHORTCUTS.iter().map(|(keys, what)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w(px(150.))
-                            .flex_shrink_0()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().foreground)
-                            .child(*keys),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(*what),
-                    )
-            }))
+            .children(
+                if self.sirv_split_shown() {
+                    &SIRV_SHORTCUTS[..]
+                } else {
+                    &SHORTCUTS[..]
+                }
+                .iter()
+                .map(|(keys, what)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(150.))
+                                .flex_shrink_0()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child(*keys),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(*what),
+                        )
+                }),
+            )
             .child(
                 div()
                     .text_size(px(11.))
@@ -194,6 +219,7 @@ impl Audit {
     /// that narrow the list. One row: the second strip was carrying a filter box
     /// and two chips across the whole window, and cost the list forty pixels.
     pub(super) fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let split = self.sirv_split_shown();
         let browser_open = self.browser_persistent(window) || self.browser_overlay;
         let breadcrumb_source = cx.entity().downgrade();
         let mut breadcrumb_parts = self.breadcrumb_parts();
@@ -333,33 +359,22 @@ impl Audit {
         let open_disabled = self.converting;
         let scope_checked = self.include_subfolders;
         let scope_disabled = self.converting || self.single_file;
-        // Paired, the Sirv bar under the header names both folders, so the
-        // button stays one short word and the path keeps its room; the
-        // selected state and the tooltip say which folder it is.
-        let sirv_tip = match &self.sirv_pairing {
-            Some(pairing) => format!("Compare with Sirv:{}", pairing.dir),
-            None => "Pair a Sirv folder with this local folder".to_string(),
-        };
-        // Keep pairing visible beside the source path.
-        let sirv = div().debug_selector(|| "sirv-pair-header".into()).child(
-            Button::new("sirv-pair-header")
-                .small()
-                .ghost()
-                .icon(IconName::Globe)
-                .label("Sirv")
-                .tooltip(sirv_tip)
-                .selected(self.sirv_pairing.is_some())
-                .disabled(sirv_disabled)
-                // Paired, the button opens what the pairing is for: the two
-                // folders compared. Changing the folder stays in the Sirv bar.
-                .on_click(cx.listener(|audit, _, _, cx| {
-                    if audit.sirv_pairing.is_some() {
-                        audit.toggle_sirv_split(cx);
-                    } else {
-                        audit.open_sirv_browser(cx);
-                    }
-                })),
-        );
+        // The way into Sirv while nothing is paired. Paired, the Sirv bar
+        // names both folders and holds Change folder and Unpair, and the view
+        // switch's Sirv segment opens the comparison: a second "Sirv" here
+        // did the segment's job under another shape.
+        let sirv = self.sirv_pairing.is_none().then(|| {
+            div().debug_selector(|| "sirv-pair-header".into()).child(
+                Button::new("sirv-pair-header")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Globe)
+                    .label("Sirv")
+                    .tooltip("Pair a Sirv folder with this local folder")
+                    .disabled(sirv_disabled)
+                    .on_click(cx.listener(|audit, _, _, cx| audit.open_sirv_browser(cx))),
+            )
+        });
         div()
             .debug_selector(|| "audit-header".into())
             .flex()
@@ -540,7 +555,7 @@ impl Audit {
                     .child(forward),
             )
             .child(path_bar)
-            .child(div().flex_shrink_0().child(sirv))
+            .children(sirv.map(|sirv| div().flex_shrink_0().child(sirv)))
             // The box narrows the list; erasing its text widens it back out.
             // `cleanable` puts the cross inside the field and only while there
             // is text to clear — the objection to the old Clear button was that
@@ -571,21 +586,43 @@ impl Audit {
                     .small()
                     .outline()
                     .compact()
-                    .children([
-                        toolbar::segment("view-list", "List", !self.grid)
-                            .debug_selector(|| "view-list".into())
-                            .tooltip("Show the audit as a list")
-                            .disabled(self.converting),
-                        toolbar::segment("view-grid", "Grid", self.grid)
-                            .debug_selector(|| "view-grid".into())
-                            .tooltip("Show the images as a gallery")
-                            .disabled(self.converting),
-                    ])
+                    .children(
+                        [
+                            Some(
+                                toolbar::segment("view-list", "List", !self.grid && !split)
+                                    .debug_selector(|| "view-list".into())
+                                    .tooltip("Show the audit as a list")
+                                    .disabled(self.converting),
+                            ),
+                            Some(
+                                toolbar::segment("view-grid", "Grid", self.grid && !split)
+                                    .debug_selector(|| "view-grid".into())
+                                    .tooltip("Show the images as a gallery")
+                                    .disabled(self.converting),
+                            ),
+                            // Paired, the comparison is the third way to look
+                            // at the folder, and List or Grid leaves it.
+                            self.sirv_pairing.is_some().then(|| {
+                                toolbar::segment("view-sirv", "Sirv", split)
+                                    .debug_selector(|| "view-sirv".into())
+                                    .tooltip("This folder and Sirv side by side")
+                                    .disabled(self.converting)
+                            }),
+                        ]
+                        .into_iter()
+                        .flatten(),
+                    )
                     .on_click(cx.listener(|audit, clicked: &Vec<usize>, _, cx| {
                         if audit.converting {
                             return;
                         }
-                        audit.set_grid(clicked.first() == Some(&1), cx);
+                        match clicked.first() {
+                            Some(2) => audit.set_sirv_split(true, cx),
+                            choice => {
+                                audit.set_sirv_split(false, cx);
+                                audit.set_grid(choice == Some(&1), cx);
+                            }
+                        }
                     })),
             )
             .child(

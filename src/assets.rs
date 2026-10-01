@@ -30,7 +30,6 @@ const ICONS: &[(&str, &[u8])] = icons![
     "panel-left-filled",
     "panel-right-filled",
     "house",
-    "columns-2",
 ];
 
 /// The icon path for a Studio tool slug, or `None` when this build ships no
