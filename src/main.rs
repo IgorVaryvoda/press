@@ -253,6 +253,11 @@ const OPTIONS: &[(&[Command], &str)] = &[
     ),
     (
         &[Command::Convert],
+        "  --progress                With --json, name each file on stderr as it\n\
+         \x20                           finishes: [done/total] name status\n",
+    ),
+    (
+        &[Command::Convert],
         "  --only <file>             Convert only this file of the folder, named\n\
          \x20                           relative to it or absolute; repeatable\n",
     ),
@@ -512,6 +517,9 @@ struct Args {
     /// `convert --only`: the files to convert, relative to the folder or absolute
     /// inside it. Empty converts the whole folder.
     only: Vec<PathBuf>,
+    /// `convert --json --progress`: one stderr line per finished file, so a caller
+    /// waiting on a long run can tell slow work from a stopped process.
+    progress: bool,
 }
 
 fn parse_args() -> Args {
@@ -596,6 +604,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut speed_set = false;
     let mut help_topic = None;
     let mut only = Vec::new();
+    let mut progress = false;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -798,6 +807,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 });
             }
             "--grid" => grid = true,
+            "--progress" => progress = true,
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
             "--lossless" => {
@@ -902,6 +912,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             preset_overrides: Vec::new(),
             help_topic,
             only: Vec::new(),
+            progress,
             unknown,
         });
     }
@@ -1006,6 +1017,15 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if !targets.is_empty() && (format_set || quality_set || edge_set || speed_set) {
         return Err(
             "targets carry their own recipes: explicit conversion options need a plain convert"
+                .into(),
+        );
+    }
+    if progress && command != Command::Convert {
+        return Err("--progress needs convert".into());
+    }
+    if progress && !json {
+        return Err(
+            "--progress needs --json; the text output already names each file as it finishes"
                 .into(),
         );
     }
@@ -1307,6 +1327,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         preset_overrides,
         help_topic: None,
         only,
+        progress,
         unknown,
     })
 }
@@ -2074,6 +2095,7 @@ fn dry_run_headless(
 /// Only `queued.entries` are converted, each to the name `queue_run` kept for it. The
 /// plan was made against every audited source, so a file left out of the queue still
 /// holds the name it was given.
+#[allow(clippy::too_many_arguments)]
 fn convert_headless(
     root: &std::path::Path,
     queued: &Queued,
@@ -2082,6 +2104,7 @@ fn convert_headless(
     quality: Quality,
     max_edge: MaxEdge,
     json: bool,
+    progress: bool,
 ) -> ConversionRun {
     let out_dir = destination.out_dir;
     let entries = &queued.entries;
@@ -2175,6 +2198,15 @@ fn convert_headless(
                         reason: None,
                     });
                 }
+            }
+            if progress {
+                let finished = totals.files.last().map_or("", |file| file.status);
+                eprintln!(
+                    "[{}/{}] {} {finished}",
+                    totals.files.len(),
+                    entries.len(),
+                    source.strip_prefix(root).unwrap_or(source).display()
+                );
             }
         },
     );
@@ -2786,6 +2818,7 @@ fn convert_targets(
                 quality,
                 max_edge,
                 args.json,
+                args.progress,
             )
         };
         run_t
@@ -3633,6 +3666,7 @@ fn main() {
             args.quality,
             args.max_edge,
             args.json,
+            args.progress,
         )
     };
     let failed = run.failed;
@@ -5034,6 +5068,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             true,
+            false,
         )
     }
 
@@ -5640,6 +5675,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             true,
+            false,
         );
         assert_eq!(run.failed, 0);
         // The report names every outcome: the converted stale file and the
@@ -6385,6 +6421,7 @@ mod tests {
             Quality::lossy(80.),
             MaxEdge::FULL,
             true,
+            false,
         );
 
         assert_eq!(run.failed, 0);

@@ -58,6 +58,8 @@ press convert <folder> --only big.png --only sub/hero.jpg --json
 
 A recorded run first matches its recipe fingerprint and the source content hash: changed settings or edited bytes rebuild even when the timestamps look current. An output with no record skips on timestamps alone. Under this flag `summary.source_bytes` and `summary.output_bytes` cover only the files this run re-encoded, so they are not the size of the whole tree.
 
+A large folder can take minutes, mostly with AVIF. Add `--progress` to a `--json` conversion to get one stderr line per finished file, `[done/total] name status`, while stdout stays the one document. Run it in the background and read stderr to tell slow work from a stopped process.
+
 Repeat `--only <file>` to convert some files of a folder, for example the `heavy` ones an audit named. Name each file relative to the folder or by the absolute path the JSON audit printed. Each output lands where a whole-folder run would put it, under the folder's `optimized/`. A name that matches no audited image exits `2` before anything is written. `summary.attempted` counts the selected files; `scan` still describes the whole folder. `--only` takes no `--target`.
 
 Repeat `--target <recipe>=<dir>` to convert once per saved recipe into its own folder under the output root, e.g. `--target recommended=web --target small-files=small`. Each target keeps its own manifest and skip decisions; the report carries one `targets` section per target plus combined `files` and `summary`. Targets refuse unknown recipes, overlapping folders, `--replace`, and explicit `--format`/`--quality`/`--preset-file` siblings: a target's recipe already answers those.

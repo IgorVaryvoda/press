@@ -372,6 +372,27 @@ fn only_converts_the_named_files_into_the_folder_s_mirror() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Progress goes to stderr, one line per finished file, and leaves stdout the one
+/// document it always was.
+#[test]
+fn progress_names_each_finished_file_on_stderr() {
+    let dir = workdir("progress");
+    photo(&dir, "one.png");
+    other_photo(&dir, "two.png");
+    let target = dir.to_string_lossy().into_owned();
+    let output = run(&["convert", &target, "--json", "--progress"]);
+    assert_exit(&output, 0, "convert --progress");
+    assert_eq!(stdout_json(&output)["summary"]["converted"], 2);
+    let lines: Vec<String> = stderr(&output).lines().map(str::to_owned).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines.iter().any(|line| line.ends_with("one.png converted")));
+    assert!(lines.iter().any(|line| line.starts_with("[2/2] ")));
+
+    let text = run(&["convert", &target, "--progress"]);
+    assert_exit(&text, 2, "--progress without --json");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn restore_and_version_answer_in_json() {
     let dir = workdir("restore-json");
