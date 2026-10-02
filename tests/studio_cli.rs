@@ -41,7 +41,7 @@ fn fixture(config: &Path, answers: &str, results: &str) -> (PathBuf, PathBuf, Pa
     (
         image,
         script,
-        config_root(config).join("imageguide/studio/jobs"),
+        config_root(config).join("imageguide/studio-jobs"),
     )
 }
 
@@ -298,4 +298,23 @@ fn hosted_rehearsal_refuses_live_shape_and_missing_authority() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("--fake"));
     let _ = std::fs::remove_dir_all(config);
+}
+
+/// The window keeps the Studio key in a file named `studio` beside the settings.
+/// A rehearsal on the same machine must neither fail on that file nor touch it.
+#[test]
+fn hosted_rehearsal_runs_beside_a_saved_studio_key() {
+    let config = config_dir("beside-key");
+    let (image, script, jobs) = fixture(&config, "{}", "{}");
+    let key = config_root(&config).join("imageguide/studio");
+    std::fs::create_dir_all(key.parent().unwrap()).expect("config folder is created");
+    std::fs::write(&key, "api_key=sk_live_test\n").expect("the key is saved");
+    let job = quote(&config, &image, &script);
+    assert!(jobs.join(format!("{job}.hosted.json")).is_file());
+    assert_eq!(
+        std::fs::read_to_string(&key).unwrap(),
+        "api_key=sk_live_test\n",
+        "the key file is untouched"
+    );
+    let _ = std::fs::remove_dir_all(&config);
 }

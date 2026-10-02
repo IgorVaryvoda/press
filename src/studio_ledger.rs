@@ -895,11 +895,12 @@ fn file_for(dir: &Path, id: &str) -> Result<PathBuf, String> {
 }
 
 /// Resolve the machine-local hosted job folder.
+///
+/// `studio-jobs`, beside the settings. It was `studio/jobs`, but `studio` is the
+/// file the window saves the Studio API key in, so on any machine with a key
+/// the folder could not be created and every rehearsal verb failed.
 pub fn studio_dir() -> Option<PathBuf> {
-    crate::settings::path().and_then(|path| {
-        path.parent()
-            .map(|parent| parent.join("studio").join("jobs"))
-    })
+    crate::settings::path().and_then(|path| path.parent().map(|parent| parent.join("studio-jobs")))
 }
 
 fn validate_job(job: &HostedJob) -> Result<(), String> {
