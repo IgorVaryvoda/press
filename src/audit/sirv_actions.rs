@@ -1260,14 +1260,12 @@ impl Audit {
                 .spawn({
                     let root = root.clone();
                     let files = files.clone();
-                    let dir = dir.clone();
                     async move {
-                        let remote: Vec<sirv::Node> = files.values().cloned().collect();
                         // The disk, both ways: the scan leaves out RAW, text and
                         // unreadable files, and a replace must see those too.
                         let local_sizes =
                             sirv::local_sizes_for(&root, files.keys().map(String::as_str));
-                        let mut plan = sirv::pull_plan(&remote, &dir, &local_sizes, differing);
+                        let mut plan = sirv::pull_plan(&files, &local_sizes, differing);
                         if let Some(only) = &only {
                             plan.retain(|key| only.contains(key));
                         }

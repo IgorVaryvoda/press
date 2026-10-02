@@ -515,25 +515,31 @@ pub fn safe_key(key: &str) -> bool {
             .all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
-/// Safe relative keys missing locally, or differing when explicitly requested.
+/// Safe relative keys missing locally, or differing when explicitly requested,
+/// sorted.
+///
+/// Keyed by `walk_remote`, not by each node's own filename: some accounts name
+/// a file relative to the folder that listed it, so `sub/c.jpg` comes back as
+/// `c.jpg`, and a plan rebuilt from that name downloaded a file that is not
+/// there and wrote it to the wrong place.
 pub fn pull_plan(
-    remote: &[Node],
-    dir: &str,
+    remote: &HashMap<String, Node>,
     local_sizes: &HashMap<String, u64>,
     differing: bool,
 ) -> Vec<String> {
-    remote
+    let mut plan: Vec<String> = remote
         .iter()
-        .filter_map(|node| unpair_remote(dir, &node.filename).map(|key| (key, node)))
         .filter(|(key, _)| safe_key(key))
-        .filter(|(key, node)| match local_sizes.get(key) {
+        .filter(|(key, node)| match local_sizes.get(*key) {
             Some(local_size) => {
                 differing && classify(*local_size, Some(node)) == SyncState::DifferentSize
             }
             None => !differing,
         })
-        .map(|(key, _)| key)
-        .collect()
+        .map(|(key, _)| key.clone())
+        .collect();
+    plan.sort();
+    plan
 }
 
 /// The on-disk size of every remote key's local twin. The image scan is the
@@ -1260,6 +1266,14 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A listing keyed the way `walk_remote` keys it, from absolute names.
+    fn keyed(remote: &[Node], dir: &str) -> HashMap<String, Node> {
+        remote
+            .iter()
+            .filter_map(|node| Some((unpair_remote(dir, &node.filename)?, node.clone())))
+            .collect()
+    }
+
     fn pull_test_dir(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("imageguide-pull-{name}-{}", std::process::id()));
@@ -1534,7 +1548,7 @@ mod tests {
         ];
         let local = HashMap::from([("a.jpg".into(), 9)]);
 
-        assert_eq!(pull_plan(&remote, "/d", &local, true), ["a.jpg"]);
+        assert_eq!(pull_plan(&keyed(&remote, "/d"), &local, true), ["a.jpg"]);
     }
 
     #[test]
@@ -2033,10 +2047,33 @@ mod tests {
             },
         ];
         assert_eq!(
-            pull_plan(&remote, "/d", &HashMap::new(), false),
+            pull_plan(&keyed(&remote, "/d"), &HashMap::new(), false),
             vec!["ok.jpg".to_string()],
             "the escaping key is left out of the plan entirely"
         );
+    }
+
+    /// Some accounts name a listed file relative to the folder that listed it.
+    /// The plan must keep the folder the walk found it in, or a pull fetches
+    /// `/d/c.jpg`, which is not there, instead of `/d/sub/c.jpg`.
+    #[test]
+    fn a_pull_keeps_a_nested_file_s_folder_when_sirv_names_it_relatively() {
+        let node = |filename: &str, folder: bool| Node {
+            filename: filename.into(),
+            is_directory: folder,
+            kind: None,
+            size: 3,
+        };
+        let listed = walk_remote("/d", true, |folder| {
+            Ok(Some(match folder {
+                "/d" => vec![node("sub", true)],
+                "/d/sub" => vec![node("c.jpg", false)],
+                _ => Vec::new(),
+            }))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(pull_plan(&listed, &HashMap::new(), false), ["sub/c.jpg"]);
     }
 
     #[test]
@@ -2063,7 +2100,7 @@ mod tests {
         ];
         let local = HashMap::from([("a.jpg".into(), 1), ("b.jpg".into(), 2)]);
         assert_eq!(
-            pull_plan(&remote, "/d", &local, false),
+            pull_plan(&keyed(&remote, "/d"), &local, false),
             vec!["sub/c.jpg".to_string()]
         );
     }
@@ -2093,11 +2130,11 @@ mod tests {
         let local = HashMap::from([("same.jpg".into(), 2), ("changed.jpg".into(), 4)]);
 
         assert_eq!(
-            pull_plan(&remote, "/d", &local, false),
+            pull_plan(&keyed(&remote, "/d"), &local, false),
             ["missing.jpg".to_string()]
         );
         assert_eq!(
-            pull_plan(&remote, "/d", &local, true),
+            pull_plan(&keyed(&remote, "/d"), &local, true),
             ["changed.jpg".to_string()]
         );
     }
