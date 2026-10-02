@@ -1,7 +1,9 @@
-//! The command line's Sirv verbs: the window's folder sync without a window.
+//! The command line's Sirv and live Studio verbs: the window's folder sync and
+//! hosted tools without a window.
 //!
-//! Every run that sends a file off this computer says so with its own flag, and
-//! every run that would replace a file on either side says that with another.
+//! Every run that sends a file off this computer says so with its own flag, every
+//! run that spends Studio credits with another, and every run that would replace
+//! a file on either side with a third.
 //! Nothing is remembered between runs: consent given once is not consent for the
 //! next command an agent decides to type.
 
@@ -11,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::scan::{self, format_bytes};
-use crate::{Args, command_error, path_text, sirv, write_json_with_code};
+use crate::{Args, command_error, path_text, sirv, studio, write_json_with_code};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SirvVerb {
@@ -378,4 +380,178 @@ fn report_progress(args: &Args, file: Option<&Transferred>, done: usize, total: 
     {
         eprintln!("[{done}/{total}] {} {}", file.key, file.status);
     }
+}
+
+/// The Studio verbs that reach the live service, beside the fixture rehearsal.
+pub(crate) const STUDIO_LIVE_VERBS: &[&str] = &["credits", "run", "alt-text"];
+
+/// Run one live Studio verb with the key the user saved in the window.
+///
+/// `credits` only reads the balance. `run` sends one image to Studio and
+/// `alt-text` has Studio read a public URL; both spend credits, so both need
+/// `--allow-spend` on the run itself, and `run` also needs `--allow-upload`.
+/// Studio quotes no price before the work and reports the charge after it, so
+/// a credit ceiling here could only ever be a promise: the report states what
+/// the run used and what the account has left instead.
+pub(crate) fn studio_live(verb: &str, args: &Args) -> i32 {
+    let fail =
+        |code: i32, message: String| -> ! { command_error("studio", message, args.json, code) };
+    let Some(key) = studio::load_key() else {
+        fail(
+            2,
+            "no Studio API key; add one in the Press window's Studio settings".into(),
+        );
+    };
+    let mut report = serde_json::Map::from_iter([
+        ("schema_version".to_string(), serde_json::json!(1)),
+        ("command".to_string(), serde_json::json!("studio")),
+        ("verb".to_string(), serde_json::json!(verb)),
+    ]);
+    let balance = |key: &str| {
+        studio::verify_key(key)
+            .ok()
+            .and_then(|account| account.credits)
+    };
+    let text = match verb {
+        "credits" => {
+            let account = studio::verify_key(&key).unwrap_or_else(|error| fail(1, error));
+            report.insert("credits".into(), serde_json::json!(account.credits));
+            match account.credits {
+                Some(credits) => format!("{} available", studio::format_credits(credits)),
+                None => "the key works; Studio did not say the balance".into(),
+            }
+        }
+        "alt-text" => {
+            let url = args
+                .studio_url
+                .as_deref()
+                .unwrap_or_else(|| fail(2, "alt-text needs --url <https://…>".into()));
+            if !url.starts_with("https://") {
+                fail(2, format!("alt-text needs a public https URL, got {url:?}"));
+            }
+            if !args.allow_spend {
+                fail(
+                    2,
+                    "alt text spends Studio credits; run again with --allow-spend".into(),
+                );
+            }
+            let (alt, used) = studio::alt_text(&key, url).unwrap_or_else(|error| fail(1, error));
+            let left = balance(&key);
+            report.insert("url".into(), serde_json::json!(url));
+            report.insert("alt_text".into(), serde_json::json!(alt));
+            report.insert("credits_used".into(), serde_json::json!(used));
+            report.insert("credits_left".into(), serde_json::json!(left));
+            format!("{alt}\n{}", spend_line(used, left))
+        }
+        _ => {
+            let slug = args.studio_tool.as_deref().unwrap_or_default();
+            let Some(tool) = studio::TOOLS
+                .iter()
+                .copied()
+                .find(|tool| tool.slug() == slug)
+            else {
+                fail(2, format!("run needs --tool, one of {}", studio_tools()));
+            };
+            let image = args
+                .studio_image
+                .as_deref()
+                .unwrap_or_else(|| fail(2, "run needs --image <file>".into()));
+            let Some(entry) = image.is_file().then(|| scan::probe(image)).flatten() else {
+                fail(2, format!("{} is not an image file", image.display()));
+            };
+            let prompt = args.studio_prompt.clone().unwrap_or_default();
+            if tool.needs_prompt() && prompt.trim().is_empty() {
+                fail(2, format!("{} needs --prompt", tool.slug()));
+            }
+            let missing: Vec<&str> = [
+                (!args.allow_upload).then_some("--allow-upload"),
+                (!args.allow_spend).then_some("--allow-spend"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !missing.is_empty() {
+                fail(
+                    2,
+                    format!(
+                        "{} sends {} ({}) to Sirv Studio and spends credits; run again with {}",
+                        tool.slug(),
+                        image.display(),
+                        format_bytes(entry.bytes),
+                        missing.join(" ")
+                    ),
+                );
+            }
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let upload = match studio::prepare_upload(image, &cancelled) {
+                Ok(studio::Preflight::Ready(upload)) => upload,
+                Ok(studio::Preflight::NeedsConfirmation(_)) => fail(
+                    2,
+                    format!(
+                        "{} only fits Studio's upload limit as a lossy or smaller copy; \
+                         make one first, for example with press convert --max-edge 4000, \
+                         and run that file",
+                        image.display()
+                    ),
+                ),
+                Err(error) => fail(1, error),
+            };
+            let audited = std::fs::canonicalize(image).unwrap_or_else(|error| {
+                fail(2, format!("could not resolve {}: {error}", image.display()))
+            });
+            let root = audited.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let destination = match args.output.clone() {
+                Some(folder) => crate::settings::Output::Folder(folder),
+                None => crate::settings::Output::Optimized,
+            };
+            let out_dir = destination
+                .context(&root)
+                .map(|context| context.output_root().to_path_buf())
+                .unwrap_or_else(|message| fail(2, message));
+            let (written, used) = studio::process_prepared(
+                &key, &root, &out_dir, &upload, &audited, tool, &prompt, &cancelled,
+            )
+            .unwrap_or_else(|error| fail(1, error));
+            let left = balance(&key);
+            report.insert("tool".into(), serde_json::json!(tool.slug()));
+            report.insert("source".into(), serde_json::json!(path_text(image)));
+            report.insert("output".into(), serde_json::json!(path_text(&written)));
+            report.insert("credits_used".into(), serde_json::json!(used));
+            report.insert("credits_left".into(), serde_json::json!(left));
+            format!(
+                "{} {} -> {}\n{}",
+                tool.slug(),
+                image.display(),
+                written.display(),
+                spend_line(used, left)
+            )
+        }
+    };
+    if args.json {
+        if let Err(error) = write_json_with_code(&report, 0) {
+            eprintln!("press: could not write JSON: {error}");
+            return 1;
+        }
+    } else {
+        outln!("{text}");
+    }
+    0
+}
+
+fn spend_line(used: Option<f64>, left: Option<f64>) -> String {
+    let used = used.map_or("Studio did not say the charge".to_string(), |used| {
+        format!("{} used", studio::format_credits(used))
+    });
+    match left {
+        Some(left) => format!("{used}, {} left", studio::format_credits(left)),
+        None => used,
+    }
+}
+
+pub(crate) fn studio_tools() -> String {
+    studio::TOOLS
+        .iter()
+        .map(|tool| tool.slug())
+        .collect::<Vec<_>>()
+        .join(", ")
 }

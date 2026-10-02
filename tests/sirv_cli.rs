@@ -3,9 +3,9 @@
 //! nothing reaches the real service. The server keeps files in memory and
 //! answers only the routes the command uses.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
@@ -99,46 +99,7 @@ fn answer(remote: &Mutex<Remote>, method: &str, target: &str, body: Vec<u8>) -> 
 }
 
 fn serve(remote: Arc<Mutex<Remote>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = format!("http://{}", listener.local_addr().unwrap());
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() {
-                continue;
-            }
-            let mut parts = line.split_whitespace();
-            let (method, target) = (
-                parts.next().unwrap_or_default().to_string(),
-                parts.next().unwrap_or_default().to_string(),
-            );
-            let mut length = 0;
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
-                if header.trim().is_empty() {
-                    break;
-                }
-                if let Some((name, value)) = header.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let (status, reply) = answer(&remote, &method, &target, body);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                reply.len()
-            );
-            let _ = stream.write_all(&reply);
-        }
-    });
-    address
+    common::serve(move |method, target, body| answer(&remote, method, target, body))
 }
 
 struct Fixture {

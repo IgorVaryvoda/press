@@ -85,6 +85,7 @@ press convert ~/path/to/folder --only big.png --json     # just these files, sam
 press compare ~/photo.jpg --format avif --quality 60 --out pair.png  # size, PSNR, side by side
 press ai remove-background ~/photo.jpg       # local model, PNG into optimized/
 press sirv push ~/path/to/folder --remote /photos --allow-upload  # public; consent each run
+press studio run --tool background-removal --image ~/photo.jpg --allow-upload --allow-spend
 press check ~/path/to/folder --requirements-file ./requirements.json --json
 press update                                    # install the latest signed release
 ```

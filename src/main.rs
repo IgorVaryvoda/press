@@ -176,8 +176,9 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
     (
         Command::Studio,
         "studio",
-        "  press studio <verb> [OPTIONS]\n",
-        "Rehearse one bounded hosted operation against a local script",
+        "  press studio <credits|run|alt-text> [OPTIONS]\n\
+         \x20 press studio <quote|accept|status|cancel|reconcile|retrieve> --fake <FILE>\n",
+        "Run a Sirv Studio tool on one image, or rehearse a hosted operation",
     ),
     (
         Command::Skill,
@@ -265,6 +266,7 @@ const OPTIONS: &[(&[Command], &str)] = &[
         &[
             Command::Convert,
             Command::Ai,
+            Command::Studio,
             Command::Plan,
             Command::Execute,
             Command::Reconcile,
@@ -287,6 +289,10 @@ const OPTIONS: &[(&[Command], &str)] = &[
          \x20 --allow-upload            Let push send files to Sirv, where they are public\n\
          \x20 --replace-changed         Also replace files whose size differs: on Sirv\n\
          \x20                           for push, on this computer for pull\n",
+    ),
+    (
+        &[Command::Studio],
+        "  --allow-upload            Let studio run send the image to Sirv Studio\n",
     ),
     (
         &[Command::Ai],
@@ -364,16 +370,18 @@ const OPTIONS: &[(&[Command], &str)] = &[
     (
         &[Command::Supplier, Command::Studio],
         "  --fake <file>             Rehearsal script for supplier or studio service calls\n\
-         \x20                           (required: there is no live service authority)\n",
+         \x20                           (required by the studio rehearsal verbs)\n",
     ),
     (
         &[Command::Studio],
-        "  --tool <upscale>          Hosted rehearsal operation (one supported tool)\n\
-         \x20 --image <file>            Hosted input for quote and acceptance re-check\n\
+        "  --tool <tool>             Studio tool for run; upscale for the rehearsal\n\
+         \x20 --image <file>            The image for run, quote and acceptance\n\
+         \x20 --url <https://…>         The public image alt-text describes\n\
+         \x20 --allow-spend             Let run or alt-text spend Studio credits\n\
          \x20 --job <id>                Hosted job id for accept/status/cancel/reconcile/retrieve\n\
          \x20 --out <file>              Local destination for a retrieved result\n\
          \x20 --payer <id>              Explicit payer for a studio quote\n\
-         \x20 --prompt <text>           Prompt hash input; raw text is never persisted\n",
+         \x20 --prompt <text>           The prompt run sends; a rehearsal keeps its hash\n",
     ),
     (
         &[Command::Window],
@@ -606,6 +614,10 @@ struct Args {
     sirv_remote: Option<String>,
     allow_upload: bool,
     replace_changed: bool,
+    /// Live `studio` verbs: consent to spend credits, and the public image URL
+    /// alt text reads.
+    allow_spend: bool,
+    studio_url: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -697,6 +709,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut sirv_verb = None;
     let mut sirv_remote = None;
     let mut allow_upload = false;
+    let mut allow_spend = false;
+    let mut studio_url = None;
     let mut replace_changed = false;
 
     while let Some(argument) = rest.next() {
@@ -913,6 +927,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--progress" => progress = true,
             "--allow-download" => allow_download = true,
             "--allow-upload" => allow_upload = true,
+            "--allow-spend" => allow_spend = true,
+            "--url" if command == Command::Studio => {
+                studio_url = Some(next_value(&mut rest, "--url", "a public https URL")?);
+            }
             "--replace-changed" => replace_changed = true,
             "--remote" => sirv_remote = Some(next_value(&mut rest, "--remote", "a Sirv folder")?),
             "--json" => json = true,
@@ -1029,6 +1047,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             sirv_remote: None,
             allow_upload: false,
             replace_changed: false,
+            allow_spend: false,
+            studio_url: None,
             unknown,
         });
     }
@@ -1189,6 +1209,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     {
         return Err("--assignment, --fake and supplier verbs need supplier".into());
     }
+    let live_studio = command == Command::Studio
+        && studio_verb
+            .as_deref()
+            .is_some_and(|verb| remote_cli::STUDIO_LIVE_VERBS.contains(&verb));
     if command != Command::Studio
         && (studio_verb.is_some()
             || studio_tool.is_some()
@@ -1203,10 +1227,15 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if command == Command::Studio
         && (root.is_some()
-            || conversion_option
+            || format_set
+            || quality_set
+            || edge_set
+            || speed_set
+            || !only.is_empty()
+            || progress
+            || (output.is_some() && studio_verb.as_deref() != Some("run"))
             || grid
             || !subfolders
-            || output.is_some()
             || preset.is_some()
             || map_root.is_some()
             || local_check_root.is_some()
@@ -1227,13 +1256,45 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 "studio needs a verb: quote, accept, status, cancel, reconcile or retrieve".into(),
             );
         };
-        if !matches!(
+        if live_studio {
+            if studio_fake.is_some()
+                || studio_job.is_some()
+                || studio_out.is_some()
+                || studio_payer.is_some()
+            {
+                return Err(format!(
+                    "studio {verb} reaches the live service; --fake, --job, --out and --payer \
+                     belong to the rehearsal"
+                ));
+            }
+            if (studio_tool.is_some() || studio_image.is_some() || studio_prompt.is_some())
+                && verb != "run"
+            {
+                return Err("--tool, --image and --prompt need studio run".into());
+            }
+            if studio_url.is_some() && verb != "alt-text" {
+                return Err("--url needs studio alt-text".into());
+            }
+            if let Some(tool) = studio_tool.as_deref()
+                && !crate::studio::TOOLS
+                    .iter()
+                    .any(|known| known.slug() == tool)
+            {
+                return Err(format!(
+                    "unknown studio tool {tool:?}; use one of {}",
+                    remote_cli::studio_tools()
+                ));
+            }
+        } else if !matches!(
             verb,
             "quote" | "accept" | "status" | "cancel" | "reconcile" | "retrieve"
         ) {
             return Err(format!("unknown studio verb {verb:?}"));
+        } else if studio_url.is_some() {
+            return Err("--url needs studio alt-text".into());
         }
-        if let Some(tool) = studio_tool.as_deref()
+        if !live_studio
+            && let Some(tool) = studio_tool.as_deref()
             && tool != crate::studio_ledger::HOSTED_OPERATION
         {
             return Err(format!(
@@ -1337,8 +1398,17 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if (sirv_remote.is_some() || replace_changed) && command != Command::Sirv {
         return Err("--remote and --replace-changed need sirv".into());
     }
-    if allow_upload && command != Command::Sirv {
-        return Err("--allow-upload needs sirv".into());
+    let studio_verb_is = |names: &[&str]| {
+        command == Command::Studio
+            && studio_verb
+                .as_deref()
+                .is_some_and(|verb| names.contains(&verb))
+    };
+    if allow_upload && command != Command::Sirv && !studio_verb_is(&["run"]) {
+        return Err("--allow-upload needs sirv push or studio run".into());
+    }
+    if allow_spend && !studio_verb_is(&["run", "alt-text"]) {
+        return Err("--allow-spend needs studio run or studio alt-text".into());
     }
     if command == Command::Sirv
         && (conversion_option
@@ -1513,6 +1583,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         sirv_remote,
         allow_upload,
         replace_changed,
+        allow_spend,
+        studio_url,
         unknown,
     })
 }
@@ -3450,6 +3522,15 @@ fn main() {
     }
     let refuse =
         |message: String| -> ! { command_error(command_name(args.command), message, args.json, 2) };
+
+    if args.command == Command::Studio
+        && let Some(verb) = args
+            .studio_verb
+            .as_deref()
+            .filter(|verb| remote_cli::STUDIO_LIVE_VERBS.contains(verb))
+    {
+        std::process::exit(remote_cli::studio_live(verb, &args));
+    }
 
     if args.command == Command::Studio {
         std::process::exit(studio_headless(
@@ -6135,6 +6216,43 @@ mod tests {
         assert!(parse(&["sirv", "status", "photos", "--avif"]).is_err());
         assert!(parse(&["convert", "photos", "--allow-upload"]).is_err());
         assert!(parse(&["convert", "photos", "--remote", "/web"]).is_err());
+    }
+
+    #[test]
+    fn live_studio_verbs_take_their_own_consent_and_no_rehearsal_flags() {
+        let parsed = parse(&[
+            "studio",
+            "run",
+            "--tool",
+            "background-removal",
+            "--image",
+            "a.png",
+            "--allow-upload",
+            "--allow-spend",
+            "--output",
+            "out",
+        ])
+        .unwrap();
+        assert!(parsed.allow_upload && parsed.allow_spend);
+        assert_eq!(parsed.output, Some(PathBuf::from("out")));
+        assert!(
+            parse(&[
+                "studio",
+                "alt-text",
+                "--url",
+                "https://a/b.jpg",
+                "--allow-spend"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["studio", "credits"]).is_ok());
+        assert!(parse(&["studio", "credits", "--allow-spend"]).is_err());
+        assert!(parse(&["studio", "alt-text", "--allow-upload"]).is_err());
+        assert!(parse(&["studio", "run", "--tool", "sharpen"]).is_err());
+        assert!(parse(&["studio", "run", "--fake", "script.json"]).is_err());
+        assert!(parse(&["studio", "quote", "--allow-spend"]).is_err());
+        assert!(parse(&["studio", "quote", "--output", "out"]).is_err());
+        assert!(parse(&["studio", "credits", "--url", "https://a/b.jpg"]).is_err());
     }
 
     #[test]
