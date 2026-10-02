@@ -81,11 +81,14 @@ press convert ~/path/to/folder --format jxl --lossless
 press convert ~/path/to/folder --output ~/build/images   # write somewhere else
 press convert ~/path/to/folder --skip-existing           # only sources that changed
 press convert ~/path/to/folder --dry-run                 # plan and project, write nothing
+press convert ~/path/to/folder --only big.png --json     # just these files, same mirror
+press compare ~/photo.jpg --format avif --quality 60 --out pair.png  # size, PSNR, side by side
 press check ~/path/to/folder --requirements-file ./requirements.json --json
 press update                                    # install the latest signed release
 ```
 
-`press --help` is the complete command reference. `audit` never writes. `convert`
+`press --help` is the complete command reference; `press <command> --help` lists only
+the options that command accepts. `audit` never writes. `convert`
 writes mirrored output under `optimized/`, or under `--output`/`-o` when you name a
 folder; the older `PATH --convert --avif` form remains compatible.
 `--skip-existing` checks recorded outputs against the effective recipe and the
@@ -98,12 +101,16 @@ projects the total from the same sample the window's estimate uses. With `--json
 exact byte counts, per-file findings or conversion outcomes, and named failures.
 The audit document carries `schema_version: 1`; convert carries `schema_version: 2`,
 whose `output` is null and whose `error` names the reason when the destination
-never established. Diagnostics stay on stderr. Exit `0` means complete success,
+never established. An invalid invocation under `--json` is one document too, with
+`status: "failed"` and the `error`. Diagnostics stay on stderr; `convert --json
+--progress` adds one stderr line per finished file. Exit `0` means complete success,
 `1` means a partial audit or conversion, and `2` means an invalid invocation.
 
 The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discovered
 automatically by Codex when it runs here. Installed builds also carry the same text:
-`press skill` prints it for use by agents in another workspace.
+`press skill` prints it for use by agents in another workspace, and `press skill
+<topic>` prints the pages it keeps out of the core (`plans`, `check`, `handoff`,
+`studio`).
 
 `press check <file-or-folder> --requirements-file <local-spec> [--json]` inspects
 actual output bytes against one bounded, user-authored requirements snapshot. It

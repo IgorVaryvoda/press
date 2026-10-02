@@ -168,7 +168,7 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
     (
         Command::Skill,
         "skill",
-        "  press skill\n",
+        "  press skill [TOPIC]\n",
         "Print the bundled Agent Skill to stdout",
     ),
     (
@@ -414,6 +414,28 @@ fn help(topic: Option<Command>) -> String {
 }
 
 const AGENT_SKILL: &str = include_str!("../.agents/skills/press-cli/SKILL.md");
+
+/// The skill's topic pages, printed by `press skill <topic>`. The core skill names
+/// them, so an agent loads a page only when its task reaches that command, and a
+/// skill installed as one file still reaches every page through the binary.
+const SKILL_TOPICS: &[(&str, &str)] = &[
+    (
+        "plans",
+        include_str!("../.agents/skills/press-cli/references/plans.md"),
+    ),
+    (
+        "check",
+        include_str!("../.agents/skills/press-cli/references/check.md"),
+    ),
+    (
+        "handoff",
+        include_str!("../.agents/skills/press-cli/references/handoff.md"),
+    ),
+    (
+        "studio",
+        include_str!("../.agents/skills/press-cli/references/studio.md"),
+    ),
+];
 
 /// A persisted size can be absent or corrupted. Keep restore policy pure so native
 /// startup and tests agree about the supported window.
@@ -1219,7 +1241,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         return Err("--no-subfolders needs audit, convert or plan".into());
     }
     if matches!(command, Command::Skill | Command::Update)
-        && (root.is_some()
+        && ((root.is_some() && command == Command::Update)
             || conversion_option
             || grid
             || json
@@ -3245,7 +3267,25 @@ fn main() {
             return;
         }
         Command::Skill => {
-            print_text(AGENT_SKILL);
+            let Some(topic) = args.root.as_deref() else {
+                print_text(AGENT_SKILL);
+                return;
+            };
+            match SKILL_TOPICS
+                .iter()
+                .find(|(name, _)| Path::new(name) == topic)
+            {
+                Some((_, page)) => print_text(page),
+                None => {
+                    let names: Vec<&str> = SKILL_TOPICS.iter().map(|(name, _)| *name).collect();
+                    eprintln!(
+                        "press: no skill topic {}; topics: {}",
+                        topic.display(),
+                        names.join(", ")
+                    );
+                    std::process::exit(2);
+                }
+            }
             return;
         }
         Command::Update => {
@@ -5750,13 +5790,27 @@ mod tests {
             "press convert <file-or-folder> --format webp --quality 80 --json",
             "schema-two error document",
             "recipe fingerprint and the source content hash",
-            "Map an ImageGuide report before converting it",
+            "press compare <file> --format avif --quality 60 --json",
         ] {
             assert!(
                 AGENT_SKILL.contains(marker),
                 "the skill still says: {marker}"
             );
         }
+        // Every topic the core names is one the binary prints, and the other way
+        // round, so an agent following the table never meets a missing page.
+        for (name, page) in SKILL_TOPICS {
+            assert!(
+                AGENT_SKILL.contains(&format!("| `{name}` |")),
+                "the core names {name}"
+            );
+            assert!(page.starts_with("# "), "{name} is a page");
+        }
+        assert_eq!(AGENT_SKILL.matches("\n| `").count(), SKILL_TOPICS.len());
+        let handoff = SKILL_TOPICS.iter().find(|(name, _)| *name == "handoff");
+        assert!(handoff.is_some_and(|(_, page)| page.contains("Map an ImageGuide report")));
+        assert!(parse(&["skill", "plans"]).is_ok());
+        assert!(parse(&["update", "plans"]).is_err());
     }
 
     /// An agent asking one command for help gets that command's options, by any of
