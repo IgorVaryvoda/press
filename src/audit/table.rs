@@ -840,8 +840,7 @@ impl TableDelegate for AuditTable {
                     let grew = *converted > entry.bytes;
                     // A saving that rounds to nothing is not a saving. "−0%" in
                     // the saving green claimed a win for a file that came back
-                    // the same size, which is what a transparent PNG does when
-                    // transparency forces lossless.
+                    // the same size, which is what a PNG does under lossless.
                     let unchanged = !grew && percent < 0.5;
                     slot.child(
                         div()

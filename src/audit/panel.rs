@@ -2271,16 +2271,6 @@ impl Audit {
                             })),
                     )
             }))
-            // WebP saves transparency lossless no matter what the slider says.
-            // The caption owns that fact next to the knob, so the number above
-            // never implies control it does not have over see-through pixels.
-            .children((self.format == Format::WebP && !lossless).then(|| {
-                div()
-                    .debug_selector(|| "quality-transparency-note".into())
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Transparency stays lossless")
-            }))
     }
 
     /// The payoff and the commit, immediately after the knobs that determine it:

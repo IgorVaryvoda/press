@@ -271,9 +271,9 @@ WebP encodes up to eight files at once and AVIF encodes two. JPEG XL encodes one
 at a time because jixel uses the machine's cores inside each encode. Each in-flight
 file holds a fully decoded image, so those limits bound memory as much as CPU.
 
-**WebP with real transparency goes lossless** whatever quality you asked for.
-libwebp's lossy path mangles alpha in ways that ruin cut-outs. AVIF and JPEG XL keep
-alpha on their normal paths. An image with an alpha channel that is entirely opaque
+**Transparency keeps every alpha value.** A lossy WebP stores alpha in its own
+plane, compressed losslessly, so a cut-out's colour pays the quality you asked for
+while its edges stay exact. AVIF and JPEG XL keep alpha on their normal paths. An image with an alpha channel that is entirely opaque
 is treated as opaque, because that is just an RGB image paying for a fourth channel.
 
 A file that grew is reported as grown rather than hidden. Re-encoding an

@@ -545,11 +545,11 @@ fn attach_webp_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// libwebp's lossy path discards the alpha channel's precision in ways that ruin
-/// cut-outs, so anything carrying real transparency goes lossless regardless of the
-/// requested quality.
+/// A lossy WebP carries alpha in its own ALPH chunk. At alpha quality 100 that plane
+/// is compressed losslessly, so a cut-out keeps every edge value while its colour
+/// pays the requested quality like any photograph.
 fn encode_webp(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
-    let lossless = quality.0.is_none() || has_transparency(image);
+    let lossless = quality.0.is_none();
     let mut config = std::mem::MaybeUninit::<WebPConfig>::uninit();
     // SAFETY: `config` points to writable storage for exactly one WebPConfig and the
     // ABI constant comes from the same statically linked libwebp crate.
@@ -568,6 +568,7 @@ fn encode_webp(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
     let mut config = unsafe { config.assume_init() };
     config.lossless = i32::from(lossless);
     config.alpha_compression = i32::from(!lossless);
+    config.alpha_quality = 100;
     config.quality = quality.0.unwrap_or(75.);
     // ponytail: method 1 makes lossy q80 output 13.5% larger, but cut a real 3.0GB
     // folder from 69.5s to 29.6s. Lossless keeps the prior method 4 behavior because
@@ -2219,9 +2220,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Transparency forces WebP down the lossless path and AVIF keeps alpha in its own
-    /// plane, so both reach the encoders by a different route than an opaque photo.
-    /// Neither route may drop the profile.
+    /// Transparency gives WebP an ALPH chunk and AVIF an alpha plane, so both reach
+    /// the encoders by a different route than an opaque photo. Neither route may drop
+    /// the profile.
     #[test]
     fn a_colour_profile_survives_the_transparent_paths() {
         let profile = colour_profile(b"RGB ");
@@ -2848,19 +2849,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn transparency_forces_the_lossless_path() {
+    fn one_see_through_pixel_is_transparency() {
         let mut buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
             ImageBuffer::from_pixel(16, 16, Rgba([10, 20, 30, 255]));
         assert!(!has_transparency(&DynamicImage::ImageRgba8(buffer.clone())));
 
         buffer.put_pixel(0, 0, Rgba([10, 20, 30, 0]));
-        let image = DynamicImage::ImageRgba8(buffer);
-        assert!(has_transparency(&image), "one see-through pixel is enough");
+        assert!(has_transparency(&DynamicImage::ImageRgba8(buffer)));
+    }
 
-        let encoded = encode(&image, Format::WebP, Quality::lossy(20.), None).unwrap();
-        let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
-        assert_eq!(decoded.get_pixel(1, 1), &Rgba([10, 20, 30, 255]));
-        assert_eq!(decoded.get_pixel(0, 0)[3], 0);
+    /// A cut-out at a lossy quality pays lossy prices for its colour and keeps every
+    /// alpha value exactly, soft edge included. Forcing the whole file lossless made
+    /// 259 real cut-outs only 3x smaller than their PNGs.
+    #[test]
+    fn a_lossy_cut_out_keeps_its_quality_and_its_exact_alpha() {
+        let colour = photo(96, 96).to_rgb8();
+        let cut_out = DynamicImage::ImageRgba8(ImageBuffer::from_fn(96, 96, |x, y| {
+            let Rgb([r, g, b]) = *colour.get_pixel(x, y);
+            let distance = ((x as f32 - 48.).powi(2) + (y as f32 - 48.).powi(2)).sqrt();
+            // Opaque core, a 16-pixel feathered edge, nothing outside.
+            let alpha = (255. * (40. - distance) / 16.).clamp(0., 255.) as u8;
+            Rgba([r, g, b, alpha])
+        }));
+
+        let lossy = encode(&cut_out, Format::WebP, Quality::lossy(80.), None).unwrap();
+        let lossless = encode(&cut_out, Format::WebP, Quality::LOSSLESS, None).unwrap();
+        let chunk = |bytes: &[u8], tag: &[u8]| bytes.windows(4).any(|window| window == tag);
+        assert!(chunk(&lossy, b"VP8 "), "the colour takes the lossy path");
+        assert!(chunk(&lossy, b"ALPH"), "the alpha travels beside it");
+        assert!(!chunk(&lossy, b"VP8L"), "nothing forced the lossless path");
+        assert!(lossy.len() < lossless.len(), "quality 80 buys bytes");
+
+        let decoded = image::load_from_memory(&lossy).unwrap().to_rgba8();
+        let source = cut_out.to_rgba8();
+        for (x, y, pixel) in source.enumerate_pixels() {
+            assert_eq!(
+                decoded.get_pixel(x, y)[3],
+                pixel[3],
+                "alpha moved at {x},{y}"
+            );
+        }
     }
 
     #[test]
