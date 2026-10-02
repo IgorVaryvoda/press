@@ -94,95 +94,300 @@ const WINDOW_MIN_HEIGHT: f32 = 560.;
 const WINDOW_DEFAULT_WIDTH: f32 = 900.;
 const WINDOW_DEFAULT_HEIGHT: f32 = 640.;
 
-const HELP: &str = concat!(
-    "Press ",
-    env!("CARGO_PKG_VERSION"),
-    " — audit and optimise images locally\n\n",
-    "Usage:\n",
-    "  press [PATH] [OPTIONS]\n",
-    "  press audit <PATH> [--json]\n",
-    "  press convert <PATH> [OPTIONS]\n",
-    "  press restore <PATH>\n",
-    "  press plan --root <PATH> --output <DIR> --plan <FILE> [OPTIONS]\n",
-    "  press execute <FILE> --root <PATH> --output <DIR>\n",
-    "      (--continue-unstarted|--retry-failed|--cancel|--reinstate-cancelled)\n",
-    "  press reconcile <FILE> --root <PATH> --output <DIR>\n",
-    "  press handoff <FILE>\n",
-    "  press check <FILE_OR_FOLDER> --requirements-file <FILE> [--json]\n",
-    "  press supplier <PATH> <verb> [OPTIONS]\n",
-    "  press studio <verb> [OPTIONS]\n",
-    "  press skill\n",
-    "  press update\n\n",
-    "Commands:\n",
-    "  audit      Read image headers without opening a window or writing files\n",
-    "  convert    Re-encode a file or folder into optimized/ without a window\n",
-    "  restore    Put back the originals a --replace run moved aside\n",
-    "  plan       Save a portable conversion plan without writing images\n",
-    "  execute    Run a saved plan against explicitly rebound roots\n",
-    "  reconcile  Repair a saved plan receipt from installed outputs\n",
-    "  handoff    Validate an ImageGuide report into a pending local task\n",
-    "  check      Inspect actual output bytes against a local requirements snapshot\n",
-    "  supplier   Prepare, submit and reconcile product images as a supplier\n",
-    "  studio     Rehearse one bounded hosted operation against a local script\n",
-    "  skill      Print the bundled Agent Skill to stdout\n",
-    "  update     Install the latest signed Press release\n",
-    "  help       Print this help\n",
-    "  version    Print the version\n\n",
-    "Options:\n",
-    "  --json                    Write one schema-versioned JSON document\n",
-    "  --no-subfolders           Read the folder itself, not the folders below it\n",
-    "  --format <webp|avif|jxl|jpeg|same>\n",
-    "                            Output format (default: webp); same keeps each\n",
-    "                            source's own format and name\n",
-    "  --jpeg                    Same as --format jpeg\n",
-    "  --quality <1..100>        Lossy quality (default: 80)\n",
-    "  --lossless                Lossless WebP or JPEG XL\n",
-    "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
-    "  --replace                 Convert in place; originals move to press-originals/\n",
-    "  -o, --output <dir>        Write converted files here instead of optimized/\n",
-    "  --skip-existing           Skip a source whose output already matches this\n",
-    "                            format, quality, max edge and AVIF speed\n",
-    "  --dry-run                 Plan and project a conversion, write nothing\n",
-    "  --plan <file>             File to create for the plan command\n",
-    "  --continue-unstarted      Execute only unstarted saved-plan items\n",
-    "  --retry-failed            Execute only failed saved-plan items\n",
-    "  --cancel                  Mark unstarted saved-plan items cancelled\n",
-    "  --reinstate-cancelled     Put cancelled saved-plan items back, write nothing\n",
-    "  --target <recipe>=<dir>    Convert once more with a saved recipe into\n",
-    "                            its own folder; repeatable, convert or plan\n",
-    "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n",
-    "                            higher is faster and slightly larger\n",
-    "  --preset-file <path>      Resolve a saved recipe file as the base;\n",
-    "                            explicit flags override it field by field\n",
-    "  --requirements-file <file>\n",
-    "                            Local requirements snapshot for check, plan,\n",
-    "                            execute or reconcile\n",
-    "  --root <dir>              Map handoff resources against this folder\n",
-    "  --deployed <dir>          Check the mapping against files in this local\n",
-    "                            folder: filename, format and dimensions only,\n",
-    "                            with no live site verification\n",
-    "                            (needs handoff --root)\n",
-    "  --assignment <file>       Supplier assignment snapshot (needs supplier)\n",
-    "  --fake <file>             Rehearsal script for supplier or studio service calls\n",
-    "                            (required: there is no live service authority)\n",
-    "  --tool <upscale>          Hosted rehearsal operation (one supported tool)\n",
-    "  --image <file>            Hosted input for quote and acceptance re-check\n",
-    "  --job <id>                Hosted job id for accept/status/cancel/reconcile/retrieve\n",
-    "  --out <file>              Local destination for a retrieved result\n",
-    "  --payer <id>              Explicit payer for a studio quote\n",
-    "  --prompt <text>           Prompt hash input; raw text is never persisted\n",
-    "  --grid                    Open the window in gallery view\n",
-    "  -h, --help                Print this help\n",
-    "  -V, --version             Print the version\n\n",
-    "Compatibility:\n",
-    "  --webp, --avif, --jxl and PATH --convert remain supported.\n\n",
-    "Exit status:\n",
-    "  0  Complete success\n",
-    "  1  The requested operation failed or was incomplete\n",
-    "  2  Invalid invocation or target\n\n",
-    "With --json, stdout contains only JSON; diagnostics go to stderr.\n",
-    "audit and convert walk subfolders unless --no-subfolders is given, and say so.\n"
-);
+/// Each command once: its name, its usage lines and its one-line summary. The
+/// global help and `press <command> --help` both read this table, so the two
+/// cannot describe a command differently.
+const COMMANDS: &[(Command, &str, &str, &str)] = &[
+    (
+        Command::Audit,
+        "audit",
+        "  press audit <PATH> [--json]\n",
+        "Read image headers without opening a window or writing files",
+    ),
+    (
+        Command::Convert,
+        "convert",
+        "  press convert <PATH> [OPTIONS]\n",
+        "Re-encode a file or folder into optimized/ without a window",
+    ),
+    (
+        Command::Restore,
+        "restore",
+        "  press restore <PATH>\n",
+        "Put back the originals a --replace run moved aside",
+    ),
+    (
+        Command::Plan,
+        "plan",
+        "  press plan --root <PATH> --output <DIR> --plan <FILE> [OPTIONS]\n",
+        "Save a portable conversion plan without writing images",
+    ),
+    (
+        Command::Execute,
+        "execute",
+        "  press execute <FILE> --root <PATH> --output <DIR>\n\
+         \x20     (--continue-unstarted|--retry-failed|--cancel|--reinstate-cancelled)\n",
+        "Run a saved plan against explicitly rebound roots",
+    ),
+    (
+        Command::Reconcile,
+        "reconcile",
+        "  press reconcile <FILE> --root <PATH> --output <DIR>\n",
+        "Repair a saved plan receipt from installed outputs",
+    ),
+    (
+        Command::Handoff,
+        "handoff",
+        "  press handoff <FILE>\n",
+        "Validate an ImageGuide report into a pending local task",
+    ),
+    (
+        Command::Check,
+        "check",
+        "  press check <FILE_OR_FOLDER> --requirements-file <FILE> [--json]\n",
+        "Inspect actual output bytes against a local requirements snapshot",
+    ),
+    (
+        Command::Supplier,
+        "supplier",
+        "  press supplier <PATH> <verb> [OPTIONS]\n",
+        "Prepare, submit and reconcile product images as a supplier",
+    ),
+    (
+        Command::Studio,
+        "studio",
+        "  press studio <verb> [OPTIONS]\n",
+        "Rehearse one bounded hosted operation against a local script",
+    ),
+    (
+        Command::Skill,
+        "skill",
+        "  press skill\n",
+        "Print the bundled Agent Skill to stdout",
+    ),
+    (
+        Command::Update,
+        "update",
+        "  press update\n",
+        "Install the latest signed Press release",
+    ),
+    (Command::Help, "help", "", "Print this help"),
+    (Command::Version, "version", "", "Print the version"),
+];
+
+const JSON_COMMANDS: &[Command] = &[
+    Command::Audit,
+    Command::Convert,
+    Command::Handoff,
+    Command::Check,
+    Command::Supplier,
+    Command::Studio,
+    Command::Plan,
+    Command::Execute,
+    Command::Reconcile,
+];
+const RECIPE_COMMANDS: &[Command] = &[Command::Convert, Command::Plan];
+const PLAN_COMMANDS: &[Command] = &[
+    Command::Check,
+    Command::Plan,
+    Command::Execute,
+    Command::Reconcile,
+];
+
+/// Each option once, with the commands that accept it. The global help lists
+/// them all; a command's own help lists only what that command would not refuse.
+const OPTIONS: &[(&[Command], &str)] = &[
+    (
+        JSON_COMMANDS,
+        "  --json                    Write one schema-versioned JSON document\n",
+    ),
+    (
+        &[Command::Audit, Command::Convert, Command::Plan],
+        "  --no-subfolders           Read the folder itself, not the folders below it\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --format <webp|avif|jxl|jpeg|same>\n\
+         \x20                           Output format (default: webp); same keeps each\n\
+         \x20                           source's own format and name\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --jpeg                    Same as --format jpeg\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --quality <1..100>        Lossy quality (default: 80)\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --lossless                Lossless WebP or JPEG XL\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --max-edge <pixels>       Downscale the longest edge; never upscale\n",
+    ),
+    (
+        &[Command::Convert],
+        "  --replace                 Convert in place; originals move to press-originals/\n",
+    ),
+    (
+        &[
+            Command::Convert,
+            Command::Plan,
+            Command::Execute,
+            Command::Reconcile,
+        ],
+        "  -o, --output <dir>        Write converted files here instead of optimized/\n",
+    ),
+    (
+        &[Command::Convert],
+        "  --skip-existing           Skip a source whose output already matches this\n\
+         \x20                           format, quality, max edge and AVIF speed\n",
+    ),
+    (
+        &[Command::Convert],
+        "  --dry-run                 Plan and project a conversion, write nothing\n",
+    ),
+    (
+        &[Command::Plan],
+        "  --plan <file>             File to create for the plan command\n",
+    ),
+    (
+        &[Command::Execute],
+        "  --continue-unstarted      Execute only unstarted saved-plan items\n\
+         \x20 --retry-failed            Execute only failed saved-plan items\n\
+         \x20 --cancel                  Mark unstarted saved-plan items cancelled\n\
+         \x20 --reinstate-cancelled     Put cancelled saved-plan items back, write nothing\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --target <recipe>=<dir>   Convert once more with a saved recipe into\n\
+         \x20                           its own folder; repeatable, convert or plan\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --avif-speed <0..10>      libaom speed for AVIF output (default: 6);\n\
+         \x20                           higher is faster and slightly larger\n",
+    ),
+    (
+        RECIPE_COMMANDS,
+        "  --preset-file <path>      Resolve a saved recipe file as the base;\n\
+         \x20                           explicit flags override it field by field\n",
+    ),
+    (
+        PLAN_COMMANDS,
+        "  --requirements-file <file>\n\
+         \x20                           Local requirements snapshot for check, plan,\n\
+         \x20                           execute or reconcile\n",
+    ),
+    (
+        &[
+            Command::Handoff,
+            Command::Plan,
+            Command::Execute,
+            Command::Reconcile,
+        ],
+        "  --root <dir>              Source folder for plan, execute and reconcile;\n\
+         \x20                           the folder handoff maps resources against\n",
+    ),
+    (
+        &[Command::Handoff],
+        "  --deployed <dir>          Check the mapping against files in this local\n\
+         \x20                           folder: filename, format and dimensions only,\n\
+         \x20                           with no live site verification\n\
+         \x20                           (needs handoff --root)\n",
+    ),
+    (
+        &[Command::Supplier],
+        "  --assignment <file>       Supplier assignment snapshot (needs supplier)\n",
+    ),
+    (
+        &[Command::Supplier, Command::Studio],
+        "  --fake <file>             Rehearsal script for supplier or studio service calls\n\
+         \x20                           (required: there is no live service authority)\n",
+    ),
+    (
+        &[Command::Studio],
+        "  --tool <upscale>          Hosted rehearsal operation (one supported tool)\n\
+         \x20 --image <file>            Hosted input for quote and acceptance re-check\n\
+         \x20 --job <id>                Hosted job id for accept/status/cancel/reconcile/retrieve\n\
+         \x20 --out <file>              Local destination for a retrieved result\n\
+         \x20 --payer <id>              Explicit payer for a studio quote\n\
+         \x20 --prompt <text>           Prompt hash input; raw text is never persisted\n",
+    ),
+    (
+        &[Command::Window],
+        "  --grid                    Open the window in gallery view\n",
+    ),
+];
+
+const EXIT_STATUS: &str = "Exit status:\n\
+    \x20 0  Complete success\n\
+    \x20 1  The requested operation failed or was incomplete\n\
+    \x20 2  Invalid invocation or target\n\n";
+
+const JSON_NOTE: &str = "With --json, stdout contains only JSON; diagnostics go to stderr.\n";
+
+fn command_named(name: &str) -> Option<Command> {
+    COMMANDS.iter().find(|row| row.1 == name).map(|row| row.0)
+}
+
+/// The global help with no topic; with one, only that command's usage and the
+/// options it accepts, so an agent reading `press convert --help` is not handed
+/// the supplier and studio flags as well.
+fn help(topic: Option<Command>) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let options = |command: Option<Command>| -> String {
+        OPTIONS
+            .iter()
+            .filter(|(commands, _)| command.is_none_or(|command| commands.contains(&command)))
+            .map(|(_, text)| *text)
+            .collect()
+    };
+    if let Some((command, name, usage, summary)) = topic
+        .and_then(|topic| COMMANDS.iter().find(|row| row.0 == topic))
+        .copied()
+    {
+        let mut text = format!("press {name} — {summary}\n\n");
+        if !usage.is_empty() {
+            text.push_str(&format!("Usage:\n{usage}\n"));
+        }
+        text.push_str("Options:\n");
+        text.push_str(&options(Some(command)));
+        text.push_str("  -h, --help                Print this help\n\n");
+        text.push_str(EXIT_STATUS);
+        if JSON_COMMANDS.contains(&command) {
+            text.push_str(JSON_NOTE);
+        }
+        return text;
+    }
+    let mut text = format!(
+        "Press {version} — audit and optimise images locally\n\n\
+         Usage:\n  press [PATH] [OPTIONS]\n"
+    );
+    for (_, _, usage, _) in COMMANDS {
+        text.push_str(usage);
+    }
+    text.push_str("\nCommands:\n");
+    for (_, name, _, summary) in COMMANDS {
+        text.push_str(&format!("  {name:<10} {summary}\n"));
+    }
+    text.push_str("\nRun press <command> --help for one command's options.\n\nOptions:\n");
+    text.push_str(&options(None));
+    text.push_str(
+        "  -h, --help                Print this help\n\
+         \x20 -V, --version             Print the version\n\n\
+         Compatibility:\n\
+         \x20 --webp, --avif, --jxl and PATH --convert remain supported.\n\n",
+    );
+    text.push_str(EXIT_STATUS);
+    text.push_str(JSON_NOTE);
+    text.push_str(
+        "audit and convert walk subfolders unless --no-subfolders is given, and say so.\n",
+    );
+    text
+}
 
 const AGENT_SKILL: &str = include_str!("../.agents/skills/press-cli/SKILL.md");
 
@@ -295,6 +500,8 @@ struct Args {
     preset: Option<crate::recipe::Recipe>,
     /// Canonical flags that overrode the preset, for the resolved-plan line.
     preset_overrides: Vec<&'static str>,
+    /// The command `--help` asks about; `None` is the global help.
+    help_topic: Option<Command>,
 }
 
 fn parse_args() -> Args {
@@ -365,6 +572,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut quality_set = false;
     let mut edge_set = false;
     let mut speed_set = false;
+    let mut help_topic = None;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -581,7 +789,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 }
                 quality = Quality::lossy(quality_value);
             }
-            "-h" | "--help" => command = Command::Help,
+            "-h" | "--help" => {
+                if !matches!(command, Command::Window | Command::Help) {
+                    help_topic = Some(command);
+                }
+                command = Command::Help;
+            }
             "-V" | "--version" => command = Command::Version,
             "--" => {
                 for argument in rest {
@@ -611,6 +824,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
 
     if matches!(command, Command::Help | Command::Version) {
+        // `press help convert` and `press --help convert` leave the command's
+        // name where a path would go.
+        let help_topic = help_topic.or_else(|| {
+            root.as_deref()
+                .and_then(|root| root.to_str())
+                .and_then(command_named)
+        });
         return Ok(Args {
             root,
             command,
@@ -649,6 +869,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             reinstate_cancelled,
             preset: None,
             preset_overrides: Vec::new(),
+            help_topic,
             unknown,
         });
     }
@@ -1059,6 +1280,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         reinstate_cancelled,
         preset,
         preset_overrides,
+        help_topic: None,
         unknown,
     })
 }
@@ -2864,7 +3086,7 @@ fn main() {
 
     match args.command {
         Command::Help => {
-            print_text(HELP);
+            print_text(&help(args.help_topic));
             return;
         }
         Command::Version => {
@@ -5235,6 +5457,33 @@ mod tests {
                 AGENT_SKILL.contains(marker),
                 "the skill still says: {marker}"
             );
+        }
+    }
+
+    /// An agent asking one command for help gets that command's options, by any of
+    /// the three spellings, and not every other command's flags with them.
+    #[test]
+    fn a_command_s_help_lists_only_the_options_it_accepts() {
+        for arguments in [
+            &["convert", "--help"][..],
+            &["help", "convert"],
+            &["--help", "convert"],
+            &["convert", "photos", "-h"],
+        ] {
+            assert_eq!(
+                parse(arguments).unwrap().help_topic,
+                Some(Command::Convert),
+                "{arguments:?}"
+            );
+        }
+        assert_eq!(parse(&["photos", "--help"]).unwrap().help_topic, None);
+        let convert = help(Some(Command::Convert));
+        assert!(convert.contains("--dry-run"), "{convert}");
+        assert!(!convert.contains("--payer"), "{convert}");
+        assert!(!convert.contains("press audit"), "{convert}");
+        assert!(help(None).contains("--payer"));
+        for (command, ..) in COMMANDS {
+            assert!(help(Some(*command)).contains("--help"));
         }
     }
 

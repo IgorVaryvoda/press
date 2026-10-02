@@ -9,7 +9,7 @@ Use `press` for local, scriptable image audits and conversion. It does not uploa
 
 ## Inspect first
 
-Run `press --help` if the installed command may differ from this skill. Use the read-only command before proposing or performing conversion:
+Run `press <command> --help` (for example `press convert --help`) if the installed command may differ from this skill: it prints that command's usage and only the options it accepts. `press --help` lists every command. Use the read-only command before proposing or performing conversion:
 
 ```bash
 press audit <file-or-folder> --json
