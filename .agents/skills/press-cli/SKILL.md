@@ -17,7 +17,7 @@ press audit <file-or-folder> --json
 
 Both commands walk subfolders by default and state that scope: `subfolders` in JSON, `subfolders included` or `subfolders excluded` on the text summary line. Pass `--no-subfolders` to read one folder only, which is how the Press window opens a folder by default.
 
-Read `summary`, then inspect `files` for exact dimensions, bytes, bytes per pixel, `heavy`, and `mislabelled`. A zero-image result is not always an empty folder: `summary.heic_skipped` and `summary.camera_raw_skipped` count files that were found but never decoded, and both must be reported. A successful JSON command writes one document to stdout with `schema_version: 1`; diagnostics go to stderr.
+Read `summary`, then inspect `files` for exact dimensions, bytes, bytes per pixel, `heavy`, and `mislabelled`. A zero-image result is not always an empty folder: `summary.heic_skipped` and `summary.camera_raw_skipped` count files that were found but never decoded, and both must be reported. A successful JSON command writes one document to stdout with `schema_version: 1`; diagnostics go to stderr. An invalid invocation or target under `--json` exits `2` with one error document instead: `command`, `status: "failed"` and the `error` sentence.
 
 Exit status `0` means the audit was complete. Status `1` means the JSON is still usable, but one or more paths could not be read; report the named `unreadable` or `walk_errors` entries.
 
@@ -121,7 +121,7 @@ press convert <folder> --replace --format webp --quality 80 --json
 press restore <folder>
 ```
 
-`press restore` reads the manifest, moves every original back, and removes the file that replaced it. It works on a later run and on another machine, because the record is in the folder. It prints one `restored` line per file, names on stderr anything it could not put back, and exits `1` when any original stayed put.
+`press restore` reads the manifest, moves every original back, and removes the file that replaced it. With `--json` it writes one document with the `restored` paths and the `failures` it could not put back. It works on a later run and on another machine, because the record is in the folder. It prints one `restored` line per file, names on stderr anything it could not put back, and exits `1` when any original stayed put.
 
 ## Map an ImageGuide report before converting it
 

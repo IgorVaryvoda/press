@@ -113,7 +113,7 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
     (
         Command::Restore,
         "restore",
-        "  press restore <PATH>\n",
+        "  press restore <PATH> [--json]\n",
         "Put back the originals a --replace run moved aside",
     ),
     (
@@ -178,6 +178,8 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
 const JSON_COMMANDS: &[Command] = &[
     Command::Audit,
     Command::Convert,
+    Command::Restore,
+    Command::Version,
     Command::Handoff,
     Command::Check,
     Command::Supplier,
@@ -505,11 +507,23 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    match parse_args_from(std::env::args().skip(1)) {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    match parse_args_from(arguments.iter().cloned()) {
         Ok(args) => args,
         Err(message) => {
-            eprintln!("press: {message}");
-            std::process::exit(2);
+            // The parse stopped at the mistake, so whether JSON was asked for is
+            // read again from the whole line: an agent that passed --json gets a
+            // document even when the flag it got wrong came first.
+            let json = arguments
+                .iter()
+                .take_while(|argument| *argument != "--")
+                .any(|argument| argument == "--json");
+            let command = arguments
+                .iter()
+                .find(|argument| !argument.starts_with('-'))
+                .and_then(|argument| command_named(argument))
+                .unwrap_or(Command::Window);
+            command_error(command_name(command), message, json, 2)
         }
     }
 }
@@ -1122,20 +1136,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     {
         return Err("plan saves a snapshot; execution flags need execute".into());
     }
-    if json
-        && !matches!(
-            command,
-            Command::Audit
-                | Command::Convert
-                | Command::Handoff
-                | Command::Check
-                | Command::Supplier
-                | Command::Studio
-                | Command::Plan
-                | Command::Execute
-                | Command::Reconcile
-        )
-    {
+    if json && !JSON_COMMANDS.contains(&command) {
         return Err(
             "--json needs an inspect, conversion, handoff, supplier or saved-plan command".into(),
         );
@@ -2659,10 +2660,7 @@ fn convert_targets(
         .collect();
     let prepared = match crate::job::prepare_targets(&job_targets, &library) {
         Ok(prepared) => prepared,
-        Err(message) => {
-            eprintln!("press: {message}");
-            std::process::exit(2);
-        }
+        Err(message) => command_error("convert", message, args.json, 2),
     };
     let audited: Vec<&Entry> = scanned.entries.iter().collect();
     let sources: Vec<PathBuf> = scanned
@@ -2923,10 +2921,12 @@ fn saved_plan_requirements(
         .transpose()
 }
 
-fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32) -> ! {
+/// A refusal before the work: with `--json`, one document naming the command and
+/// the error, so a caller that parses stdout never has to scrape stderr instead.
+fn command_error(command: &str, error: String, json: bool, code: i32) -> ! {
     if json {
         let report = serde_json::json!({
-            "schema_version": saved_plan::SCHEMA_VERSION,
+            "schema_version": 1,
             "command": command,
             "status": "failed",
             "error": error,
@@ -2936,8 +2936,16 @@ fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32)
             std::process::exit(1);
         }
     } else {
-        eprintln!("press: {command}: {error}");
+        eprintln!("press: {error}");
     }
+    std::process::exit(code)
+}
+
+fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32) -> ! {
+    if json {
+        command_error(command, error, json, code)
+    }
+    eprintln!("press: {command}: {error}");
     std::process::exit(code)
 }
 
@@ -3090,7 +3098,19 @@ fn main() {
             return;
         }
         Command::Version => {
-            outln!("press {}", env!("CARGO_PKG_VERSION"));
+            if args.json {
+                let report = serde_json::json!({
+                    "schema_version": 1,
+                    "command": "version",
+                    "version": env!("CARGO_PKG_VERSION"),
+                });
+                if let Err(error) = write_json(&report) {
+                    eprintln!("press: could not write JSON: {error}");
+                    std::process::exit(1);
+                }
+            } else {
+                outln!("press {}", env!("CARGO_PKG_VERSION"));
+            }
             return;
         }
         Command::Skill => {
@@ -3119,9 +3139,15 @@ fn main() {
             eprintln!("press: ignoring unknown option {argument}");
         }
     } else if let Some(first) = args.unknown.first() {
-        eprintln!("press: unknown option {first}");
-        std::process::exit(2);
+        command_error(
+            command_name(args.command),
+            format!("unknown option {first}"),
+            args.json,
+            2,
+        );
     }
+    let refuse =
+        |message: String| -> ! { command_error(command_name(args.command), message, args.json, 2) };
 
     if args.command == Command::Studio {
         std::process::exit(studio_headless(
@@ -3169,18 +3195,10 @@ fn main() {
 
     let Some(target) = target else {
         if args.command != Command::Window {
-            eprintln!(
-                "press: {} needs a file or folder",
-                match args.command {
-                    Command::Audit => "audit",
-                    Command::Restore => "restore",
-                    Command::Handoff => "handoff",
-                    Command::Check => "check",
-                    Command::Supplier => "supplier",
-                    _ => "convert",
-                }
-            );
-            std::process::exit(2);
+            refuse(format!(
+                "{} needs a file or folder",
+                command_name(args.command)
+            ));
         }
         // No path given: open the window on its empty state and let the user pick.
         return run_window(
@@ -3212,20 +3230,22 @@ fn main() {
 
     if args.command == Command::Restore {
         if !target.is_dir() {
-            eprintln!("press: {} is not a folder", target.display());
-            std::process::exit(2);
+            refuse(format!("{} is not a folder", target.display()));
         }
-        std::process::exit(restore_headless(&target));
+        std::process::exit(restore_headless(&target, args.json));
     }
 
     if args.command == Command::Check {
-        std::process::exit(check_headless(
+        match check_headless(
             &target,
             args.requirements_file
                 .as_deref()
                 .expect("check requires a requirements file"),
             args.json,
-        ));
+        ) {
+            Ok(code) => std::process::exit(code),
+            Err((code, message)) => command_error("check", message, args.json, code),
+        }
     }
 
     // Supplier verbs run a saved job's attempt queue: prepare off the folder's
@@ -3233,8 +3253,7 @@ fn main() {
     // cancel, correct or report locally. Only the attempt log is written.
     if args.command == Command::Supplier {
         if !target.is_dir() {
-            eprintln!("press: {} is not a folder", target.display());
-            std::process::exit(2);
+            refuse(format!("{} is not a folder", target.display()));
         }
         std::process::exit(supplier_headless(
             &target,
@@ -3250,18 +3269,14 @@ fn main() {
     // consumes the pending task printed here.
     if args.command == Command::Handoff {
         if !target.is_file() {
-            eprintln!("press: {} is not a report file", target.display());
-            std::process::exit(2);
+            refuse(format!("{} is not a report file", target.display()));
         }
         // Bound the read before parsing allocates: the schema check repeats
         // the cap for library callers that skip the CLI.
         let bytes =
             match crate::job::read_bounded(&target, handoff::MAX_FILE_BYTES, "handoff report") {
                 Ok(bytes) => bytes,
-                Err(error) => {
-                    eprintln!("press: {} cannot be read: {error}", target.display());
-                    std::process::exit(2);
-                }
+                Err(error) => refuse(format!("{} cannot be read: {error}", target.display())),
             };
         match handoff::parse_bytes(&bytes) {
             Ok(pending) => {
@@ -3273,8 +3288,7 @@ fn main() {
                     None => None,
                     Some(map_root) => {
                         if !map_root.is_dir() {
-                            eprintln!("press: {} is not a folder", map_root.display());
-                            std::process::exit(2);
+                            refuse(format!("{} is not a folder", map_root.display()));
                         }
                         let scanned = scan::scan(map_root, &map_root.join(scan::OUTPUT_DIR));
                         scans.push(scan_diagnostics(map_root, SOURCE_SCAN, &scanned));
@@ -3293,8 +3307,7 @@ fn main() {
                     None => None,
                     Some(local_root) => {
                         if !local_root.is_dir() {
-                            eprintln!("press: {} is not a folder", local_root.display());
-                            std::process::exit(2);
+                            refuse(format!("{} is not a folder", local_root.display()));
                         }
                         let local_scan = scan::scan(local_root, &local_root.join(scan::OUTPUT_DIR));
                         scans.push(scan_diagnostics(local_root, LOCAL_CHECK_SCAN, &local_scan));
@@ -3338,18 +3351,14 @@ fn main() {
                 }
                 std::process::exit(i32::from(incomplete || gaps));
             }
-            Err(message) => {
-                eprintln!("press: {}: {message}", target.display());
-                std::process::exit(2);
-            }
+            Err(message) => refuse(format!("{}: {message}", target.display())),
         }
     }
 
     // A single file opens straight into the comparison. A folder opens the audit.
     let open_single = target.is_file();
     if !target.is_dir() && !open_single {
-        eprintln!("press: {} is not a file or folder", target.display());
-        std::process::exit(2);
+        refuse(format!("{} is not a file or folder", target.display()));
     }
 
     if args.command == Command::Window {
@@ -3390,16 +3399,12 @@ fn main() {
     // The typed path stays the one every report names.
     let audited = match audited_path(&target, open_single) {
         Ok(audited) => audited,
-        Err(error) => {
-            eprintln!("press: could not resolve {}: {error}", target.display());
-            std::process::exit(2);
-        }
+        Err(error) => refuse(format!("could not resolve {}: {error}", target.display())),
     };
     let (scanned, root) = if open_single {
         let parent = audited.parent().unwrap_or(Path::new(".")).to_path_buf();
         let Some(entry) = scan::probe(&audited) else {
-            eprintln!("press: {} is not an image", target.display());
-            std::process::exit(2);
+            refuse(format!("{} is not an image", target.display()));
         };
         (
             scan::Scan {
@@ -3422,10 +3427,7 @@ fn main() {
         let output = walk_output(&audited, args.output.as_deref());
         match scan::browse(&audited, &output) {
             Ok(browsed) => (browsed.scan, audited.clone()),
-            Err(error) => {
-                eprintln!("press: {}: {error}", target.display());
-                std::process::exit(2);
-            }
+            Err(error) => refuse(format!("{}: {error}", target.display())),
         }
     };
     print_scan_errors(&scanned);
@@ -3612,8 +3614,23 @@ fn main() {
 }
 
 /// Put back what a `--replace` run moved aside, and say what came back by name.
-fn restore_headless(root: &Path) -> i32 {
+fn restore_headless(root: &Path, json: bool) -> i32 {
     let restore = manifest::restore(root);
+    let code = i32::from(!restore.failures.is_empty());
+    if json {
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "command": "restore",
+            "target": path_text(root),
+            "restored": restore.restored.iter().map(|path| path_text(path)).collect::<Vec<_>>(),
+            "failures": restore.failures,
+        });
+        if let Err(error) = write_json_with_code(&report, code) {
+            eprintln!("press: could not write JSON: {error}");
+            return 1;
+        }
+        return code;
+    }
     if restore.restored.is_empty() && restore.failures.is_empty() {
         outln!("no originals to restore in {}", root.display());
         return 0;
@@ -3629,19 +3646,17 @@ fn restore_headless(root: &Path) -> i32 {
         restore.restored.len(),
         restore.failures.len()
     );
-    i32::from(!restore.failures.is_empty())
+    code
 }
 
 /// Inspect one output file or every regular file below a chosen output folder.
 /// The requirement pack is local data; this command never uploads or rewrites.
-fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
-    let snapshot = match requirements::parse_file(requirements_path) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            eprintln!("press: {error}");
-            return 2;
-        }
-    };
+fn check_headless(
+    target: &Path,
+    requirements_path: &Path,
+    json: bool,
+) -> Result<i32, (i32, String)> {
+    let snapshot = requirements::parse_file(requirements_path).map_err(|error| (2, error))?;
     let (root, refs) = if target.is_file() {
         let root = target.parent().unwrap_or_else(|| Path::new("."));
         (
@@ -3656,29 +3671,22 @@ fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
             }],
         )
     } else if target.is_dir() {
-        let target = match std::fs::canonicalize(target) {
-            Ok(target) => target,
-            Err(error) => {
-                eprintln!("press: could not resolve {}: {error}", target.display());
-                return 1;
-            }
-        };
-        let requirements_path = match std::fs::canonicalize(requirements_path) {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("press: could not resolve requirements file: {error}");
-                return 2;
-            }
-        };
+        let target = std::fs::canonicalize(target).map_err(|error| {
+            (
+                1,
+                format!("could not resolve {}: {error}", target.display()),
+            )
+        })?;
+        let requirements_path = std::fs::canonicalize(requirements_path)
+            .map_err(|error| (2, format!("could not resolve requirements file: {error}")))?;
         let mut refs = Vec::new();
         for item in walkdir::WalkDir::new(&target).follow_links(false) {
-            let item = match item {
-                Ok(item) => item,
-                Err(error) => {
-                    eprintln!("press: could not inspect {}: {error}", target.display());
-                    return 1;
-                }
-            };
+            let item = item.map_err(|error| {
+                (
+                    1,
+                    format!("could not inspect {}: {error}", target.display()),
+                )
+            })?;
             let path = item.path();
             if !item.file_type().is_file()
                 || path.file_name() == Some(std::ffi::OsStr::new(manifest::NAME))
@@ -3687,11 +3695,13 @@ fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
                 continue;
             }
             if refs.len() == requirements::MAX_OUTPUTS {
-                eprintln!(
-                    "press: check found more than {} outputs",
-                    requirements::MAX_OUTPUTS
-                );
-                return 1;
+                return Err((
+                    1,
+                    format!(
+                        "check found more than {} outputs",
+                        requirements::MAX_OUTPUTS
+                    ),
+                ));
             }
             let Some(relative) = path.strip_prefix(&target).ok() else {
                 continue;
@@ -3705,27 +3715,18 @@ fn check_headless(target: &Path, requirements_path: &Path, json: bool) -> i32 {
         refs.sort_by(|left, right| left.output.cmp(&right.output));
         (target, refs)
     } else {
-        eprintln!("press: {} is not a file or folder", target.display());
-        return 2;
+        return Err((2, format!("{} is not a file or folder", target.display())));
     };
-    let receipt = match requirements::inspect_outputs(&root, &refs, &snapshot) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            eprintln!("press: {error}");
-            return 1;
-        }
-    };
+    let receipt =
+        requirements::inspect_outputs(&root, &refs, &snapshot).map_err(|error| (1, error))?;
     let result = if json {
         requirements::render_json(&receipt).map(|json| print_text(&format!("{json}\n")))
     } else {
         print_text(&requirements::render_report(&receipt));
         Ok(())
     };
-    if let Err(error) = result {
-        eprintln!("press: {error}");
-        return 1;
-    }
-    i32::from(!receipt.all_required_pass)
+    result.map_err(|error| (1, error))?;
+    Ok(i32::from(!receipt.all_required_pass))
 }
 
 fn studio_error(error: studio_ledger::LedgerError) -> String {
@@ -6304,7 +6305,7 @@ mod tests {
         );
         assert_eq!(recorded.outputs[0].source_bytes, original.len() as u64);
 
-        assert_eq!(restore_headless(&root), 0);
+        assert_eq!(restore_headless(&root, false), 0);
         assert_eq!(std::fs::read(&source).unwrap(), original);
         assert!(!root.join("album").join("photo.webp").exists());
         std::fs::remove_dir_all(&root).unwrap();
@@ -6335,7 +6336,7 @@ mod tests {
                 .dry_run,
             "a replace run can be planned without moving an original"
         );
-        assert!(parse(&["restore", "/photos", "--json"]).is_err());
+        assert!(parse(&["restore", "/photos", "--json"]).unwrap().json);
         assert!(parse(&["restore", "/photos", "--avif"]).is_err());
     }
 

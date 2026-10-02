@@ -284,6 +284,61 @@ fn an_invalid_invocation_exits_two_with_stderr_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An agent that asked for JSON parses stdout. A refusal it cannot parse is a
+/// refusal it reads as a crash, so every one of these is a document too.
+#[test]
+fn an_invalid_invocation_with_json_is_one_error_document() {
+    let dir = workdir("invalid-json");
+    photo(&dir, "shot.png");
+    let target = dir.to_string_lossy().into_owned();
+    let missing = dir.join("missing").to_string_lossy().into_owned();
+    for (arguments, command, says) in [
+        (
+            vec!["convert", &target, "--quality", "500", "--json"],
+            "convert",
+            "--quality",
+        ),
+        (
+            vec!["convert", &target, "--jsn", "--json"],
+            "convert",
+            "--jsn",
+        ),
+        (vec!["audit", &missing, "--json"], "audit", "missing"),
+        (vec!["restore", &missing, "--json"], "restore", "missing"),
+    ] {
+        let output = run(&arguments);
+        assert_exit(&output, 2, &format!("{arguments:?}"));
+        let report = stdout_json(&output);
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["command"], command);
+        assert_eq!(report["status"], "failed");
+        assert!(
+            report["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(says)),
+            "{report}"
+        );
+    }
+    assert!(!dir.join("optimized").exists(), "a refusal writes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restore_and_version_answer_in_json() {
+    let dir = workdir("restore-json");
+    photo(&dir, "shot.png");
+    let output = run(&["restore", &dir.to_string_lossy(), "--json"]);
+    assert_exit(&output, 0, "restore with nothing to put back");
+    let report = stdout_json(&output);
+    assert_eq!(report["command"], "restore");
+    assert_eq!(report["restored"], serde_json::json!([]));
+    assert_eq!(report["failures"], serde_json::json!([]));
+    let output = run(&["version", "--json"]);
+    assert_exit(&output, 0, "version");
+    assert_eq!(stdout_json(&output)["version"], env!("CARGO_PKG_VERSION"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_refused_destination_json_still_reports_and_exits_two() {
     let dir = workdir("refused-json");
@@ -462,7 +517,14 @@ fn replace_and_restore_round_trip(
             "the backup holds {name} untouched"
         );
     }
-    assert_exit(&run(&["restore", restore_target]), 0, "restore");
+    let restore = run(&["restore", restore_target, "--json"]);
+    assert_exit(&restore, 0, "restore");
+    let restored = stdout_json(&restore);
+    assert_eq!(
+        restored["restored"].as_array().map(Vec::len),
+        Some(names.len()),
+        "{restored}"
+    );
     for (name, original) in names.iter().zip(&originals) {
         assert_eq!(
             &std::fs::read(dir.join(name))
@@ -833,8 +895,11 @@ fn handoff_refuses_garbage_with_exit_two() {
     std::fs::write(&report, b"{\"schema\":99}").expect("the bad fixture is written");
     let output = run(&["handoff", &report.to_string_lossy(), "--json"]);
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty(), "no document on refusal");
-    assert!(stderr(&output).contains("press: "), "{}", stderr(&output));
+    // A refusal under --json is the error document, never a pending task.
+    let refusal = stdout_json(&output);
+    assert_eq!(refusal["command"], "handoff");
+    assert_eq!(refusal["status"], "failed");
+    assert!(refusal.get("task").is_none(), "{refusal}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
