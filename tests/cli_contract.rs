@@ -323,6 +323,55 @@ fn an_invalid_invocation_with_json_is_one_error_document() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An agent picks files out of an audit and converts just those. Each lands where a
+/// whole-folder run would put it, and a name the audit never saw is refused before
+/// anything is written rather than quietly converting less than was asked.
+#[test]
+fn only_converts_the_named_files_into_the_folder_s_mirror() {
+    let dir = workdir("only");
+    std::fs::create_dir_all(dir.join("sub")).expect("the subfolder is created");
+    photo(&dir, "left.png");
+    photo(&dir, "sub/inner.png");
+    let absolute = photo(&dir, "right.png");
+    let target = dir.to_string_lossy().into_owned();
+
+    let refused = run(&["convert", &target, "--only", "nope.png", "--json"]);
+    assert_exit(&refused, 2, "an unknown --only");
+    assert!(
+        stdout_json(&refused)["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("nope.png"))
+    );
+    assert!(!dir.join("optimized").exists(), "a refusal writes nothing");
+
+    let output = run(&[
+        "convert",
+        &target,
+        "--only",
+        "sub/inner.png",
+        "--only",
+        &absolute.to_string_lossy(),
+        "--json",
+    ]);
+    assert_exit(&output, 0, "convert --only");
+    let report = stdout_json(&output);
+    assert_eq!(report["summary"]["attempted"], 2);
+    assert_eq!(report["summary"]["converted"], 2);
+    assert_eq!(
+        report["scan"]["images"], 3,
+        "the audit still names the folder"
+    );
+    let optimized = dir.join("optimized");
+    assert!(optimized.join("sub/inner.webp").is_file());
+    assert!(optimized.join("right.webp").is_file());
+    assert!(
+        !optimized.join("left.webp").exists(),
+        "left was not asked for"
+    );
+    assert!(!dir.join("sub/optimized").exists(), "no second output root");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn restore_and_version_answer_in_json() {
     let dir = workdir("restore-json");

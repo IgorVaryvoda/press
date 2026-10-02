@@ -252,6 +252,11 @@ const OPTIONS: &[(&[Command], &str)] = &[
         "  --dry-run                 Plan and project a conversion, write nothing\n",
     ),
     (
+        &[Command::Convert],
+        "  --only <file>             Convert only this file of the folder, named\n\
+         \x20                           relative to it or absolute; repeatable\n",
+    ),
+    (
         &[Command::Plan],
         "  --plan <file>             File to create for the plan command\n",
     ),
@@ -504,6 +509,9 @@ struct Args {
     preset_overrides: Vec<&'static str>,
     /// The command `--help` asks about; `None` is the global help.
     help_topic: Option<Command>,
+    /// `convert --only`: the files to convert, relative to the folder or absolute
+    /// inside it. Empty converts the whole folder.
+    only: Vec<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -587,6 +595,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut edge_set = false;
     let mut speed_set = false;
     let mut help_topic = None;
+    let mut only = Vec::new();
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -758,6 +767,14 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 conversion_option = true;
                 skip_existing = true;
             }
+            "--only" => {
+                conversion_option = true;
+                only.push(PathBuf::from(next_value(
+                    &mut rest,
+                    "--only",
+                    "a file in the folder",
+                )?));
+            }
             "--dry-run" => {
                 conversion_option = true;
                 dry_run = true;
@@ -884,6 +901,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             preset: None,
             preset_overrides: Vec::new(),
             help_topic,
+            only: Vec::new(),
             unknown,
         });
     }
@@ -990,6 +1008,12 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "targets carry their own recipes: explicit conversion options need a plain convert"
                 .into(),
         );
+    }
+    if !only.is_empty() && command != Command::Convert {
+        return Err("--only needs convert".into());
+    }
+    if !only.is_empty() && !targets.is_empty() {
+        return Err("--only needs a plain convert; it takes no --target".into());
     }
     if !targets.is_empty() && preset.is_some() {
         return Err("targets carry their own recipes: --preset-file needs a plain convert".into());
@@ -1282,6 +1306,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         preset,
         preset_overrides,
         help_topic: None,
+        only,
         unknown,
     })
 }
@@ -1312,6 +1337,41 @@ fn command_name(command: Command) -> &'static str {
         Command::Help => "help",
         Command::Version => "version",
     }
+}
+
+/// Resolve each `--only` against the audited folder: relative to it, as the text
+/// audit names files, or absolute, as the JSON audit does. A name that matches no
+/// audited image is refused before anything is written, never silently dropped,
+/// and the selection can only narrow the audit, so it cannot reach outside it.
+fn select_only(
+    only: &[PathBuf],
+    root: &Path,
+    scanned: &scan::Scan,
+) -> Result<std::collections::HashSet<PathBuf>, String> {
+    only.iter()
+        .map(|wanted| {
+            let full = root.join(wanted);
+            // The walk starts from the canonical folder; a path typed through a
+            // link to it names the same file under another spelling.
+            let resolved = full
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+                .zip(full.file_name())
+                .map(|(parent, name)| parent.join(name));
+            scanned
+                .entries
+                .iter()
+                .find(|entry| entry.path == full || Some(&entry.path) == resolved.as_ref())
+                .map(|entry| entry.path.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "--only {} names no image in {}",
+                        wanted.display(),
+                        root.display()
+                    )
+                })
+        })
+        .collect()
 }
 
 fn set_root(root: &mut Option<PathBuf>, value: String) -> Result<(), String> {
@@ -3431,6 +3491,10 @@ fn main() {
         }
     };
     print_scan_errors(&scanned);
+    if open_single && !args.only.is_empty() {
+        refuse("--only needs a folder, not one file".into());
+    }
+    let only = select_only(&args.only, &root, &scanned).unwrap_or_else(|message| refuse(message));
     let scope = (!open_single).then_some(args.subfolders);
     let unread = scanned.unreadable.len() + scanned.walk_errors.len();
 
@@ -3507,7 +3571,6 @@ fn main() {
         backups: backups.as_deref(),
         manifest: &recorded,
     };
-    let audited: Vec<&Entry> = scanned.entries.iter().collect();
     let sources: Vec<PathBuf> = scanned
         .entries
         .iter()
@@ -3516,6 +3579,22 @@ fn main() {
     // Plan against every audited source first. `--skip-existing` then decides one file
     // at a time, so the names a run leaves alone are the names it would have written.
     let planned = convert::plan_outputs(&root, &sources, &sources, &destination, args.format);
+    // `--only` drops files after planning, as `--skip-existing` does: a file
+    // converted alone gets the name, and the mirrored place, a whole-folder run
+    // would give it, rather than a fresh `optimized/` beside it.
+    let (audited, planned): (Vec<&Entry>, Vec<_>) = scanned
+        .entries
+        .iter()
+        .zip(planned)
+        .filter(|(entry, _)| only.is_empty() || only.contains(&entry.path))
+        .unzip();
+    if !only.is_empty() && !args.json {
+        outln!(
+            "{} of {} selected with --only",
+            audited.len(),
+            scanned.entries.len()
+        );
+    }
     let queued = queue_run(
         &audited,
         &planned,
@@ -3589,7 +3668,7 @@ fn main() {
             manifest: run.written_manifest.as_deref().map(path_text),
             backup: backups.as_deref().map(path_text),
             summary: ConversionSummary {
-                attempted: scanned.entries.len(),
+                attempted: audited.len(),
                 converted,
                 failed,
                 skipped,
@@ -5486,6 +5565,29 @@ mod tests {
         for (command, ..) in COMMANDS {
             assert!(help(Some(*command)).contains("--help"));
         }
+    }
+
+    #[test]
+    fn only_belongs_to_a_plain_convert() {
+        let parsed = parse(&["convert", "photos", "--only", "a.png", "--only", "b/c.png"]).unwrap();
+        assert_eq!(
+            parsed.only,
+            [PathBuf::from("a.png"), PathBuf::from("b/c.png")]
+        );
+        assert!(parse(&["audit", "photos", "--only", "a.png"]).is_err());
+        assert!(parse(&["photos", "--only", "a.png"]).is_err());
+        assert!(
+            parse(&[
+                "convert",
+                "photos",
+                "--only",
+                "a.png",
+                "--target",
+                "recommended=web"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["convert", "photos", "--only", "--json"]).is_err());
     }
 
     /// The point of the flag: a re-run over a tree that mostly has not changed does

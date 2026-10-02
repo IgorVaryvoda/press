@@ -49,6 +49,7 @@ press convert <file-or-folder> --format same --max-edge 1600 --json
 press convert <file-or-folder> --output <dir> --json
 press convert <file-or-folder> --skip-existing --json
 press convert <file-or-folder> --dry-run --json
+press convert <folder> --only big.png --only sub/hero.jpg --json
 ```
 
 `--output <dir>` (short `-o`) writes the mirrored tree into that folder instead of `optimized/`. It is refused with exit status `2` when it is or contains the source folder or ends in a symlink. With `--json` the refusal is the schema-two error document (`output` null, `error` naming the reason, every file `failed`); without it, the reason is one stderr line plus per-file stdout lines.
@@ -56,6 +57,8 @@ press convert <file-or-folder> --dry-run --json
 `--skip-existing` leaves a source alone when its planned output is already current. Those files come back with `status` `skipped`, `skipped: true`, a named `reason`, and the size already on disk in `output_bytes`; they are counted in `summary.skipped` and never in `converted` or `failed`.
 
 A recorded run first matches its recipe fingerprint and the source content hash: changed settings or edited bytes rebuild even when the timestamps look current. An output with no record skips on timestamps alone. Under this flag `summary.source_bytes` and `summary.output_bytes` cover only the files this run re-encoded, so they are not the size of the whole tree.
+
+Repeat `--only <file>` to convert some files of a folder, for example the `heavy` ones an audit named. Name each file relative to the folder or by the absolute path the JSON audit printed. Each output lands where a whole-folder run would put it, under the folder's `optimized/`. A name that matches no audited image exits `2` before anything is written. `summary.attempted` counts the selected files; `scan` still describes the whole folder. `--only` takes no `--target`.
 
 Repeat `--target <recipe>=<dir>` to convert once per saved recipe into its own folder under the output root, e.g. `--target recommended=web --target small-files=small`. Each target keeps its own manifest and skip decisions; the report carries one `targets` section per target plus combined `files` and `summary`. Targets refuse unknown recipes, overlapping folders, `--replace`, and explicit `--format`/`--quality`/`--preset-file` siblings: a target's recipe already answers those.
 
