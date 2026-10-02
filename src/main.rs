@@ -117,6 +117,12 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
         "Encode one file in memory; report its size and pixel difference",
     ),
     (
+        Command::Ai,
+        "ai",
+        "  press ai <remove-background|upscale> <FILE> [--allow-download] [OPTIONS]\n",
+        "Remove a background or upscale 4x with the local AI engine",
+    ),
+    (
         Command::Restore,
         "restore",
         "  press restore <PATH> [--json]\n",
@@ -185,6 +191,7 @@ const JSON_COMMANDS: &[Command] = &[
     Command::Audit,
     Command::Convert,
     Command::Compare,
+    Command::Ai,
     Command::Restore,
     Command::Version,
     Command::Handoff,
@@ -243,6 +250,7 @@ const OPTIONS: &[(&[Command], &str)] = &[
     (
         &[
             Command::Convert,
+            Command::Ai,
             Command::Plan,
             Command::Execute,
             Command::Reconcile,
@@ -257,6 +265,11 @@ const OPTIONS: &[(&[Command], &str)] = &[
     (
         &[Command::Convert],
         "  --dry-run                 Plan and project a conversion, write nothing\n",
+    ),
+    (
+        &[Command::Ai],
+        "  --allow-download          Let first use download the pinned engine and\n\
+         \x20                           model (about 100 MB, checked by SHA-256)\n",
     ),
     (
         &[Command::Compare],
@@ -457,6 +470,7 @@ enum Command {
     Audit,
     Convert,
     Compare,
+    Ai,
     Handoff,
     Check,
     Supplier,
@@ -557,6 +571,9 @@ struct Args {
     progress: bool,
     /// `compare --out`: the side-by-side PNG to write. `None` reports numbers only.
     compare_out: Option<PathBuf>,
+    /// `ai`: which local tool, and consent to its one-time download.
+    ai_tool: Option<crate::local_ai::Tool>,
+    allow_download: bool,
 }
 
 fn parse_args() -> Args {
@@ -643,12 +660,15 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut only = Vec::new();
     let mut progress = false;
     let mut compare_out = None;
+    let mut ai_verb = None;
+    let mut allow_download = false;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
             "compare" if root.is_none() && command == Command::Window => command = Command::Compare,
+            "ai" if root.is_none() && command == Command::Window => command = Command::Ai,
             "plan" if root.is_none() && command == Command::Window => command = Command::Plan,
             "execute" if root.is_none() && command == Command::Window => command = Command::Execute,
             "reconcile" if root.is_none() && command == Command::Window => {
@@ -854,6 +874,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--grid" => grid = true,
             "--progress" => progress = true,
+            "--allow-download" => allow_download = true,
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
             "--lossless" => {
@@ -899,6 +920,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                     return Err("supplier takes a folder, a verb and at most an attempt id".into());
                 }
             }
+            _ if command == Command::Ai && ai_verb.is_none() => ai_verb = Some(argument),
             _ if command == Command::Studio => {
                 if studio_verb.is_none() {
                     studio_verb = Some(argument);
@@ -960,6 +982,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             only: Vec::new(),
             progress,
             compare_out: None,
+            ai_tool: None,
+            allow_download: false,
             unknown,
         });
     }
@@ -1257,6 +1281,31 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
         ));
     }
+    if allow_download && command != Command::Ai {
+        return Err("--allow-download needs ai".into());
+    }
+    let ai_tool = match (command, ai_verb.as_deref()) {
+        (Command::Ai, Some("remove-background")) => Some(crate::local_ai::Tool::RemoveBackground),
+        (Command::Ai, Some("upscale")) => Some(crate::local_ai::Tool::Upscale),
+        (Command::Ai, Some(verb)) => return Err(format!("unknown ai verb {verb:?}")),
+        (Command::Ai, None) => return Err("ai needs a verb: remove-background or upscale".into()),
+        _ => None,
+    };
+    if command == Command::Ai
+        && (format_set
+            || quality_set
+            || edge_set
+            || speed_set
+            || preset.is_some()
+            || grid
+            || !subfolders
+            || replace
+            || skip_existing
+            || dry_run
+            || !targets.is_empty())
+    {
+        return Err("ai takes a verb, one file, --output, --allow-download and --json".into());
+    }
     if command == Command::Compare
         && (grid
             || !subfolders
@@ -1387,6 +1436,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         only,
         progress,
         compare_out,
+        ai_tool,
+        allow_download,
         unknown,
     })
 }
@@ -1407,6 +1458,7 @@ fn command_name(command: Command) -> &'static str {
         Command::Audit => "audit",
         Command::Convert => "convert",
         Command::Compare => "compare",
+        Command::Ai => "ai",
         Command::Handoff => "handoff",
         Command::Check => "check",
         Command::Supplier => "supplier",
@@ -3296,6 +3348,7 @@ fn main() {
         | Command::Audit
         | Command::Convert
         | Command::Compare
+        | Command::Ai
         | Command::Restore
         | Command::Plan
         | Command::Execute
@@ -3409,6 +3462,10 @@ fn main() {
 
     if args.command == Command::Compare {
         std::process::exit(compare_headless(&target, &args));
+    }
+
+    if let Some(tool) = args.ai_tool {
+        std::process::exit(ai_headless(tool, &target, &args));
     }
 
     if args.command == Command::Check {
@@ -3982,6 +4039,99 @@ fn compare_headless(target: &Path, args: &Args) -> i32 {
             outln!("wrote {} (original left, converted right)", out.display());
         }
         outln!("nothing else written");
+    }
+    0
+}
+
+/// Run one local AI tool over one file, into the same output folder a conversion of
+/// that file would use. The engine and model are downloaded only with explicit
+/// consent: a command an agent runs never fetches 100 MB on its own initiative.
+fn ai_headless(tool: local_ai::Tool, target: &Path, args: &Args) -> i32 {
+    let fail = |code: i32, message: String| -> ! { command_error("ai", message, args.json, code) };
+    let verb = match tool {
+        local_ai::Tool::RemoveBackground => "remove-background",
+        local_ai::Tool::Upscale => "upscale",
+    };
+    if !local_ai::available() {
+        fail(
+            2,
+            "local AI has no engine on this platform; set PRESS_VISION_CLI to a vision.cpp \
+             vision-cli"
+                .into(),
+        );
+    }
+    let Some(entry) = target.is_file().then(|| scan::probe(target)).flatten() else {
+        fail(2, format!("{} is not an image file", target.display()));
+    };
+    if tool == local_ai::Tool::Upscale
+        && let Err(message) = local_ai::upscale_dimensions(entry.width, entry.height)
+    {
+        fail(2, message);
+    }
+    let download = local_ai::setup_bytes(tool);
+    if download > 0 && !args.allow_download {
+        fail(
+            2,
+            format!(
+                "first use downloads {} (the pinned engine and model, checked by SHA-256); \
+                 run again with --allow-download",
+                format_bytes(download)
+            ),
+        );
+    }
+    let audited = audited_path(target, true).unwrap_or_else(|error| {
+        fail(
+            2,
+            format!("could not resolve {}: {error}", target.display()),
+        )
+    });
+    let root = audited.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let destination = match args.output.clone() {
+        Some(folder) => settings::Output::Folder(folder),
+        None => settings::Output::Optimized,
+    };
+    let out_dir = destination
+        .context(&root)
+        .map(|context| context.output_root().to_path_buf())
+        .unwrap_or_else(|message| fail(2, message));
+    if download > 0 {
+        eprintln!(
+            "press: downloading {} once for local AI",
+            format_bytes(download)
+        );
+    }
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let written = local_ai::prepare(tool, &cancelled)
+        .and_then(|prepared| local_ai::process(prepared, &root, &out_dir, &audited, &cancelled))
+        .unwrap_or_else(|message| fail(1, message));
+    let result = scan::probe(&written);
+    let (width, height) = result
+        .as_ref()
+        .map_or((0, 0), |entry| (entry.width, entry.height));
+    let bytes = result.as_ref().map_or(0, |entry| entry.bytes);
+    if args.json {
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "command": "ai",
+            "tool": verb,
+            "source": path_text(target),
+            "output": path_text(&written),
+            "width": width,
+            "height": height,
+            "bytes": bytes,
+            "downloaded_bytes": download,
+        });
+        if let Err(error) = write_json(&report) {
+            eprintln!("press: could not write JSON: {error}");
+            return 1;
+        }
+    } else {
+        outln!(
+            "{verb} {} -> {} ({width}x{height}, {})",
+            target.display(),
+            written.display(),
+            format_bytes(bytes)
+        );
     }
     0
 }
@@ -5861,6 +6011,24 @@ mod tests {
         assert!(parse(&["compare", "a.png", "--output", "x"]).is_err());
         assert!(parse(&["compare", "a.png", "--target", "recommended=web"]).is_err());
         assert!(parse(&["convert", "a.png", "--out", "pair.png"]).is_err());
+    }
+
+    #[test]
+    fn ai_takes_a_tool_one_file_and_consent() {
+        let parsed = parse(&["ai", "upscale", "a.png", "--allow-download", "--json"]).unwrap();
+        assert_eq!(parsed.ai_tool, Some(crate::local_ai::Tool::Upscale));
+        assert_eq!(parsed.root, Some(PathBuf::from("a.png")));
+        assert!(parsed.allow_download);
+        assert_eq!(
+            parse(&["ai", "remove-background", "a.png"])
+                .unwrap()
+                .ai_tool,
+            Some(crate::local_ai::Tool::RemoveBackground)
+        );
+        assert!(parse(&["ai", "a.png"]).is_err(), "a path is not a verb");
+        assert!(parse(&["ai"]).is_err());
+        assert!(parse(&["ai", "upscale", "a.png", "--avif"]).is_err());
+        assert!(parse(&["convert", "a.png", "--allow-download"]).is_err());
     }
 
     #[test]

@@ -449,6 +449,40 @@ fn compare_reports_one_encode_and_writes_only_the_named_picture() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A command an agent runs never downloads the AI engine on its own initiative.
+/// With nothing installed, the run is refused by name before any byte is fetched
+/// or written; on a platform with no engine, it says that instead.
+#[test]
+fn ai_refuses_its_first_download_without_consent() {
+    let dir = workdir("ai-consent");
+    let source = photo(&dir, "shot.png");
+    let empty = dir.join("data");
+    let output = Command::new(env!("CARGO_BIN_EXE_press"))
+        .args([
+            "ai",
+            "remove-background",
+            &source.to_string_lossy(),
+            "--json",
+        ])
+        .env("XDG_DATA_HOME", &empty)
+        .env("HOME", &empty)
+        .env("LOCALAPPDATA", &empty)
+        .env_remove("PRESS_VISION_CLI")
+        .output()
+        .expect("the binary runs");
+    assert_exit(&output, 2, "ai with nothing installed");
+    let report = stdout_json(&output);
+    assert_eq!(report["command"], "ai");
+    let error = report["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--allow-download") || error.contains("no engine"),
+        "{error}"
+    );
+    assert!(!empty.exists(), "nothing was downloaded");
+    assert!(!dir.join("optimized").exists(), "nothing was written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Width and height from a PNG's IHDR, which sits at a fixed offset.
 fn image_size(path: &Path) -> (u32, u32) {
     let bytes = std::fs::read(path).expect("the picture is written");

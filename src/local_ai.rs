@@ -103,6 +103,33 @@ pub fn installed(tool: Tool) -> bool {
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() == tool.model().bytes)
 }
 
+/// What `prepare` would download for `tool` before it can run: the model when it is
+/// missing, and the engine archive on the one platform Press provisions it for.
+/// Zero once both are in place. The command line asks for consent above zero.
+pub fn setup_bytes(tool: Tool) -> u64 {
+    let Ok(base) = data_dir() else {
+        return 0;
+    };
+    let runtime = if discover_runtime(&base).ok().flatten().is_some() {
+        0
+    } else {
+        runtime_download_bytes()
+    };
+    let model = std::fs::metadata(base.join("models").join(tool.model().filename))
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == tool.model().bytes);
+    runtime + if model { 0 } else { tool.model().bytes }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn runtime_download_bytes() -> u64 {
+    RUNTIME.bytes
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn runtime_download_bytes() -> u64 {
+    0
+}
+
 pub fn prepare(tool: Tool, cancelled: &AtomicBool) -> Result<Prepared, String> {
     check_cancelled(cancelled)?;
     let base = data_dir()?;

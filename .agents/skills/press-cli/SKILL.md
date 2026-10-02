@@ -1,6 +1,6 @@
 ---
 name: press-cli
-description: Audit, compare or convert local image files with the Press CLI. Use when an agent needs image metadata (dimensions, bytes, heavy or mislabelled files), the size and look of one file at a given format and quality, or explicitly authorized local WebP, AVIF, JPEG XL or JPEG conversion, or a resize that keeps each file's own format.
+description: Audit, compare, convert, remove backgrounds from or upscale local image files with the Press CLI. Use when an agent needs image metadata (dimensions, bytes, heavy or mislabelled files), the size and look of one file at a given format and quality, or explicitly authorized local WebP, AVIF, JPEG XL or JPEG conversion, or a resize that keeps each file's own format.
 ---
 
 # Press CLI
@@ -92,6 +92,17 @@ press restore <folder>
 ```
 
 `press restore` reads the manifest, moves every original back, and removes the file that replaced it. With `--json` it writes one document with the `restored` paths and the `failures` it could not put back. It works on a later run and on another machine, because the record is in the folder. It prints one `restored` line per file, names on stderr anything it could not put back, and exits `1` when any original stayed put.
+
+## Remove a background or upscale only when asked
+
+`press ai` runs one local model over one file and writes a PNG into the same `optimized/` folder a conversion would use, or into `--output <dir>`. Nothing is uploaded.
+
+```bash
+press ai remove-background <file> --json
+press ai upscale <file> --json
+```
+
+The report names the `output`, its `width`, `height` and `bytes`. Upscaling is 4x and is refused by name above 40 megapixels. First use needs a one-time download of the pinned engine and model (about 100 MB, checked by SHA-256). Without `--allow-download` that run exits `2` and names the size; ask the user before you add the flag. The engine is provisioned on Linux x64; on other platforms the run exits `2` unless `PRESS_VISION_CLI` names a vision.cpp `vision-cli`.
 
 ## Update Press
 

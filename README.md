@@ -83,6 +83,7 @@ press convert ~/path/to/folder --skip-existing           # only sources that cha
 press convert ~/path/to/folder --dry-run                 # plan and project, write nothing
 press convert ~/path/to/folder --only big.png --json     # just these files, same mirror
 press compare ~/photo.jpg --format avif --quality 60 --out pair.png  # size, PSNR, side by side
+press ai remove-background ~/photo.jpg       # local model, PNG into optimized/
 press check ~/path/to/folder --requirements-file ./requirements.json --json
 press update                                    # install the latest signed release
 ```
