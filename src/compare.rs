@@ -206,24 +206,51 @@ pub fn build(
     max_edge: MaxEdge,
     avif_speed: u8,
 ) -> Result<Pair, Failure> {
-    let prepared = convert::prepare(path, max_edge)?;
-    let (_, encoded) = convert::encode_prepared(&prepared, path, format, quality, avif_speed)?;
-    let decoded = crate::scan::decode_bytes(&encoded).ok_or(Failure::Failed)?;
-    let (width, height) = (prepared.image.width(), prepared.image.height());
+    let trip = round_trip(path, format, quality, max_edge, avif_speed)?;
+    let (width, height) = (trip.source.image.width(), trip.source.image.height());
     Ok(Pair {
         // Converted to the window's byte order only now: after the encode, so no
         // display buffer was ever anybody's source.
         original: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(
-            prepared.image.into_rgba8(),
+            trip.source.image.into_rgba8(),
         ))])),
         converted: Arc::new(RenderImage::new(vec![Frame::new(to_bgra(
-            decoded.into_rgba8(),
+            trip.converted.into_rgba8(),
         ))])),
-        converted_bytes: encoded.len() as u64,
+        converted_bytes: trip.converted_bytes,
         width,
         height,
-        source: prepared.identity,
+        source: trip.source.identity,
         written: None,
+    })
+}
+
+/// What `build` measures, before any of it becomes a window buffer: the source as
+/// the writer prepares it, the encode decoded back, and the encode's length.
+/// `press compare` reads the same three without a window to put them in.
+pub struct RoundTrip {
+    pub source: crate::scan::DecodedSource,
+    pub converted: image::DynamicImage,
+    pub converted_bytes: u64,
+    /// The format the encoder answered with, which `Same` resolves per file.
+    pub format: Format,
+}
+
+pub fn round_trip(
+    path: &Path,
+    format: Format,
+    quality: Quality,
+    max_edge: MaxEdge,
+    avif_speed: u8,
+) -> Result<RoundTrip, Failure> {
+    let source = convert::prepare(path, max_edge)?;
+    let (format, encoded) = convert::encode_prepared(&source, path, format, quality, avif_speed)?;
+    let converted = crate::scan::decode_bytes(&encoded).ok_or(Failure::Failed)?;
+    Ok(RoundTrip {
+        source,
+        converted,
+        converted_bytes: encoded.len() as u64,
+        format,
     })
 }
 

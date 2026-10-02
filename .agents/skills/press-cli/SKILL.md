@@ -21,6 +21,17 @@ Read `summary`, then inspect `files` for exact dimensions, bytes, bytes per pixe
 
 Exit status `0` means the audit was complete. Status `1` means the JSON is still usable, but one or more paths could not be read; report the named `unreadable` or `walk_errors` entries.
 
+## Compare one file before converting
+
+`press compare` encodes one file in memory with the same recipe options as `convert` and writes nothing, except the picture you name:
+
+```bash
+press compare <file> --format avif --quality 60 --json
+press compare <file> --format avif --quality 60 --out /tmp/pair.png
+```
+
+The report gives `source_bytes`, `converted_bytes`, `saving_percent`, the delivered `width` and `height`, and `psnr_db`. `psnr_db` is a plain pixel difference (higher is closer, `null` is identical). Use it to rank settings for the same file, not to compare two different photographs. `--out` writes one PNG with the original on the left and the converted image on the right, at the delivered resolution. If you can view images, look at it before you choose a quality for a folder: small text and fine edges show loss first. `--out` must end in `.png` and cannot name the source.
+
 ## Check a local requirements snapshot
 
 Use a bounded, local, user-authored requirements file to inspect actual output

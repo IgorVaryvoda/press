@@ -393,6 +393,70 @@ fn progress_names_each_finished_file_on_stderr() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An agent picks a quality by comparing in memory: a number for each try, and a
+/// picture when asked. The only file written is the picture it named.
+#[test]
+fn compare_reports_one_encode_and_writes_only_the_named_picture() {
+    let dir = workdir("compare");
+    let source = photo(&dir, "shot.png");
+    let source_text = source.to_string_lossy().into_owned();
+    let pair = dir.join("pair.png");
+
+    let output = run(&[
+        "compare",
+        &source_text,
+        "--quality",
+        "60",
+        "--out",
+        &pair.to_string_lossy(),
+        "--json",
+    ]);
+    assert_exit(&output, 0, "compare");
+    let report = stdout_json(&output);
+    assert_eq!(report["command"], "compare");
+    assert_eq!(report["format"], "webp");
+    assert_eq!(
+        (report["width"].clone(), report["height"].clone()),
+        (8.into(), 8.into())
+    );
+    assert!(
+        report["converted_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    assert!(
+        report["psnr_db"].as_f64().is_some_and(|db| db > 10.),
+        "{report}"
+    );
+    let (width, height) = image_size(&pair);
+    assert_eq!((width, height), (8 * 2 + 8, 8), "both halves and the seam");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|item| item.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["pair.png", "shot.png"], "nothing else is written");
+
+    let over_source = run(&["compare", &source_text, "--out", &source_text, "--json"]);
+    assert_exit(&over_source, 2, "--out over the source");
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        photo_png(),
+        "the source is untouched"
+    );
+    let not_png = run(&["compare", &source_text, "--out", "pair.webp"]);
+    assert_exit(&not_png, 2, "--out that is not a PNG");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Width and height from a PNG's IHDR, which sits at a fixed offset.
+fn image_size(path: &Path) -> (u32, u32) {
+    let bytes = std::fs::read(path).expect("the picture is written");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "the picture is a PNG");
+    let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    (word(16), word(20))
+}
+
 #[test]
 fn restore_and_version_answer_in_json() {
     let dir = workdir("restore-json");

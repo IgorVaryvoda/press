@@ -111,6 +111,12 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
         "Re-encode a file or folder into optimized/ without a window",
     ),
     (
+        Command::Compare,
+        "compare",
+        "  press compare <FILE> [--out <PNG>] [OPTIONS]\n",
+        "Encode one file in memory; report its size and pixel difference",
+    ),
+    (
         Command::Restore,
         "restore",
         "  press restore <PATH> [--json]\n",
@@ -178,6 +184,7 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
 const JSON_COMMANDS: &[Command] = &[
     Command::Audit,
     Command::Convert,
+    Command::Compare,
     Command::Restore,
     Command::Version,
     Command::Handoff,
@@ -188,7 +195,7 @@ const JSON_COMMANDS: &[Command] = &[
     Command::Execute,
     Command::Reconcile,
 ];
-const RECIPE_COMMANDS: &[Command] = &[Command::Convert, Command::Plan];
+const RECIPE_COMMANDS: &[Command] = &[Command::Convert, Command::Compare, Command::Plan];
 const PLAN_COMMANDS: &[Command] = &[
     Command::Check,
     Command::Plan,
@@ -252,6 +259,11 @@ const OPTIONS: &[(&[Command], &str)] = &[
         "  --dry-run                 Plan and project a conversion, write nothing\n",
     ),
     (
+        &[Command::Compare],
+        "  --out <file.png>          Write the original and the converted image side\n\
+         \x20                           by side, original on the left\n",
+    ),
+    (
         &[Command::Convert],
         "  --progress                With --json, name each file on stderr as it\n\
          \x20                           finishes: [done/total] name status\n",
@@ -273,7 +285,7 @@ const OPTIONS: &[(&[Command], &str)] = &[
          \x20 --reinstate-cancelled     Put cancelled saved-plan items back, write nothing\n",
     ),
     (
-        RECIPE_COMMANDS,
+        &[Command::Convert, Command::Plan],
         "  --target <recipe>=<dir>   Convert once more with a saved recipe into\n\
          \x20                           its own folder; repeatable, convert or plan\n",
     ),
@@ -422,6 +434,7 @@ enum Command {
     Window,
     Audit,
     Convert,
+    Compare,
     Handoff,
     Check,
     Supplier,
@@ -520,6 +533,8 @@ struct Args {
     /// `convert --json --progress`: one stderr line per finished file, so a caller
     /// waiting on a long run can tell slow work from a stopped process.
     progress: bool,
+    /// `compare --out`: the side-by-side PNG to write. `None` reports numbers only.
+    compare_out: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -605,11 +620,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut help_topic = None;
     let mut only = Vec::new();
     let mut progress = false;
+    let mut compare_out = None;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
             "audit" if root.is_none() && command == Command::Window => command = Command::Audit,
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
+            "compare" if root.is_none() && command == Command::Window => command = Command::Compare,
             "plan" if root.is_none() && command == Command::Window => command = Command::Plan,
             "execute" if root.is_none() && command == Command::Window => command = Command::Execute,
             "reconcile" if root.is_none() && command == Command::Window => {
@@ -720,6 +737,13 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
             "--job" if command == Command::Studio => {
                 studio_job = Some(next_value(&mut rest, "--job", "a hosted job id")?);
+            }
+            "--out" if command == Command::Compare => {
+                compare_out = Some(PathBuf::from(next_value(
+                    &mut rest,
+                    "--out",
+                    "a .png file",
+                )?));
             }
             "--out" if command == Command::Studio => {
                 studio_out = Some(PathBuf::from(next_value(
@@ -913,6 +937,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             help_topic,
             only: Vec::new(),
             progress,
+            compare_out: None,
             unknown,
         });
     }
@@ -1210,6 +1235,17 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             }
         ));
     }
+    if command == Command::Compare
+        && (grid
+            || !subfolders
+            || output.is_some()
+            || replace
+            || skip_existing
+            || dry_run
+            || !targets.is_empty())
+    {
+        return Err("compare takes one file, recipe options, --out and --json".into());
+    }
     if command == Command::Audit && conversion_option {
         return Err("audit does not accept conversion options".into());
     }
@@ -1328,6 +1364,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         help_topic: None,
         only,
         progress,
+        compare_out,
         unknown,
     })
 }
@@ -1347,6 +1384,7 @@ fn command_name(command: Command) -> &'static str {
         Command::Reconcile => "reconcile",
         Command::Audit => "audit",
         Command::Convert => "convert",
+        Command::Compare => "compare",
         Command::Handoff => "handoff",
         Command::Check => "check",
         Command::Supplier => "supplier",
@@ -3217,6 +3255,7 @@ fn main() {
         Command::Window
         | Command::Audit
         | Command::Convert
+        | Command::Compare
         | Command::Restore
         | Command::Plan
         | Command::Execute
@@ -3326,6 +3365,10 @@ fn main() {
             refuse(format!("{} is not a folder", target.display()));
         }
         std::process::exit(restore_headless(&target, args.json));
+    }
+
+    if args.command == Command::Compare {
+        std::process::exit(compare_headless(&target, &args));
     }
 
     if args.command == Command::Check {
@@ -3760,6 +3803,147 @@ fn restore_headless(root: &Path, json: bool) -> i32 {
         restore.failures.len()
     );
     code
+}
+
+#[derive(Serialize)]
+struct CompareReport {
+    schema_version: u32,
+    command: &'static str,
+    source: String,
+    options: ConversionOptions,
+    /// What the encoder wrote; `same` resolves to the source's own format here.
+    format: &'static str,
+    width: u32,
+    height: u32,
+    source_bytes: u64,
+    converted_bytes: u64,
+    saving_percent: f32,
+    /// Peak signal-to-noise ratio over RGBA, in dB. `null` when the pixels are
+    /// identical. A pixel difference, not a perceptual verdict.
+    psnr_db: Option<f64>,
+    out: Option<String>,
+}
+
+/// Peak signal-to-noise ratio of two same-sized images, `None` when identical.
+///
+/// ponytail: plain RGBA PSNR, no perceptual weighting. It ranks settings for one
+/// file well and compares two different photographs badly; a perceptual score
+/// (SSIMULACRA2, DSSIM) needs a new dependency.
+fn psnr(left: &image::RgbaImage, right: &image::RgbaImage) -> Option<f64> {
+    let squared: f64 = left
+        .as_raw()
+        .iter()
+        .zip(right.as_raw())
+        .map(|(left, right)| (f64::from(*left) - f64::from(*right)).powi(2))
+        .sum();
+    let mse = squared / left.as_raw().len().max(1) as f64;
+    (mse > 0.).then(|| 10. * (255f64.powi(2) / mse).log10())
+}
+
+/// Encode one file in memory and say what it would weigh and how far its pixels
+/// moved. With `--out`, the two sides go into one PNG at the delivered resolution,
+/// original on the left, so an agent that can see images can judge the trade
+/// before anything is written. Nothing beside `--out` is ever written.
+fn compare_headless(target: &Path, args: &Args) -> i32 {
+    let fail =
+        |code: i32, message: String| -> ! { command_error("compare", message, args.json, code) };
+    if !target.is_file() || scan::probe(target).is_none() {
+        fail(2, format!("{} is not an image file", target.display()));
+    }
+    if let Some(out) = &args.compare_out {
+        if !out
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        {
+            fail(2, "--out needs a .png file".into());
+        }
+        if std::fs::canonicalize(out).ok() == std::fs::canonicalize(target).ok() {
+            fail(
+                2,
+                "--out names the source; compare never writes over it".into(),
+            );
+        }
+    }
+    let trip = compare::round_trip(
+        target,
+        args.format,
+        args.quality,
+        args.max_edge,
+        avif::speed(),
+    )
+    .unwrap_or_else(|failure| {
+        fail(
+            1,
+            failure
+                .reason()
+                .unwrap_or_else(|| "conversion failed".to_string()),
+        )
+    });
+    let source_bytes = trip.source.identity.bytes;
+    let original = trip.source.image.into_rgba8();
+    let converted = trip.converted.into_rgba8();
+    let (width, height) = original.dimensions();
+    let difference = psnr(&original, &converted);
+    if let Some(out) = &args.compare_out {
+        // A grey seam, so the edge between the two halves is never read as part
+        // of either picture.
+        const SEAM: u32 = 8;
+        let mut canvas = image::RgbaImage::from_pixel(
+            width * 2 + SEAM,
+            height,
+            image::Rgba([128, 128, 128, 255]),
+        );
+        image::imageops::replace(&mut canvas, &original, 0, 0);
+        image::imageops::replace(&mut canvas, &converted, i64::from(width + SEAM), 0);
+        if let Err(error) = canvas.save_with_format(out, image::ImageFormat::Png) {
+            fail(1, format!("could not write {}: {error}", out.display()));
+        }
+    }
+    let saving =
+        (source_bytes as f32 - trip.converted_bytes as f32) / source_bytes.max(1) as f32 * 100.;
+    if args.json {
+        let report = CompareReport {
+            schema_version: 1,
+            command: "compare",
+            source: path_text(target),
+            options: ConversionOptions {
+                format: args.format.label(),
+                quality: args.quality.0,
+                max_edge: args.max_edge.0,
+            },
+            format: trip.format.label(),
+            width,
+            height,
+            source_bytes,
+            converted_bytes: trip.converted_bytes,
+            saving_percent: saving,
+            psnr_db: difference,
+            out: args.compare_out.as_deref().map(path_text),
+        };
+        if let Err(error) = write_json(&report) {
+            eprintln!("press: could not write JSON: {error}");
+            return 1;
+        }
+    } else {
+        outln!(
+            "{}  {width}x{height}  {} -> {} {} {}, {} ({:+.0}%), {}",
+            target.display(),
+            format_bytes(source_bytes),
+            trip.format.label(),
+            args.quality.label(),
+            args.max_edge.label(),
+            format_bytes(trip.converted_bytes),
+            -saving,
+            difference.map_or("identical pixels".to_string(), |db| format!(
+                "PSNR {db:.1} dB"
+            ))
+        );
+        if let Some(out) = &args.compare_out {
+            outln!("wrote {} (original left, converted right)", out.display());
+        }
+        outln!("nothing else written");
+    }
+    0
 }
 
 /// Inspect one output file or every regular file below a chosen output folder.
@@ -5600,6 +5784,29 @@ mod tests {
         for (command, ..) in COMMANDS {
             assert!(help(Some(*command)).contains("--help"));
         }
+    }
+
+    #[test]
+    fn psnr_is_none_for_identical_pixels_and_falls_as_they_move() {
+        let base = image::RgbaImage::from_pixel(4, 4, image::Rgba([100, 100, 100, 255]));
+        let near = image::RgbaImage::from_pixel(4, 4, image::Rgba([101, 100, 100, 255]));
+        let far = image::RgbaImage::from_pixel(4, 4, image::Rgba([140, 100, 100, 255]));
+        assert_eq!(psnr(&base, &base), None);
+        let (near, far) = (psnr(&base, &near).unwrap(), psnr(&base, &far).unwrap());
+        assert!(near > far, "{near} > {far}");
+        // One step on one of four channels: MSE 0.25, so 10*log10(255²/0.25).
+        assert!((near - 54.15).abs() < 0.01, "{near}");
+    }
+
+    #[test]
+    fn compare_takes_one_file_and_recipe_options() {
+        let parsed = parse(&["compare", "a.png", "--avif", "--out", "pair.png", "--json"]).unwrap();
+        assert_eq!(parsed.command, Command::Compare);
+        assert_eq!(parsed.compare_out, Some(PathBuf::from("pair.png")));
+        assert!(parse(&["compare", "a.png", "--replace"]).is_err());
+        assert!(parse(&["compare", "a.png", "--output", "x"]).is_err());
+        assert!(parse(&["compare", "a.png", "--target", "recommended=web"]).is_err());
+        assert!(parse(&["convert", "a.png", "--out", "pair.png"]).is_err());
     }
 
     #[test]
