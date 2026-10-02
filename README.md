@@ -84,6 +84,7 @@ press convert ~/path/to/folder --dry-run                 # plan and project, wri
 press convert ~/path/to/folder --only big.png --json     # just these files, same mirror
 press compare ~/photo.jpg --format avif --quality 60 --out pair.png  # size, PSNR, side by side
 press ai remove-background ~/photo.jpg       # local model, PNG into optimized/
+press sirv push ~/path/to/folder --remote /photos --allow-upload  # public; consent each run
 press check ~/path/to/folder --requirements-file ./requirements.json --json
 press update                                    # install the latest signed release
 ```
@@ -111,7 +112,7 @@ The repo includes an Agent Skill at `.agents/skills/press-cli/SKILL.md`, discove
 automatically by Codex when it runs here. Installed builds also carry the same text:
 `press skill` prints it for use by agents in another workspace, and `press skill
 <topic>` prints the pages it keeps out of the core (`plans`, `check`, `handoff`,
-`studio`).
+`studio`, `sirv`).
 
 `press check <file-or-folder> --requirements-file <local-spec> [--json]` inspects
 actual output bytes against one bounded, user-authored requirements snapshot. It

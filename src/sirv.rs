@@ -26,6 +26,17 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// holds files that legitimately take minutes.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(150), Duration::from_millis(500)];
+/// The Sirv API this process talks to. Debug builds honour `PRESS_SIRV_API`, so the
+/// command-line tests can run a push against a loopback server; release builds
+/// ignore it, so stored keys never leave for another host.
+fn api() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(api) = std::env::var("PRESS_SIRV_API") {
+        return api;
+    }
+    API.to_string()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Credentials {
     pub client_id: String,
@@ -727,7 +738,7 @@ impl Client {
             cdn_host: None,
             token_lifetime: DEFAULT_TOKEN_LIFETIME,
             agent: ureq::AgentBuilder::new().timeout(TIMEOUT).build(),
-            api: API.to_string(),
+            api: api(),
         }
     }
 

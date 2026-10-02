@@ -88,6 +88,8 @@ macro_rules! outln {
     };
 }
 
+mod remote_cli;
+
 /// The smallest compositor window that supports every production view.
 const WINDOW_MIN_WIDTH: f32 = 760.;
 const WINDOW_MIN_HEIGHT: f32 = 560.;
@@ -121,6 +123,12 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
         "ai",
         "  press ai <remove-background|upscale> <FILE> [--allow-download] [OPTIONS]\n",
         "Remove a background or upscale 4x with the local AI engine",
+    ),
+    (
+        Command::Sirv,
+        "sirv",
+        "  press sirv <status|push|pull> <FOLDER> [--remote <DIR>] [OPTIONS]\n",
+        "Compare a folder with Sirv by name and size; push or pull the difference",
     ),
     (
         Command::Restore,
@@ -192,6 +200,7 @@ const JSON_COMMANDS: &[Command] = &[
     Command::Convert,
     Command::Compare,
     Command::Ai,
+    Command::Sirv,
     Command::Restore,
     Command::Version,
     Command::Handoff,
@@ -218,7 +227,12 @@ const OPTIONS: &[(&[Command], &str)] = &[
         "  --json                    Write one schema-versioned JSON document\n",
     ),
     (
-        &[Command::Audit, Command::Convert, Command::Plan],
+        &[
+            Command::Audit,
+            Command::Convert,
+            Command::Sirv,
+            Command::Plan,
+        ],
         "  --no-subfolders           Read the folder itself, not the folders below it\n",
     ),
     (
@@ -267,6 +281,14 @@ const OPTIONS: &[(&[Command], &str)] = &[
         "  --dry-run                 Plan and project a conversion, write nothing\n",
     ),
     (
+        &[Command::Sirv],
+        "  --remote <dir>            The Sirv folder to compare with, such as /photos;\n\
+         \x20                           defaults to the folder's pairing in the window\n\
+         \x20 --allow-upload            Let push send files to Sirv, where they are public\n\
+         \x20 --replace-changed         Also replace files whose size differs: on Sirv\n\
+         \x20                           for push, on this computer for pull\n",
+    ),
+    (
         &[Command::Ai],
         "  --allow-download          Let first use download the pinned engine and\n\
          \x20                           model (about 100 MB, checked by SHA-256)\n",
@@ -277,7 +299,7 @@ const OPTIONS: &[(&[Command], &str)] = &[
          \x20                           by side, original on the left\n",
     ),
     (
-        &[Command::Convert],
+        &[Command::Convert, Command::Sirv],
         "  --progress                With --json, name each file on stderr as it\n\
          \x20                           finishes: [done/total] name status\n",
     ),
@@ -445,6 +467,10 @@ const SKILL_TOPICS: &[(&str, &str)] = &[
         include_str!("../.agents/skills/press-cli/references/handoff.md"),
     ),
     (
+        "sirv",
+        include_str!("../.agents/skills/press-cli/references/sirv.md"),
+    ),
+    (
         "studio",
         include_str!("../.agents/skills/press-cli/references/studio.md"),
     ),
@@ -471,6 +497,7 @@ enum Command {
     Convert,
     Compare,
     Ai,
+    Sirv,
     Handoff,
     Check,
     Supplier,
@@ -574,6 +601,11 @@ struct Args {
     /// `ai`: which local tool, and consent to its one-time download.
     ai_tool: Option<crate::local_ai::Tool>,
     allow_download: bool,
+    /// `sirv`: the verb, the remote folder, and consent to upload or replace.
+    sirv_verb: Option<remote_cli::SirvVerb>,
+    sirv_remote: Option<String>,
+    allow_upload: bool,
+    replace_changed: bool,
 }
 
 fn parse_args() -> Args {
@@ -662,6 +694,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut compare_out = None;
     let mut ai_verb = None;
     let mut allow_download = false;
+    let mut sirv_verb = None;
+    let mut sirv_remote = None;
+    let mut allow_upload = false;
+    let mut replace_changed = false;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -669,6 +705,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "convert" if root.is_none() && command == Command::Window => command = Command::Convert,
             "compare" if root.is_none() && command == Command::Window => command = Command::Compare,
             "ai" if root.is_none() && command == Command::Window => command = Command::Ai,
+            "sirv" if root.is_none() && command == Command::Window => command = Command::Sirv,
             "plan" if root.is_none() && command == Command::Window => command = Command::Plan,
             "execute" if root.is_none() && command == Command::Window => command = Command::Execute,
             "reconcile" if root.is_none() && command == Command::Window => {
@@ -875,6 +912,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--grid" => grid = true,
             "--progress" => progress = true,
             "--allow-download" => allow_download = true,
+            "--allow-upload" => allow_upload = true,
+            "--replace-changed" => replace_changed = true,
+            "--remote" => sirv_remote = Some(next_value(&mut rest, "--remote", "a Sirv folder")?),
             "--json" => json = true,
             "--no-subfolders" => subfolders = false,
             "--lossless" => {
@@ -921,6 +961,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 }
             }
             _ if command == Command::Ai && ai_verb.is_none() => ai_verb = Some(argument),
+            _ if command == Command::Sirv && sirv_verb.is_none() => sirv_verb = Some(argument),
             _ if command == Command::Studio => {
                 if studio_verb.is_none() {
                     studio_verb = Some(argument);
@@ -984,6 +1025,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             compare_out: None,
             ai_tool: None,
             allow_download: false,
+            sirv_verb: None,
+            sirv_remote: None,
+            allow_upload: false,
+            replace_changed: false,
             unknown,
         });
     }
@@ -1091,8 +1136,8 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 .into(),
         );
     }
-    if progress && command != Command::Convert {
-        return Err("--progress needs convert".into());
+    if progress && !matches!(command, Command::Convert | Command::Sirv) {
+        return Err("--progress needs convert or sirv".into());
     }
     if progress && !json {
         return Err(
@@ -1259,10 +1304,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     if !subfolders
         && !matches!(
             command,
-            Command::Audit | Command::Convert | Command::Plan | Command::Window
+            Command::Audit | Command::Convert | Command::Sirv | Command::Plan | Command::Window
         )
     {
-        return Err("--no-subfolders needs audit, convert or plan".into());
+        return Err("--no-subfolders needs audit, convert, sirv or plan".into());
     }
     if matches!(command, Command::Skill | Command::Update)
         && ((root.is_some() && command == Command::Update)
@@ -1280,6 +1325,32 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                 "update"
             }
         ));
+    }
+    let sirv_verb = match (command, sirv_verb.as_deref()) {
+        (Command::Sirv, Some(name)) => Some(
+            remote_cli::SirvVerb::named(name)
+                .ok_or_else(|| format!("unknown sirv verb {name:?}"))?,
+        ),
+        (Command::Sirv, None) => return Err("sirv needs a verb: status, push or pull".into()),
+        _ => None,
+    };
+    if (sirv_remote.is_some() || replace_changed) && command != Command::Sirv {
+        return Err("--remote and --replace-changed need sirv".into());
+    }
+    if allow_upload && command != Command::Sirv {
+        return Err("--allow-upload needs sirv".into());
+    }
+    if command == Command::Sirv
+        && (conversion_option
+            || grid
+            || !targets.is_empty()
+            || (allow_upload && sirv_verb != Some(remote_cli::SirvVerb::Push)))
+    {
+        return Err(
+            "sirv takes a verb, one folder, --remote, --no-subfolders, --replace-changed, \
+             --json and, for push, --allow-upload"
+                .into(),
+        );
     }
     if allow_download && command != Command::Ai {
         return Err("--allow-download needs ai".into());
@@ -1438,6 +1509,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         compare_out,
         ai_tool,
         allow_download,
+        sirv_verb,
+        sirv_remote,
+        allow_upload,
+        replace_changed,
         unknown,
     })
 }
@@ -1459,6 +1534,7 @@ fn command_name(command: Command) -> &'static str {
         Command::Convert => "convert",
         Command::Compare => "compare",
         Command::Ai => "ai",
+        Command::Sirv => "sirv",
         Command::Handoff => "handoff",
         Command::Check => "check",
         Command::Supplier => "supplier",
@@ -3349,6 +3425,7 @@ fn main() {
         | Command::Convert
         | Command::Compare
         | Command::Ai
+        | Command::Sirv
         | Command::Restore
         | Command::Plan
         | Command::Execute
@@ -3462,6 +3539,10 @@ fn main() {
 
     if args.command == Command::Compare {
         std::process::exit(compare_headless(&target, &args));
+    }
+
+    if let Some(verb) = args.sirv_verb {
+        std::process::exit(remote_cli::sirv_headless(verb, &target, &args));
     }
 
     if let Some(tool) = args.ai_tool {
@@ -6029,6 +6110,31 @@ mod tests {
         assert!(parse(&["ai"]).is_err());
         assert!(parse(&["ai", "upscale", "a.png", "--avif"]).is_err());
         assert!(parse(&["convert", "a.png", "--allow-download"]).is_err());
+    }
+
+    #[test]
+    fn sirv_takes_a_verb_a_folder_and_per_run_consent() {
+        let parsed = parse(&[
+            "sirv",
+            "push",
+            "photos",
+            "--remote",
+            "/web",
+            "--allow-upload",
+            "--replace-changed",
+        ])
+        .unwrap();
+        assert_eq!(parsed.sirv_verb, Some(remote_cli::SirvVerb::Push));
+        assert_eq!(parsed.sirv_remote.as_deref(), Some("/web"));
+        assert!(parsed.allow_upload && parsed.replace_changed);
+        assert!(
+            parse(&["sirv", "photos"]).is_err(),
+            "a folder is not a verb"
+        );
+        assert!(parse(&["sirv", "pull", "photos", "--allow-upload"]).is_err());
+        assert!(parse(&["sirv", "status", "photos", "--avif"]).is_err());
+        assert!(parse(&["convert", "photos", "--allow-upload"]).is_err());
+        assert!(parse(&["convert", "photos", "--remote", "/web"]).is_err());
     }
 
     #[test]
