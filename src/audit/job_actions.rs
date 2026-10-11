@@ -186,6 +186,26 @@ impl Audit {
             Err(message) => self.notify_error("jobs", "Couldn’t delete the job", message, cx),
         }
     }
+    /// A conversion landed: the mappings of the files it converted take their
+    /// new size and mtime, and the product rows and outdated list re-resolve.
+    /// Only a job already in the library is saved again; a run never creates
+    /// a job file.
+    pub(super) fn after_conversion(&mut self, cx: &mut Context<Self>) {
+        let converted: HashSet<PathBuf> = self
+            .results
+            .keys()
+            .filter_map(|index| Some(self.entries.get(*index)?.path.clone()))
+            .collect();
+        if !self.job_choice_pending()
+            && job::refresh_sources(&mut self.work_job, &converted)
+            && let Some(dir) = job::dir()
+            && job::exists(&dir, &self.work_job.id)
+        {
+            self.persist_job(&dir, cx);
+        }
+        self.refresh_job_states(cx);
+    }
+
     /// Re-resolve roles and staleness off the update path. The landing keeps
     /// the newest dataset's results only.
     pub(super) fn refresh_job_states(&mut self, cx: &mut Context<Self>) {

@@ -630,6 +630,7 @@ impl Audit {
                     audit.converting = false;
                     audit.active_target_count = None;
                     audit.convert_cancel = None;
+                    audit.after_conversion(cx);
                     // A stop clicked as the last file lands converted everything
                     // it was asked to, so it reports like any other finished run.
                     let stopped = cancel.load(Ordering::Acquire)

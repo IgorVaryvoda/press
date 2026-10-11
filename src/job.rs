@@ -1246,6 +1246,37 @@ pub fn relink(job: &mut Job, mapping_id: &str, path: &std::path::Path) -> Result
     Ok(())
 }
 
+/// Re-read size and mtime for the mappings of files a run just converted. The
+/// run consumed those bytes, so the mapping now describes them and the file
+/// stops reading as changed. Returns whether any mapping moved.
+pub fn refresh_sources(
+    job: &mut Job,
+    converted: &std::collections::HashSet<std::path::PathBuf>,
+) -> bool {
+    let mut moved = false;
+    for mapping in job
+        .products
+        .iter_mut()
+        .flat_map(|product| product.mappings.iter_mut())
+        .filter(|mapping| converted.contains(&mapping.source.path))
+    {
+        let Ok(metadata) = std::fs::metadata(&mapping.source.path) else {
+            continue;
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|age| age.as_secs());
+        if (mapping.source.bytes, mapping.source.modified) != (metadata.len(), modified) {
+            mapping.source.bytes = metadata.len();
+            mapping.source.modified = modified;
+            moved = true;
+        }
+    }
+    moved
+}
+
 /// Normalize a file stem for matching: lowercase, separators to one dash.
 fn stem_key(name: &str) -> String {
     let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
@@ -1529,19 +1560,22 @@ pub fn stale_deliverables(
                 let Ok(relative) = source.path.strip_prefix(root) else {
                     continue;
                 };
-                let outputs: Vec<&crate::manifest::Record> = manifest
-                    .outputs
-                    .iter()
-                    .filter(|record| record.source.as_path() == relative)
-                    .collect();
-                if outputs.is_empty() {
-                    continue;
-                }
-                // Already confined by the resolve above: no second stat that
-                // could disagree with the status the row shows.
-                let current = source.status;
+                // Only the newest line per output describes it: an older run's
+                // line for a file a later run rewrote is history, not a loss.
+                let mut seen = std::collections::HashSet::new();
+                let outputs = manifest.outputs.iter().rev().filter(|record| {
+                    record.source.as_path() == relative
+                        && seen.insert(crate::convert::path_key(&record.output))
+                        && !record.void
+                });
                 for record in outputs {
                     let output = out_dir.join(&record.output);
+                    // The recorded source hash is the authority when there is
+                    // one: a rerun from the new bytes is current again. Older
+                    // lines fall back to the mapping's size and mtime.
+                    let changed = record
+                        .source_matches(&source.path)
+                        .map_or(source.status != SourceStatus::Fresh, |same| !same);
                     if !record.installed(&output) {
                         stale.push(StaleDeliverable {
                             product_id: state.product_id.clone(),
@@ -1550,7 +1584,7 @@ pub fn stale_deliverables(
                             output,
                             reason: StaleReason::OutputGone,
                         });
-                    } else if current != SourceStatus::Fresh {
+                    } else if changed {
                         stale.push(StaleDeliverable {
                             product_id: state.product_id.clone(),
                             role_id: state.role_id.clone(),

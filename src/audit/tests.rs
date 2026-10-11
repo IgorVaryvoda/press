@@ -7105,6 +7105,22 @@ fn job_stale_sources_select_for_regeneration(cx: &mut TestAppContext) {
         cx.debug_bounds("rail").is_some(),
         "selecting stale keeps the rail"
     );
+    // Converting the edited file delivers its new bytes: nothing is outdated
+    // any more, and the mapping describes the file it now points at.
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert!(audit.work_stale.is_empty(), "{:?}", audit.work_stale);
+        assert!(
+            audit
+                .work_states
+                .iter()
+                .flat_map(|state| &state.sources)
+                .all(|source| source.status == crate::job::SourceStatus::Fresh),
+            "{:?}",
+            audit.work_states
+        );
+    });
     let root = audit.read_with(cx, |audit, _| audit.root.clone());
     let _ = std::fs::remove_dir_all(root);
 }
