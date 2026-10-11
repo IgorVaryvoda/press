@@ -7058,46 +7058,6 @@ fn clicking_cancel_closes_the_export_review_and_restores_list_focus(cx: &mut Tes
     );
 }
 
-/// Binding the selected recipe records the job's target and persists it;
-/// with nothing selected the job keeps no target instead of inventing one.
-#[gpui_kit::test]
-fn job_target_binds_the_selected_recipe(cx: &mut TestAppContext) {
-    let (audit, cx) = convertible_audit(1, cx);
-    let dir = std::env::temp_dir().join(format!("press-gui-jobs-target-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    audit.update_in(cx, |audit, window, cx| {
-        audit.product_name_input.update(cx, |input, cx| {
-            input.set_value("Hero", window, cx);
-        });
-        audit.add_product(&dir, cx);
-    });
-    // Nothing selected: the refusal leaves the job untargeted.
-    audit.update(cx, |audit, cx| {
-        audit.bind_current_recipe_as_target(&dir, cx)
-    });
-    audit.read_with(cx, |audit, _| {
-        assert_eq!(audit.work_job.target_recipe, None);
-    });
-    audit.update(cx, |audit, _| {
-        audit.selected_recipe = Some("night".to_string());
-    });
-    audit.update(cx, |audit, cx| {
-        audit.bind_current_recipe_as_target(&dir, cx)
-    });
-    audit.read_with(cx, |audit, _| {
-        assert_eq!(audit.work_job.target_recipe.as_deref(), Some("night"));
-    });
-    // The binding survives the file round trip; clearing drops it.
-    let root = audit.read_with(cx, |audit, _| audit.root.clone());
-    let reloaded = job_actions::load_job_for_in(&dir, &root);
-    assert_eq!(reloaded.target_recipe.as_deref(), Some("night"));
-    audit.update(cx, |audit, cx| audit.clear_job_target(&dir, cx));
-    audit.read_with(cx, |audit, _| {
-        assert_eq!(audit.work_job.target_recipe, None);
-    });
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 /// Edit a converted source and only its deliverable goes stale; selecting
 /// stale ticks exactly the outdated file for regeneration.
 #[gpui_kit::test]

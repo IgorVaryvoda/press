@@ -1303,14 +1303,6 @@ impl Audit {
 
     /// The bound target's display name from loaded recipes. A bound id with
     /// no recipe stays visible as missing: preparation refuses it by name.
-    fn job_target_label(&self) -> String {
-        match crate::job::resolve_target(&self.work_job, &self.recipes) {
-            Ok(None) => "No target".to_string(),
-            Ok(Some(recipe)) => recipe.name.clone(),
-            Err(message) => message,
-        }
-    }
-
     fn job_export_preview_row(
         &self,
         draft: &crate::job::ExportDraft,
@@ -1609,50 +1601,6 @@ impl Audit {
                         "Group this folder's images by product, and give each group the \
                          settings and destinations its pictures need. Conversion works \
                          without any of this.",
-                    )
-            }))
-            .children(open.then(|| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .debug_selector(|| "sets-target".into())
-                            .child(format!("Settings: {}", self.job_target_label())),
-                    )
-                    .child(
-                        Button::new("sets-target-current")
-                            .small()
-                            .ghost()
-                            .label("Use current")
-                            .disabled(edit_disabled)
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                let Some(dir) = audit.job_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.bind_current_recipe_as_target(&dir, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sets-target-clear")
-                            .small()
-                            .ghost()
-                            .label("Clear")
-                            .disabled(edit_disabled || self.work_job.target_recipe.is_none())
-                            .on_click(cx.listener(|audit, _, _, cx| {
-                                let Some(dir) = audit.job_dir_or_notify(cx) else {
-                                    return;
-                                };
-                                audit.clear_job_target(&dir, cx);
-                            })),
                     )
             }))
             .children(open.then(|| {

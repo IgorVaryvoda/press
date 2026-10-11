@@ -186,34 +186,6 @@ impl Audit {
             Err(message) => self.notify_error("jobs", "Couldn’t delete the job", message, cx),
         }
     }
-    /// Bind the selected personal recipe as the job's target. Existence is
-    /// checked at prepare time, not here: a deleted recipe must refuse by
-    /// name rather than silently convert with current settings.
-    pub(super) fn bind_current_recipe_as_target(&mut self, dir: &Path, cx: &mut Context<Self>) {
-        if self.converting || self.job_choice_pending() {
-            return;
-        }
-        let Some(id) = self.selected_recipe.clone() else {
-            self.notify_error(
-                "jobs",
-                "Couldn’t set the target",
-                "select a personal recipe first",
-                cx,
-            );
-            return;
-        };
-        self.mutate_job(dir, cx, move |job| crate::job::bind_target(job, Some(&id)));
-    }
-
-    /// Clear the bound target. Conversion keeps using the current settings;
-    /// the job just stops naming a recipe.
-    pub(super) fn clear_job_target(&mut self, dir: &Path, cx: &mut Context<Self>) {
-        if self.converting {
-            return;
-        }
-        self.mutate_job(dir, cx, |job| crate::job::bind_target(job, None));
-    }
-
     /// Re-resolve roles and staleness off the update path. The landing keeps
     /// the newest dataset's results only.
     pub(super) fn refresh_job_states(&mut self, cx: &mut Context<Self>) {

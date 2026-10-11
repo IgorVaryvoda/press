@@ -1048,16 +1048,6 @@ pub fn resolve_product(product: &ProductSet, root: &std::path::Path) -> Vec<Role
         .collect()
 }
 
-/// Bind or clear the job's target recipe. The id is recorded, never applied:
-/// preparation resolves it and refuses a missing one by name instead of
-/// silently converting with whatever is selected.
-pub fn bind_target(job: &mut Job, recipe_id: Option<&str>) {
-    job.target_recipe = recipe_id
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string);
-}
-
 /// Resolve the bound target against known recipes. A bound id with no recipe
 /// refuses with its name rather than falling back to current settings.
 pub fn resolve_target<'a>(
@@ -1899,13 +1889,9 @@ mod tests {
     #[test]
     fn bound_targets_resolve_and_missing_ones_refuse_by_name() {
         let mut job = job();
-        bind_target(&mut job, None);
+        job.target_recipe = None;
         assert_eq!(resolve_target(&job, &[]).unwrap(), None);
-        bind_target(&mut job, Some("  night  "));
-        assert_eq!(job.target_recipe.as_deref(), Some("night"));
-        bind_target(&mut job, Some("   "));
-        assert_eq!(job.target_recipe, None);
-        bind_target(&mut job, Some("night"));
+        job.target_recipe = Some("night".into());
         let night = crate::recipe::Recipe {
             schema: crate::recipe::SCHEMA_VERSION,
             id: "night".into(),
