@@ -13,7 +13,6 @@ mod local_ai_actions;
 mod media;
 mod panel;
 pub(crate) use panel::BAR_CLEARANCE;
-mod plan_actions;
 mod recipe_actions;
 mod sirv_actions;
 mod sirv_view;
@@ -468,18 +467,6 @@ pub(crate) struct Audit {
     delivery_progress: HashMap<String, convert_job::DeliveryOutcome>,
     /// The product-set block folds closed: it is a second job, not a setting.
     sets_open: bool,
-    /// The saved-plan block folds closed for the same reason.
-    plan_open: bool,
-    /// The plan file the window has in hand, saved or opened.
-    plan_work: Option<plan_actions::PlanWork>,
-    /// What the last plan command reported, in one line under the heading.
-    plan_status: Option<String>,
-    /// Set while a plan runs on the executor. Storing `true` stops it between
-    /// files; a landing that does not own this token is a run the window has
-    /// already left behind.
-    plan_cancel: Option<Arc<AtomicBool>>,
-    /// Items the running plan has finished, as its watcher counted them.
-    plan_done: usize,
     /// The open panel's width, as its grab edge left it. Remembered.
     rail_size: f32,
     /// The grab edge is held: the workspace sizes the panel from the pointer.
@@ -1449,16 +1436,6 @@ impl Audit {
         if let Some(job) = self.studio_job.take() {
             job.cancelled.store(true, Ordering::Relaxed);
         }
-        // A saved plan binds to one source root. Replacing the dataset replaces
-        // that root, so a running plan stops between files and the plan in hand
-        // retires with it: leaving the token behind would also leave the window
-        // believing a run it can no longer land is still going.
-        if let Some(cancel) = self.plan_cancel.take() {
-            cancel.store(true, Ordering::Release);
-        }
-        self.plan_work = None;
-        self.plan_status = None;
-        self.plan_done = 0;
         self.studio_source = None;
         self.root = root;
         // Product sets follow the folder, not the run. Multiple saved jobs
@@ -2125,11 +2102,7 @@ impl Audit {
     /// makes the report truthful: the files that came back are named, and so are
     /// the ones that could not.
     pub(super) fn restore_originals(&mut self, cx: &mut Context<Self>) {
-        if self.files_in_motion()
-            || self.plan_busy()
-            || self.scan_blocks_delivery()
-            || self.restorable == 0
-        {
+        if self.files_in_motion() || self.scan_blocks_delivery() || self.restorable == 0 {
             return;
         }
         self.clear_error("restore", cx);
@@ -2688,11 +2661,6 @@ pub(crate) fn build_audit(
             recipe_prompt: None,
             delivery_progress: HashMap::new(),
             sets_open: false,
-            plan_open: false,
-            plan_work: None,
-            plan_status: None,
-            plan_cancel: None,
-            plan_done: 0,
             rail_size: rail_width.map_or(panel::RAIL_WIDTH, |width| {
                 width.clamp(panel::RAIL_MIN, panel::RAIL_MAX)
             }),

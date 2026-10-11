@@ -732,6 +732,10 @@ takes a watcher that sees each finished item and answers whether to continue;
 the command line passes one that always continues. Opening another folder
 retires the plan in hand and asks its run to stop.
 
+**Withdrawn 2026-10-11.** The window section is removed; saved plans are a
+command-line contract (`plan`, `execute`, `reconcile`) for agents and scripts.
+The `watch` parameter on `saved_plan::execute` stays for a future caller.
+
 **Review findings closed in this landing.**
 
 | Finding | What changed |

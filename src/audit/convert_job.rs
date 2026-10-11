@@ -215,7 +215,7 @@ impl Audit {
     /// earlier run, at these settings, from these bytes, is left alone. A target
     /// that owes nothing says so instead of re-encoding the folder.
     pub(super) fn regenerate_delivery_target(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.converting || self.plan_busy() {
+        if self.converting {
             return;
         }
         let deliveries = match self.delivery_runs() {
@@ -307,7 +307,6 @@ impl Audit {
         if self.files_in_motion()
             || self.local_ai_busy()
             || self.studio_busy()
-            || self.plan_busy()
             || self.scan_blocks_delivery()
         {
             return;
