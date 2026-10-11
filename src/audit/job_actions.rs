@@ -671,6 +671,61 @@ impl Audit {
         cx.notify();
     }
 
+    /// Tick the files of every product whose required roles all have their
+    /// files on disk, so Convert delivers whole products. A product with a
+    /// required role unmapped or missing stays unticked and is named: a half
+    /// product is not quietly delivered as if it were complete.
+    pub(super) fn select_complete_products(&mut self, cx: &mut Context<Self>) {
+        use crate::job::{RoleStatus, SourceStatus};
+        let rows: HashMap<&Path, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.path.as_path(), index))
+            .collect();
+        let mut selected = HashSet::new();
+        let mut incomplete = Vec::new();
+        for product in &self.work_job.products {
+            let states: Vec<_> = self
+                .work_states
+                .iter()
+                .filter(|state| state.product_id == product.id)
+                .collect();
+            let gap = states.iter().any(|state| {
+                state.required && matches!(state.status, RoleStatus::Unmapped | RoleStatus::Missing)
+            });
+            if gap {
+                incomplete.push(product.name.clone());
+                continue;
+            }
+            for source in states.iter().flat_map(|state| &state.sources) {
+                if source.status != SourceStatus::Missing
+                    && let Some(index) = rows.get(source.path.as_path())
+                {
+                    selected.insert(*index);
+                }
+            }
+        }
+        let count = selected.len();
+        self.selected = selected;
+        self.selection_changed(cx);
+        let title = format!(
+            "Selected {count} file{} from complete products",
+            if count == 1 { "" } else { "s" }
+        );
+        if incomplete.is_empty() {
+            self.notify_success("jobs", title, "Every product has its required views.", cx);
+        } else {
+            self.notify_error(
+                "jobs",
+                title,
+                format!("Missing a required view: {}.", incomplete.join(", ")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     /// Import a mapping sheet through a picker. Outcomes report per row: what
     /// mapped, what needs a choice, and what names nothing on disk.
     pub(super) fn import_csv_file(&mut self, cx: &mut Context<Self>) {

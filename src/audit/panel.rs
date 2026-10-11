@@ -1598,9 +1598,9 @@ impl Audit {
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(
-                        "Group this folder's images by product, and give each group the \
-                         settings and destinations its pictures need. Conversion works \
-                         without any of this.",
+                        "Group this folder's images by product. A mapped file converts to \
+                         <SKU>_<role>, once per delivery target. Conversion works without \
+                         any of this.",
                     )
             }))
             .children(open.then(|| {
@@ -1640,6 +1640,19 @@ impl Audit {
                     )
             }))
             .children(open.then_some(products).into_iter().flatten())
+            .children((open && !self.work_job.products.is_empty()).then(|| {
+                Button::new("sets-select-complete")
+                    .debug_selector(|| "sets-select-complete".into())
+                    .small()
+                    .outline()
+                    .w_full()
+                    .label("Select complete products")
+                    .tooltip("Tick every file of each product that has all its required views")
+                    .disabled(edit_disabled)
+                    .on_click(cx.listener(|audit, _, _, cx| {
+                        audit.select_complete_products(cx);
+                    }))
+            }))
             .children((open && !self.work_stale.is_empty()).then(|| {
                 div()
                     .flex()

@@ -7109,6 +7109,41 @@ fn job_stale_sources_select_for_regeneration(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Only products with every required view get ticked; the one without its
+/// main image stays out and does not pull in a stranger's file.
+#[gpui_kit::test]
+fn selecting_complete_products_leaves_out_a_product_missing_a_required_view(
+    cx: &mut TestAppContext,
+) {
+    let (audit, cx) = convertible_audit(2, cx);
+    let dir = std::env::temp_dir().join(format!("press-gui-jobs-complete-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for name in ["Hero", "Bare"] {
+        audit.update_in(cx, |audit, window, cx| {
+            audit.product_name_input.update(cx, |input, cx| {
+                input.set_value(name, window, cx);
+            });
+            audit.add_product(&dir, cx);
+        });
+    }
+    audit.update(cx, |audit, cx| {
+        audit.selected = std::collections::HashSet::from([0]);
+        audit.map_selected(&dir, "hero", "main", cx);
+        audit.selected = std::collections::HashSet::from([1]);
+        audit.map_selected(&dir, "bare", "detail", cx);
+        audit.refresh_job_states(cx);
+    });
+    cx.run_until_parked();
+
+    audit.update(cx, |audit, cx| audit.select_complete_products(cx));
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.selected, std::collections::HashSet::from([0]));
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_stopped_run_says_how_far_it_got_rather_than_how_many_failed() {
     let stopped = panel::conversion_result_state(Some(36), 12, 0);
