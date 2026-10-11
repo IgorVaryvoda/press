@@ -115,6 +115,7 @@ These commands have their own pages. Read the page only when the task needs it: 
 | Topic | When |
 |---|---|
 | `plans` | Save a conversion plan for review, then execute or reconcile it (`press plan`, `execute`, `reconcile`) |
+| `jobs` | Read the window's product sets, or convert and plan with product and view names (`press job`, `--job`) |
 | `check` | Inspect output bytes against a local requirements snapshot (`press check`) |
 | `handoff` | Map an ImageGuide findings report to local files (`press handoff`) |
 | `sirv` | Compare a folder with Sirv, then push or pull the difference (`press sirv`) |

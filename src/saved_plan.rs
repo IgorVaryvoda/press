@@ -140,6 +140,11 @@ pub struct PlanSource {
     pub height: u32,
     pub format: String,
     pub checks: Vec<Check>,
+    /// The stem a product-set job gives this file (`<sku>_<role>`), written
+    /// directly under each target's folder instead of the mirrored path.
+    /// Absent on plans without a job, which keep their digest unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -331,6 +336,14 @@ impl Plan {
             if source.width == 0 || source.height == 0 {
                 return Err(format!("source {:?} has invalid dimensions", source.source));
             }
+            if let Some(name) = &source.output_name
+                && (!crate::job::portable_component(name) || name.contains('.'))
+            {
+                return Err(format!(
+                    "source {:?} has an unsafe output name {name:?}",
+                    source.source
+                ));
+            }
         }
         let mut target_ids = std::collections::HashSet::new();
         for target in &self.targets {
@@ -493,6 +506,7 @@ pub fn build(
     scan_errors: usize,
     mut targets: Vec<TargetInput>,
     requirements: Option<&crate::requirements::RequirementsSnapshot>,
+    names: &std::collections::HashMap<PathBuf, Vec<String>>,
 ) -> Result<Plan, String> {
     if scan_errors != 0 {
         return Err(format!(
@@ -549,7 +563,21 @@ pub fn build(
                 ),
             },
         };
+        // A plan has one output per file and target; a file a job maps under
+        // two roles is refused by name rather than delivered under one of them.
+        let output_name = match names.get(&entry.path).map(Vec::as_slice) {
+            None | Some([]) => None,
+            Some([name]) => Some(name.clone()),
+            Some(several) => {
+                return Err(format!(
+                    "source {source:?} serves {} roles in the job; a saved plan delivers one \
+                     output per file, so map it once or use press convert --job",
+                    several.len()
+                ));
+            }
+        };
         sources.push(PlanSource {
+            output_name,
             item_id: hex_digest(format!("item|{source}").as_bytes()),
             source,
             bytes: identity.bytes,
@@ -599,8 +627,18 @@ pub fn build(
             manifest: &recorded,
         };
         let (format, _, _) = target.recipe.settings()?;
-        let planned =
-            crate::convert::plan_outputs(root, &source_paths, &source_paths, &destination, format);
+        let source_names: Vec<Option<String>> = sources
+            .iter()
+            .map(|source| source.output_name.clone())
+            .collect();
+        let planned = crate::convert::plan_outputs_named(
+            root,
+            &source_paths,
+            &source_paths,
+            &destination,
+            format,
+            &source_names,
+        );
         let mappings = sources
             .iter()
             .zip(planned)
@@ -1775,12 +1813,18 @@ fn validate_mappings(plan: &Plan, source_root: &Path, output_root: &Path) -> Res
             manifest: &recorded,
         };
         let (format, _, _) = target.recipe.settings()?;
-        let current = crate::convert::plan_outputs(
+        let source_names: Vec<Option<String>> = plan
+            .sources
+            .iter()
+            .map(|source| source.output_name.clone())
+            .collect();
+        let current = crate::convert::plan_outputs_named(
             source_root,
             &source_paths,
             &source_paths,
             &destination,
             format,
+            &source_names,
         );
         for (source, actual) in plan.sources.iter().zip(current) {
             let expected = target
@@ -2164,6 +2208,7 @@ mod tests {
             height: 8,
             format: "png".into(),
             checks: Vec::new(),
+            output_name: None,
         }
     }
 

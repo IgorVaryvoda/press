@@ -156,6 +156,13 @@ const COMMANDS: &[(Command, &str, &str, &str)] = &[
         "Repair a saved plan receipt from installed outputs",
     ),
     (
+        Command::Job,
+        "job",
+        "  press job list [--json]\n\
+         \x20 press job show <ID> [--json]\n",
+        "List saved product-set jobs, or show one job's products and views",
+    ),
+    (
         Command::Handoff,
         "handoff",
         "  press handoff <FILE>\n",
@@ -211,6 +218,7 @@ const JSON_COMMANDS: &[Command] = &[
     Command::Plan,
     Command::Execute,
     Command::Reconcile,
+    Command::Job,
 ];
 const RECIPE_COMMANDS: &[Command] = &[Command::Convert, Command::Compare, Command::Plan];
 const PLAN_COMMANDS: &[Command] = &[
@@ -329,6 +337,11 @@ const OPTIONS: &[(&[Command], &str)] = &[
         &[Command::Convert, Command::Plan],
         "  --target <recipe>=<dir>   Convert once more with a saved recipe into\n\
          \x20                           its own folder; repeatable, convert or plan\n",
+    ),
+    (
+        &[Command::Convert, Command::Plan],
+        "  --job <id>                Name mapped files <SKU>_<role> and deliver the\n\
+         \x20                           saved job's targets; see press job list\n",
     ),
     (
         RECIPE_COMMANDS,
@@ -482,6 +495,10 @@ const SKILL_TOPICS: &[(&str, &str)] = &[
         "studio",
         include_str!("../.agents/skills/press-cli/references/studio.md"),
     ),
+    (
+        "jobs",
+        include_str!("../.agents/skills/press-cli/references/jobs.md"),
+    ),
 ];
 
 /// A persisted size can be absent or corrupted. Keep restore policy pure so native
@@ -514,6 +531,7 @@ enum Command {
     Plan,
     Execute,
     Reconcile,
+    Job,
     Skill,
     Update,
     Help,
@@ -618,6 +636,16 @@ struct Args {
     /// alt text reads.
     allow_spend: bool,
     studio_url: Option<String>,
+    /// `convert --job` and `plan --job`: a saved product-set job whose
+    /// products name the outputs and whose targets, when it has any, are the
+    /// run's targets.
+    job: Option<String>,
+    /// Whether the command line set format, quality, edge, speed or a preset
+    /// file. A job's recipe targets refuse them rather than ignore them.
+    explicit_settings: bool,
+    /// `job`: the verb (`list` or `show`) and, for `show`, the job id.
+    job_verb: Option<String>,
+    job_name: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -712,6 +740,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     let mut allow_spend = false;
     let mut studio_url = None;
     let mut replace_changed = false;
+    let mut job = None;
+    let mut job_verb = None;
+    let mut job_name = None;
 
     while let Some(argument) = rest.next() {
         match argument.as_str() {
@@ -725,6 +756,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "reconcile" if root.is_none() && command == Command::Window => {
                 command = Command::Reconcile
             }
+            "job" if root.is_none() && command == Command::Window => command = Command::Job,
             "restore" if root.is_none() && command == Command::Window => command = Command::Restore,
             "handoff" if root.is_none() && command == Command::Window => command = Command::Handoff,
             "check" if root.is_none() && command == Command::Window => command = Command::Check,
@@ -909,6 +941,9 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             "--reinstate-cancelled" => reinstate_cancelled = true,
             "--retry-failed" => retry_failed = true,
             "--cancel" => cancel = true,
+            "--job" if matches!(command, Command::Convert | Command::Plan) => {
+                job = Some(next_value(&mut rest, "--job", "a saved job id")?);
+            }
             "--target" => {
                 let value =
                     next_value(&mut rest, "--target", "a recipe and folder like night=web")?;
@@ -976,6 +1011,15 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
                     supplier_attempt = Some(argument);
                 } else {
                     return Err("supplier takes a folder, a verb and at most an attempt id".into());
+                }
+            }
+            _ if command == Command::Job => {
+                if job_verb.is_none() {
+                    job_verb = Some(argument);
+                } else if job_name.is_none() {
+                    job_name = Some(argument);
+                } else {
+                    return Err("job takes a verb and at most a job id".into());
                 }
             }
             _ if command == Command::Ai && ai_verb.is_none() => ai_verb = Some(argument),
@@ -1049,6 +1093,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
             replace_changed: false,
             allow_spend: false,
             studio_url: None,
+            job: None,
+            explicit_settings: false,
+            job_verb: None,
+            job_name: None,
             unknown,
         });
     }
@@ -1146,6 +1194,38 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
     }
     if command == Command::Check && requirements_file.is_none() {
         return Err("check needs --requirements-file <file>".into());
+    }
+    if command == Command::Job {
+        let extra = conversion_option
+            || grid
+            || !subfolders
+            || output.is_some()
+            || preset.is_some()
+            || map_root.is_some()
+            || plan_root.is_some()
+            || plan_file.is_some()
+            || requirements_file.is_some()
+            || !targets.is_empty()
+            || replace
+            || skip_existing
+            || dry_run;
+        match (job_verb.as_deref(), job_name.is_some()) {
+            _ if extra => return Err("job takes a verb, a job id for show, and --json".into()),
+            (Some("list"), false) | (Some("show"), true) => {}
+            (Some("list"), true) => return Err("job list takes no job id".into()),
+            (Some("show"), false) => return Err("job show needs a job id".into()),
+            (Some(verb), _) => return Err(format!("unknown job verb {verb:?}")),
+            (None, _) => return Err("job needs a verb: list or show".into()),
+        }
+    }
+    if job.is_some() && !targets.is_empty() {
+        return Err("--job delivers the job's own targets; --target needs a plain convert".into());
+    }
+    if job.is_some() && replace {
+        return Err(
+            "--job names outputs by product and role; replace mode keeps each original's name"
+                .into(),
+        );
     }
     if !targets.is_empty() && !matches!(command, Command::Convert | Command::Plan) {
         return Err("--target needs convert or plan".into());
@@ -1535,6 +1615,7 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         }
     }
 
+    let explicit_settings = format_set || quality_set || edge_set || speed_set || preset.is_some();
     Ok(Args {
         root,
         command,
@@ -1585,6 +1666,10 @@ fn parse_args_from(mut rest: impl Iterator<Item = String>) -> Result<Args, Strin
         replace_changed,
         allow_spend,
         studio_url,
+        job,
+        explicit_settings,
+        job_verb,
+        job_name,
         unknown,
     })
 }
@@ -1602,6 +1687,7 @@ fn command_name(command: Command) -> &'static str {
         Command::Plan => "plan",
         Command::Execute => "execute",
         Command::Reconcile => "reconcile",
+        Command::Job => "job",
         Command::Audit => "audit",
         Command::Convert => "convert",
         Command::Compare => "compare",
@@ -2996,30 +3082,32 @@ fn convert_targets(
     root: &Path,
     out_dir: &Path,
     unread: usize,
+    job: Option<&crate::job::Job>,
+    names: &std::collections::HashMap<PathBuf, Vec<String>>,
 ) -> ! {
     let library = target_library();
-    let job_targets: Vec<crate::job::JobTarget> = args
-        .targets
-        .iter()
-        .map(|spec| crate::job::JobTarget {
-            id: spec.recipe.clone(),
-            name: spec.recipe.clone(),
-            recipe: Some(spec.recipe.clone()),
-            // A command-line target resolves its recipe for this run only.
-            recipe_snapshot: None,
-            out: spec.out.clone(),
-        })
-        .collect();
+    let job_targets = cli_targets(args, job);
+    let refuse = |message: String| -> ! { command_error("convert", message, args.json, 2) };
+    if args.explicit_settings && job_targets.iter().any(|target| target.recipe.is_some()) {
+        refuse(
+            "targets carry their own recipes: explicit conversion options need a plain convert"
+                .into(),
+        );
+    }
+    if let Err(message) = crate::job::validate_target_namespaces(&job_targets) {
+        refuse(message);
+    }
     let prepared = match crate::job::prepare_targets(&job_targets, &library) {
         Ok(prepared) => prepared,
-        Err(message) => command_error("convert", message, args.json, 2),
+        Err(message) => refuse(message),
     };
-    let audited: Vec<&Entry> = scanned.entries.iter().collect();
+    let all: Vec<&Entry> = scanned.entries.iter().collect();
     let sources: Vec<PathBuf> = scanned
         .entries
         .iter()
         .map(|entry| entry.path.clone())
         .collect();
+    let (audited, row_sources, chosen) = named_rows(&all, names);
     let mut sections = Vec::new();
     let ambient_speed = avif::configured_speed();
     for prepared in &prepared {
@@ -3049,7 +3137,14 @@ fn convert_targets(
             backups: None,
             manifest: &recorded_t,
         };
-        let planned_t = convert::plan_outputs(root, &sources, &sources, &destination_t, format);
+        let planned_t = convert::plan_outputs_named(
+            root,
+            &row_sources,
+            &sources,
+            &destination_t,
+            format,
+            &chosen,
+        );
         // `configured_speed` is the manifest representation. An explicit
         // default speed is equivalent to no setting, so use the normalized
         // value after setting the process-wide encoder dial.
@@ -3093,7 +3188,7 @@ fn convert_targets(
                 quality: quality.0,
                 max_edge: max_edge.0,
             },
-            summary: target_summary(scanned.entries.len(), &queued_t, &run_t, args.dry_run),
+            summary: target_summary(audited.len(), &queued_t, &run_t, args.dry_run),
             files: std::mem::take(&mut run_t.files),
         });
     }
@@ -3167,14 +3262,36 @@ fn convert_targets(
     std::process::exit(if failed + unread == 0 { 0 } else { 1 });
 }
 
-fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, String> {
+/// The run's targets: `--target` specs, each resolving its recipe for this run
+/// only, or else the `--job`'s saved targets with their pinned snapshots.
+fn cli_targets(args: &Args, job: Option<&crate::job::Job>) -> Vec<crate::job::JobTarget> {
+    if args.targets.is_empty() {
+        return job.map(|job| job.targets.clone()).unwrap_or_default();
+    }
+    args.targets
+        .iter()
+        .map(|spec| crate::job::JobTarget {
+            id: spec.recipe.clone(),
+            name: spec.recipe.clone(),
+            recipe: Some(spec.recipe.clone()),
+            recipe_snapshot: None,
+            out: spec.out.clone(),
+        })
+        .collect()
+}
+
+fn saved_plan_targets(
+    args: &Args,
+    job: Option<&crate::job::Job>,
+) -> Result<Vec<saved_plan::TargetInput>, String> {
     // A headless command runs on `Settings::default()`, never on the settings
     // file. Reading that file here would put a speed in the plan's recipe
     // fingerprint that `press convert` on the same machine never uses, and the
     // two would then refuse each other's outputs over a number that changes no
     // bytes at all outside AVIF.
     let configured_speed = args.avif_speed.map(|speed| speed.min(10));
-    if args.targets.is_empty() {
+    let job_targets = cli_targets(args, job);
+    if job_targets.is_empty() {
         return Ok(vec![saved_plan::TargetInput {
             id: "default".into(),
             out: String::new(),
@@ -3186,27 +3303,23 @@ fn saved_plan_targets(args: &Args) -> Result<Vec<saved_plan::TargetInput>, Strin
             ),
         }]);
     }
+    if args.explicit_settings && job_targets.iter().any(|target| target.recipe.is_some()) {
+        return Err(
+            "targets carry their own recipes: explicit conversion options need a plain plan".into(),
+        );
+    }
+    crate::job::validate_target_namespaces(&job_targets)?;
     let library = target_library();
-    let job_targets: Vec<crate::job::JobTarget> = args
-        .targets
-        .iter()
-        .map(|target| crate::job::JobTarget {
-            id: target.recipe.clone(),
-            name: target.recipe.clone(),
-            recipe: Some(target.recipe.clone()),
-            // A command-line target resolves its recipe for this run only.
-            recipe_snapshot: None,
-            out: target.out.clone(),
-        })
-        .collect();
     let prepared = crate::job::prepare_targets(&job_targets, &library)?;
     prepared
         .into_iter()
         .map(|target| {
-            let recipe = target
+            // A job target that names no recipe runs the command's settings.
+            let (format, quality, max_edge, speed) = target
                 .recipe
-                .ok_or_else(|| format!("target {:?} has no resolved recipe", target.id))?;
-            let (format, quality, max_edge, speed) = recipe.effective();
+                .map_or((args.format, args.quality, args.max_edge, None), |recipe| {
+                    recipe.effective()
+                });
             Ok(saved_plan::TargetInput {
                 id: target.id,
                 out: saved_plan::portable_relative(&target.out)?,
@@ -3294,6 +3407,245 @@ fn command_error(command: &str, error: String, json: bool, code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// The saved job `--job` names, from the same library the window saves to.
+fn saved_job(id: &str) -> Result<crate::job::Job, String> {
+    let dir = crate::job::dir().ok_or("no config folder resolves, so no saved jobs exist")?;
+    crate::job::load(&dir, id)
+}
+
+/// The job's output names keyed by canonical source path. A job records the
+/// window's paths; the command line may reach the same files another way.
+fn job_names(job: &crate::job::Job) -> std::collections::HashMap<PathBuf, Vec<String>> {
+    crate::job::output_names(job)
+        .into_iter()
+        .map(|(path, stems)| (std::fs::canonicalize(&path).unwrap_or(path), stems))
+        .collect()
+}
+
+/// One row per output: an entry the job does not name once, an entry it
+/// names under several roles once per name.
+fn named_rows<'a>(
+    entries: &[&'a Entry],
+    names: &std::collections::HashMap<PathBuf, Vec<String>>,
+) -> (Vec<&'a Entry>, Vec<PathBuf>, Vec<Option<String>>) {
+    let mut rows = Vec::with_capacity(entries.len());
+    let mut sources = Vec::with_capacity(entries.len());
+    let mut chosen = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = std::fs::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.clone());
+        match names.get(&key) {
+            Some(stems) => {
+                for stem in stems {
+                    rows.push(*entry);
+                    sources.push(entry.path.clone());
+                    chosen.push(Some(stem.clone()));
+                }
+            }
+            None => {
+                rows.push(*entry);
+                sources.push(entry.path.clone());
+                chosen.push(None);
+            }
+        }
+    }
+    (rows, sources, chosen)
+}
+
+/// `press job list` and `press job show <id>`: what the window's product sets
+/// hold, for an agent that cannot see the rail. Read-only.
+fn job_headless(args: &Args) -> ! {
+    let refuse = |message: String| -> ! { command_error("job", message, args.json, 2) };
+    let Some(dir) = crate::job::dir() else {
+        refuse("no config folder resolves, so no saved jobs exist".into());
+    };
+    if args.job_verb.as_deref() == Some("list") {
+        let (jobs, skipped) = crate::job::list(&dir);
+        if args.json {
+            let rows: Vec<_> = jobs
+                .iter()
+                .map(|job| {
+                    serde_json::json!({
+                        "id": job.id,
+                        "name": job.name,
+                        "revision": job.revision,
+                        "source_roots": job.source_roots.iter().map(|root| path_text(root)).collect::<Vec<_>>(),
+                        "products": job.products.len(),
+                        "targets": job.targets.len(),
+                    })
+                })
+                .collect();
+            let report = serde_json::json!({
+                "schema_version": 1,
+                "command": "job",
+                "verb": "list",
+                "jobs": rows,
+                "skipped": skipped,
+            });
+            if let Err(error) = write_json(&report) {
+                eprintln!("press: could not write JSON: {error}");
+                std::process::exit(1);
+            }
+        } else {
+            if jobs.is_empty() {
+                outln!("no saved jobs");
+            }
+            for job in &jobs {
+                outln!(
+                    "{}  {} · {} products · {} targets",
+                    job.id,
+                    job.name,
+                    job.products.len(),
+                    job.targets.len()
+                );
+            }
+            for path in &skipped {
+                outln!("skipped unreadable job file {path}");
+            }
+        }
+        std::process::exit(0);
+    }
+    let id = args.job_name.as_deref().unwrap_or_default();
+    let job = crate::job::load(&dir, id).unwrap_or_else(|message| refuse(message));
+    let names = crate::job::output_names(&job);
+    // ponytail: views resolve against the job's first source root, which is
+    // the only one the window ever records; a multi-root job reads the rest
+    // as missing until the window learns to record more.
+    let root = job.source_roots.first().cloned().unwrap_or_default();
+    let role_status = |status: crate::job::RoleStatus| match status {
+        crate::job::RoleStatus::Ready => "ready",
+        crate::job::RoleStatus::Stale => "changed",
+        crate::job::RoleStatus::Missing => "missing",
+        crate::job::RoleStatus::Unmapped => "unmapped",
+    };
+    let source_status = |status: crate::job::SourceStatus| match status {
+        crate::job::SourceStatus::Fresh => "ready",
+        crate::job::SourceStatus::Stale => "changed",
+        crate::job::SourceStatus::Missing => "missing",
+    };
+    let products: Vec<_> = job
+        .products
+        .iter()
+        .map(|product| {
+            let states = crate::job::resolve_product(product, &root);
+            let complete = !states.iter().any(|state| {
+                state.required
+                    && matches!(
+                        state.status,
+                        crate::job::RoleStatus::Unmapped | crate::job::RoleStatus::Missing
+                    )
+            });
+            let roles: Vec<_> = product
+                .roles
+                .iter()
+                .zip(&states)
+                .map(|(role, state)| {
+                    let files: Vec<_> = state
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            serde_json::json!({
+                                "path": path_text(&source.path),
+                                "status": source_status(source.status),
+                                "outputs": names.get(&source.path).cloned().unwrap_or_default(),
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "id": role.id,
+                        "label": role.label,
+                        "required": role.required,
+                        "status": role_status(state.status),
+                        "files": files,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "id": product.id,
+                "name": product.name,
+                "sku_hint": product.sku_hint,
+                "complete": complete,
+                "roles": roles,
+            })
+        })
+        .collect();
+    let targets: Vec<_> = job
+        .targets
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "id": target.id,
+                "name": target.name,
+                "recipe": target.recipe,
+                "out": path_text(&target.out),
+            })
+        })
+        .collect();
+    if args.json {
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "command": "job",
+            "verb": "show",
+            "job": {
+                "id": job.id,
+                "name": job.name,
+                "revision": job.revision,
+                "source_roots": job.source_roots.iter().map(|root| path_text(root)).collect::<Vec<_>>(),
+                "targets": targets,
+                "products": products,
+            },
+        });
+        if let Err(error) = write_json(&report) {
+            eprintln!("press: could not write JSON: {error}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+    outln!("{} · {} (revision {})", job.id, job.name, job.revision);
+    for root in &job.source_roots {
+        outln!("source {}", root.display());
+    }
+    for target in &job.targets {
+        outln!(
+            "target {} -> {} ({})",
+            target.id,
+            target.out.display(),
+            target.recipe.as_deref().unwrap_or("current settings")
+        );
+    }
+    for product in &products {
+        let complete = product["complete"].as_bool().unwrap_or(false);
+        outln!(
+            "{} {}{}",
+            product["sku_hint"]
+                .as_str()
+                .filter(|sku| !sku.is_empty())
+                .unwrap_or("-"),
+            product["name"].as_str().unwrap_or_default(),
+            if complete {
+                ""
+            } else {
+                " · missing a required view"
+            }
+        );
+        for role in product["roles"].as_array().into_iter().flatten() {
+            let files = role["files"].as_array().map_or(0, Vec::len);
+            outln!(
+                "  {}{}: {} · {} file{}",
+                role["id"].as_str().unwrap_or_default(),
+                if role["required"].as_bool() == Some(true) {
+                    " (required)"
+                } else {
+                    ""
+                },
+                role["status"].as_str().unwrap_or_default(),
+                files,
+                if files == 1 { "" } else { "s" }
+            );
+        }
+    }
+    std::process::exit(0);
+}
+
 fn saved_plan_error(command: &'static str, error: String, json: bool, code: i32) -> ! {
     if json {
         command_error(command, error, json, code)
@@ -3322,7 +3674,12 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 Ok(scanned) => scanned,
                 Err(error) => saved_plan_error("plan", error, args.json, 2),
             };
-            let targets = match saved_plan_targets(args) {
+            let job = match args.job.as_deref().map(saved_job).transpose() {
+                Ok(job) => job,
+                Err(error) => saved_plan_error("plan", error, args.json, 2),
+            };
+            let names = job.as_ref().map(job_names).unwrap_or_default();
+            let targets = match saved_plan_targets(args, job.as_ref()) {
                 Ok(targets) => targets,
                 Err(error) => saved_plan_error("plan", error, args.json, 2),
             };
@@ -3337,6 +3694,7 @@ fn saved_plan_headless(args: &Args) -> i32 {
                 scanned.unreadable.len() + scanned.walk_errors.len(),
                 targets,
                 requirements.as_ref(),
+                &names,
             ) {
                 Ok(plan) => plan,
                 Err(error) => saved_plan_error("plan", error, args.json, 2),
@@ -3492,6 +3850,7 @@ fn main() {
             update_headless();
             return;
         }
+        Command::Job => job_headless(&args),
         Command::Window
         | Command::Audit
         | Command::Convert
@@ -3894,10 +4253,29 @@ fn main() {
         ),
     };
     let out_dir = context.output_root().to_path_buf();
+    let job = args
+        .job
+        .as_deref()
+        .map(|id| saved_job(id).unwrap_or_else(|message| refuse(message)));
+    let names = job.as_ref().map(job_names).unwrap_or_default();
     // Named targets run the same pipeline once each under their own
-    // namespaces; the single-target flow below never sees them.
-    if !args.targets.is_empty() {
-        convert_targets(&target, &scanned, scope, &args, &root, &out_dir, unread);
+    // namespaces; the single-target flow below never sees them. A job's
+    // targets are its targets, unless it has none.
+    if !args.targets.is_empty() || job.as_ref().is_some_and(|job| !job.targets.is_empty()) {
+        if !args.only.is_empty() {
+            refuse("--only needs a plain convert; the job has delivery targets".into());
+        }
+        convert_targets(
+            &target,
+            &scanned,
+            scope,
+            &args,
+            &root,
+            &out_dir,
+            unread,
+            job.as_ref(),
+            &names,
+        );
     }
     let backups = args.replace.then(|| manifest::backup_root(&out_dir));
     let recorded = manifest::load(&out_dir);
@@ -3913,13 +4291,21 @@ fn main() {
         .collect();
     // Plan against every audited source first. `--skip-existing` then decides one file
     // at a time, so the names a run leaves alone are the names it would have written.
-    let planned = convert::plan_outputs(&root, &sources, &sources, &destination, args.format);
+    let all: Vec<&Entry> = scanned.entries.iter().collect();
+    let (rows, row_sources, chosen) = named_rows(&all, &names);
+    let planned = convert::plan_outputs_named(
+        &root,
+        &row_sources,
+        &sources,
+        &destination,
+        args.format,
+        &chosen,
+    );
     // `--only` drops files after planning, as `--skip-existing` does: a file
     // converted alone gets the name, and the mirrored place, a whole-folder run
     // would give it, rather than a fresh `optimized/` beside it.
-    let (audited, planned): (Vec<&Entry>, Vec<_>) = scanned
-        .entries
-        .iter()
+    let (audited, planned): (Vec<&Entry>, Vec<_>) = rows
+        .into_iter()
         .zip(planned)
         .filter(|(entry, _)| only.is_empty() || only.contains(&entry.path))
         .unzip();

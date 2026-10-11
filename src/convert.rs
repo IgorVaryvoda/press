@@ -1161,6 +1161,7 @@ pub fn ai_output_path(
 ///
 /// Replace mode is the one case where an output may claim an audited original: its
 /// own source. The original is in the backup before the rename happens.
+#[cfg(test)]
 pub fn plan_outputs(
     root: &Path,
     sources: &[PathBuf],

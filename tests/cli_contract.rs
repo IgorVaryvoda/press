@@ -3727,3 +3727,152 @@ fn reinstating_is_a_mode_of_its_own() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// One saved job in an isolated config folder: a mug whose main view is
+/// `a.png`, whose detail view is required and empty, and one `web` target.
+fn saved_mug_job(home: &Path, root: &Path) {
+    let jobs = config_root(home).join("imageguide/jobs");
+    std::fs::create_dir_all(&jobs).expect("the job folder is created");
+    let source = root.join("a.png");
+    let metadata = std::fs::metadata(&source).expect("the mapped photo exists");
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| age.as_secs());
+    let job = serde_json::json!({
+        "schema": 1,
+        "id": "mug",
+        "name": "Mug",
+        "revision": 1,
+        "source_roots": [root],
+        "target_recipe": null,
+        "targets": [{"id": "web", "name": "Web", "recipe": "recommended", "out": "web"}],
+        "products": [{
+            "id": "mug",
+            "name": "Mug",
+            "sku_hint": "MUG-9",
+            "roles": [
+                {"id": "main", "label": "Main", "required": true},
+                {"id": "detail", "label": "Detail", "required": true}
+            ],
+            "mappings": [{
+                "id": "m1",
+                "role_id": "main",
+                "source": {"path": source, "bytes": metadata.len(), "modified": modified}
+            }],
+            "binding": null
+        }]
+    });
+    std::fs::write(jobs.join("mug.json"), job.to_string()).expect("the job is written");
+}
+
+/// `job list` and `job show` read the window's saved jobs; `convert --job`
+/// and `plan --job` deliver the job's targets under product and role names.
+#[test]
+fn a_saved_job_lists_shows_converts_and_plans_by_product_and_role() {
+    let dir = workdir("job-cli");
+    let root = dir.join("images");
+    std::fs::create_dir_all(&root).expect("the image root is created");
+    let root = std::fs::canonicalize(&root).expect("the image root resolves");
+    photo(&root, "a.png");
+    other_photo(&root, "b.png");
+    saved_mug_job(&dir, &root);
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+
+    let listed = supplier_run(&dir, &["job", "list", "--json"]);
+    assert_eq!(listed.status.code(), Some(0), "{}", stderr(&listed));
+    assert_eq!(stdout_json(&listed)["jobs"][0]["id"], "mug");
+
+    let shown = supplier_run(&dir, &["job", "show", "mug", "--json"]);
+    assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
+    let product = &stdout_json(&shown)["job"]["products"][0];
+    assert_eq!(product["complete"], false, "the detail view is empty");
+    assert_eq!(product["roles"][0]["status"], "ready");
+    assert_eq!(product["roles"][0]["files"][0]["outputs"][0], "MUG-9_main");
+    assert_eq!(product["roles"][1]["status"], "unmapped");
+
+    let converted = supplier_run(&dir, &["convert", &text(&root), "--job", "mug", "--json"]);
+    assert_eq!(converted.status.code(), Some(0), "{}", stderr(&converted));
+    let web = root.join("optimized/web");
+    assert!(
+        web.join("MUG-9_main.webp").exists(),
+        "the mapped file is named"
+    );
+    assert!(
+        web.join("b.webp").exists(),
+        "an unmapped file keeps its name"
+    );
+
+    let out = dir.join("delivery");
+    std::fs::create_dir_all(&out).expect("the plan output folder is created");
+    let plan = dir.join("plan.json");
+    let planned = supplier_run(
+        &dir,
+        &[
+            "plan",
+            "--root",
+            &text(&root),
+            "--output",
+            &text(&out),
+            "--plan",
+            &text(&plan),
+            "--job",
+            "mug",
+            "--json",
+        ],
+    );
+    assert_eq!(planned.status.code(), Some(0), "{}", stderr(&planned));
+    let executed = supplier_run(
+        &dir,
+        &[
+            "execute",
+            &text(&plan),
+            "--root",
+            &text(&root),
+            "--output",
+            &text(&out),
+            "--continue-unstarted",
+            "--json",
+        ],
+    );
+    assert_eq!(executed.status.code(), Some(0), "{}", stderr(&executed));
+    assert!(out.join("web/MUG-9_main.webp").exists());
+    assert!(out.join("web/b.webp").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn job_arguments_refuse_before_writing_anything() {
+    let dir = workdir("job-refuse");
+    let root = dir.join("images");
+    std::fs::create_dir_all(&root).expect("the image root is created");
+    let root = std::fs::canonicalize(&root).expect("the image root resolves");
+    photo(&root, "a.png");
+    saved_mug_job(&dir, &root);
+    let target = root.to_string_lossy().into_owned();
+    for arguments in [
+        vec!["convert", &target, "--job", "nope"],
+        vec![
+            "convert",
+            &target,
+            "--job",
+            "mug",
+            "--target",
+            "recommended=web",
+        ],
+        vec!["convert", &target, "--job", "mug", "--replace"],
+        vec!["convert", &target, "--job", "mug", "--format", "avif"],
+        vec!["job", "show"],
+        vec!["job", "list", "mug"],
+        vec!["job", "remove", "mug"],
+    ] {
+        let output = supplier_run(&dir, &arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?} is refused");
+    }
+    assert!(
+        !root.join("optimized").exists(),
+        "nothing converts on refusal"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

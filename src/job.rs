@@ -882,6 +882,15 @@ pub fn save(dir: &std::path::Path, job: &Job) -> Result<(), String> {
     write_atomic(&file_for(dir, &job.id), pretty.as_bytes())
 }
 
+/// One saved job by id, refused by name when the library has none.
+pub fn load(dir: &std::path::Path, id: &str) -> Result<Job, String> {
+    list(dir)
+        .0
+        .into_iter()
+        .find(|job| job.id == id)
+        .ok_or_else(|| format!("no saved job named {id:?}; press job list shows them"))
+}
+
 /// Delete one job by id. Sources, outputs and recipes live elsewhere; only
 /// the job file goes.
 pub fn remove(dir: &std::path::Path, id: &str) -> Result<(), String> {
