@@ -2118,11 +2118,13 @@ impl Audit {
         let Some(stale) = self.work_stale.get(index) else {
             return div().into_any_element();
         };
+        // Relative to the output root, so a target's copy names its folder.
+        let output_root = self.output.root(&self.root);
         let name = stale
             .output
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| stale.output.display().to_string());
+            .strip_prefix(&output_root)
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|_| stale.output.display().to_string());
         let reason = match stale.reason {
             crate::job::StaleReason::SourceChanged => "source changed",
             crate::job::StaleReason::OutputGone => "output changed",

@@ -233,8 +233,7 @@ impl Audit {
                         .iter()
                         .flat_map(|product| job::resolve_product(product, &root))
                         .collect();
-                    let manifest = crate::manifest::load(&out_dir);
-                    let stale = job::stale_deliverables(&manifest, &job, &root, &out_dir);
+                    let stale = job::stale_in_outputs(&job, &root, &out_dir);
                     (states, stale)
                 })
                 .await;

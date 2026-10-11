@@ -7125,6 +7125,56 @@ fn job_stale_sources_select_for_regeneration(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A delivery target writes its own folder with its own run record, so an
+/// edited source makes that target's copy outdated, not only the root's.
+#[gpui_kit::test]
+fn an_edited_source_makes_its_delivery_target_copy_outdated(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(1, cx);
+    let dir = std::env::temp_dir().join(format!(
+        "press-gui-jobs-target-stale-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit.update_in(cx, |audit, window, cx| {
+        audit.product_name_input.update(cx, |input, cx| {
+            input.set_value("Hero", window, cx);
+        });
+        audit.add_product(&dir, cx);
+    });
+    audit.update(cx, |audit, cx| {
+        audit.map_selected(&dir, "hero", "main", cx);
+        audit.work_job.targets = vec![crate::job::JobTarget {
+            id: "web".into(),
+            name: "Web".into(),
+            recipe: None,
+            recipe_snapshot: None,
+            out: PathBuf::from("web"),
+        }];
+        audit.start_conversion(cx);
+    });
+    cx.run_until_parked();
+    let path = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
+    crate::convert::tests::photo(16, 16)
+        .save(&path)
+        .expect("the edit lands");
+    audit.update(cx, |audit, cx| audit.refresh_job_states(cx));
+    cx.run_until_parked();
+    audit.read_with(cx, |audit, _| {
+        assert_eq!(audit.work_stale.len(), 1, "{:?}", audit.work_stale);
+        assert!(
+            audit.work_stale[0]
+                .output
+                .parent()
+                .is_some_and(|folder| folder.ends_with("web")),
+            "{:?}",
+            audit.work_stale
+        );
+    });
+    let root = audit.read_with(cx, |audit, _| audit.root.clone());
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Only products with every required view get ticked; the one without its
 /// main image stays out and does not pull in a stranger's file.
 #[gpui_kit::test]

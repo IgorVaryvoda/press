@@ -1543,6 +1543,29 @@ pub enum StaleReason {
     OutputGone,
 }
 
+/// Outdated deliverables in every folder this job writes: the output root and
+/// each delivery target's folder, each read through its own run manifest.
+pub fn stale_in_outputs(
+    job: &Job,
+    root: &std::path::Path,
+    output_root: &std::path::Path,
+) -> Vec<StaleDeliverable> {
+    let mut folders = vec![output_root.to_path_buf()];
+    for target in &job.targets {
+        let folder = output_root.join(&target.out);
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    folders
+        .iter()
+        .flat_map(|out_dir| {
+            let manifest = crate::manifest::load(out_dir);
+            stale_deliverables(&manifest, job, root, out_dir)
+        })
+        .collect()
+}
+
 /// Which recorded outputs no longer match their mapped sources. Reads the run
 /// manifest beside the outputs; plans nothing, writes nothing. `root` scopes
 /// the mappings, `out_dir` the recorded outputs; anything outside either is
