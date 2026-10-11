@@ -12,6 +12,31 @@ struct Planned {
     backup: Option<convert::Backup>,
 }
 
+/// One row per output: a source with no chosen name once, a source a job
+/// names under several roles once per name.
+fn with_names(
+    sources: Vec<(usize, PathBuf)>,
+    names: &HashMap<PathBuf, Vec<String>>,
+) -> (Vec<(usize, PathBuf)>, Vec<Option<String>>) {
+    let mut rows = Vec::with_capacity(sources.len());
+    let mut chosen = Vec::with_capacity(sources.len());
+    for (index, source) in sources {
+        match names.get(&source) {
+            Some(stems) => {
+                for stem in stems {
+                    rows.push((index, source.clone()));
+                    chosen.push(Some(stem.clone()));
+                }
+            }
+            None => {
+                rows.push((index, source));
+                chosen.push(None);
+            }
+        }
+    }
+    (rows, chosen)
+}
+
 /// This is filesystem work, even though it does not encode: loading the run
 /// record and proving name ownership can stat every recorded output. Call it
 /// on the background executor, never from a click handler.
@@ -22,8 +47,9 @@ fn plan_sources(
     sources: Vec<(usize, PathBuf)>,
     audited: &[PathBuf],
     format: Format,
-    names: &HashMap<PathBuf, String>,
+    names: &HashMap<PathBuf, Vec<String>>,
 ) -> Vec<Planned> {
+    let (sources, names) = with_names(sources, names);
     let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
     let recorded = manifest::load(out_dir);
     let destination = convert::Destination {
@@ -31,7 +57,7 @@ fn plan_sources(
         backups,
         manifest: &recorded,
     };
-    let planned = convert::plan_outputs_named(root, &paths, audited, &destination, format, names);
+    let planned = convert::plan_outputs_named(root, &paths, audited, &destination, format, &names);
     sources
         .into_iter()
         .zip(planned)
@@ -72,17 +98,18 @@ fn outdated_rows(
     fingerprint: &str,
     sources: &[(usize, PathBuf)],
     format: Format,
-    names: &HashMap<PathBuf, String>,
+    names: &HashMap<PathBuf, Vec<String>>,
 ) -> Vec<usize> {
     let recorded = manifest::load(out_dir);
+    let (sources, names) = with_names(sources.to_vec(), names);
     let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
     let destination = convert::Destination {
         out_dir,
         backups: None,
         manifest: &recorded,
     };
-    let planned = convert::plan_outputs_named(root, &paths, &paths, &destination, format, names);
-    sources
+    let planned = convert::plan_outputs_named(root, &paths, &paths, &destination, format, &names);
+    let mut outdated: Vec<usize> = sources
         .iter()
         .zip(planned)
         .filter_map(|((index, source), written)| {
@@ -98,7 +125,11 @@ fn outdated_rows(
                 });
             (!current).then_some(*index)
         })
-        .collect()
+        .collect();
+    // A row with two names is converted whole: one outdated name is enough.
+    outdated.sort_unstable();
+    outdated.dedup();
+    outdated
 }
 
 /// One pass of a run: a folder to write into and the settings to write with.
@@ -359,7 +390,13 @@ impl Audit {
         }
 
         let plan_root = root.clone();
-        let names = Arc::new(crate::job::output_names(&self.work_job));
+        // Replace converts each original where it stands: a product name
+        // would move the file, not just re-encode it.
+        let names = Arc::new(if self.output == Output::Replace {
+            HashMap::new()
+        } else {
+            crate::job::output_names(&self.work_job)
+        });
         let proof_root = root.clone();
         let proof_output = output.clone();
         cx.spawn(async move |this, cx| {

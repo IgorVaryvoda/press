@@ -1048,16 +1048,14 @@ pub fn resolve_product(product: &ProductSet, root: &std::path::Path) -> Vec<Role
         .collect()
 }
 
-/// The output stem of every mapped file: `<product>_<role>`, numbered
+/// The output stems of every mapped file: `<product>_<role>`, numbered
 /// `-1`, `-2` in mapping order when a role holds several files. The product
 /// part is the SKU hint, else the name, else the id, reduced to letters,
-/// digits, `-` and `_` so it is one portable component with no dot.
-///
-/// ponytail: one output per file. A file mapped twice keeps its first name
-/// (product order, then role order); serving two roles needs per-mapping rows
-/// in the conversion queue, which is keyed by file today.
-pub fn output_names(job: &Job) -> std::collections::HashMap<std::path::PathBuf, String> {
-    let mut names = std::collections::HashMap::new();
+/// digits, `-` and `_` so it is one portable component with no dot. A file
+/// that serves two roles or two products gets one stem for each.
+pub fn output_names(job: &Job) -> std::collections::HashMap<std::path::PathBuf, Vec<String>> {
+    let mut names: std::collections::HashMap<std::path::PathBuf, Vec<String>> =
+        std::collections::HashMap::new();
     for product in &job.products {
         let key = [&product.sku_hint, &product.name, &product.id]
             .into_iter()
@@ -1076,7 +1074,10 @@ pub fn output_names(job: &Job) -> std::collections::HashMap<std::path::PathBuf, 
                 } else {
                     format!("{key}_{}-{}", role.id, position + 1)
                 };
-                names.entry(mapping.source.path.clone()).or_insert(stem);
+                names
+                    .entry(mapping.source.path.clone())
+                    .or_default()
+                    .push(stem);
             }
         }
     }
@@ -1718,7 +1719,7 @@ mod tests {
         job.products[0].mappings.extend([
             mapping("m2", "detail", "/photos/a.png"),
             mapping("m3", "detail", "/photos/b.png"),
-            // A second claim on a mapped file keeps the first name.
+            // A file serving a second role gets a second name.
             mapping("m4", "detail", "/photos/hero.png"),
         ]);
         let mut unnamed = product();
@@ -1729,11 +1730,11 @@ mod tests {
         job.products.push(unnamed);
 
         let names = output_names(&job);
-        let name = |path: &str| names.get(&PathBuf::from(path)).map(String::as_str);
-        assert_eq!(name("/photos/hero.png"), Some("SKU-1_main"));
-        assert_eq!(name("/photos/a.png"), Some("SKU-1_detail-1"));
-        assert_eq!(name("/photos/b.png"), Some("SKU-1_detail-2"));
-        assert_eq!(name("/photos/mug.png"), Some("Blue-mug-1-5L_main"));
+        let name = |path: &str| names.get(&PathBuf::from(path)).cloned().unwrap_or_default();
+        assert_eq!(name("/photos/hero.png"), ["SKU-1_main", "SKU-1_detail-3"]);
+        assert_eq!(name("/photos/a.png"), ["SKU-1_detail-1"]);
+        assert_eq!(name("/photos/b.png"), ["SKU-1_detail-2"]);
+        assert_eq!(name("/photos/mug.png"), ["Blue-mug-1-5L_main"]);
         assert_eq!(names.len(), 4);
     }
 

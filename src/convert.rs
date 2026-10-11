@@ -1168,27 +1168,21 @@ pub fn plan_outputs(
     destination: &Destination,
     format: Format,
 ) -> Vec<Result<PathBuf, Failure>> {
-    plan_outputs_named(
-        root,
-        sources,
-        audited,
-        destination,
-        format,
-        &std::collections::HashMap::new(),
-    )
+    plan_outputs_named(root, sources, audited, destination, format, &[])
 }
 
-/// `plan_outputs` with chosen names: a source in `names` asks for that stem
-/// directly under `out_dir` instead of its mirrored path. Product-set jobs name
-/// outputs by product and role this way. Every collision and ownership rule
-/// above still applies to the chosen name.
+/// `plan_outputs` with chosen names: `names[i]`, when present, is the stem
+/// `sources[i]` asks for directly under `out_dir` instead of its mirrored path.
+/// Product-set jobs name outputs by product and role this way, and list one
+/// source twice to give it two names. Every collision and ownership rule above
+/// still applies to the chosen name.
 pub fn plan_outputs_named(
     root: &Path,
     sources: &[PathBuf],
     audited: &[PathBuf],
     destination: &Destination,
     format: Format,
-    names: &std::collections::HashMap<PathBuf, String>,
+    names: &[Option<String>],
 ) -> Vec<Result<PathBuf, Failure>> {
     let out_dir = destination.out_dir;
     let replace = destination.backups.is_some();
@@ -1252,7 +1246,7 @@ pub fn plan_outputs_named(
     for index in order {
         let source = &sources[index];
         let mine = mine_keys[index].as_str();
-        let plain = match names.get(source) {
+        let plain = match names.get(index).and_then(Option::as_deref) {
             Some(stem) => named_output_path(out_dir, stem, source, format),
             None => output_path(root, source, out_dir, format),
         };
@@ -3184,10 +3178,11 @@ pub(crate) mod tests {
             PathBuf::from("/photos/raw/b.png"),
             PathBuf::from("/photos/raw/c.png"),
         ];
-        let names = std::collections::HashMap::from([
-            (sources[0].clone(), "SKU-1_main".to_string()),
-            (sources[1].clone(), "SKU-1_main".to_string()),
-        ]);
+        let names = [
+            Some("SKU-1_main".to_string()),
+            Some("SKU-1_main".to_string()),
+            None,
+        ];
         let planned = |format| {
             super::plan_outputs_named(root, &sources, &sources, &plain(out), format, &names)
         };
