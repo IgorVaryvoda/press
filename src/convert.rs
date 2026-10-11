@@ -1086,6 +1086,17 @@ pub fn output_path(root: &Path, source: &Path, out_dir: &Path, format: Format) -
     }
 }
 
+/// A chosen stem under `out_dir`, with the extension `output_path` would give.
+/// The stem must hold no dot, or the collision fallback's `with_extension`
+/// would cut it short; `job::output_names` only makes such stems.
+fn named_output_path(out_dir: &Path, stem: &str, source: &Path, format: Format) -> PathBuf {
+    let named = out_dir.join(stem);
+    match format.extension() {
+        Some(extension) => named.with_extension(extension),
+        None => named.with_extension(source.extension().unwrap_or_default()),
+    }
+}
+
 /// A collision-free path for one AI result beside the normal converted files.
 pub fn ai_output_path(
     root: &Path,
@@ -1157,6 +1168,28 @@ pub fn plan_outputs(
     destination: &Destination,
     format: Format,
 ) -> Vec<Result<PathBuf, Failure>> {
+    plan_outputs_named(
+        root,
+        sources,
+        audited,
+        destination,
+        format,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// `plan_outputs` with chosen names: a source in `names` asks for that stem
+/// directly under `out_dir` instead of its mirrored path. Product-set jobs name
+/// outputs by product and role this way. Every collision and ownership rule
+/// above still applies to the chosen name.
+pub fn plan_outputs_named(
+    root: &Path,
+    sources: &[PathBuf],
+    audited: &[PathBuf],
+    destination: &Destination,
+    format: Format,
+    names: &std::collections::HashMap<PathBuf, String>,
+) -> Vec<Result<PathBuf, Failure>> {
     let out_dir = destination.out_dir;
     let replace = destination.backups.is_some();
     let mut taken: HashSet<String> = HashSet::new();
@@ -1219,7 +1252,10 @@ pub fn plan_outputs(
     for index in order {
         let source = &sources[index];
         let mine = mine_keys[index].as_str();
-        let plain = output_path(root, source, out_dir, format);
+        let plain = match names.get(source) {
+            Some(stem) => named_output_path(out_dir, stem, source, format),
+            None => output_path(root, source, out_dir, format),
+        };
         // In replace mode a WebP converted to WebP writes its own name back. That
         // is not destruction: the original moves into the backup first. But a
         // case twin on a case-sensitive disk shares the key without being the
@@ -3135,6 +3171,39 @@ pub(crate) mod tests {
         .expect("conversion runs");
 
         assert_eq!((converted.width, converted.height), (200, 100));
+    }
+
+    /// A chosen name replaces the mirrored path but not the collision rules:
+    /// two products sharing a SKU still get two files.
+    #[test]
+    fn named_sources_take_their_names_and_still_never_collide() {
+        let root = Path::new("/photos");
+        let out = Path::new("/photos/optimized");
+        let sources = [
+            PathBuf::from("/photos/raw/a.jpg"),
+            PathBuf::from("/photos/raw/b.png"),
+            PathBuf::from("/photos/raw/c.png"),
+        ];
+        let names = std::collections::HashMap::from([
+            (sources[0].clone(), "SKU-1_main".to_string()),
+            (sources[1].clone(), "SKU-1_main".to_string()),
+        ]);
+        let planned = |format| {
+            super::plan_outputs_named(root, &sources, &sources, &plain(out), format, &names)
+        };
+        assert_eq!(
+            planned(Format::WebP),
+            [
+                Ok(PathBuf::from("/photos/optimized/SKU-1_main.webp")),
+                Ok(PathBuf::from("/photos/optimized/SKU-1_main-png.webp")),
+                Ok(PathBuf::from("/photos/optimized/raw/c.webp")),
+            ]
+        );
+        assert_eq!(
+            planned(Format::Same)[0],
+            Ok(PathBuf::from("/photos/optimized/SKU-1_main.jpg")),
+            "a kept format keeps the source extension"
+        );
     }
 
     /// The bug this exists to stop: `shot.jpg` and `shot.png` both asked for

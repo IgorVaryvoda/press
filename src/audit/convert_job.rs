@@ -22,6 +22,7 @@ fn plan_sources(
     sources: Vec<(usize, PathBuf)>,
     audited: &[PathBuf],
     format: Format,
+    names: &HashMap<PathBuf, String>,
 ) -> Vec<Planned> {
     let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
     let recorded = manifest::load(out_dir);
@@ -30,7 +31,7 @@ fn plan_sources(
         backups,
         manifest: &recorded,
     };
-    let planned = convert::plan_outputs(root, &paths, audited, &destination, format);
+    let planned = convert::plan_outputs_named(root, &paths, audited, &destination, format, names);
     sources
         .into_iter()
         .zip(planned)
@@ -71,6 +72,7 @@ fn outdated_rows(
     fingerprint: &str,
     sources: &[(usize, PathBuf)],
     format: Format,
+    names: &HashMap<PathBuf, String>,
 ) -> Vec<usize> {
     let recorded = manifest::load(out_dir);
     let paths: Vec<PathBuf> = sources.iter().map(|(_, path)| path.clone()).collect();
@@ -79,7 +81,7 @@ fn outdated_rows(
         backups: None,
         manifest: &recorded,
     };
-    let planned = convert::plan_outputs(root, &paths, &paths, &destination, format);
+    let planned = convert::plan_outputs_named(root, &paths, &paths, &destination, format, names);
     sources
         .iter()
         .zip(planned)
@@ -243,6 +245,7 @@ impl Audit {
         let root = self.root.clone();
         let output = self.output.clone();
         let dataset = self.dataset_generation;
+        let names = crate::job::output_names(&self.work_job);
         // The row's own wording, so a toast names what the person clicked.
         let name = self
             .work_job
@@ -272,6 +275,7 @@ impl Audit {
                         &fingerprint,
                         &sources,
                         format,
+                        &names,
                     ))
                 })
                 .await;
@@ -355,6 +359,7 @@ impl Audit {
         }
 
         let plan_root = root.clone();
+        let names = Arc::new(crate::job::output_names(&self.work_job));
         let proof_root = root.clone();
         let proof_output = output.clone();
         cx.spawn(async move |this, cx| {
@@ -431,6 +436,7 @@ impl Audit {
                 let plan_root = plan_root.clone();
                 let sources = sources.clone();
                 let audited = audited.clone();
+                let names = names.clone();
                 if primary {
                     primary_out_dir = Some(out_dir.clone());
                 }
@@ -451,6 +457,7 @@ impl Audit {
                             sources,
                             &audited,
                             format,
+                            &names,
                         )
                     })
                     .await;
@@ -730,6 +737,7 @@ mod tests {
             vec![(42, png.clone()), (3, jpeg.clone())],
             &audited,
             Format::WebP,
+            &HashMap::new(),
         );
         assert_eq!(planned.len(), 2);
         assert_eq!((planned[0].index, &planned[0].source), (42, &png));
@@ -756,6 +764,7 @@ mod tests {
             vec![(4, source.clone())],
             &[source, untouched],
             Format::WebP,
+            &HashMap::new(),
         );
         assert_eq!(planned[0].written, Err(convert::Failure::OverwritesSource));
     }
@@ -774,6 +783,7 @@ mod tests {
             vec![(9, source.clone())],
             std::slice::from_ref(&source),
             Format::WebP,
+            &HashMap::new(),
         );
         assert_eq!(
             planned[0].backup,

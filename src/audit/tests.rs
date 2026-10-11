@@ -10395,6 +10395,51 @@ fn a_job_with_delivery_targets_converts_once_per_target(cx: &mut TestAppContext)
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A file mapped to a product role is delivered under the product's name and
+/// the role; a file the job does not map keeps its mirrored name.
+#[gpui_kit::test]
+fn a_mapped_file_is_delivered_by_product_and_role(cx: &mut TestAppContext) {
+    let (audit, cx) = convertible_audit(2, cx);
+    audit.update(cx, |audit, _| {
+        let path = audit.entries[0].path.clone();
+        audit.work_job.products = vec![crate::job::ProductSet {
+            id: "mug".into(),
+            name: "Mug".into(),
+            sku_hint: "MUG-9".into(),
+            roles: vec![crate::job::Role {
+                id: "main".into(),
+                label: "Main".into(),
+                required: true,
+            }],
+            mappings: vec![crate::job::Mapping {
+                id: "m1".into(),
+                role_id: "main".into(),
+                source: crate::job::SourceRef {
+                    path,
+                    bytes: 0,
+                    modified: None,
+                },
+            }],
+            binding: None,
+        }];
+    });
+
+    audit.update(cx, |audit, cx| audit.start_conversion(cx));
+    cx.run_until_parked();
+
+    let (root, unmapped) = audit.read_with(cx, |audit, _| {
+        assert!(audit.failures.is_empty(), "{:?}", audit.failures);
+        (audit.root.clone(), audit.entries[1].path.clone())
+    });
+    let out = root.join(crate::scan::OUTPUT_DIR);
+    assert!(out.join("MUG-9_main.webp").exists());
+    let mirrored = out
+        .join(unmapped.strip_prefix(&root).unwrap())
+        .with_extension("webp");
+    assert!(mirrored.exists(), "{mirrored:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// The rail lists the job's delivery targets, so a folder that delivers two
 /// things says so where the job is configured.
 #[gpui_kit::test]

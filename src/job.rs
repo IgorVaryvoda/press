@@ -1048,6 +1048,61 @@ pub fn resolve_product(product: &ProductSet, root: &std::path::Path) -> Vec<Role
         .collect()
 }
 
+/// The output stem of every mapped file: `<product>_<role>`, numbered
+/// `-1`, `-2` in mapping order when a role holds several files. The product
+/// part is the SKU hint, else the name, else the id, reduced to letters,
+/// digits, `-` and `_` so it is one portable component with no dot.
+///
+/// ponytail: one output per file. A file mapped twice keeps its first name
+/// (product order, then role order); serving two roles needs per-mapping rows
+/// in the conversion queue, which is keyed by file today.
+pub fn output_names(job: &Job) -> std::collections::HashMap<std::path::PathBuf, String> {
+    let mut names = std::collections::HashMap::new();
+    for product in &job.products {
+        let key = [&product.sku_hint, &product.name, &product.id]
+            .into_iter()
+            .map(|text| stem_part(text))
+            .find(|part| !part.is_empty())
+            .unwrap_or_else(|| "product".into());
+        for role in &product.roles {
+            let files: Vec<&Mapping> = product
+                .mappings
+                .iter()
+                .filter(|mapping| mapping.role_id == role.id)
+                .collect();
+            for (position, mapping) in files.iter().enumerate() {
+                let stem = if files.len() == 1 {
+                    format!("{key}_{}", role.id)
+                } else {
+                    format!("{key}_{}-{}", role.id, position + 1)
+                };
+                names.entry(mapping.source.path.clone()).or_insert(stem);
+            }
+        }
+    }
+    names
+}
+
+fn stem_part(text: &str) -> String {
+    text.trim()
+        .chars()
+        .map(|cell| {
+            if cell.is_ascii_alphanumeric() || cell == '-' || cell == '_' {
+                cell
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .take(MAX_ID_LEN)
+        .collect()
+}
+
 /// Resolve the bound target against known recipes. A bound id with no recipe
 /// refuses with its name rather than falling back to current settings.
 pub fn resolve_target<'a>(
@@ -1589,6 +1644,40 @@ mod tests {
         let mut dup = job();
         dup.products.push(product());
         assert!(parse_bytes(&serde_json::to_vec(&dup).unwrap()).is_err());
+    }
+
+    #[test]
+    fn mapped_files_are_named_by_product_and_role() {
+        let mapping = |id: &str, role: &str, path: &str| Mapping {
+            id: id.into(),
+            role_id: role.into(),
+            source: SourceRef {
+                path: PathBuf::from(path),
+                bytes: 1,
+                modified: None,
+            },
+        };
+        let mut job = job();
+        job.products[0].mappings.extend([
+            mapping("m2", "detail", "/photos/a.png"),
+            mapping("m3", "detail", "/photos/b.png"),
+            // A second claim on a mapped file keeps the first name.
+            mapping("m4", "detail", "/photos/hero.png"),
+        ]);
+        let mut unnamed = product();
+        unnamed.id = "p2".into();
+        unnamed.name = "Blue mug / 1.5L".into();
+        unnamed.sku_hint = "  ".into();
+        unnamed.mappings = vec![mapping("m1", "main", "/photos/mug.png")];
+        job.products.push(unnamed);
+
+        let names = output_names(&job);
+        let name = |path: &str| names.get(&PathBuf::from(path)).map(String::as_str);
+        assert_eq!(name("/photos/hero.png"), Some("SKU-1_main"));
+        assert_eq!(name("/photos/a.png"), Some("SKU-1_detail-1"));
+        assert_eq!(name("/photos/b.png"), Some("SKU-1_detail-2"));
+        assert_eq!(name("/photos/mug.png"), Some("Blue-mug-1-5L_main"));
+        assert_eq!(names.len(), 4);
     }
 
     #[test]
