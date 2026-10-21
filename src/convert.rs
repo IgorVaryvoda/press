@@ -570,10 +570,11 @@ fn encode_webp(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
     config.alpha_compression = i32::from(!lossless);
     config.alpha_quality = 100;
     config.quality = quality.0.unwrap_or(75.);
-    // ponytail: method 1 makes lossy q80 output 13.5% larger, but cut a real 3.0GB
-    // folder from 69.5s to 29.6s. Lossless keeps the prior method 4 behavior because
-    // its explicit promise is unchanged pixels, not the lossy path's speed tradeoff.
-    config.method = if lossless { 4 } else { 1 };
+    // libwebp's default effort. Method 1 cut a real 3.0GB folder from 69.5s to 29.6s,
+    // but at the same SSIMULACRA2 score it needed 13% more bytes than method 4 on
+    // photos, and a smaller file is what Press is for. Method 3 measured the same
+    // size and speed as 4; method 2 was in between.
+    config.method = 4;
     if unsafe { WebPValidateConfig(&config) } == 0 {
         return None;
     }

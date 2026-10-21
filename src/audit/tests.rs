@@ -7442,19 +7442,20 @@ fn a_replaced_source_of_the_same_length_is_not_estimated_from_the_held_decode(
     let path = audit.read_with(cx, |audit, _| audit.entries[0].path.clone());
 
     // Two real 8x8 PNGs of the same length. Nothing reads past IEND, so the shorter
-    // is padded rather than tuned into a coincidence.
-    let png = |shift: u8| {
+    // is padded rather than tuned into a coincidence. Noise against a smooth ramp:
+    // a colour shift of the same noise encoded to within a byte at WebP method 4,
+    // which the oracle below cannot tell apart.
+    let png = |pixels: image::RgbImage| {
         let mut bytes = Vec::new();
-        let source = crate::convert::tests::photo(8, 8).to_rgb8();
-        image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(8, 8, |x, y| {
-            let pixel = source.get_pixel(x, y);
-            image::Rgb([pixel[0].wrapping_add(shift), pixel[1], pixel[2]])
-        }))
-        .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
-        .expect("the fixture encodes");
+        image::DynamicImage::ImageRgb8(pixels)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("the fixture encodes");
         bytes
     };
-    let (mut before, mut after) = (png(0), png(101));
+    let ramp = image::ImageBuffer::from_fn(8, 8, |x, y| {
+        image::Rgb([(x * 32) as u8, (y * 32) as u8, 128])
+    });
+    let (mut before, mut after) = (png(crate::convert::tests::photo(8, 8).to_rgb8()), png(ramp));
     let length = before.len().max(after.len());
     before.resize(length, 0);
     after.resize(length, 0);
