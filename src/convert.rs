@@ -424,7 +424,7 @@ fn encode_png(image: &DynamicImage, profile: Option<&[u8]>) -> Option<Vec<u8>> {
     Some(encoded)
 }
 
-/// libjpeg-turbo writes no metadata, so the profile goes in by hand: APP2 segments
+/// The JPEG encoder writes no metadata, so the profile goes in by hand: APP2 segments
 /// tagged `ICC_PROFILE`, at most 65519 profile bytes each, right after the JFIF
 /// APP0 the spec wants first. Every decoder that reads a profile reads it there.
 fn attach_jpeg_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
@@ -448,68 +448,36 @@ fn attach_jpeg_profile(encoded: &[u8], profile: &[u8]) -> Option<Vec<u8>> {
     Some(tagged)
 }
 
-/// 4:2:0 subsampling and baseline Huffman: what every camera and CMS writes, so
-/// the output opens everywhere the source did. A grayscale source stays one
-/// plane; promoted to RGB it would pay for two chroma planes of nothing. Lossless
-/// never reaches here; the window and the CLI both refuse it for JPEG, so `None`
-/// only has to be safe.
+/// 4:2:0 subsampling and baseline scans: what every camera and CMS writes, so the
+/// output opens everywhere the source did. mozjpeg's trellis quantization and
+/// optimised Huffman tables buy the size: at the same SSIMULACRA2 score 70 it came
+/// out 11% smaller than libjpeg-turbo on photos, for about nine times the encode
+/// time, which is still well under a WebP encode. It is a pure-Rust port, so it
+/// cannot collide with the libjpeg-turbo symbols the decoders link. A grayscale
+/// source stays one plane; promoted to RGB it would pay for two chroma planes of
+/// nothing. Lossless never reaches here; the window and the CLI both refuse it for
+/// JPEG, so `None` only has to be safe.
 fn encode_jpeg(image: &DynamicImage, quality: Quality) -> Result<Vec<u8>, Failure> {
     if has_transparency(image) {
         return Err(Failure::JpegNeedsOpaque);
     }
-    let gray = matches!(
-        image,
-        DynamicImage::ImageLuma8(_) | DynamicImage::ImageLuma16(_)
-    );
+    let encoder = mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::BaselineBalanced)
+        .quality(quality.0.unwrap_or(100.).round().clamp(1., 100.) as u8)
+        .subsampling(mozjpeg_rs::Subsampling::S420);
+    let (width, height) = (image.width(), image.height());
     // Photographs already arrive as RGB8 or Luma8: borrow those buffers instead of
     // copying every pixel into a second frame before the compressor reads it.
-    let luma_owned;
-    let rgb_owned;
-    let (pixels, channels, pixel_format, subsamp) = if gray {
-        let pixels: &[u8] = if let Some(gray) = image.as_luma8() {
-            gray.as_raw()
-        } else {
-            luma_owned = image.to_luma8().into_raw();
-            &luma_owned
-        };
-        (
-            pixels,
-            1,
-            turbojpeg::PixelFormat::GRAY,
-            turbojpeg::Subsamp::Gray,
-        )
-    } else {
-        let pixels: &[u8] = if let Some(rgb) = image.as_rgb8() {
-            rgb.as_raw()
-        } else {
-            rgb_owned = image.to_rgb8().into_raw();
-            &rgb_owned
-        };
-        (
-            pixels,
-            3,
-            turbojpeg::PixelFormat::RGB,
-            turbojpeg::Subsamp::Sub2x2,
-        )
+    let encoded = match image {
+        DynamicImage::ImageLuma8(gray) => encoder.encode_gray(gray.as_raw(), width, height),
+        DynamicImage::ImageLuma16(_) => {
+            encoder.encode_gray(&image.to_luma8().into_raw(), width, height)
+        }
+        _ => match image.as_rgb8() {
+            Some(rgb) => encoder.encode_rgb(rgb.as_raw(), width, height),
+            None => encoder.encode_rgb(&image.to_rgb8().into_raw(), width, height),
+        },
     };
-    let mut compressor = turbojpeg::Compressor::new().map_err(|_| Failure::Failed)?;
-    compressor
-        .set_quality(quality.0.unwrap_or(100.).round() as i32)
-        .map_err(|_| Failure::Failed)?;
-    compressor
-        .set_subsamp(subsamp)
-        .map_err(|_| Failure::Failed)?;
-    // Optimised Huffman tables cost a second pass and buy a few percent for free.
-    compressor.set_optimize(true).map_err(|_| Failure::Failed)?;
-    compressor
-        .compress_to_vec(turbojpeg::Image {
-            pixels,
-            width: image.width() as usize,
-            pitch: image.width() as usize * channels,
-            height: image.height() as usize,
-            format: pixel_format,
-        })
-        .map_err(|_| Failure::Failed)
+    encoded.map_err(|_| Failure::Failed)
 }
 
 /// Rewrap an encoded bitstream in WebP's extended container so it can carry an ICCP
@@ -570,10 +538,11 @@ fn encode_webp(image: &DynamicImage, quality: Quality) -> Option<Vec<u8>> {
     config.alpha_compression = i32::from(!lossless);
     config.alpha_quality = 100;
     config.quality = quality.0.unwrap_or(75.);
-    // ponytail: method 1 makes lossy q80 output 13.5% larger, but cut a real 3.0GB
-    // folder from 69.5s to 29.6s. Lossless keeps the prior method 4 behavior because
-    // its explicit promise is unchanged pixels, not the lossy path's speed tradeoff.
-    config.method = if lossless { 4 } else { 1 };
+    // libwebp's default effort. Method 1 cut a real 3.0GB folder from 69.5s to 29.6s,
+    // but at the same SSIMULACRA2 score it needed 13% more bytes than method 4 on
+    // photos, and a smaller file is what Press is for. Method 3 measured the same
+    // size and speed as 4; method 2 was in between.
+    config.method = 4;
     if unsafe { WebPValidateConfig(&config) } == 0 {
         return None;
     }
@@ -811,8 +780,19 @@ fn is_high_depth(image: &DynamicImage) -> bool {
     colour.bits_per_pixel() / u16::from(colour.channel_count()) > 8
 }
 
+/// Press quality to libavif quality. Up to 80 the slope matches what rav1e used to
+/// produce, so existing recipes keep their sizes. Above it the dial has to reach
+/// libavif's top: the old flat cap at 75 left q98 near SSIMULACRA2 79 while avifenc
+/// reaches about 92 on the same photos, so nothing Press wrote was visually
+/// lossless. 90 now asks for 80, 95 for 90, 100 for 100.
 fn aom_quality(quality: Quality) -> u8 {
-    ((quality.0.unwrap_or(90.) * 0.75).round() as u8).clamp(1, 75)
+    let quality = quality.0.unwrap_or(90.).clamp(1., 100.);
+    let mapped = if quality <= 80. {
+        quality * 0.75
+    } else {
+        60. + (quality - 80.) * 2.
+    };
+    (mapped.round() as u8).clamp(1, 100)
 }
 
 /// True when any pixel is not fully opaque. A PNG with an alpha channel that is
@@ -2841,6 +2821,14 @@ pub(crate) mod tests {
     #[test]
     fn aom_quality_matches_the_measured_rav1e_output() {
         assert_eq!(aom_quality(Quality::lossy(80.)), 60);
+    }
+
+    #[test]
+    fn aom_quality_reaches_the_top_of_libavif_s_range() {
+        assert_eq!(aom_quality(Quality::lossy(50.)), 38);
+        assert_eq!(aom_quality(Quality::lossy(90.)), 80);
+        assert_eq!(aom_quality(Quality::lossy(95.)), 90);
+        assert_eq!(aom_quality(Quality::lossy(100.)), 100);
     }
 
     #[test]
