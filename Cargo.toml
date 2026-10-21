@@ -23,6 +23,9 @@ jxl-oxide = { version = "0.12.6", features = ["image"] }
 walkdir = "2"
 libwebp-sys = "0.14.4"
 turbojpeg = { version = "1.5.1", default-features = false, features = ["cmake"] }
+# Trellis-quantized JPEG encoding. Pure Rust, so it cannot clash with the
+# libjpeg-turbo symbols turbojpeg links for decoding.
+mozjpeg-rs = { version = "0.9.2", default-features = false }
 # Sirv REST sync. ureq keeps the dependency tree pure Rust (rustls), so no new
 # system packages join the CI images; calls run on gpui's background executor.
 ureq = { version = "2.10", features = ["json"] }
