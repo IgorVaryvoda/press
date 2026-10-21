@@ -811,8 +811,19 @@ fn is_high_depth(image: &DynamicImage) -> bool {
     colour.bits_per_pixel() / u16::from(colour.channel_count()) > 8
 }
 
+/// Press quality to libavif quality. Up to 80 the slope matches what rav1e used to
+/// produce, so existing recipes keep their sizes. Above it the dial has to reach
+/// libavif's top: the old flat cap at 75 left q98 near SSIMULACRA2 79 while avifenc
+/// reaches about 92 on the same photos, so nothing Press wrote was visually
+/// lossless. 90 now asks for 80, 95 for 90, 100 for 100.
 fn aom_quality(quality: Quality) -> u8 {
-    ((quality.0.unwrap_or(90.) * 0.75).round() as u8).clamp(1, 75)
+    let quality = quality.0.unwrap_or(90.).clamp(1., 100.);
+    let mapped = if quality <= 80. {
+        quality * 0.75
+    } else {
+        60. + (quality - 80.) * 2.
+    };
+    (mapped.round() as u8).clamp(1, 100)
 }
 
 /// True when any pixel is not fully opaque. A PNG with an alpha channel that is
@@ -2841,6 +2852,14 @@ pub(crate) mod tests {
     #[test]
     fn aom_quality_matches_the_measured_rav1e_output() {
         assert_eq!(aom_quality(Quality::lossy(80.)), 60);
+    }
+
+    #[test]
+    fn aom_quality_reaches_the_top_of_libavif_s_range() {
+        assert_eq!(aom_quality(Quality::lossy(50.)), 38);
+        assert_eq!(aom_quality(Quality::lossy(90.)), 80);
+        assert_eq!(aom_quality(Quality::lossy(95.)), 90);
+        assert_eq!(aom_quality(Quality::lossy(100.)), 100);
     }
 
     #[test]
