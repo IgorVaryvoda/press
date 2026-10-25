@@ -517,6 +517,7 @@ impl Audit {
                     }))
                     .child(
                         Checkbox::new("sirv-split-all")
+                            .accessibility_label("Select all")
                             .checked(all_ticked)
                             .disabled(rows.is_empty())
                             .tooltip("Select every file shown")
@@ -795,6 +796,7 @@ impl Audit {
                     .child({
                         let key = row.key.clone();
                         Checkbox::new(("sirv-split-tick", shown))
+                            .accessibility_label(key.clone())
                             .checked(ticked)
                             .on_click(cx.listener(move |audit, _: &bool, window, cx| {
                                 cx.stop_propagation();

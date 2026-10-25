@@ -13,12 +13,12 @@ path = "src/main.rs"
 # gpui, platform, component and asset crates together. Cargo.lock pins the
 # actual versions; CI builds --locked.
 [dependencies]
-gpui-kit = "0.6"
+gpui-kit = "0.8"
 # The icon SVGs `IconName` refers to. Without an asset source registered on the
 # application every icon resolves to nothing and renders as empty space.
 futures = "0.3"
 image = { version = "0.25", features = ["avif-native"] }
-jixel = "0.2.19"
+jixel = "0.5"
 jxl-oxide = { version = "0.12.6", features = ["image"] }
 walkdir = "2"
 libwebp-sys = "0.14.4"
@@ -28,11 +28,11 @@ turbojpeg = { version = "1.5.1", default-features = false, features = ["cmake"] 
 mozjpeg-rs = { version = "0.9.2", default-features = false }
 # Sirv REST sync. ureq keeps the dependency tree pure Rust (rustls), so no new
 # system packages join the CI images; calls run on gpui's background executor.
-ureq = { version = "2.10", features = ["json"] }
+ureq = { version = "2.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-md5 = "0.7"
-parking_lot = "0.12"
+md5 = "0.8"
+parking_lot = "0.13"
 flate2 = "1"
 sha2 = "0.10"
 tar = "0.4"
@@ -54,17 +54,17 @@ rfd = "0.17.2"
 # rename will not replace an existing file on Windows. The thumbnail reuse also
 # reads the shell image factory plus GDI, so those API sets join the same pin.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Gdi"] }
 
 # gpui can render a frame to an image and hand back the pixels, but only with
 # `test-support` on. That is how `cargo test --bin press -- --ignored
 # screenshot` gets a picture of the real window without needing the screen.
 [dev-dependencies]
-gpui-kit = { version = "0.6", features = ["test-support"] }
+gpui-kit = { version = "0.8", features = ["test-support"] }
 # The screenshot harness feeds HeadlessAppContext a real headless renderer,
 # which gpui-pre-platform gates behind its own test-support; the facade does
 # not forward that feature.
-gpui-pre-platform = { version = "0.3.1", features = ["test-support"] }
+gpui-pre-platform = { version = "0.3.9", features = ["test-support"] }
 
 [build-dependencies]
 cc = "1"

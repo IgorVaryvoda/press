@@ -403,7 +403,9 @@ fn screenshot() {
     let text_system = gpui_kit::platform::current_platform(true).text_system();
     let mut cx = HeadlessAppContext::with_platform(
         text_system,
-        std::sync::Arc::new(gpui_kit::assets::Assets),
+        // The app's own source: it adds the panel and Studio glyphs, which
+        // the library set lacks and drew as blank squares.
+        std::sync::Arc::new(crate::assets::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
 
@@ -10776,6 +10778,16 @@ fn a_ticked_control_fills_with_the_apps_blue_and_not_its_tick_colour(cx: &mut Te
         assert_ne!(
             fill, theme.primary_foreground,
             "the tick is drawn in a colour the fill does not hide"
+        );
+        assert_eq!(
+            gpui_kit::Hsla::from(theme.tokens.button_primary),
+            theme.button_primary,
+            "the commit button fills with the blue its label is chosen against"
+        );
+        assert_eq!(
+            gpui_kit::Hsla::from(theme.tokens.table_even),
+            theme.table_even,
+            "the table paints the app's zebra, not the stock one"
         );
     });
 }
