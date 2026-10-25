@@ -476,10 +476,8 @@ mod tests {
     struct PromptHarness;
 
     impl Render for PromptHarness {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            gpui_kit::div()
-                .size_full()
-                .children(Root::render_dialog_layer(window, cx))
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            gpui_kit::div().size_full()
         }
     }
 

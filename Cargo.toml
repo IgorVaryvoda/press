@@ -13,7 +13,7 @@ path = "src/main.rs"
 # gpui, platform, component and asset crates together. Cargo.lock pins the
 # actual versions; CI builds --locked.
 [dependencies]
-gpui-kit = "0.6"
+gpui-kit = "0.8"
 # The icon SVGs `IconName` refers to. Without an asset source registered on the
 # application every icon resolves to nothing and renders as empty space.
 futures = "0.3"
@@ -60,11 +60,11 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32
 # `test-support` on. That is how `cargo test --bin press -- --ignored
 # screenshot` gets a picture of the real window without needing the screen.
 [dev-dependencies]
-gpui-kit = { version = "0.6", features = ["test-support"] }
+gpui-kit = { version = "0.8", features = ["test-support"] }
 # The screenshot harness feeds HeadlessAppContext a real headless renderer,
 # which gpui-pre-platform gates behind its own test-support; the facade does
 # not forward that feature.
-gpui-pre-platform = { version = "0.3.1", features = ["test-support"] }
+gpui-pre-platform = { version = "0.3.9", features = ["test-support"] }
 
 [build-dependencies]
 cc = "1"

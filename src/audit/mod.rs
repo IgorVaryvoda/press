@@ -2793,7 +2793,10 @@ pub(crate) fn build_audit(
     // that means reading the audit.
     let table = {
         let delegate = AuditTable::new(audit.downgrade(), window);
-        cx.new(|cx| TableState::new(delegate, window, cx))
+        // Press keeps its own cursor and ticks. A library-selected row is a
+        // third state: it repaints the clicked row over Press's zebra and tick
+        // tint, and stays lit after the file is unticked.
+        cx.new(|cx| TableState::new(delegate, window, cx).row_selectable(false))
     };
     audit.update(cx, |audit, _| audit.table = Some(table));
 

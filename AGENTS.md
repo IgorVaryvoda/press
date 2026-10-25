@@ -32,7 +32,7 @@ Key patterns an editor must respect:
 - **Generation counters invalidate stale async work.** `dataset_generation`, `scan_generation`, `estimate_generation` on `Audit`, plus `handoff_generation`, `job_request_generation`, `sirv_generation`, `sirv_pairing_generation`, `sirv_browser_generation`. Check the generation you captured before applying a result; a slider drag supersedes an in-flight estimate.
 - **`convert::workers(format)` bounds conversion** — WebP/JPEG/PNG get `cores.clamp(2, 8)`, AVIF 2, a kept-format (`Same`) folder 4, JPEG XL 1 (its own encoder already uses all the machine's cores). Each in-flight file holds a fully decoded image up to `convert::MAX_DECODE_BYTES` (1 GiB), so this is a memory bound, not just a parallelism knob.
 - **Thumbnails are viewport-driven.** `render_td`/gallery bands call `request_thumb`; `requested: HashSet` dedupes; never decode eagerly.
-- **Theme comes from `cx.theme()`**, set once in `src/main.rs::init_theme`. Colour set and `theme.tokens.button_primary*` must agree or buttons render black-on-blue. Fonts: SF Pro Text / SF Pro Display, mono Fira Code.
+- **Theme comes from `cx.theme()`**, set once in `src/main.rs::init_theme`. Edit it through `Theme::update`, which keeps the colour set, the token set and Base's copy in step; a `global_mut` edit leaves tokens stale and buttons render black-on-blue. Fonts: SF Pro Text / SF Pro Display, mono Fira Code.
 - **Checkbox keyboard ownership**: unmodified Space/Enter must stop at a wrapper `on_key_down` (`is_checkbox_activation_key`), or the component toggles and the root cursor handler toggles again.
 - **`TableState` caches column groups**: after a viewport/result-signature change, update the delegate and call `TableState::refresh` from `cx.defer`, never during `Audit::render`.
 
@@ -56,7 +56,7 @@ cargo run --release -- ~/path/to/folder                          # audit window
 cargo run --release -- convert ~/path/to/folder --format avif    # headless convert, no window
 cargo run --release -- convert ~/path/to/folder --replace        # convert in place; originals to press-originals/
 cargo run --release -- restore ~/path/to/folder                  # put those originals back
-cargo test --bin press -- --ignored --nocapture screenshot   # known-broken on this Linux host (no HeadlessRenderer); prove UI with the real app instead
+IMAGEGUIDE_SHOT_DIR=~/folder cargo test --bin press -- --ignored --nocapture screenshot   # writes /tmp/imageguide-shot.png; needs a Vulkan adapter on Linux
 ```
 
 The older flag syntax (`press ~/folder --convert --avif`) still parses; `press --help` is the complete, current command reference (`convert`, `audit`, `check`, `restore`, `plan`, `execute`, `reconcile`, `handoff`, `supplier`, `studio`, `skill`, `update`, ...).
@@ -114,5 +114,5 @@ CI runs the same gates with `--locked --features updater` (see `.github/workflow
 - Framework: built-in `cargo test`; UI tests use `#[gpui_kit::test]` with `TestAppContext`/`VisualTestContext` (`cx.update(init_theme)`, `cx.add_window_view(...)`, `simulate_click`, `debug_bounds(selector)`).
 - Coverage: table/gallery layout thresholds, sort stability (ties fall back to filename), checkbox pointer/keyboard ownership, conversion round-trips, AVIF alpha preservation, scan rules, settings round-trip.
 - Helpers: `entry(name,w,h,bytes,format)`, `pointer_checkbox_audit(grid, cx)`, `photo(w,h)` (deterministic noise — flat colours compress to nothing and make assertions false).
-- The ignored screenshot test fails on this Linux host (`render_to_image not available`) — that is host-specific, not a platform verdict; for visual proof, launch the real release binary and capture it (Hyprland/ydotool/grim on Linux; macOS maintainers prove UI with the real app too) instead of fixing the harness incidentally.
+- The ignored screenshot test renders headless on Linux since gpui-pre-platform 0.3.9 (wgpu); it reads `IMAGEGUIDE_SHOT_DIR` (default `/tmp/imageguide-demo`, which must hold images) and `IMAGEGUIDE_SHOT_MODE` (`list`/`grid`/`compare`/`empty`). Interaction proof (clicks, drags) still needs the real release binary (Hyprland/ydotool/grim on Linux).
 - Baseline gate before landing (matches CI): `cargo test --locked --features updater`, `cargo clippy --all-targets --features updater -- -D warnings`, `cargo fmt --check` all green.

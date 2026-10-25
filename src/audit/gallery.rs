@@ -164,6 +164,11 @@ impl Audit {
                             }))
                             .child(
                                 Checkbox::new(("tile-tick", index))
+                                    .accessibility_label(entry_label(
+                                        &self.root,
+                                        self.show_parent(),
+                                        entry,
+                                    ))
                                     .checked(ticked)
                                     .on_click(cx.listener(move |audit, _: &bool, _, cx| {
                                         cx.stop_propagation();

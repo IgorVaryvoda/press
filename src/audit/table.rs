@@ -132,6 +132,9 @@ impl TableColumn {
             TableColumn::Name => TableCol::new("name", "Name")
                 .width(px(name_width))
                 .min_width(px(W_NAME_MIN))
+                // The library caps a column at 1200 px. Name fills a wide
+                // window past that, and the first drag snapped it back.
+                .max_width(px(f32::MAX))
                 .resizable(true),
             TableColumn::Format => TableCol::new("format", "Format")
                 .width(px(if compact { W_FORMAT_COMPACT } else { W_FORMAT }))
@@ -378,6 +381,7 @@ impl TableDelegate for AuditTable {
                     }))
                     .child(
                         Checkbox::new("select-all")
+                            .accessibility_label("Select all")
                             .checked(state == SelectionState::All)
                             .tooltip("Select every image the filter is showing")
                             .on_click(cx.listener(|table, _: &bool, _, cx| {
@@ -603,6 +607,11 @@ impl TableDelegate for AuditTable {
                     }))
                     .child(
                         Checkbox::new(("tick", index))
+                            .accessibility_label(entry_label(
+                                &audit.root,
+                                audit.show_parent(),
+                                entry,
+                            ))
                             .checked(ticked)
                             .on_click(cx.listener(move |table, _: &bool, _, cx| {
                                 cx.stop_propagation();

@@ -5633,102 +5633,78 @@ fn init_theme(cx: &mut App) {
     // commits work a white slab and leaves nothing to point at anything else. This
     // app already has a blue.
     //
-    // Both halves of the theme have to be told. A button takes its fill from the
-    // token set and its label from the colour set, so setting one and not the other
-    // is how you get black text on a blue button.
-    let theme = gpui_kit::component::Theme::global_mut(cx);
-    // One neutral ramp, barely blue, so the imagery in the table carries the
-    // colour and the chrome reads as an instrument panel rather than a website.
-    // Flat and hairline-precise: surfaces are separated by a line or a stripe,
-    // never by a gradient or a shadow, which is what a pro Mac app looks like.
-    let background = gpui_kit::Hsla::from(gpui_kit::rgb(0x0b0e14));
-    let surface = gpui_kit::Hsla::from(gpui_kit::rgb(0x121926));
-    let table = gpui_kit::Hsla::from(gpui_kit::rgb(0x0b0e14));
-    // Every other row. The zebra does the work the row hairlines used to.
-    let stripe = gpui_kit::Hsla::from(gpui_kit::rgb(0x0d111a));
-    let border = gpui_kit::Hsla::from(gpui_kit::rgb(0x1b2331));
-    let foreground = gpui_kit::Hsla::from(gpui_kit::rgb(0xe6ecf4));
-    let muted = gpui_kit::Hsla::from(gpui_kit::rgb(0x8b98ab));
-    let base = gpui_kit::Hsla::from(gpui_kit::rgb(0x4c8dff));
-    let hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x65a0ff));
-    let active = gpui_kit::Hsla::from(gpui_kit::rgb(0x3b79e6));
-    let focus = gpui_kit::Hsla::from(gpui_kit::rgb(0x8fbcff));
+    // `update`, not `global_mut`: controls paint from the token set and their
+    // labels from the colour set, and `update` carries each colour edit into its
+    // token and into Base's copy (scrollbars, text views). Edited through
+    // `global_mut`, the two halves drifted and a blue button got black text.
+    gpui_kit::component::Theme::update(cx, |theme| {
+        // One neutral ramp, barely blue, so the imagery in the table carries the
+        // colour and the chrome reads as an instrument panel rather than a website.
+        // Flat and hairline-precise: surfaces are separated by a line or a stripe,
+        // never by a gradient or a shadow, which is what a pro Mac app looks like.
+        let background = gpui_kit::Hsla::from(gpui_kit::rgb(0x0b0e14));
+        let surface = gpui_kit::Hsla::from(gpui_kit::rgb(0x121926));
+        let table = gpui_kit::Hsla::from(gpui_kit::rgb(0x0b0e14));
+        // Every other row. The zebra does the work the row hairlines used to.
+        let stripe = gpui_kit::Hsla::from(gpui_kit::rgb(0x0d111a));
+        let border = gpui_kit::Hsla::from(gpui_kit::rgb(0x1b2331));
+        let foreground = gpui_kit::Hsla::from(gpui_kit::rgb(0xe6ecf4));
+        let muted = gpui_kit::Hsla::from(gpui_kit::rgb(0x8b98ab));
+        let base = gpui_kit::Hsla::from(gpui_kit::rgb(0x4c8dff));
+        let hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x65a0ff));
+        let active = gpui_kit::Hsla::from(gpui_kit::rgb(0x3b79e6));
+        let focus = gpui_kit::Hsla::from(gpui_kit::rgb(0x8fbcff));
 
-    theme.background = background;
-    theme.secondary = surface;
-    theme.table = table;
-    theme.input = border;
-    theme.border = border;
-    theme.foreground = foreground;
-    theme.muted_foreground = muted;
-    theme.group_box = surface;
-    theme.group_box_foreground = foreground;
-    theme.list_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x141c28));
-    theme.list_active = gpui_kit::Hsla::from(gpui_kit::rgb(0x16233a));
-    theme.list_active_border = base;
-    theme.table_head = gpui_kit::Hsla::from(gpui_kit::rgb(0x10151d));
-    theme.table_head_foreground = muted;
-    theme.table_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x131a25));
-    // The stripe separates the rows, so a hairline under every one of them was
-    // the same edge drawn twice.
-    theme.table_row_border = gpui_kit::transparent_black();
-    theme.table_even = stripe;
-    theme.ring = focus;
+        theme.background = background;
+        theme.secondary = surface;
+        theme.table = table;
+        theme.input = border;
+        theme.border = border;
+        theme.foreground = foreground;
+        theme.muted_foreground = muted;
+        theme.group_box = surface;
+        theme.group_box_foreground = foreground;
+        theme.list_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x141c28));
+        theme.list_active = gpui_kit::Hsla::from(gpui_kit::rgb(0x16233a));
+        theme.list_active_border = base;
+        theme.table_head = gpui_kit::Hsla::from(gpui_kit::rgb(0x10151d));
+        theme.table_head_foreground = muted;
+        theme.table_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x131a25));
+        // The stripe separates the rows, so a hairline under every one of them was
+        // the same edge drawn twice.
+        theme.table_row_border = gpui_kit::transparent_black();
+        theme.table_even = stripe;
+        theme.ring = focus;
 
-    // The table draws itself from the token set, not the colour set, so the
-    // list stayed near-black under a blue-grey zebra until these were told too.
-    theme.tokens.table = table.into();
-    theme.tokens.table_head = gpui_kit::Hsla::from(gpui_kit::rgb(0x10151d)).into();
-    theme.tokens.table_even = stripe.into();
-    theme.tokens.table_hover = gpui_kit::Hsla::from(gpui_kit::rgb(0x131a25)).into();
-    // Translucent on purpose: the table paints its selected row as an overlay
-    // ON TOP of that row's cells, so an opaque colour here does not tint the
-    // row, it hides it — tick, thumbnail, name and all.
-    theme.tokens.table_active = gpui_kit::Hsla::from(gpui_kit::rgba(0x4c8dff1f)).into();
-    theme.tokens.table_active_border = base.into();
-    theme.tokens.table_row_border = gpui_kit::transparent_black().into();
+        theme.primary = base;
+        theme.primary_hover = hover;
+        theme.primary_active = active;
+        theme.primary_foreground = gpui_kit::white();
+        theme.button_primary = base;
+        theme.button_primary_hover = hover;
+        theme.button_primary_active = active;
+        theme.button_primary_foreground = gpui_kit::white();
 
-    theme.primary = base;
-    theme.primary_hover = hover;
-    theme.primary_active = active;
-    theme.primary_foreground = gpui_kit::white();
-    theme.button_primary = base;
-    theme.button_primary_hover = hover;
-    theme.button_primary_active = active;
-    theme.button_primary_foreground = gpui_kit::white();
+        // The two findings share one amber, and saved bytes are the one green.
+        theme.yellow = gpui_kit::Hsla::from(gpui_kit::rgb(0xe0b054));
+        theme.green = gpui_kit::Hsla::from(gpui_kit::rgb(0x4ade80));
 
-    theme.tokens.button_primary = base.into();
-    theme.tokens.button_primary_hover = hover.into();
-    theme.tokens.button_primary_active = active.into();
-    theme.tokens.button_primary_foreground = gpui_kit::white().into();
-    // Every control that fills itself when it is on — checkbox, radio, switch,
-    // tab — reads the token set, not `theme.primary`. Left stock, a ticked
-    // checkbox painted itself white and then drew a white tick on it: a blank
-    // white square, which is why a selected row never looked selected.
-    theme.tokens.primary = base.into();
-    theme.tokens.primary_hover = hover.into();
-    theme.tokens.primary_active = active.into();
-    theme.tokens.primary_foreground = gpui_kit::white().into();
+        // SF Pro Text for words, Fira Code for every measured number. A column of
+        // byte counts in a proportional face will not align down its right edge,
+        // and an audit that will not align is not an audit.
+        theme.font_family = "SF Pro Text".into();
+        theme.mono_font_family = "Fira Code".into();
+        theme.mono_font_size = px(12.);
 
-    // The two findings share one amber, and saved bytes are the one green.
-    theme.yellow = gpui_kit::Hsla::from(gpui_kit::rgb(0xe0b054));
-    theme.green = gpui_kit::Hsla::from(gpui_kit::rgb(0x4ade80));
-
-    // SF Pro Text for words, Fira Code for every measured number. A column of
-    // byte counts in a proportional face will not align down its right edge,
-    // and an audit that will not align is not an audit.
-    theme.font_family = "SF Pro Text".into();
-    theme.mono_font_family = "Fira Code".into();
-    theme.mono_font_size = px(12.);
-
-    // Toasts land in the list's lower-left corner. The library puts them top
-    // right, which in this window is the table header, the first rows, the
-    // panel's title, its destination line and its replace switch — a run's
-    // failure covered the very results it was reporting, and an error stays up
-    // until it is dismissed. The bottom margin clears the status bar and the
-    // floating bar so a message never lands on a control.
-    theme.notification.placement = gpui_kit::Anchor::BottomLeft;
-    theme.notification.margins.bottom = px(audit::BAR_CLEARANCE + 16.);
+        // Toasts land in the list's lower-left corner. The library puts them top
+        // right, which in this window is the table header, the first rows, the
+        // panel's title, its destination line and its replace switch — a run's
+        // failure covered the very results it was reporting, and an error stays up
+        // until it is dismissed. The bottom margin clears the status bar and the
+        // floating bar so a message never lands on a control.
+        theme.notification.placement = gpui_kit::Anchor::BottomLeft;
+        theme.notification.margins.bottom = px(audit::BAR_CLEARANCE + 16.);
+    });
 }
 
 /// Everything the window needs to open. A struct rather than nine positional
@@ -5755,7 +5731,8 @@ struct Launch {
     rail_width: Option<f32>,
 }
 
-/// `Root` owns these overlays but leaves their placement to the app's content view.
+/// The update banner sits above the audit; `Root` mounts dialogs, sheets and
+/// notifications over both on its own.
 struct WindowContent {
     audit: gpui_kit::Entity<audit::Audit>,
 }
@@ -5763,22 +5740,18 @@ struct WindowContent {
 impl Render for WindowContent {
     fn render(
         &mut self,
-        window: &mut gpui_kit::Window,
+        _window: &mut gpui_kit::Window,
         cx: &mut gpui_kit::Context<Self>,
     ) -> impl IntoElement {
-        let sheet = Root::render_sheet_layer(window, cx);
-        let dialog = Root::render_dialog_layer(window, cx);
-        let notifications = Root::render_notification_layer(window, cx);
         let content = gpui_kit::div().flex().flex_col().size_full();
+        #[cfg(not(feature = "updater"))]
+        let _ = cx;
         #[cfg(feature = "updater")]
         let content = content.children(self.audit.update(cx, |audit, cx| audit.update_banner(cx)));
         gpui_kit::div()
             .relative()
             .size_full()
             .child(content.child(gpui_kit::div().flex_1().min_h_0().child(self.audit.clone())))
-            .children(sheet)
-            .children(dialog)
-            .children(notifications)
     }
 }
 
@@ -5880,12 +5853,10 @@ mod tests {
     impl Render for CrashWindowHarness {
         fn render(
             &mut self,
-            window: &mut gpui_kit::Window,
-            cx: &mut Context<Self>,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut Context<Self>,
         ) -> impl IntoElement {
-            gpui_kit::div()
-                .size_full()
-                .children(Root::render_dialog_layer(window, cx))
+            gpui_kit::div().size_full()
         }
     }
 
