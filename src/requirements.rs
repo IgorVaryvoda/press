@@ -1010,6 +1010,16 @@ struct HeaderFacts {
 }
 
 fn header_from_bytes(bytes: &[u8]) -> Option<HeaderFacts> {
+    // Ahead of the TIFF decoder, which would measure a raw file's small preview.
+    if let Some(info) = crate::raw::probe_bytes(bytes) {
+        return Some(HeaderFacts {
+            format: ContentFormat::Other,
+            width: info.width,
+            height: info.height,
+            profile: None,
+            depth_bits: None,
+        });
+    }
     if image::guess_format(bytes).ok() == Some(ImageFormat::Avif) {
         let info = crate::avif::probe_bytes(bytes)?;
         if info.unsupported_transform {

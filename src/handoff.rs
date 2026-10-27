@@ -253,6 +253,7 @@ not a live site, image identity, markup or a re-audit";
 fn entry_format(entry: &crate::scan::Entry) -> &'static str {
     match entry.format {
         crate::scan::FileFormat::JpegXl => "jxl",
+        crate::scan::FileFormat::Raw => "raw",
         crate::scan::FileFormat::Image(format) => {
             if format == image::ImageFormat::Png {
                 "png"

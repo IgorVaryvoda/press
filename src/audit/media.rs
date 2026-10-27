@@ -772,7 +772,7 @@ impl Audit {
                         .filter(|row| !visible.contains(row))
                         .filter_map(|row| audit.entry_at(row))
                         .collect::<Vec<_>>();
-                    // Fast decoders first: JPEG and WebP fill the viewport
+                    // Fast decoders first: JPEG, WebP and raw previews fill the viewport
                     // while PNG and AVIF wait behind them, not beside them.
                     let (fast, slow): (Vec<usize>, Vec<usize>) =
                         visible_indices.partition(|index| {
@@ -781,7 +781,7 @@ impl Audit {
                                     entry.format,
                                     scan::FileFormat::Image(
                                         image::ImageFormat::Jpeg | image::ImageFormat::WebP
-                                    )
+                                    ) | scan::FileFormat::Raw
                                 )
                             })
                         });
@@ -834,6 +834,7 @@ impl Audit {
             native_scaled: matches!(
                 entry.format,
                 scan::FileFormat::Image(image::ImageFormat::Jpeg | image::ImageFormat::WebP)
+                    | scan::FileFormat::Raw
             ),
             fallback: false,
         };

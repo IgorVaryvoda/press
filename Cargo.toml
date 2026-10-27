@@ -38,6 +38,9 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3.27.0"
 cargo-packager-updater = { version = "0.2.3", optional = true }
+# Camera raw decoding, pure Rust. `mmap` is left out because a mapped file truncated
+# mid-read kills the process; `icc` because Press develops to the built-in sRGB.
+flashraw = { version = "0.1.1", default-features = false, features = ["rayon", "simd"] }
 
 [features]
 updater = ["dep:cargo-packager-updater"]

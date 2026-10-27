@@ -179,6 +179,19 @@ pub(crate) fn persist(cache: PendingCache) {
 }
 
 pub(crate) fn decode_native(path: &Path, edge: Option<u32>) -> Option<RgbaImage> {
+    // A sized request takes the camera's own preview. A full-size one is a
+    // comparison source and needs the developed pixels conversion uses, which
+    // the general decoder gives it.
+    if let Some(edge) = edge
+        && let Some(preview) = crate::raw::preview(path, edge)
+        && let Some(thumbnail) = decode_jpeg_bytes(&preview.jpeg, Some(edge))
+    {
+        let mut thumbnail = DynamicImage::ImageRgba8(thumbnail);
+        if let Some(orientation) = preview.orientation {
+            thumbnail.apply_orientation(orientation);
+        }
+        return Some(thumbnail.into_rgba8());
+    }
     let bytes = std::fs::read(path).ok()?;
     let format = image::guess_format(&bytes[..bytes.len().min(16)]).ok()?;
     if !matches!(format, ImageFormat::Jpeg | ImageFormat::WebP) {
@@ -936,7 +949,7 @@ fn exif_thumbnail(tiff: &[u8]) -> Option<Vec<u8>> {
 
 /// A JPEG decode shared by the full frame and the embedded preview, without
 /// the preview shortcut itself.
-fn decode_jpeg_bytes(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
+pub(crate) fn decode_jpeg_bytes(bytes: &[u8], edge: Option<u32>) -> Option<RgbaImage> {
     let mut decoder = turbojpeg::Decompressor::new().ok()?;
     let header = decoder.read_header(bytes).ok()?;
     let factor = edge.map_or(turbojpeg::ScalingFactor::ONE, |edge| {
