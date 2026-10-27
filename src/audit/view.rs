@@ -2,12 +2,11 @@ use super::*;
 
 /// The sentence under "No supported images found". A folder straight off a phone is
 /// all HEIC, and there "no images" is true, useless, and looks like a broken app.
-/// Raw files and macOS packages are counted but never listed, so their counts
-/// append the same way rather than leaving a bare "no images".
+/// macOS packages are counted but never listed, so their count appends the same
+/// way rather than leaving a bare "no images".
 pub(super) fn empty_folder_detail(
     folder: &str,
     skipped_heic: usize,
-    skipped_raw: usize,
     skipped_packages: usize,
 ) -> String {
     let mut detail = match skipped_heic {
@@ -15,12 +14,6 @@ pub(super) fn empty_folder_detail(
         1 => format!("The “{folder}” folder has 1 HEIC file, not supported yet."),
         many => format!("The “{folder}” folder has {many} HEIC files, not supported yet."),
     };
-    if skipped_raw > 0 {
-        detail.push_str(&format!(
-            " Plus {skipped_raw} camera raw {} (counted, not listed).",
-            if skipped_raw == 1 { "file" } else { "files" }
-        ));
-    }
     if skipped_packages > 0 {
         detail.push_str(&format!(
             " Plus {skipped_packages} macOS {} (counted, not listed).",
@@ -2109,7 +2102,6 @@ impl Audit {
                         .child(empty_folder_detail(
                             &folder,
                             self.skipped_heic,
-                            self.skipped_raw,
                             self.skipped_packages,
                         )),
                 )

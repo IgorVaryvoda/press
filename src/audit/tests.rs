@@ -417,7 +417,6 @@ fn screenshot() {
                 Launch {
                     root: root.clone(),
                     entries: scanned.entries,
-                    skipped_raw: scanned.skipped_raw,
                     skipped_heic: scanned.skipped_heic,
                     skipped_packages: scanned.skipped_packages,
                     unreadable: scanned.unreadable,
@@ -692,7 +691,6 @@ fn replace_launch(root: PathBuf, entries: Vec<Entry>) -> Launch {
     Launch {
         root,
         entries,
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -832,7 +830,6 @@ fn every_comparison_is_built_from_its_own_source(cx: &mut TestAppContext) {
     let launch = Launch {
         root: folder.clone(),
         entries: scanned.entries,
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -966,7 +963,6 @@ fn preview_navigation_adopts_and_promotes_lookahead(cx: &mut TestAppContext) {
     let launch = Launch {
         root: folder.clone(),
         entries: scanned.entries,
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -1608,7 +1604,6 @@ fn notification_audit(
             Launch {
                 root: PathBuf::new(),
                 entries,
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -1723,7 +1718,6 @@ fn installing_a_dataset_announces_unreadable_files_once_in_a_toast(cx: &mut Test
     let (audit, cx) = notification_audit(cx, Vec::new());
     let scan = || scan::Scan {
         entries: Vec::new(),
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: vec![PathBuf::from("a.jpg"), PathBuf::from("b.jpg")],
@@ -1756,7 +1750,6 @@ fn a_clean_dataset_clears_only_the_scan_error_without_a_success_toast(cx: &mut T
         audit.install_dataset(
             scan::Scan {
                 entries: Vec::new(),
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: vec![PathBuf::from("a.jpg")],
@@ -1779,7 +1772,6 @@ fn a_clean_dataset_clears_only_the_scan_error_without_a_success_toast(cx: &mut T
         audit.install_dataset(
             scan::Scan {
                 entries: Vec::new(),
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -1821,7 +1813,6 @@ fn superseded_media_cannot_publish_an_error_into_the_new_dataset(cx: &mut TestAp
             audit.install_dataset(
                 scan::Scan {
                     entries: Vec::new(),
-                    skipped_raw: 0,
                     skipped_heic: 0,
                     skipped_packages: 0,
                     unreadable: Vec::new(),
@@ -2012,7 +2003,6 @@ fn opening_another_folder_clears_the_finding(cx: &mut TestAppContext) {
             audit.install_dataset(
                 scan::Scan {
                     entries: vec![entry("new.png", 10, 10, 100, ImageFormat::Png)],
-                    skipped_raw: 0,
                     skipped_heic: 0,
                     skipped_packages: 0,
                     unreadable: Vec::new(),
@@ -2058,7 +2048,6 @@ fn opening_another_folder_retires_the_pairing(cx: &mut TestAppContext) {
             audit.install_dataset(
                 scan::Scan {
                     entries: vec![entry("new.png", 10, 10, 100, ImageFormat::Png)],
-                    skipped_raw: 0,
                     skipped_heic: 0,
                     unreadable: Vec::new(),
                     walk_errors: Vec::new(),
@@ -2090,7 +2079,6 @@ fn finding_launch() -> Launch {
             entry("screenshot.png", 100, 100, 300_000, ImageFormat::Png),
             entry("liar.webp", 100, 100, 1_000, ImageFormat::Png),
         ],
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -2972,7 +2960,6 @@ fn pointer_checkbox_audit(
             entry("first.png", 10, 10, 100, ImageFormat::Png),
             entry("second.png", 10, 10, 200, ImageFormat::Png),
         ],
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -5183,38 +5170,32 @@ fn a_heic_only_folder_says_how_many_it_skipped(cx: &mut TestAppContext) {
         .to_string_lossy()
         .into_owned();
     let detail = audit.read_with(cx, |audit, _| {
-        view::empty_folder_detail(&folder, audit.skipped_heic, audit.skipped_raw, 0)
+        view::empty_folder_detail(&folder, audit.skipped_heic, 0)
     });
     assert_eq!(
         detail,
         format!("The “{folder}” folder has 1 HEIC file, not supported yet.")
     );
     assert_eq!(
-        view::empty_folder_detail("shoot", 12, 0, 0),
+        view::empty_folder_detail("shoot", 12, 0),
         "The “shoot” folder has 12 HEIC files, not supported yet."
     );
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn empty_folder_detail_names_raw_and_package_counts() {
+fn empty_folder_detail_names_package_counts() {
     assert_eq!(
-        view::empty_folder_detail("shoot", 0, 0, 0),
+        view::empty_folder_detail("shoot", 0, 0),
         "The “shoot” folder has no direct supported images."
     );
     assert_eq!(
-        view::empty_folder_detail("shoot", 0, 1, 0),
+        view::empty_folder_detail("shoot", 0, 2),
         "The “shoot” folder has no direct supported images. \
-         Plus 1 camera raw file (counted, not listed)."
-    );
-    assert_eq!(
-        view::empty_folder_detail("shoot", 0, 3, 2),
-        "The “shoot” folder has no direct supported images. \
-         Plus 3 camera raw files (counted, not listed). \
          Plus 2 macOS packages (counted, not listed)."
     );
     assert_eq!(
-        view::empty_folder_detail("shoot", 2, 0, 1),
+        view::empty_folder_detail("shoot", 2, 1),
         "The “shoot” folder has 2 HEIC files, not supported yet. \
          Plus 1 macOS package (counted, not listed)."
     );
@@ -5359,7 +5340,6 @@ fn gallery_scroll_resets_only_when_the_production_column_count_changes(
             Launch {
                 root: PathBuf::new(),
                 entries,
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -5473,7 +5453,6 @@ fn opening_another_large_folder_resets_gallery_scroll_at_the_same_column_count(
             Launch {
                 root: PathBuf::new(),
                 entries: Vec::new(),
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -5555,7 +5534,6 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui_kit::TestAppCo
             Launch {
                 root: PathBuf::from("old"),
                 entries,
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -5592,7 +5570,6 @@ fn opening_another_large_folder_resets_table_scroll(cx: &mut gpui_kit::TestAppCo
         entries: (0..120)
             .map(|index| entry(&format!("new-{index}.png"), 1, 1, 1, ImageFormat::Png))
             .collect(),
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -5641,7 +5618,6 @@ fn convertible_audit(
     let launch = Launch {
         root,
         entries,
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -8315,7 +8291,6 @@ fn installing_a_clean_dataset_keeps_totals_without_a_toast(cx: &mut TestAppConte
                     entry("a.png", 8, 8, 256, ImageFormat::Png),
                     entry("b.png", 8, 8, 256, ImageFormat::Png),
                 ],
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),

@@ -18,6 +18,7 @@ mod local_ai;
 mod manifest;
 mod menus;
 mod output;
+mod raw;
 mod recipe;
 pub mod requirements;
 mod saved_plan;
@@ -1755,6 +1756,8 @@ struct ScanSummary {
     bytes: u64,
     heavy: usize,
     mislabelled: usize,
+    /// Always 0 since camera raw is decoded and listed. Kept so a schema 1
+    /// reader that sums the skipped counts still finds every key it knows.
     camera_raw_skipped: usize,
     heic_skipped: usize,
     macos_packages_skipped: usize,
@@ -1778,7 +1781,7 @@ impl ScanSummary {
                 .iter()
                 .filter(|entry| entry.extension_lies())
                 .count(),
-            camera_raw_skipped: scanned.skipped_raw,
+            camera_raw_skipped: 0,
             heic_skipped: scanned.skipped_heic,
             macos_packages_skipped: scanned.skipped_packages,
             unreadable: scanned.unreadable.len(),
@@ -2640,6 +2643,7 @@ struct HandoffScanDiagnostics {
     walk_errors: Vec<String>,
     walk_errors_total: usize,
     walk_errors_omitted: usize,
+    /// Always 0, kept for schema 1 readers like `camera_raw_skipped`.
     excluded_raw: usize,
     excluded_heic: usize,
     excluded_packages: usize,
@@ -2672,7 +2676,7 @@ fn scan_diagnostics(
         walk_errors,
         walk_errors_total: scanned.walk_errors.len(),
         walk_errors_omitted,
-        excluded_raw: scanned.skipped_raw,
+        excluded_raw: 0,
         excluded_heic: scanned.skipped_heic,
         excluded_packages: scanned.skipped_packages,
         complete: scanned.unreadable.is_empty() && scanned.walk_errors.is_empty(),
@@ -2902,10 +2906,9 @@ fn print_scan_diagnostics(diagnostics: &HandoffScanDiagnostics) {
             );
         }
     }
-    if diagnostics.excluded_raw + diagnostics.excluded_heic + diagnostics.excluded_packages > 0 {
+    if diagnostics.excluded_heic + diagnostics.excluded_packages > 0 {
         outln!(
-            "  excluded by design, not read here: {} raw, {} heic, {} packages",
-            diagnostics.excluded_raw,
+            "  excluded by design, not read here: {} heic, {} packages",
             diagnostics.excluded_heic,
             diagnostics.excluded_packages
         );
@@ -3947,7 +3950,6 @@ fn main() {
             Launch {
                 root: PathBuf::new(),
                 entries: Vec::new(),
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -4120,7 +4122,6 @@ fn main() {
             Launch {
                 root: PathBuf::new(),
                 entries: Vec::new(),
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -4163,7 +4164,6 @@ fn main() {
         (
             scan::Scan {
                 entries: vec![entry],
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: Vec::new(),
@@ -4208,10 +4208,9 @@ fn main() {
 
     if !args.json {
         outln!(
-            "{} images, {} on disk, {} camera raw skipped{}",
+            "{} images, {} on disk{}",
             scanned.entries.len(),
             format_bytes(scanned.entries.iter().map(|entry| entry.bytes).sum()),
-            scanned.skipped_raw,
             scope_note(scope)
         );
         if scanned.skipped_heic > 0 {
@@ -5712,7 +5711,6 @@ fn init_theme(cx: &mut App) {
 struct Launch {
     root: PathBuf,
     entries: Vec<Entry>,
-    skipped_raw: usize,
     skipped_heic: usize,
     skipped_packages: usize,
     unreadable: Vec<PathBuf>,
@@ -7086,7 +7084,6 @@ mod tests {
             },
             scan: ScanSummary::from_scan(&scan::Scan {
                 entries: entries.clone(),
-                skipped_raw: 0,
                 skipped_heic: 0,
                 skipped_packages: 0,
                 unreadable: vec![],
@@ -7138,7 +7135,6 @@ mod tests {
         let entries = probe_all(&[root.join("one.png"), root.join("two.png")]);
         let scanned = scan::Scan {
             entries,
-            skipped_raw: 0,
             skipped_heic: 0,
             skipped_packages: 0,
             unreadable: vec![],
@@ -7178,7 +7174,6 @@ mod tests {
 
         let empty = scan::Scan {
             entries: vec![],
-            skipped_raw: 0,
             skipped_heic: 0,
             skipped_packages: 0,
             unreadable: vec![],
@@ -7500,7 +7495,6 @@ mod tests {
             .collect();
         let scanned = scan::Scan {
             entries: Vec::new(),
-            skipped_raw: 2,
             skipped_heic: 1,
             skipped_packages: 0,
             unreadable: many,
@@ -7525,13 +7519,11 @@ mod tests {
             !diagnostics.complete,
             "an unenterable folder shortens the walk"
         );
-        // Raw and HEIC are excluded by design, counted rather than blamed:
-        // leaving them out is policy, not a failure to read them.
-        assert_eq!(diagnostics.excluded_raw, 2);
+        // HEIC is excluded by design, counted rather than blamed: leaving it
+        // out is policy, not a failure to read it.
         assert_eq!(diagnostics.excluded_heic, 1);
         let excluded_only = scan::Scan {
             entries: Vec::new(),
-            skipped_raw: 3,
             skipped_heic: 4,
             skipped_packages: 5,
             unreadable: Vec::new(),
@@ -7642,7 +7634,6 @@ mod tests {
                 height: 100,
                 bytes: 40_000,
             }],
-            skipped_raw: 2,
             skipped_heic: 0,
             skipped_packages: 0,
             unreadable: vec![],
@@ -7655,7 +7646,10 @@ mod tests {
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["subfolders"], true);
         assert_eq!(json["summary"]["heavy"], 1);
-        assert_eq!(json["summary"]["camera_raw_skipped"], 2);
+        assert_eq!(
+            json["summary"]["camera_raw_skipped"], 0,
+            "a schema 1 key stays after raw became readable"
+        );
         assert_eq!(json["files"][0]["path"], "/photos/heavy.png");
         assert_eq!(json["files"][0]["heavy"], true);
     }
@@ -7664,7 +7658,6 @@ mod tests {
     fn a_heic_only_folder_reports_its_count_in_the_json_summary() {
         let scanned = scan::Scan {
             entries: vec![],
-            skipped_raw: 0,
             skipped_heic: 4,
             skipped_packages: 0,
             unreadable: vec![],

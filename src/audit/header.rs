@@ -14,11 +14,8 @@ impl Audit {
     /// so the common case stays one short line.
     pub(super) fn warning_stats(&self) -> String {
         let mut warnings = String::new();
-        if self.skipped_raw > 0 {
-            warnings.push_str(&format!(" · {} camera raw skipped", self.skipped_raw));
-        }
-        // Named as unsupported rather than merely skipped: raw is a deliberate
-        // exclusion, HEIC is a gap, and the difference is the user's next move.
+        // Named as unsupported rather than merely skipped: HEIC is a gap, not a
+        // deliberate exclusion, and the difference is the user's next move.
         if self.skipped_heic > 0 {
             warnings.push_str(&format!(
                 " · {} HEIC skipped (not supported yet)",

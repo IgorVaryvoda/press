@@ -64,7 +64,8 @@ downloads and installs the latest release from the command line.
 
 ## Status
 
-Audit, thumbnails, and WebP, AVIF, JPEG XL, and JPEG conversion all work.
+Audit, thumbnails, and WebP, AVIF, JPEG XL, and JPEG conversion all work, camera raw
+included.
 The **Keep** format preserves each source’s format; saved presets let you reuse
 your format, quality, size limit, and AVIF speed settings.
 
@@ -178,16 +179,19 @@ a file carrying too much says `heavy` in its own row instead. That word needs a 
 worth converting behind it: a 44-byte sliver has an enormous ratio and nothing to
 give back, so the finding ignores anything under 32 KB or 64x64 px.
 
-**Camera raw is counted, not listed.** `.nef`, `.cr2`, `.arw` and friends are TIFF
-containers, so a header read returns the embedded preview — a 6000x4000 NEF reports
-as a 160x120 TIFF and every derived number becomes a lie. They are also not web
-delivery candidates. The header says how many were skipped rather than quietly
-shortening the total.
+**Camera raw is read with [FlashRaw](https://flashraw.ybouane.com).** NEF, CR2, CR3,
+ARW, RAF, DNG, ORF, RW2, PEF and the rest are listed at their real sensor size, not
+as the 160x120 preview a TIFF header read returns. Thumbnails come from the camera's
+embedded JPEG. Conversion develops the sensor data to sixteen-bit sRGB with the camera's
+crop and orientation, then takes its tone curve from the camera's own embedded JPEG, so
+the result looks like what the camera showed at the full sensor size. Nikon High Efficiency NEF, whose sensor data FlashRaw cannot read, converts
+from its full-size embedded JPEG instead. A raw file that will not open is named
+with the other unreadable files.
 
 **HEIC and HEIF are counted, not listed.** `.heic`, `.heif`, `.hif`, `.avci` and
 `.heix` — what a recent iPhone writes by default — have no decoder here yet, so
-nothing can be measured about them. They are counted like raw, so a folder straight
-off a phone says how many it holds instead of opening empty.
+nothing can be measured about them. They are counted, so a folder straight off a
+phone says how many it holds instead of opening empty.
 
 On macOS, nested packages such as Photos libraries and application bundles are
 counted and skipped for the same reason: their internal assets are not web-delivery

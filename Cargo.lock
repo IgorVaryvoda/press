@@ -1866,6 +1866,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
+name = "flashraw"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19b9e98fcbfa0ebbcd891315b00e49ffe1efb338c3ba7a1c2d3e4a145cf6be19"
+dependencies = [
+ "flashraw-camera-db",
+ "flashraw-codecs",
+ "flashraw-core",
+ "flashraw-formats",
+ "rayon",
+]
+
+[[package]]
+name = "flashraw-camera-db"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31e41773f47a27f5ffd91cd54a2a6f165e6d9253f720143a04502cb863bfd1b"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flashraw-codecs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5003f7d9cb205d4808c6d4744962d5791bd3c0f90a25b3c3cf58f43990160356"
+dependencies = [
+ "flashraw-core",
+ "rayon",
+ "zlib-rs",
+ "zune-inflate",
+ "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "flashraw-core"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17e44e91643ffccded486415de5b9c29ca92e8abd04c707b86666a9e92d8a378"
+dependencies = [
+ "libc",
+ "rayon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "flashraw-formats"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd3a56dffdd7c00b5eb7e664475f27ce04669158c02a4ec736fceff1294a5bdd"
+dependencies = [
+ "flashraw-camera-db",
+ "flashraw-codecs",
+ "flashraw-core",
+ "rayon",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5719,6 +5778,7 @@ version = "0.9.2"
 dependencies = [
  "cargo-packager-updater",
  "cc",
+ "flashraw",
  "flate2",
  "futures",
  "gpui-kit",

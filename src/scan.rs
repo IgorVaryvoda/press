@@ -23,16 +23,18 @@ use image::{
 };
 use walkdir::WalkDir;
 
-/// Camera raw formats. Most are TIFF containers, so a plain header read reports the
-/// embedded preview — a 6000x4000 NEF comes back as a 160x120 TIFF, which makes every
-/// derived number a lie. They are also not web delivery candidates. Counted, not listed.
-const RAW_EXTENSIONS: [&str; 9] = [
-    "nef", "cr2", "cr3", "arw", "dng", "orf", "rw2", "raf", "srw",
+/// Camera raw extensions, the names `crate::raw` answers to. A raw file is identified
+/// by its bytes like everything else; the names say whether a failed read is worth
+/// reporting and whether the extension tells the truth.
+const RAW_EXTENSIONS: [&str; 27] = [
+    "nef", "nrw", "cr2", "cr3", "crw", "arw", "sr2", "srf", "dng", "orf", "rw2", "rwl", "raf",
+    "srw", "pef", "iiq", "mos", "3fr", "fff", "mrw", "x3f", "kdc", "dcr", "dcs", "erf", "mef",
+    "mdc",
 ];
 
 /// Apple's HEIC and the HEIF family it sits in — what every recent iPhone writes by
 /// default, and what mirrorless bodies increasingly offer. Nothing here links a HEIC
-/// decoder, so these cannot be measured. Counted like raw rather than dropped: a
+/// decoder, so these cannot be measured. Counted rather than dropped: a
 /// folder straight off a phone otherwise audits as empty and the app looks broken.
 const HEIC_EXTENSIONS: [&str; 5] = ["heic", "heif", "hif", "avci", "heix"];
 
@@ -42,7 +44,7 @@ fn has_extension(path: &Path, extensions: &[&str]) -> bool {
         .is_some_and(|extension| extensions.contains(&extension.to_ascii_lowercase().as_str()))
 }
 
-pub fn is_raw(path: &Path) -> bool {
+pub(crate) fn is_raw(path: &Path) -> bool {
     has_extension(path, &RAW_EXTENSIONS)
 }
 
@@ -74,7 +76,7 @@ fn is_partial(path: &Path) -> bool {
 
 /// Extensions macOS keeps as opaque packages. Some are permission-walled, and the
 /// rest are directory trees whose internal images are not web-delivery candidates.
-/// Skipped by design like camera raw, counted for the same reason.
+/// Skipped by design, and counted so the total says so.
 const PACKAGE_EXTENSIONS: [&str; 13] = [
     "photoslibrary",
     "photolibrary",
@@ -149,15 +151,11 @@ pub(crate) fn is_opaque_package(path: &Path) -> bool {
 /// What a folder holds.
 pub struct Scan {
     pub entries: Vec<Entry>,
-    /// Camera raw files left out of the list, so the total is not silently short.
-    /// A count, not names: raw is excluded by design and a photographer knows they
-    /// have it. Nothing in the window would act on the list.
-    pub skipped_raw: usize,
-    /// HEIC/HEIF files left out of the list for want of a decoder, counted like raw
-    /// so an iPhone folder says what it holds instead of showing nothing.
+    /// HEIC/HEIF files left out of the list for want of a decoder, counted so an
+    /// iPhone folder says what it holds instead of showing nothing.
     pub skipped_heic: usize,
-    /// macOS packages the walk never entered, counted like raw for the same
-    /// reason: they are excluded by design and the total says so.
+    /// macOS packages the walk never entered, counted for the same reason: they
+    /// are excluded by design and the total says so.
     pub skipped_packages: usize,
     /// Files that look like images by extension but would not decode. Counted in
     /// the lane, named in the scan toast: "3 would not decode" tells you a folder
@@ -204,6 +202,8 @@ pub struct Entry {
 pub enum FileFormat {
     Image(ImageFormat),
     JpegXl,
+    /// Camera raw, read and developed by `crate::raw`.
+    Raw,
 }
 
 impl FileFormat {
@@ -211,6 +211,7 @@ impl FileFormat {
         match self {
             Self::Image(format) => format.extensions_str(),
             Self::JpegXl => &["jxl"],
+            Self::Raw => &RAW_EXTENSIONS,
         }
     }
 }
@@ -308,6 +309,15 @@ pub fn probe_bytes(bytes: &[u8]) -> Result<Probed, ProbeRefusal> {
     if bytes.len() as u64 > crate::convert::MAX_SOURCE_BYTES {
         return Err(ProbeRefusal::TooLarge);
     }
+    if let Some(info) = crate::raw::probe_bytes(bytes) {
+        check_budget_dimensions(info.width, info.height).map_err(|_| ProbeRefusal::TooLarge)?;
+        return Ok(Probed {
+            format: FileFormat::Raw,
+            width: info.width,
+            height: info.height,
+            depth_bits: None,
+        });
+    }
     if let Ok(reader) = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
         && let Some(format) = reader.format()
     {
@@ -364,6 +374,16 @@ pub fn probe_bytes(bytes: &[u8]) -> Result<Probed, ProbeRefusal> {
 /// Read one file's header. `None` when it is not an image we can read.
 pub fn probe(path: &Path) -> Option<Entry> {
     let bytes = std::fs::metadata(path).ok()?.len();
+    if let Some(info) = crate::raw::probe(path) {
+        check_budget_dimensions(info.width, info.height).ok()?;
+        return Some(Entry {
+            path: path.to_path_buf(),
+            format: FileFormat::Raw,
+            width: info.width,
+            height: info.height,
+            bytes,
+        });
+    }
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
         && let Some(format) = reader.format()
     {
@@ -421,6 +441,10 @@ pub fn probe(path: &Path) -> Option<Entry> {
 /// mislabelled were exactly the files it then failed to convert, thumbnail or open,
 /// with no error beyond a missing row.
 pub fn decode(path: &Path) -> Option<DynamicImage> {
+    if let Some(info) = crate::raw::probe(path) {
+        check_budget_dimensions(info.width, info.height).ok()?;
+        return crate::raw::decode_bytes(&read_source_bytes(path).ok()?);
+    }
     if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
         && let Some(format) = reader.format()
     {
@@ -455,6 +479,10 @@ pub fn decode(path: &Path) -> Option<DynamicImage> {
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
+    if let Some(info) = crate::raw::probe_bytes(bytes) {
+        check_budget_dimensions(info.width, info.height).ok()?;
+        return crate::raw::decode_bytes(bytes);
+    }
     if image::guess_format(bytes).ok() == Some(ImageFormat::Avif) {
         let info = crate::avif::probe_bytes(bytes)?;
         if info.unsupported_transform {
@@ -542,6 +570,16 @@ pub(crate) fn decode_for_conversion_from_bytes(
         return Err(ConversionDecodeError::TooLarge);
     }
     let identity = crate::manifest::SourceIdentity::from_bytes(bytes);
+    if let Some(info) = crate::raw::probe_bytes(bytes) {
+        check_budget_dimensions(info.width, info.height)?;
+        let image = crate::raw::decode_bytes(bytes).ok_or(ConversionDecodeError::Failed)?;
+        return Ok(DecodedSource {
+            image,
+            profile: None,
+            identity,
+            format: FileFormat::Raw,
+        });
+    }
     let reader = ImageReader::new(std::io::Cursor::new(&bytes))
         .with_guessed_format()
         .ok();
@@ -885,13 +923,10 @@ pub fn scan(root: &Path, output_root: &Path) -> Scan {
 /// unrelated neighbours into the audit.
 pub fn scan_files(paths: &[PathBuf]) -> Scan {
     let mut entries = Vec::new();
-    let mut skipped_raw = 0;
     let mut skipped_heic = 0;
     let mut unreadable = Vec::new();
     for path in paths {
-        if is_raw(path) {
-            skipped_raw += 1;
-        } else if is_heic(path) {
+        if is_heic(path) {
             skipped_heic += 1;
         } else if let Some(entry) = probe(path) {
             entries.push(entry);
@@ -902,7 +937,6 @@ pub fn scan_files(paths: &[PathBuf]) -> Scan {
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
     Scan {
         entries,
-        skipped_raw,
         skipped_heic,
         skipped_packages: 0,
         unreadable,
@@ -978,7 +1012,6 @@ fn browse_page(
     let root = input_root(root, output_root)?;
     let mut folders = Vec::new();
     let mut entries = Vec::new();
-    let mut skipped_raw = 0;
     let mut skipped_heic = 0;
     let mut skipped_packages = 0;
     let mut unreadable = Vec::new();
@@ -1018,9 +1051,7 @@ fn browse_page(
         if !file_type.is_file() || is_partial(&path) {
             continue;
         }
-        if is_raw(&path) {
-            skipped_raw += 1;
-        } else if is_heic(&path) {
+        if is_heic(&path) {
             skipped_heic += 1;
         } else if let Some(entry) = probe(&path) {
             entries.push(entry);
@@ -1043,7 +1074,6 @@ fn browse_page(
         folders,
         scan: Scan {
             entries,
-            skipped_raw,
             skipped_heic,
             skipped_packages,
             unreadable,
@@ -1117,7 +1147,6 @@ fn browse_folders_inner(
 ) -> std::io::Result<Option<Scan>> {
     let mut scan = Scan {
         entries: Vec::new(),
-        skipped_raw: 0,
         skipped_heic: 0,
         skipped_packages: 0,
         unreadable: Vec::new(),
@@ -1130,7 +1159,6 @@ fn browse_folders_inner(
         };
         let browsed = browsed.scan;
         scan.entries.extend(browsed.entries);
-        scan.skipped_raw += browsed.skipped_raw;
         scan.skipped_heic += browsed.skipped_heic;
         scan.skipped_packages += browsed.skipped_packages;
         scan.unreadable.extend(browsed.unreadable);
@@ -1299,7 +1327,6 @@ fn scan_progressive_cancellable_inner(
 
         #[derive(Default)]
         struct WalkSummary {
-            skipped_raw: usize,
             skipped_heic: usize,
             skipped_packages: usize,
             walk_errors: Vec<PathBuf>,
@@ -1389,10 +1416,6 @@ fn scan_progressive_cancellable_inner(
                 // whole image and it is about to be renamed away, so auditing it
                 // would offer to convert a file that will not be there.
                 if is_partial(file.path()) {
-                    continue;
-                }
-                if is_raw(file.path()) {
-                    summary.skipped_raw += 1;
                     continue;
                 }
                 if is_heic(file.path()) {
@@ -1563,7 +1586,6 @@ fn scan_progressive_cancellable_inner(
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
     ScanOutcome::Complete(Scan {
         entries,
-        skipped_raw: summary.skipped_raw,
         skipped_heic: summary.skipped_heic,
         skipped_packages: summary.skipped_packages,
         unreadable,
@@ -1577,9 +1599,7 @@ fn looks_like_an_image(path: &Path) -> bool {
     const EXTENSIONS: [&str; 10] = [
         "jpg", "jpeg", "png", "webp", "avif", "jxl", "gif", "tif", "tiff", "bmp",
     ];
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+    has_extension(path, &EXTENSIONS) || is_raw(path)
 }
 
 /// Human-readable file size. Deliberately not exact: the point is comparison.
@@ -1597,6 +1617,7 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn format_name(format: FileFormat) -> &'static str {
     match format {
         FileFormat::JpegXl => "JPEG XL",
+        FileFormat::Raw => "RAW",
         FileFormat::Image(ImageFormat::Jpeg) => "JPEG",
         FileFormat::Image(ImageFormat::Png) => "PNG",
         FileFormat::Image(ImageFormat::WebP) => "WebP",
@@ -2481,18 +2502,20 @@ mod tests {
     }
 
     #[test]
-    fn camera_raw_is_counted_but_not_listed() {
+    fn a_raw_file_that_will_not_open_is_named() {
         let dir = temp_dir("raw");
         write_sample(&dir, "keep.png", 8, 8);
-        // A raw file is skipped on its name, before anything tries to decode it.
         std::fs::write(dir.join("DSC_0001.NEF"), b"not really a nef").unwrap();
         std::fs::write(dir.join("DSC_0002.cr2"), b"nor this").unwrap();
 
         let scanned = scan(&dir, &dir.join(OUTPUT_DIR));
         assert_eq!(scanned.entries.len(), 1);
+        let mut unreadable = scanned.unreadable;
+        unreadable.sort();
         assert_eq!(
-            scanned.skipped_raw, 2,
-            "raw is counted, not silently dropped"
+            unreadable,
+            [dir.join("DSC_0001.NEF"), dir.join("DSC_0002.cr2")],
+            "a raw name that does not decode is a named failure, not a silent drop"
         );
     }
 
@@ -2500,7 +2523,7 @@ mod tests {
     fn heic_is_counted_but_not_listed() {
         let dir = temp_dir("heic");
         write_sample(&dir, "keep.png", 8, 8);
-        // Nothing here decodes HEIC, so the files are skipped on their name like raw.
+        // Nothing here decodes HEIC, so the files are skipped on their name.
         // Bytes that no decoder will read still have to be admitted to.
         std::fs::write(dir.join("IMG_0001.HEIC"), b"not really a heic").unwrap();
         std::fs::write(dir.join("IMG_0002.heif"), b"nor this").unwrap();

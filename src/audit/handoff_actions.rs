@@ -52,7 +52,6 @@ pub(super) struct ScanDiagnostics {
     pub(super) unentered_total: usize,
     /// Files this Press does not decode at all. They were seen and excluded,
     /// which is a different thing from a file it failed to read.
-    pub(super) skipped_raw: usize,
     pub(super) skipped_heic: usize,
     pub(super) skipped_packages: usize,
 }
@@ -65,7 +64,6 @@ impl ScanDiagnostics {
             unreadable_total: scan.unreadable.len(),
             unentered: scan.walk_errors.iter().take(MAX_LINES).cloned().collect(),
             unentered_total: scan.walk_errors.len(),
-            skipped_raw: scan.skipped_raw,
             skipped_heic: scan.skipped_heic,
             skipped_packages: scan.skipped_packages,
         }
@@ -79,7 +77,7 @@ impl ScanDiagnostics {
 
     /// Files that were seen and excluded because Press does not decode them.
     pub(super) fn unsupported(&self) -> usize {
-        self.skipped_raw + self.skipped_heic + self.skipped_packages
+        self.skipped_heic + self.skipped_packages
     }
 }
 
@@ -836,9 +834,6 @@ pub(super) fn scan_lines(scan: Option<&ScanDiagnostics>) -> Vec<String> {
         // formats have no decoder here, and saying otherwise would invent
         // support the app does not have.
         let mut parts = Vec::new();
-        if scan.skipped_raw > 0 {
-            parts.push(format!("{} camera raw", scan.skipped_raw));
-        }
         if scan.skipped_heic > 0 {
             parts.push(format!("{} HEIC", scan.skipped_heic));
         }
@@ -1334,7 +1329,7 @@ mod tests {
         );
     }
 
-    fn walk(unreadable: usize, raw: usize) -> ScanDiagnostics {
+    fn walk(unreadable: usize, heic: usize) -> ScanDiagnostics {
         ScanDiagnostics {
             images: 3,
             unreadable: (0..unreadable.min(MAX_LINES))
@@ -1343,8 +1338,7 @@ mod tests {
             unreadable_total: unreadable,
             unentered: Vec::new(),
             unentered_total: 0,
-            skipped_raw: raw,
-            skipped_heic: 0,
+            skipped_heic: heic,
             skipped_packages: 0,
         }
     }
@@ -1370,7 +1364,7 @@ mod tests {
             "{lines:#?}"
         );
         assert!(
-            lines.contains(&"Not searched, unsupported here: 2 camera raw".to_string()),
+            lines.contains(&"Not searched, unsupported here: 2 HEIC".to_string()),
             "an excluded format is named as unsupported, not as missing: {lines:#?}"
         );
         assert!(

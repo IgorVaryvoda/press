@@ -417,7 +417,6 @@ pub(crate) struct Audit {
     tree_expanded: HashSet<PathBuf>,
     tree_paths: HashMap<String, PathBuf>,
     entries: Vec<Entry>,
-    skipped_raw: usize,
     /// HEIC/HEIF files the scan counted but could not read, for the same reason:
     /// no decoder is linked, and a phone folder that lists nothing looks broken.
     skipped_heic: usize,
@@ -1480,7 +1479,6 @@ impl Audit {
                 table.update(cx, |table, cx| table.scroll_to_row(0, cx));
             });
         }
-        self.skipped_raw = scanned.skipped_raw;
         self.skipped_heic = scanned.skipped_heic;
         self.skipped_packages = scanned.skipped_packages;
         self.unreadable = scanned.unreadable;
@@ -1691,7 +1689,6 @@ impl Audit {
                     audit.install_dataset(
                         scan::Scan {
                             entries: vec![entry],
-                            skipped_raw: 0,
                             skipped_heic: 0,
                             skipped_packages: 0,
                             unreadable: Vec::new(),
@@ -2426,7 +2423,6 @@ pub(crate) fn build_audit(
     let Launch {
         root,
         entries,
-        skipped_raw,
         skipped_heic,
         skipped_packages,
         unreadable,
@@ -2617,7 +2613,6 @@ pub(crate) fn build_audit(
             tree_expanded: HashSet::new(),
             tree_paths: HashMap::new(),
             entries,
-            skipped_raw,
             skipped_heic,
             skipped_packages,
             heaviest: 0,
